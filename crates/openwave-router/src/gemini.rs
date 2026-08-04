@@ -370,13 +370,18 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
     }
     if !req.tools.is_empty() {
-        body["tools"] = json!([{
-            "functionDeclarations": req.tools.iter().map(|tool| json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-            })).collect::<Vec<_>>(),
-        }]);
+        let declarations = req
+            .tools
+            .iter()
+            .map(|tool| {
+                Ok(json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": gemini_tool_schema(&tool.input_schema)?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        body["tools"] = json!([{ "functionDeclarations": declarations }]);
         body["toolConfig"] = json!({
             "functionCallingConfig": gemini_function_calling_config(req.tool_choice.as_ref())?,
         });
@@ -402,6 +407,123 @@ fn gemini_function_calling_config(choice: Option<&ToolChoice>) -> Result<Value> 
             )))
         }
     })
+}
+
+/// Translate JSON Schema into the subset Gemini accepts for function parameters.
+///
+/// Tool schemas are intentionally lossy at this provider boundary: unsupported
+/// validation keywords are omitted, while the structural shape and constraints
+/// Gemini can express are retained. Building from an allowlist prevents a new
+/// JSON Schema keyword from becoming an unknown protobuf field in every turn.
+fn gemini_tool_schema(schema: &Value) -> Result<Value> {
+    let unsupported = |detail: &str| {
+        AgentError::Provider(format!(
+            "gemini function parameters cannot express {detail}"
+        ))
+    };
+    let object = schema
+        .as_object()
+        .ok_or_else(|| unsupported("a non-object schema"))?;
+    let mut out = serde_json::Map::new();
+
+    for keyword in GEMINI_SCHEMA_KEYWORDS {
+        if let Some(value) = object.get(*keyword) {
+            out.insert((*keyword).to_owned(), value.clone());
+        }
+    }
+    if let Some(format) = object.get("format").and_then(Value::as_str) {
+        if GEMINI_FORMATS.contains(&format) {
+            out.insert("format".to_owned(), json!(format));
+        }
+    }
+    if let Some(default) = object.get("default") {
+        out.insert("default".to_owned(), default.clone());
+    }
+
+    let mut nullable = object
+        .get("nullable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut declared: Option<&str> = None;
+    let mut any_of = None;
+    if let Some(branches) = object.get("anyOf") {
+        let branches = branches
+            .as_array()
+            .ok_or_else(|| unsupported("a non-array `anyOf`"))?;
+        let mut concrete = Vec::new();
+        for branch in branches {
+            if branch.get("type").is_some_and(|value| value == "null") {
+                nullable = true;
+            } else {
+                concrete.push(gemini_tool_schema(branch)?);
+            }
+        }
+        if concrete.len() == 1 && object.get("type").is_none() {
+            out.extend(
+                concrete
+                    .pop()
+                    .and_then(|branch| branch.as_object().cloned())
+                    .ok_or_else(|| unsupported("a non-object `anyOf` branch"))?,
+            );
+        } else if !concrete.is_empty() {
+            any_of = Some(concrete);
+        }
+    }
+    if let Some(value) = object.get("type") {
+        let names: Vec<&str> = match value {
+            Value::String(name) => vec![name.as_str()],
+            Value::Array(names) => names
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<_>>()
+                .ok_or_else(|| unsupported("a non-string type name"))?,
+            _ => return Err(unsupported("a non-string type")),
+        };
+        for name in names {
+            if name == "null" {
+                nullable = true;
+            } else if declared.replace(name).is_some() {
+                return Err(unsupported("a union of two concrete types"));
+            }
+        }
+    }
+
+    if let Some(name) = declared {
+        let gemini_type =
+            gemini_schema_type(name).ok_or_else(|| unsupported(&format!("the type `{name}`")))?;
+        out.insert("type".to_owned(), json!(gemini_type));
+        if name == "object" {
+            let properties = object
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|properties| {
+                    properties
+                        .iter()
+                        .map(|(name, property)| Ok((name.clone(), gemini_tool_schema(property)?)))
+                        .collect::<Result<serde_json::Map<_, _>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            out.insert("properties".to_owned(), Value::Object(properties));
+            if let Some(required) = object.get("required") {
+                out.insert("required".to_owned(), required.clone());
+            }
+        }
+        if name == "array" {
+            let items = object
+                .get("items")
+                .ok_or_else(|| unsupported("an array with no item schema"))?;
+            out.insert("items".to_owned(), gemini_tool_schema(items)?);
+        }
+    } else if let Some(branches) = any_of {
+        out.insert("anyOf".to_owned(), Value::Array(branches));
+    } else if !out.contains_key("type") && !out.contains_key("enum") {
+        return Err(unsupported("a schema with no type, enum, or anyOf"));
+    }
+    if nullable {
+        out.insert("nullable".to_owned(), json!(true));
+    }
+    Ok(Value::Object(out))
 }
 
 /// Keywords `responseSchema` understands and that carry over unchanged.
@@ -925,7 +1047,16 @@ fn classify_gemini_error(
 mod tests {
     use super::*;
     use openwave_core::provider::ChatMessage;
-    use openwave_core::tool::ToolSpec;
+    use openwave_core::tool::{Tool, ToolSpec};
+    use openwave_core::{
+        ask_user_questions_tool_spec, create_app_tool_spec, exit_plan_mode_tool_spec,
+        import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
+        read_connected_file_tool_spec, request_folder_access_tool_spec,
+        sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
+        sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec, wait_for_agents_tool_spec,
+        web_extract_tool_spec, web_search_tool_spec, write_output_to_connected_folder_tool_spec,
+        ListDir, ReadFile, WriteFile,
+    };
 
     fn request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
@@ -969,6 +1100,94 @@ mod tests {
             .get("thinkingBudget")
             .is_none());
         assert!(body["generationConfig"].get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn all_tool_schemas_translate_to_geminis_supported_subset() {
+        let mut req = request(vec![ChatMessage::text(Role::User, "hi")]);
+        req.tools = vec![
+            spawn_sandbox_agent_tool_spec(),
+            wait_for_agents_tool_spec(),
+            web_search_tool_spec(),
+            web_extract_tool_spec(),
+            sandbox_web_search_tool_spec(),
+            sandbox_read_delegated_file_tool_spec(),
+            request_folder_access_tool_spec(),
+            sandbox_folder_access_proposal_tool_spec(),
+            list_connected_folders_tool_spec(),
+            list_folder_tool_spec(),
+            read_connected_file_tool_spec(),
+            import_connected_file_tool_spec(),
+            write_output_to_connected_folder_tool_spec(),
+            exit_plan_mode_tool_spec(),
+            ask_user_questions_tool_spec(),
+            create_app_tool_spec(),
+            ReadFile.spec(),
+            ListDir.spec(),
+            WriteFile.spec(),
+        ];
+
+        let body = build_request_json(&req).unwrap();
+        let declarations = body["tools"][0]["functionDeclarations"].as_array().unwrap();
+        assert_eq!(declarations.len(), req.tools.len());
+
+        fn assert_supported(schema: &Value) {
+            const SUPPORTED: &[&str] = &[
+                "type",
+                "format",
+                "description",
+                "nullable",
+                "enum",
+                "items",
+                "properties",
+                "required",
+                "minimum",
+                "maximum",
+                "minItems",
+                "maxItems",
+                "minLength",
+                "maxLength",
+                "pattern",
+                "anyOf",
+                "default",
+            ];
+            let object = schema.as_object().expect("Gemini schema must be an object");
+            for (keyword, value) in object {
+                assert!(
+                    SUPPORTED.contains(&keyword.as_str()),
+                    "unsupported Gemini schema keyword `{keyword}` in {schema}"
+                );
+                if keyword == "type" {
+                    assert!(value.is_string(), "Gemini type must be scalar in {schema}");
+                }
+            }
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                for property in properties.values() {
+                    assert_supported(property);
+                }
+            }
+            if let Some(items) = object.get("items") {
+                assert_supported(items);
+            }
+            if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+                for branch in branches {
+                    assert_supported(branch);
+                }
+            }
+        }
+
+        for declaration in declarations {
+            assert_supported(&declaration["parameters"]);
+        }
+        let wait = declarations
+            .iter()
+            .find(|declaration| declaration["name"] == "wait_for_agents")
+            .unwrap();
+        assert!(wait["parameters"]["properties"]["agent_ids"]
+            .get("uniqueItems")
+            .is_none());
+        let nullable = gemini_tool_schema(&json!({ "type": ["string", "null"] })).unwrap();
+        assert_eq!(nullable, json!({ "type": "STRING", "nullable": true }));
     }
 
     #[test]

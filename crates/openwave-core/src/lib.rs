@@ -224,7 +224,7 @@ pub use tool::{
     ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec, ToolUiView,
 };
 #[cfg(feature = "tools")]
-pub use tools::{CreateAppTool, ListDir, ReadFile, WriteFile};
+pub use tools::{create_app_tool_spec, CreateAppTool, ListDir, ReadFile, WriteFile};
 pub use user_questions::{
     ask_user_questions_tool_spec, validate_ask_user_questions_arguments, AnswerUserQuestions,
     AnswerUserQuestionsRequest, AskUserQuestionsArgs, PendingUserQuestions, UserQuestion,
