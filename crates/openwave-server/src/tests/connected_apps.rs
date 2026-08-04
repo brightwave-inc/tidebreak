@@ -411,6 +411,83 @@ async fn a_refused_upsert_persists_nothing() {
     );
 }
 
+/// A saved `rest_api` record must reach `create_app`'s roster immediately:
+/// the registry republishes on the CRUD surface, not on the next unrelated
+/// MCP reconfiguration. Reproduces a freshly configured REST app leaving
+/// chat claiming no connected apps existed until a restart; the delete leg
+/// pins the symmetric removal.
+#[tokio::test]
+async fn a_saved_rest_record_reaches_the_create_app_roster_immediately() {
+    struct StubCreateApp;
+
+    #[async_trait]
+    impl Tool for StubCreateApp {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: openwave_core::local_app::CREATE_APP_TOOL.into(),
+                description: "create an app.".into(),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolCtx,
+            _args: serde_json::Value,
+        ) -> openwave_core::Result<ToolOutput> {
+            panic!("the roster test never executes create_app");
+        }
+    }
+
+    let (dir, store) = temp_db_store("connected-apps-roster.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut base = ToolRegistry::new();
+    base.register(Box::new(StubCreateApp));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(base),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state.clone());
+
+    let roster = || {
+        state
+            .mcp
+            .snapshot()
+            .server_tool(openwave_core::local_app::CREATE_APP_TOOL)
+            .expect("create_app stays registered")
+            .spec()
+            .description
+    };
+
+    let id = ConnectedAppId::new();
+    let put = put_rest(
+        &router,
+        &bearer,
+        id,
+        upsert_body("https://api.example.com", json!("none")),
+    )
+    .await;
+    assert_eq!(put.status(), StatusCode::OK);
+    let description = roster();
+    assert!(description.contains(&id.to_string()), "{description}");
+    assert!(description.contains("listIssues"), "{description}");
+
+    let deleted = delete_rest(&router, &bearer, id).await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let description = roster();
+    assert!(!description.contains(&id.to_string()), "{description}");
+}
+
 /// The spec-acquisition contract across preview and upsert: a vendor
 /// document broken outside the selection previews tolerantly and ingests
 /// exactly the selection, and the hash pin refuses a document that no longer

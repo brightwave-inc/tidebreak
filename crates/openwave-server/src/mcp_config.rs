@@ -1582,6 +1582,24 @@ impl McpRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
     }
 
+    /// Republish the tool registry from the current state so the
+    /// `create_app` roster reflects the stored `rest_api` records right now.
+    ///
+    /// The registry is otherwise rebuilt only when MCP configuration or
+    /// connections change, so without this a REST record saved from Settings
+    /// stays invisible to `create_app` — the description keeps claiming no
+    /// connected apps exist — until something unrelated republishes. The
+    /// connected-apps CRUD surface calls this after every store write; MCP
+    /// connections are untouched.
+    pub(crate) async fn refresh_connected_app_roster(&self) {
+        let state = self.state.lock().await;
+        let registry = self.registry_for(&state).await;
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+    }
+
     /// Every stored `rest_api` connected app's roster inputs, read from the
     /// store when a registry is (re)built. The roster is authoring
     /// legibility, never the gate, so an unreadable store or an unparseable
