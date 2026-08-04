@@ -313,12 +313,18 @@ impl AutoJudgeStatus {
 /// and a command must additionally have cleared the deterministic analyzer
 /// under the broadest possible rule.
 ///
-/// That last condition is what makes judging a command defensible. The
-/// analyzer has already refused interpreters, destructive operations, writes
-/// to sensitive paths, and anything reaching outside the workspace — so what
-/// reaches the model is the structurally benign residue, and a model that
-/// answers badly can only fail towards asking. It cannot widen what the
-/// floor already refused.
+/// That last condition is what makes judging a command defensible, and it is
+/// worth stating exactly what it buys. Under the blanket `All` rule the
+/// analyzer refuses interpreters, destructive operations, sensitive reads and
+/// writes, anything reaching outside the folder — and, because a blanket rule
+/// names no program, every script executor and package installer:
+/// `python script.py`, `node server.js`, `pip install x` never reach the
+/// model, whatever their arguments look like. So what is judged is a call to
+/// a named program with ordinary operands, and a model that answers badly can
+/// only fail towards asking. It cannot widen what the floor already refused.
+///
+/// A rule the person actually wrote — "always allow `python`" — still covers
+/// those commands. The refusal here is about a rule nobody wrote.
 #[must_use]
 pub fn is_auto_judge_candidate(
     kind: ToolApprovalKind,
@@ -1412,6 +1418,74 @@ mod standing_grant_tests {
         // An action with nothing to read is still covered: that is what
         // granting the whole tool agreed to.
         assert!(grants.covers(chat, None, "exec", kind, &no_args()));
+    }
+
+    /// The judge never decides about code the agent could have written.
+    ///
+    /// A candidate has to clear the analyzer under a blanket rule, and a
+    /// script executor used to clear it whenever its operands were
+    /// workspace-relative. In Auto mode that closed a loop: `write_file`
+    /// authors `script.py`, `exec python3 script.py` goes to a model, and no
+    /// human sees either. It escalates now, while a grant naming the program
+    /// still runs it without asking.
+    #[test]
+    fn a_script_execution_is_never_handed_to_the_judge() {
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        assert!(!is_auto_judge_candidate(
+            kind,
+            "exec",
+            &exec_args("python3", &["script.py"])
+        ));
+        assert!(!is_auto_judge_candidate(
+            kind,
+            "exec",
+            &exec_args("pip", &["install", "requests"])
+        ));
+        // An ordinary command with nothing to run is still judgeable.
+        assert!(is_auto_judge_candidate(
+            kind,
+            "exec",
+            &exec_args("cargo", &["test"])
+        ));
+
+        let chat = ChatId::new();
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                GrantLevel::Chat { chat_id: chat },
+                "exec",
+                kind,
+                GrantScope::AnyArgsFor {
+                    command: "python3".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+        grants.record(
+            StandingGrant::scoped(
+                GrantLevel::Chat { chat_id: chat },
+                "exec",
+                kind,
+                exact_command("pip", &["install", "requests"]),
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+        assert!(grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &exec_args("python3", &["script.py"])
+        ));
+        assert!(grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &exec_args("pip", &["install", "requests"])
+        ));
     }
 
     #[test]
