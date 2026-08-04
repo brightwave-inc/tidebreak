@@ -1443,6 +1443,15 @@ pub(in crate::db) async fn reclaim_container_agent_run(
     Ok(Some(reclaimed))
 }
 
+/// How long a no-work claim receipt is kept around for.
+///
+/// The receipt exists so an exact retry of the same lease token (e.g. after a
+/// lost response) recovers the same "no work" answer instead of racing a
+/// later scan that might find real work. No caller retries with the same
+/// token beyond process restart timescales, so a generous but bounded window
+/// is enough; past it the row only exists to be swept.
+const EMPTY_CLAIM_SCAN_RETENTION: chrono::Duration = chrono::Duration::hours(1);
+
 async fn record_empty_claim_scan_on<C>(
     conn: &C,
     lease_token: uuid::Uuid,
@@ -1451,6 +1460,17 @@ async fn record_empty_claim_scan_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
+    // An idle worker polls every few seconds and would otherwise accrete one
+    // NULL-run receipt per empty scan forever (#1455). Prune expired ones
+    // before inserting the new one so the table stays bounded by the
+    // retention window instead of growing without bound.
+    entities::agent_run_claim::Entity::delete_many()
+        .filter(entities::agent_run_claim::Column::AgentRunId.is_null())
+        .filter(entities::agent_run_claim::Column::ClaimedAt.lt(now - EMPTY_CLAIM_SCAN_RETENTION))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+
     entities::agent_run_claim::ActiveModel {
         token: Set(lease_token),
         agent_run_id: Set(None),

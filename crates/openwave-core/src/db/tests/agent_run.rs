@@ -1398,6 +1398,44 @@ async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
 }
 
 #[tokio::test]
+async fn idle_polling_does_not_accrete_empty_claim_scan_rows() {
+    let (_dir, store) = temp_store().await;
+
+    // Stand in for a receipt an idle worker's earlier empty poll would have
+    // left behind, well outside the retention window (#1455).
+    let stale_token = uuid::Uuid::new_v4();
+    let stale_claimed_at = Utc::now() - Duration::hours(2);
+    crate::db::entities::agent_run_claim::ActiveModel {
+        token: Set(stale_token),
+        agent_run_id: Set(None),
+        attempt_count: Set(None),
+        claim_count: Set(None),
+        claimed_at: Set(stale_claimed_at),
+        lease_expires_at: Set(None),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    // An idle worker poll with nothing to claim.
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 4, 2)
+        .await
+        .unwrap()
+        .is_none());
+
+    let remaining = crate::db::entities::agent_run_claim::Entity::find()
+        .filter(crate::db::entities::agent_run_claim::Column::AgentRunId.is_null())
+        .all(&store.conn)
+        .await
+        .unwrap();
+    // The stale receipt was swept; only the poll's own fresh receipt remains,
+    // so an idle worker no longer accretes rows without bound.
+    assert_eq!(remaining.len(), 1);
+    assert_ne!(remaining[0].token, stale_token);
+}
+
+#[tokio::test]
 async fn sandbox_result_submission_is_fenced_and_idempotent() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
