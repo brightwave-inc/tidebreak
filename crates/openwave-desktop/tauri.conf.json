@@ -54,7 +54,8 @@
     "active": true,
     "targets": "all",
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "minimumSystemVersion": "10.15"
     },
     "resources": {
       "../../scripts/exec-documents/": "exec-scripts/",
