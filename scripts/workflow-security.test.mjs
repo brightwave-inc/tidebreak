@@ -530,13 +530,13 @@ test("release caches restore only credential-free compiler products", () => {
   ]) {
     assert.match(
       restoreStep,
-      /macos-release-target-v2-\$\{\{ matrix\.arch \}\}-/,
+      /macos-release-target-v3-\$\{\{ matrix\.arch \}\}-/,
       "unsigned product caches should be preferred when available",
     );
-    assert.match(
+    assert.doesNotMatch(
       restoreStep,
-      /macos-release-target-v1-\$\{\{ matrix\.arch \}\}-/,
-      "unsigned compiler-only caches should remain a migration fallback",
+      /macos-release-(?:target|prepared)-v[12]-/,
+      "older cache generations bake in a stale MACOSX_DEPLOYMENT_TARGET and must not be restored",
     );
   }
 });
