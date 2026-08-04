@@ -26,6 +26,8 @@ mod image_attachments;
 mod media_type;
 mod office_install;
 mod office_pdf;
+#[cfg(target_os = "macos")]
+mod office_sandbox;
 mod updater;
 mod voice_transcription;
 

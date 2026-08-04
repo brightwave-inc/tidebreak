@@ -26,6 +26,7 @@ pub mod package_cache;
 mod preview;
 mod receipt;
 mod remote;
+pub mod sbpl;
 pub mod skills;
 pub mod sync;
 mod tool;

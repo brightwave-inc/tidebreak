@@ -9,12 +9,12 @@
 //! download or an install hint, not an error.
 //!
 //! The converter processes untrusted bytes, so the invocation is contained
-//! the way the rest of the app treats external processes: an empty
-//! environment, a throwaway working directory that also holds the LibreOffice
-//! profile, piped stdio, a hard timeout with `kill_on_drop`, and size caps on
-//! both input and output. It is not yet wrapped in the exec sandbox profile —
-//! that profile denies the application directories LibreOffice lives in and
-//! widening it is real design work, recorded as a known gap.
+//! the way the rest of the app treats external processes: on macOS it runs
+//! under `sandbox-exec` with the profile in [`crate::office_sandbox`] — no IP
+//! network, no writes outside the throwaway directory, the user's files
+//! unreadable — plus an empty environment, a throwaway working directory that
+//! also holds the LibreOffice profile, piped stdio, a hard timeout with
+//! `kill_on_drop`, and size caps on both input and output.
 //!
 //! Converted PDFs are cached on disk under `derived/office-pdf/`, keyed by the
 //! SHA-256 of the source bytes. The directory sits deliberately outside
@@ -145,6 +145,9 @@ pub(crate) async fn convert_presentation_to_pdf(
         // half-removed install. To the user that is the same state as no
         // LibreOffice at all: the install hint is the actionable message.
         Err(ConversionError::Spawn) => return Ok(converter_missing()),
+        Err(ConversionError::Sandbox(reason)) => {
+            return Err(format!("Could not sandbox LibreOffice: {reason}"))
+        }
         Err(ConversionError::Failed(reason)) => return Err(reason),
     };
 
@@ -300,8 +303,35 @@ const PATH_BINARY_NAMES: &[&str] = &["soffice", "libreoffice"];
 enum ConversionError {
     /// The binary would not start; indistinguishable from not installed.
     Spawn,
+    /// The confinement itself could not be established. Deliberately its own
+    /// state: it says nothing about the document and everything about this
+    /// host, and it must never be answered by running LibreOffice unconfined.
+    Sandbox(String),
     /// LibreOffice ran and did not produce a usable PDF.
     Failed(String),
+}
+
+/// The command that runs one conversion: on macOS, `sandbox-exec` wrapping
+/// `soffice` with the profile from [`crate::office_sandbox`].
+///
+/// Elsewhere the converter is invoked directly, unchanged. Nothing but the
+/// desktop app converts today and its office rendering is macOS-only in
+/// practice, so no second confinement mechanism is invented here; a Windows
+/// or Linux converter needs its own and this is where it would go.
+#[cfg(target_os = "macos")]
+fn converter_command(soffice: &Path, workdir: &Path) -> Result<Command, ConversionError> {
+    // A converter that vanished between resolution and here is the
+    // missing-converter state, not a sandbox fault; the profile builder would
+    // otherwise report its failure to resolve the path.
+    if !soffice.exists() {
+        return Err(ConversionError::Spawn);
+    }
+    crate::office_sandbox::confined_command(soffice, workdir).map_err(ConversionError::Sandbox)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn converter_command(soffice: &Path, _workdir: &Path) -> Result<Command, ConversionError> {
+    Ok(Command::new(soffice))
 }
 
 /// Run one headless conversion in a throwaway directory.
@@ -332,7 +362,7 @@ async fn run_conversion(
         .await
         .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
 
-    let mut command = Command::new(soffice);
+    let mut command = converter_command(soffice, workdir.path())?;
     command
         .arg("--headless")
         .arg("--nologo")
@@ -381,6 +411,15 @@ async fn run_conversion(
     let metadata = tokio::fs::metadata(&produced).await;
     let produced_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     if !output.status.success() || produced_len == 0 {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = brief(detail.trim());
+        // `sandbox-exec` announces its own failures — an unusable profile, a
+        // converter it could not launch under one — before LibreOffice writes
+        // anything. Keeping that distinct matters: it is a host problem to
+        // report, not a document that failed to convert.
+        if detail.starts_with("sandbox-exec:") {
+            return Err(ConversionError::Sandbox(detail));
+        }
         // Package managers leave launcher scripts behind after the
         // application is removed; those spawn fine and then exit with the
         // shell's not-found / not-executable codes. Same state as no install.
@@ -390,8 +429,6 @@ async fn run_conversion(
         // The reason travels to the failure card, so it names what actually
         // happened: LibreOffice's own words when it said any, its exit status
         // when it did not.
-        let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = brief(detail.trim());
         return Err(ConversionError::Failed(if detail.is_empty() {
             format!(
                 "LibreOffice produced no PDF ({})",
@@ -537,6 +574,11 @@ impl openwave_code_execution::HostOfficeConverter for ExecOfficeConverter {
             // A resolved path that will not spawn is the same state as no
             // LibreOffice at all.
             Err(ConversionError::Spawn) => Err(OfficeConvertError::ConverterMissing),
+            // A confinement failure is reported as itself, not folded into a
+            // conversion failure: the document is fine and the host is not.
+            Err(ConversionError::Sandbox(reason)) => Err(OfficeConvertError::Failed(format!(
+                "could not sandbox LibreOffice: {reason}"
+            ))),
             Err(ConversionError::Failed(reason)) => Err(OfficeConvertError::Failed(reason)),
         }
     }
@@ -595,10 +637,12 @@ mod tests {
         assert!(uri.contains("OpenWave%20Preview/profile%20%231"), "{uri}");
     }
 
-    /// End-to-end proof against a real LibreOffice, when one is installed.
-    /// Skips silently otherwise — CI runners and most dev machines carry no
-    /// LibreOffice, and its absence is exactly the state the feature designs
-    /// for, not a test failure.
+    /// End-to-end proof against a real LibreOffice, when one is installed —
+    /// and, on macOS, proof that it converts *under the Seatbelt profile*,
+    /// which is the only way that profile is ever checked against a real
+    /// `soffice`. Skips silently otherwise — CI runners and most dev machines
+    /// carry no LibreOffice, and its absence is exactly the state the feature
+    /// designs for, not a test failure.
     #[tokio::test]
     async fn converts_a_real_deck_when_libreoffice_is_installed() {
         let Some(soffice) = system_soffice() else {
@@ -615,6 +659,9 @@ mod tests {
             // spawn; that is the missing-converter state, not a defect.
             Err(ConversionError::Spawn) => {
                 eprintln!("skipping: resolved LibreOffice cannot spawn");
+            }
+            Err(ConversionError::Sandbox(reason)) => {
+                panic!("the converter could not be sandboxed: {reason}")
             }
             Err(ConversionError::Failed(reason)) => {
                 panic!("conversion failed with LibreOffice present: {reason}")
