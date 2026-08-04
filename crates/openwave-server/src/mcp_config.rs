@@ -2,13 +2,14 @@
 //!
 //! A definition is either a local stdio child process or a remote Streamable
 //! HTTP endpoint. Definitions are typed data, never shell fragments. Every
-//! child starts with a cleared environment and receives only literal values
-//! explicitly marked non-secret plus values selected by *name* from the parent
-//! environment; an HTTP server's bearer token is likewise selected by name.
-//! Selected values are resolved only at the connection boundary and are never
-//! stored or projected through the API.
+//! child starts with a cleared environment and receives only values named by
+//! the definition: literal values held in the secret store, plus values
+//! selected by *name* from the parent environment. An HTTP server's bearer
+//! token is likewise selected by name. **No environment value of any kind
+//! lives in a definition**: the connected-app record and every API projection
+//! carry names only, and values are resolved at the connection boundary.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use futures::future::join_all;
 use openwave_core::connected_app::{ConnectedApp, ConnectedAppKind};
 use openwave_core::id::ConnectedAppId;
 use openwave_core::local_app::CREATE_APP_TOOL;
-use openwave_core::{AgentError, Result, Store, ToolRegistry};
+use openwave_core::{AgentError, Result, SecretProvider, Store, ToolRegistry};
 use openwave_mcp::{McpClient, McpProbe, MAX_SERVER_NAME_BYTES};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -156,9 +157,19 @@ pub(crate) struct McpServerDefinition {
     pub(crate) command: Option<String>,
     #[serde(default)]
     pub(crate) args: Vec<String>,
-    /// Explicit literal values. The UI labels these as non-secret.
+    /// Names of the environment variables this server is given directly. The
+    /// values live in the secret store under [`env_secret_key`] and never
+    /// enter this type, so they neither persist in the connected-app record
+    /// nor project through the API.
     #[serde(default)]
-    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) env: BTreeSet<String>,
+    /// Inbound-only: values for [`env`](Self::env) names being set or
+    /// changed. A commit writes these into the secret store and drops them; a
+    /// name present in `env` but absent here keeps the value already stored,
+    /// which is what makes "leave blank to keep" work. `skip_serializing`
+    /// keeps them out of both the persisted record and every projection.
+    #[serde(default, skip_serializing)]
+    pub(crate) env_values: BTreeMap<String, String>,
     /// Parent environment names to forward. Their values never enter this type.
     #[serde(default)]
     pub(crate) env_from: Vec<String>,
@@ -190,7 +201,7 @@ impl std::fmt::Debug for McpServerDefinition {
             .field("name", &self.name)
             .field("command", &self.command)
             .field("argument_count", &self.args.len())
-            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .field("env_names", &self.env.iter().collect::<Vec<_>>())
             .field("env_from", &self.env_from)
             .field("cwd", &self.cwd)
             .field("url", &self.url)
@@ -244,7 +255,10 @@ pub(crate) struct GatewayEndpointAccess {
 }
 
 impl McpServerDefinition {
-    fn build_command(&self) -> Result<Command> {
+    /// Build the child command. `env` is the definition's literal environment
+    /// as resolved from the secret store — passed in rather than read off the
+    /// definition, because the definition never holds values.
+    fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
         let Some(program) = &self.command else {
             return Err(AgentError::config(
                 "MCP server definition has no command to spawn",
@@ -263,14 +277,24 @@ impl McpServerDefinition {
             })?;
             command.env(name, value);
         }
-        command.envs(&self.env);
+        // Only names the definition still declares: a resolved map that has
+        // drifted ahead of a just-edited definition must not widen the child.
+        for (name, value) in env {
+            if self.env.contains(name) {
+                command.env(name, value);
+            }
+        }
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
         Ok(command)
     }
 
-    async fn connect(&self, gateway: &Arc<dyn GatewayEndpoints>) -> Result<McpClient> {
+    async fn connect(
+        &self,
+        gateway: &Arc<dyn GatewayEndpoints>,
+        env: &BTreeMap<String, String>,
+    ) -> Result<McpClient> {
         if let Some(slug) = &self.gateway_endpoint {
             // Resolved per connection: a reconnect always presents a token
             // that is fresh at that moment, so expiry is survived by the
@@ -306,7 +330,7 @@ impl McpServerDefinition {
         }
         McpClient::spawn_with_timeouts(
             self.name.clone(),
-            self.build_command()?,
+            self.build_command(env)?,
             INITIALIZATION_TIMEOUT,
             Duration::from_millis(self.request_timeout_ms),
         )
@@ -322,8 +346,9 @@ impl McpServerDefinition {
     async fn connect_with_views(
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
+        env: &BTreeMap<String, String>,
     ) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
-        let client = self.connect(gateway).await?;
+        let client = self.connect(gateway, env).await?;
         let uris: HashSet<String> = client
             .tools()
             .filter_map(|spec| client.ui_resource_uri(&spec.name))
@@ -393,7 +418,10 @@ impl McpServerDefinition {
 /// `env_names` is the sorted *names* of the literal `env` entries and
 /// `env_from` the sorted selected parent-environment names — configuration
 /// values and resolved secrets never enter the canonical form, so the
-/// fingerprint can never be a value oracle. `bearer_token_env_set` records
+/// fingerprint can never be a value oracle. That is also why moving the
+/// literal values out of the definition and into the secret store did not
+/// bump `v`: the canonical form only ever saw the names, which are unchanged,
+/// so every grant issued before the move still matches after it. `bearer_token_env_set` records
 /// only whether a bearer name is selected. `cwd` is the configured path,
 /// lossily UTF-8. The `v:1` form excluded the server name because grants were
 /// keyed by it; app-keyed grants pin a record id instead, so `namespace`
@@ -427,7 +455,7 @@ pub(crate) fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 3
         gateway_endpoint: Option<&'a str>,
     }
 
-    let mut env_names: Vec<&str> = definition.env.keys().map(String::as_str).collect();
+    let mut env_names: Vec<&str> = definition.env.iter().map(String::as_str).collect();
     env_names.sort_unstable();
     let mut env_from: Vec<&str> = definition.env_from.iter().map(String::as_str).collect();
     env_from.sort_unstable();
@@ -463,6 +491,49 @@ const fn default_request_timeout_ms() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_MS
 }
 
+/// Secret-store key holding one server's literal environment: a JSON object
+/// of name → value.
+///
+/// Derived from the connected-app record id, never from anything in a
+/// request, so this surface can only ever read and write its own secrets.
+/// Mirrors `rest_credential_secret_key` for the REST connected-app kind.
+fn env_secret_key(id: ConnectedAppId) -> String {
+    format!("mcp.{id}.env_v1")
+}
+
+/// Lift literal `env` values out of a connected-app record persisted before
+/// the values moved into the secret store, leaving `env` in the name-array
+/// shape the current definition uses.
+///
+/// Definitions written before that move stored `env` as a JSON object of
+/// name → value, in cleartext, in `connected_app.definition_json`. Rejecting
+/// them would take working MCP servers down at boot, so they are migrated
+/// instead: the values come out here and the loader writes them to the secret
+/// store and rewrites the record. Names are unchanged, so the definition
+/// fingerprint — and therefore every app grant pinned to it — survives the
+/// migration untouched. A record already in the new shape yields nothing and
+/// takes no write.
+fn take_legacy_env_values(definition: &mut serde_json::Value) -> BTreeMap<String, String> {
+    let Some(entries) = definition
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+                .collect::<BTreeMap<String, String>>()
+        })
+    else {
+        return BTreeMap::new();
+    };
+    definition["env"] = serde_json::Value::Array(
+        entries
+            .keys()
+            .map(|name| serde_json::Value::String(name.clone()))
+            .collect(),
+    );
+    entries
+}
 const fn enabled_by_default() -> bool {
     true
 }
@@ -652,6 +723,9 @@ pub(crate) struct McpRuntime {
     state: Mutex<RuntimeState>,
     mutation: Mutex<()>,
     store: Arc<dyn Store>,
+    /// Holds each server's literal environment values, keyed by record id.
+    /// Definitions carry only the names.
+    secrets: Arc<dyn SecretProvider>,
     /// Resolves gateway-managed endpoints at every connection.
     gateway: Arc<dyn GatewayEndpoints>,
     /// The OS authority for managed-mode resolution. Managed policy locks the
@@ -665,6 +739,7 @@ impl McpRuntime {
     pub(crate) fn new(
         base_tools: Arc<ToolRegistry>,
         store: Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
         gateway: Arc<dyn GatewayEndpoints>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
@@ -678,10 +753,97 @@ impl McpRuntime {
             }),
             mutation: Mutex::new(()),
             store,
+            secrets,
             gateway,
             os_policy,
             next_epoch: AtomicU64::new(1),
         }
+    }
+
+    /// One server's literal environment as stored, by record id. A missing or
+    /// unreadable entry resolves empty: the child then starts without those
+    /// names and fails with the server's own diagnostic, which beats taking
+    /// an unrelated settings save down.
+    async fn stored_env(&self, id: ConnectedAppId) -> BTreeMap<String, String> {
+        match self.secrets.get_secret(&env_secret_key(id)).await {
+            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+            Ok(None) => BTreeMap::new(),
+            Err(error) => {
+                tracing::warn!(%error, "could not read stored MCP environment values");
+                BTreeMap::new()
+            }
+        }
+    }
+
+    /// The environment to hand each definition's child, resolved once for a
+    /// whole replacement so the connections below can run concurrently.
+    async fn resolve_envs(
+        &self,
+        definitions: &[McpServerDefinition],
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) -> HashMap<String, BTreeMap<String, String>> {
+        let mut resolved = HashMap::with_capacity(definitions.len());
+        for definition in definitions {
+            if definition.env.is_empty() {
+                resolved.insert(definition.name.clone(), BTreeMap::new());
+                continue;
+            }
+            let Some(id) = ids.get(&definition.name).copied() else {
+                resolved.insert(definition.name.clone(), BTreeMap::new());
+                continue;
+            };
+            resolved.insert(definition.name.clone(), self.stored_env(id).await);
+        }
+        resolved
+    }
+
+    /// Commit each definition's environment values to the secret store and
+    /// return the definitions with `env_values` emptied, ready to persist.
+    ///
+    /// The stored entry becomes exactly what the definition declares: values
+    /// just set win, names dropped from `env` lose their stored value, and a
+    /// name kept without a new value keeps the one already stored. Records
+    /// that no longer exist have their entry deleted, so removing a server
+    /// takes its credentials with it.
+    async fn commit_env_values(
+        &self,
+        definitions: &mut [McpServerDefinition],
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) -> Result<()> {
+        let live: HashSet<ConnectedAppId> = ids.values().copied().collect();
+        let stale: Vec<ConnectedAppId> = {
+            let state = self.state.lock().await;
+            state
+                .ids
+                .values()
+                .copied()
+                .filter(|id| !live.contains(id))
+                .collect()
+        };
+        for id in stale {
+            // Best effort: a leftover entry is unreachable (nothing
+            // references the id) and a failure here must not fail the save.
+            let _ = self.secrets.delete_secret(&env_secret_key(id)).await;
+        }
+        for definition in definitions {
+            let Some(id) = ids.get(&definition.name).copied() else {
+                definition.env_values.clear();
+                continue;
+            };
+            let mut values = self.stored_env(id).await;
+            values.append(&mut definition.env_values);
+            values.retain(|name, _| definition.env.contains(name));
+            let key = env_secret_key(id);
+            if values.is_empty() {
+                let _ = self.secrets.delete_secret(&key).await;
+                continue;
+            }
+            let encoded = serde_json::to_string(&values).map_err(|error| {
+                AgentError::config(format!("could not encode MCP environment values: {error}"))
+            })?;
+            self.secrets.set_secret(&key, &encoded).await?;
+        }
+        Ok(())
     }
 
     /// The gateway resolver MCP dispatch rides on — exposed so tests can pin
@@ -691,6 +853,13 @@ impl McpRuntime {
     #[cfg(test)]
     pub(crate) fn gateway_endpoints(&self) -> Arc<dyn GatewayEndpoints> {
         self.gateway.clone()
+    }
+
+    /// The secret store this runtime writes environment values to — so a test
+    /// can read back exactly what landed there.
+    #[cfg(test)]
+    pub(crate) fn secrets(&self) -> Arc<dyn SecretProvider> {
+        self.secrets.clone()
     }
 
     /// How far managed policy currently locks the manual transports.
@@ -811,14 +980,24 @@ impl McpRuntime {
         if !records.is_empty() {
             let mut ids = BTreeMap::new();
             let mut definitions = Vec::with_capacity(records.len());
+            let mut migrated = Vec::new();
             for record in records {
-                let mut definition: McpServerDefinition = serde_json::from_value(record.definition)
-                    .map_err(|error| {
+                let mut stored = record.definition;
+                // Records written before literal values moved into the secret
+                // store carry them here in cleartext; lift them out before the
+                // definition is typed, so no value ever enters the type again.
+                let legacy = take_legacy_env_values(&mut stored);
+                let mut definition: McpServerDefinition =
+                    serde_json::from_value(stored).map_err(|error| {
                         AgentError::config(format!(
                             "invalid saved connected-app definition {:?}: {error}",
                             record.name
                         ))
                     })?;
+                if !legacy.is_empty() {
+                    migrated.push(record.name.clone());
+                    definition.env_values = legacy;
+                }
                 // The record's name is authoritative for the namespace; the
                 // stored definition mirrors it and is repaired if they ever
                 // disagree.
@@ -827,6 +1006,18 @@ impl McpRuntime {
                 definitions.push(definition);
             }
             validate_servers(&definitions)?;
+            if !migrated.is_empty() {
+                tracing::info!(
+                    servers = ?migrated,
+                    "moving stored MCP environment values into the secret store"
+                );
+                // Writes the values, empties `env_values`, and rewrites the
+                // records without them. A failure leaves the cleartext records
+                // untouched and retries next boot rather than starting servers
+                // whose credentials just went missing.
+                self.commit_env_values(&mut definitions, &ids).await?;
+                self.persist_definitions(&definitions, &ids).await?;
+            }
             self.replace_permissive(definitions, ids).await;
             return Ok(());
         }
@@ -1047,7 +1238,8 @@ impl McpRuntime {
                 name,
                 command: None,
                 args: Vec::new(),
-                env: BTreeMap::new(),
+                env: BTreeSet::new(),
+                env_values: BTreeMap::new(),
                 env_from: Vec::new(),
                 cwd: None,
                 url: None,
@@ -1160,7 +1352,7 @@ impl McpRuntime {
 
     async fn replace_strict(
         &self,
-        definitions: Vec<McpServerDefinition>,
+        mut definitions: Vec<McpServerDefinition>,
         persist: bool,
     ) -> Result<()> {
         validate_servers(&definitions)?;
@@ -1180,14 +1372,25 @@ impl McpRuntime {
                 })
                 .collect()
         };
+        // Before anything connects, so the children below see the environment
+        // this replacement declares rather than the previous one's. A boot
+        // file's values land in the same store under the same derived key:
+        // one resolution path, and the file stops being a second home for
+        // credentials.
+        self.commit_env_values(&mut definitions, &ids).await?;
+        let definitions = definitions;
+        let envs = self.resolve_envs(&definitions, &ids).await;
         let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
         let mut servers = HashMap::new();
-        let connections = join_all(definitions.iter().map(|definition| async move {
-            if connects(definition, lockdown) {
-                definition.connect_with_views(gateway).await.map(Some)
-            } else {
-                Ok(None)
+        let connections = join_all(definitions.iter().map(|definition| {
+            let env = envs.get(&definition.name).cloned().unwrap_or_default();
+            async move {
+                if connects(definition, lockdown) {
+                    definition.connect_with_views(gateway, &env).await.map(Some)
+                } else {
+                    Ok(None)
+                }
             }
         }))
         .await;
@@ -1263,26 +1466,38 @@ impl McpRuntime {
             // Before the new state publishes, while the published set is
             // still what this replacement diffs against.
             self.remember_endpoint_unmounts(&definitions).await;
-            let now = chrono::Utc::now();
-            let records: Vec<ConnectedApp> = definitions
-                .iter()
-                .map(|definition| {
-                    Ok(ConnectedApp {
-                        id: ids[&definition.name],
-                        name: definition.name.clone(),
-                        kind: ConnectedAppKind::McpServer,
-                        definition: serde_json::to_value(definition)?,
-                        created_at: now,
-                        updated_at: now,
-                    })
-                })
-                .collect::<Result<_>>()?;
-            self.store
-                .replace_connected_apps(ConnectedAppKind::McpServer, &records)
-                .await?;
+            self.persist_definitions(&definitions, &ids).await?;
         }
         self.publish(definitions, ids, servers).await;
         Ok(())
+    }
+
+    /// Write the definitions as this profile's complete `mcp_server`
+    /// connected-app set. `env_values` is `skip_serializing`, so the record
+    /// carries environment *names* and nothing more; the values are already in
+    /// the secret store by the time this runs.
+    async fn persist_definitions(
+        &self,
+        definitions: &[McpServerDefinition],
+        ids: &BTreeMap<String, ConnectedAppId>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        let records: Vec<ConnectedApp> = definitions
+            .iter()
+            .map(|definition| {
+                Ok(ConnectedApp {
+                    id: ids[&definition.name],
+                    name: definition.name.clone(),
+                    kind: ConnectedAppKind::McpServer,
+                    definition: serde_json::to_value(definition)?,
+                    created_at: now,
+                    updated_at: now,
+                })
+            })
+            .collect::<Result<_>>()?;
+        self.store
+            .replace_connected_apps(ConnectedAppKind::McpServer, &records)
+            .await
     }
 
     async fn replace_permissive(
@@ -1290,14 +1505,18 @@ impl McpRuntime {
         definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
     ) {
+        let envs = self.resolve_envs(&definitions, &ids).await;
         let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
         let mut servers = HashMap::new();
-        let connections = join_all(definitions.iter().map(|definition| async move {
-            if connects(definition, lockdown) {
-                definition.connect_with_views(gateway).await.map(Some)
-            } else {
-                Ok(None)
+        let connections = join_all(definitions.iter().map(|definition| {
+            let env = envs.get(&definition.name).cloned().unwrap_or_default();
+            async move {
+                if connects(definition, lockdown) {
+                    definition.connect_with_views(gateway, &env).await.map(Some)
+                } else {
+                    Ok(None)
+                }
             }
         }))
         .await;
@@ -1471,7 +1690,7 @@ impl McpRuntime {
             (server.reconnect_lock.clone(), server.epoch)
         };
         let _reconnect = reconnect_lock.lock().await;
-        let (definition, start_epoch) = {
+        let (definition, app_id, start_epoch) = {
             let mut state = self.state.lock().await;
             let definition = state
                 .definitions
@@ -1488,6 +1707,7 @@ impl McpRuntime {
             if !definition.enabled {
                 return Err(AgentError::config("disabled MCP server cannot reconnect"));
             }
+            let app_id = state.ids.get(name).copied();
             let Some(server) = state.servers.get_mut(name) else {
                 return Err(AgentError::config("MCP server runtime is missing"));
             };
@@ -1498,9 +1718,16 @@ impl McpRuntime {
             }
             server.health = McpHealth::Reconnecting;
             server.diagnostic = None;
-            (definition, server.epoch)
+            (definition, app_id, server.epoch)
         };
-        match definition.connect_with_views(&self.gateway).await {
+        // Resolved fresh for this attempt, outside the state lock: a
+        // credential rotated since the last connection takes effect on the
+        // next reconnect without a settings save.
+        let env = match app_id {
+            Some(id) if !definition.env.is_empty() => self.stored_env(id).await,
+            _ => BTreeMap::new(),
+        };
+        match definition.connect_with_views(&self.gateway, &env).await {
             Ok((client, ui_views)) => {
                 let mut state = self.state.lock().await;
                 // A settings replacement may have won while the process started.
@@ -1822,9 +2049,17 @@ fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
             ));
         }
         let mut environment_names = HashSet::new();
-        for (key, value) in &server.env {
+        for key in &server.env {
             validate_environment_name(&server.name, key)?;
             environment_names.insert(key.as_str());
+        }
+        for (key, value) in &server.env_values {
+            if !server.env.contains(key) {
+                return Err(server_error(
+                    &server.name,
+                    format!("environment value {key:?} names no configured variable"),
+                ));
+            }
             validate_process_string(&server.name, "environment value", value)?;
         }
         for key in &server.env_from {
@@ -2004,6 +2239,18 @@ mod tests {
             .collect()
     }
 
+    /// The persisted `mcp_server` records themselves, so a test can look at
+    /// the stored JSON rather than the type it parses into.
+    async fn saved_records(store: &Arc<dyn Store>) -> Vec<ConnectedApp> {
+        store
+            .list_connected_apps()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.kind == ConnectedAppKind::McpServer)
+            .collect()
+    }
+
     /// Persist definitions as connected-app records, the way a settings save
     /// would, without connecting anything.
     async fn seed_records(store: &Arc<dyn Store>, definitions: &[McpServerDefinition]) {
@@ -2028,6 +2275,25 @@ mod tests {
     /// The signed-out stand-in: every resolution demands a session.
     struct NoGateway;
 
+    /// An in-memory secret store, so a test can assert what the runtime put
+    /// there — and what it did not.
+    #[derive(Default)]
+    struct TestSecrets(std::sync::Mutex<BTreeMap<String, String>>);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for TestSecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
     #[async_trait::async_trait]
     impl GatewayEndpoints for NoGateway {
         async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
@@ -2042,7 +2308,8 @@ mod tests {
             name: name.to_string(),
             command: Some(command.to_string()),
             args: Vec::new(),
-            env: BTreeMap::new(),
+            env: BTreeSet::new(),
+            env_values: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
             url: None,
@@ -2058,7 +2325,8 @@ mod tests {
             name: name.to_string(),
             command: None,
             args: Vec::new(),
-            env: BTreeMap::new(),
+            env: BTreeSet::new(),
+            env_values: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
             url: Some(url.to_string()),
@@ -2074,7 +2342,8 @@ mod tests {
             name: name.to_string(),
             command: None,
             args: Vec::new(),
-            env: BTreeMap::new(),
+            env: BTreeSet::new(),
+            env_values: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
             url: None,
@@ -2112,6 +2381,7 @@ mod tests {
             Arc::new(McpRuntime::new(
                 Arc::new(ToolRegistry::new()),
                 store.clone(),
+                Arc::new(TestSecrets::default()),
                 gateway,
                 os_policy,
             )),
@@ -2221,7 +2491,8 @@ mod tests {
                     "name": "private_docs",
                     "command": "/usr/local/bin/docs-mcp",
                     "args": ["--stdio"],
-                    "env": {"LOG_LEVEL": "info"},
+                    "env": ["LOG_LEVEL"],
+                    "env_values": {"LOG_LEVEL": "info"},
                     "env_from": ["DOCS_TOKEN"],
                     "cwd": "/srv/docs",
                     "request_timeout_ms": 2500
@@ -2233,7 +2504,8 @@ mod tests {
         assert_eq!(server.name, "private_docs");
         assert_eq!(server.command.as_deref(), Some("/usr/local/bin/docs-mcp"));
         assert_eq!(server.args, ["--stdio"]);
-        assert_eq!(server.env.get("LOG_LEVEL").unwrap(), "info");
+        assert!(server.env.contains("LOG_LEVEL"));
+        assert_eq!(server.env_values.get("LOG_LEVEL").unwrap(), "info");
         assert_eq!(server.env_from, ["DOCS_TOKEN"]);
         assert_eq!(server.cwd.as_deref(), Some(Path::new("/srv/docs")));
         assert_eq!(server.request_timeout_ms, 2500);
@@ -2248,7 +2520,7 @@ mod tests {
         assert!(server.env.is_empty());
         assert!(server.env_from.is_empty());
         assert_eq!(server.request_timeout_ms, 60_000);
-        let command = server.build_command().unwrap();
+        let command = server.build_command(&BTreeMap::new()).unwrap();
         assert!(command.as_std().get_envs().next().is_none());
     }
 
@@ -2291,13 +2563,24 @@ mod tests {
             r#"{"servers":[{
                 "name":"docs",
                 "command":"/bin/docs",
-                "env":{"DOCS_TOKEN":"literal"},
+                "env":["DOCS_TOKEN"],
                 "env_from":["DOCS_TOKEN"]
             }]}"#,
         )
         .err()
         .unwrap();
         assert!(duplicate.to_string().contains("configured more than once"));
+
+        let orphan = parse(
+            r#"{"servers":[{
+                "name":"docs",
+                "command":"/bin/docs",
+                "env_values":{"DOCS_TOKEN":"literal"}
+            }]}"#,
+        )
+        .err()
+        .unwrap();
+        assert!(orphan.to_string().contains("names no configured variable"));
 
         let invalid = parse(
             r#"{"servers":[{
@@ -2323,7 +2606,7 @@ mod tests {
             }]}"#,
         )
         .unwrap();
-        let command = config.0[0].build_command().unwrap();
+        let command = config.0[0].build_command(&BTreeMap::new()).unwrap();
         let forwarded_path = command
             .as_std()
             .get_envs()
@@ -2347,7 +2630,11 @@ mod tests {
         ))
         .unwrap();
         let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
-        let error = config.0[0].connect(&gateway).await.err().unwrap();
+        let error = config.0[0]
+            .connect(&gateway, &BTreeMap::new())
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains(MISSING));
         assert!(error.to_string().contains("is not set"));
         assert!(!error.to_string().contains("secret-value"));
@@ -2555,7 +2842,7 @@ mod tests {
 
         for (field, fragment) in [
             (r#""args":["--stdio"]"#, "args apply only"),
-            (r#""env":{"A":"b"}"#, "environment applies only"),
+            (r#""env":["A"]"#, "environment applies only"),
             (r#""env_from":["TOKEN"]"#, "environment applies only"),
             (r#""cwd":"/srv""#, "cwd applies only"),
         ] {
@@ -2766,7 +3053,11 @@ mod tests {
         let mut definition = http_definition("gateway", "http://127.0.0.1:1/mcp");
         definition.bearer_token_env = Some(MISSING.to_string());
         let gateway: Arc<dyn GatewayEndpoints> = Arc::new(NoGateway);
-        let error = definition.connect(&gateway).await.err().unwrap();
+        let error = definition
+            .connect(&gateway, &BTreeMap::new())
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains(MISSING));
         assert!(error.to_string().contains("is not set"));
 
@@ -3063,7 +3354,10 @@ mod tests {
     #[test]
     fn fingerprints_derive_from_fields_cover_the_namespace_and_leak_no_values() {
         let mut definition = disabled_definition("docs", "/bin/docs");
-        definition.env.insert("TOKEN".into(), "secret-a".into());
+        definition.env.insert("TOKEN".into());
+        definition
+            .env_values
+            .insert("TOKEN".into(), "secret-a".into());
         let baseline = definition_fingerprint(&definition);
 
         let mut toggled = definition.clone();
@@ -3076,11 +3370,21 @@ mod tests {
         );
 
         let mut rotated = definition.clone();
-        rotated.env.insert("TOKEN".into(), "secret-b".into());
+        rotated.env_values.insert("TOKEN".into(), "secret-b".into());
         assert_eq!(
             definition_fingerprint(&rotated),
             baseline,
             "environment values never enter the canonical form"
+        );
+
+        let stored_only = disabled_definition("docs", "/bin/docs");
+        let mut stored_only = stored_only;
+        stored_only.env.insert("TOKEN".into());
+        assert_eq!(
+            definition_fingerprint(&stored_only),
+            baseline,
+            "moving the values into the secret store leaves every grant pinned \
+             to this definition still matching"
         );
 
         let mut renamed = definition.clone();
@@ -3097,12 +3401,175 @@ mod tests {
         assert_ne!(definition_fingerprint(&swapped), baseline);
     }
 
+    /// The whole point of the change: a value the user typed into Settings
+    /// lands in the secret store, and nothing that leaves this process — the
+    /// persisted record or the projection the renderer reads — carries it.
+    #[tokio::test]
+    async fn environment_values_reach_the_secret_store_and_nothing_else() {
+        const VALUE: &str = "sk-not-a-real-key-2f1c";
+        let (runtime, store, _directory) = test_runtime().await;
+        let mut definition = disabled_definition("docs", "/bin/docs");
+        definition.env.insert("DOCS_TOKEN".to_string());
+        definition
+            .env_values
+            .insert("DOCS_TOKEN".to_string(), VALUE.to_string());
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![definition],
+            })
+            .await
+            .unwrap();
+
+        // The projection the renderer reads, serialized exactly as the route
+        // sends it.
+        let projected = serde_json::to_string(&runtime.info().await).unwrap();
+        assert!(!projected.contains(VALUE), "{projected}");
+        assert!(projected.contains("DOCS_TOKEN"), "{projected}");
+
+        // The durable record.
+        let record = &saved_records(&store).await[0];
+        let stored = serde_json::to_string(&record.definition).unwrap();
+        assert!(!stored.contains(VALUE), "{stored}");
+        assert_eq!(record.definition["env"], serde_json::json!(["DOCS_TOKEN"]));
+
+        // And where it did go.
+        let secret = runtime
+            .secrets()
+            .get_secret(&env_secret_key(record.id))
+            .await
+            .unwrap()
+            .expect("the value is in the secret store");
+        assert_eq!(secret, format!(r#"{{"DOCS_TOKEN":"{VALUE}"}}"#));
+    }
+
+    /// A save that leaves a value blank keeps the stored one; dropping the
+    /// name takes the value with it. Without this, editing any other field of
+    /// a server would silently wipe its credentials.
+    #[tokio::test]
+    async fn a_blank_value_keeps_the_stored_one_and_removing_a_name_drops_it() {
+        let (runtime, store, _directory) = test_runtime().await;
+        let mut definition = disabled_definition("docs", "/bin/docs");
+        definition.env.insert("DOCS_TOKEN".to_string());
+        definition
+            .env_values
+            .insert("DOCS_TOKEN".to_string(), "first".to_string());
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![definition.clone()],
+            })
+            .await
+            .unwrap();
+        let id = saved_records(&store).await[0].id;
+
+        // The renderer round-trips the definition it was given, which carries
+        // names only — no `env_values` at all.
+        let mut retimed = definition.clone();
+        retimed.env_values.clear();
+        retimed.request_timeout_ms += 1;
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![retimed],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .stored_env(id)
+                .await
+                .get("DOCS_TOKEN")
+                .map(String::as_str),
+            Some("first")
+        );
+
+        let mut cleared = definition.clone();
+        cleared.env.clear();
+        cleared.env_values.clear();
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![cleared],
+            })
+            .await
+            .unwrap();
+        assert!(runtime.stored_env(id).await.is_empty());
+    }
+
+    /// Definitions persisted before the values moved out carry them in
+    /// cleartext. Boot migrates them into the secret store and rewrites the
+    /// record, and the definition fingerprint — what every app grant is
+    /// pinned to — comes out unchanged, so no grant is invalidated.
+    #[tokio::test]
+    async fn a_legacy_record_migrates_its_cleartext_values_without_moving_the_fingerprint() {
+        const VALUE: &str = "legacy-secret-9a4d";
+        let (runtime, store, _directory) = test_runtime().await;
+        let expected = {
+            let mut definition = disabled_definition("docs", "/bin/docs");
+            definition.env.insert("DOCS_TOKEN".to_string());
+            definition_fingerprint(&definition)
+        };
+        // The pre-migration shape, written straight to the store.
+        let now = chrono::Utc::now();
+        let id = ConnectedAppId::new();
+        let legacy = serde_json::json!({
+            "name": "docs",
+            "command": "/bin/docs",
+            "args": [],
+            "env": {"DOCS_TOKEN": VALUE},
+            "env_from": [],
+            "cwd": null,
+            "url": null,
+            "bearer_token_env": null,
+            "gateway_endpoint": null,
+            "request_timeout_ms": DEFAULT_REQUEST_TIMEOUT_MS,
+            "enabled": false,
+        });
+        store
+            .replace_connected_apps(
+                ConnectedAppKind::McpServer,
+                &[ConnectedApp {
+                    id,
+                    name: "docs".to_string(),
+                    kind: ConnectedAppKind::McpServer,
+                    definition: legacy,
+                    created_at: now,
+                    updated_at: now,
+                }],
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .initialize(ConfiguredMcpServers::default())
+            .await
+            .unwrap();
+
+        let record = &saved_records(&store).await[0];
+        assert_eq!(record.id, id, "the record keeps its identity");
+        assert_eq!(record.definition["env"], serde_json::json!(["DOCS_TOKEN"]));
+        assert!(!serde_json::to_string(&record.definition)
+            .unwrap()
+            .contains(VALUE));
+        assert_eq!(
+            runtime
+                .stored_env(id)
+                .await
+                .get("DOCS_TOKEN")
+                .map(String::as_str),
+            Some(VALUE)
+        );
+        assert_eq!(
+            runtime.app_fingerprints().await[&id].fingerprint,
+            expected,
+            "the canonical form only ever saw the names, so grants survive"
+        );
+    }
+
     #[test]
     fn debug_projection_redacts_argument_and_literal_environment_values() {
         let mut definition = disabled_definition("docs", "/bin/docs");
         definition.args = vec!["argument-secret".to_string()];
+        definition.env.insert("TOKEN".to_string());
         definition
-            .env
+            .env_values
             .insert("TOKEN".to_string(), "literal-secret".to_string());
         let debug = format!("{definition:?}");
         assert!(!debug.contains("argument-secret"));

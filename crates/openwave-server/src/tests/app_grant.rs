@@ -89,7 +89,8 @@ async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
                         "name": "cmd",
                         "command": "/opt/secret-location/docs-mcp",
                         "args": ["--secret-flag"],
-                        "env": {"LITERAL_NAME": "literal-value-hunter2"},
+                        "env": ["LITERAL_NAME"],
+                        "env_values": {"LITERAL_NAME": "literal-value-hunter2"},
                         "env_from": ["PARENT_SECRET_NAME"],
                         "enabled": false
                     }]})

@@ -294,6 +294,7 @@ impl AppState {
         let mcp = Arc::new(McpRuntime::new(
             tools.clone(),
             store.clone(),
+            secrets.clone(),
             gateway.clone(),
             os_policy.clone(),
         ));

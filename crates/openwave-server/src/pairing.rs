@@ -355,6 +355,7 @@ mod tests {
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
+            Arc::new(TestSecrets::default()),
             Arc::new(NoGateway),
             Arc::new(NoOsPolicy),
         ));
@@ -567,6 +568,7 @@ mod tests {
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
+            Arc::new(TestSecrets::default()),
             Arc::new(NoGateway),
             Arc::new(OsAsserted),
         ));
@@ -838,7 +840,8 @@ mod tests {
                 name: "private_docs".to_string(),
                 command: None,
                 args: Vec::new(),
-                env: std::collections::BTreeMap::new(),
+                env: std::collections::BTreeSet::new(),
+                env_values: std::collections::BTreeMap::new(),
                 env_from: Vec::new(),
                 cwd: None,
                 url: Some(serve_manual_mcp().await),

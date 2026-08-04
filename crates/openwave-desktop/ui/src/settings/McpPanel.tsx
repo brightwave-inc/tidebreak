@@ -32,7 +32,7 @@ function emptyServer(index: number): McpServerInfo {
     name: `server_${index + 1}`,
     command: "",
     args: [],
-    env: {},
+    env: [],
     env_from: [],
     cwd: null,
     url: null,
@@ -60,7 +60,7 @@ function transportFields(transport: "stdio" | "http"): Partial<McpServerInfo> {
     ? {
         command: null,
         args: [],
-        env: {},
+        env: [],
         env_from: [],
         cwd: null,
         url: "",
@@ -603,9 +603,12 @@ export function McpPanel({
               {transportOf(server) === "stdio" && (
                 <>
                   <EnvironmentEditor
-                    values={server.env}
+                    names={server.env}
+                    values={server.env_values ?? {}}
                     disabled={working}
-                    onChange={(env) => update(index, { env })}
+                    onChange={(env, env_values) =>
+                      update(index, { env, env_values })
+                    }
                   />
 
                   <StringListEditor
@@ -701,10 +704,10 @@ export function McpPanel({
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             MCP tools are always sensitive and keep OpenWave’s existing approval
-            boundary. Child environments start empty. Put credentials in the
-            host environment and select only their variable names above; do not
-            enter secrets in the executable, arguments, working directory,
-            literal values, or a server URL.
+            boundary. Child environments start empty. Environment values are
+            held in the OS credential store and never come back to this window;
+            do not enter secrets in the executable, arguments, working
+            directory, or a server URL, which are ordinary settings.
           </p>
         </>
       )}
@@ -783,7 +786,7 @@ function mountDefinition(slug: string, name: string): McpServerDefinition {
     name,
     command: null,
     args: [],
-    env: {},
+    env: [],
     env_from: [],
     cwd: null,
     url: null,
@@ -1028,29 +1031,48 @@ function StringListEditor({
   );
 }
 
+/**
+ * The child's own environment: names on the left, values on the right.
+ *
+ * The server returns names only — a stored value never comes back — so an
+ * existing row's value field starts blank and staying blank keeps whatever is
+ * stored. Typing replaces it. That is why the inputs are password-style
+ * despite the label: people put API keys here regardless of what the label
+ * says, so the field is built for the credential case.
+ */
 function EnvironmentEditor({
+  names,
   values,
   disabled,
   onChange,
 }: {
+  names: string[];
   values: Record<string, string>;
   disabled: boolean;
-  onChange: (values: Record<string, string>) => void;
+  onChange: (names: string[], values: Record<string, string>) => void;
 }) {
-  const rows = Object.entries(values);
-  function replaceRow(index: number, name: string, value: string) {
-    const next = rows.map(([key, item], itemIndex) =>
-      itemIndex === index ? ([name, value] as const) : ([key, item] as const),
+  function replaceRow(index: number, name: string, value: string | null) {
+    const previous = names[index];
+    const nextNames = names.map((item, itemIndex) =>
+      itemIndex === index ? name : item,
     );
-    onChange(Object.fromEntries(next));
+    const nextValues: Record<string, string> = {};
+    for (const [key, item] of Object.entries(values)) {
+      if (key !== previous) nextValues[key] = item;
+    }
+    // A renamed row cannot keep a value it never showed: the stored value
+    // belongs to the old name, and the new one starts unset.
+    const carried = value ?? (name === previous ? values[previous] : undefined);
+    if (carried !== undefined && carried !== "") nextValues[name] = carried;
+    onChange(nextNames, nextValues);
   }
   return (
     <FieldGroup
-      label="Literal non-secret environment"
-      hint="These values are displayed and stored as ordinary settings. Never put credentials here."
+      label="Environment"
+      hint="Values are held in the OS credential store, never in settings, and are never sent back to this window. Leave a value blank to keep the one already stored."
     >
       <div className="flex flex-col gap-2">
-        {rows.map(([name, value], index) => (
+        {names.map((name, index) => (
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2" key={index}>
             <Input
               aria-label={`Environment name ${index + 1}`}
@@ -1059,14 +1081,13 @@ function EnvironmentEditor({
               disabled={disabled}
               autoComplete="off"
               spellCheck={false}
-              onChange={(event) =>
-                replaceRow(index, event.target.value, value)
-              }
+              onChange={(event) => replaceRow(index, event.target.value, null)}
             />
             <Input
+              type="password"
               aria-label={`Environment value ${index + 1}`}
-              placeholder="non-secret value"
-              value={value}
+              placeholder="leave blank to keep"
+              value={values[name] ?? ""}
               disabled={disabled}
               autoComplete="off"
               spellCheck={false}
@@ -1079,13 +1100,14 @@ function EnvironmentEditor({
               variant="outline"
               aria-label={`Remove environment value ${index + 1}`}
               disabled={disabled}
-              onClick={() =>
+              onClick={() => {
+                const nextValues = { ...values };
+                delete nextValues[name];
                 onChange(
-                  Object.fromEntries(
-                    rows.filter((_, itemIndex) => itemIndex !== index),
-                  ),
-                )
-              }
+                  names.filter((_, itemIndex) => itemIndex !== index),
+                  nextValues,
+                );
+              }}
             >
               <Trash2 size={14} />
             </Button>
@@ -1096,10 +1118,10 @@ function EnvironmentEditor({
           variant="outline"
           className="self-start"
           disabled={disabled}
-          onClick={() => onChange({ ...values, "": "" })}
+          onClick={() => onChange([...names, ""], values)}
         >
           <Plus size={14} />
-          Add literal value
+          Add variable
         </Button>
       </div>
     </FieldGroup>

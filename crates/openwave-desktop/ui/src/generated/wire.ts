@@ -1000,9 +1000,20 @@ export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting"
  */
 export type McpServerDefinition = { name: string, command: string | null, args: Array<string>, 
 /**
- * Explicit literal values. The UI labels these as non-secret.
+ * Names of the environment variables this server is given directly. The
+ * values live in the secret store under [`env_secret_key`] and never
+ * enter this type, so they neither persist in the connected-app record
+ * nor project through the API.
  */
-env: { [key in string]: string }, 
+env: Array<string>, 
+/**
+ * Inbound-only: values for [`env`](Self::env) names being set or
+ * changed. A commit writes these into the secret store and drops them; a
+ * name present in `env` but absent here keeps the value already stored,
+ * which is what makes "leave blank to keep" work. `skip_serializing`
+ * keeps them out of both the persisted record and every projection.
+ */
+env_values?: { [key in string]: string }, 
 /**
  * Parent environment names to forward. Their values never enter this type.
  */
@@ -1030,9 +1041,20 @@ gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, }
  */
 export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, name: string, command: string | null, args: Array<string>, 
 /**
- * Explicit literal values. The UI labels these as non-secret.
+ * Names of the environment variables this server is given directly. The
+ * values live in the secret store under [`env_secret_key`] and never
+ * enter this type, so they neither persist in the connected-app record
+ * nor project through the API.
  */
-env: { [key in string]: string }, 
+env: Array<string>, 
+/**
+ * Inbound-only: values for [`env`](Self::env) names being set or
+ * changed. A commit writes these into the secret store and drops them; a
+ * name present in `env` but absent here keeps the value already stored,
+ * which is what makes "leave blank to keep" work. `skip_serializing`
+ * keeps them out of both the persisted record and every projection.
+ */
+env_values?: { [key in string]: string }, 
 /**
  * Parent environment names to forward. Their values never enter this type.
  */

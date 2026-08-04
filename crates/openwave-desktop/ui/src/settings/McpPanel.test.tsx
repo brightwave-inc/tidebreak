@@ -23,7 +23,7 @@ const healthy: McpServersInfo = {
       name: "private_docs",
       command: "/opt/mcp/docs",
       args: ["--stdio"],
-      env: { LOG_LEVEL: "info" },
+      env: ["LOG_LEVEL"],
       env_from: ["PRIVATE_DOCS_TOKEN"],
       cwd: "/tmp/docs",
       url: null,
@@ -56,7 +56,7 @@ function gatewayMount(
     name: slug,
     command: null,
     args: [],
-    env: {},
+    env: [],
     env_from: [],
     cwd: null,
     url: null,
@@ -165,6 +165,42 @@ describe("McpPanel", () => {
     );
   });
 
+  it("shows an existing environment value as blank and keeps it unless retyped", async () => {
+    const client = api();
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await screen.findByText("Healthy");
+    // The server returns names only, so the value field starts empty and is
+    // password-typed — people put credentials here whatever the label says.
+    const value = screen.getByLabelText("Environment value 1");
+    expect(value).toHaveValue("");
+    expect(value).toHaveAttribute("type", "password");
+
+    // Saving without touching it sends no value for that name, which is what
+    // tells the server to keep the stored one.
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+    await waitFor(() =>
+      expect(client.putMcpServers).toHaveBeenCalledWith([
+        expect.objectContaining({ env: ["LOG_LEVEL"] }),
+      ]),
+    );
+    expect(
+      vi.mocked(client.putMcpServers).mock.calls[0][0][0].env_values ?? {},
+    ).toEqual({});
+
+    await user.type(value, "rotated-secret");
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+    await waitFor(() =>
+      expect(client.putMcpServers).toHaveBeenLastCalledWith([
+        expect.objectContaining({
+          env: ["LOG_LEVEL"],
+          env_values: { LOG_LEVEL: "rotated-secret" },
+        }),
+      ]),
+    );
+  });
+
   it("reconnects by namespace and replaces the displayed health snapshot", async () => {
     const client = api();
     const user = userEvent.setup();
@@ -224,7 +260,7 @@ describe("McpPanel", () => {
         expect.objectContaining({
           command: null,
           args: [],
-          env: {},
+          env: [],
           env_from: [],
           cwd: null,
           url: "http://127.0.0.1:28081/mcp/tools",
@@ -280,7 +316,7 @@ describe("McpPanel", () => {
               name: "gateway",
               command: null,
               args: [],
-              env: {},
+              env: [],
               env_from: [],
               cwd: null,
               url: "http://127.0.0.1:28081/mcp/tools",
@@ -339,7 +375,7 @@ describe("McpPanel", () => {
           name: "tools",
           command: null,
           args: [],
-          env: {},
+          env: [],
           env_from: [],
           cwd: null,
           url: null,
@@ -651,7 +687,7 @@ describe("McpPanel", () => {
           name: "legacy_docs",
           command: "/opt/mcp/docs",
           args: ["--stdio"],
-          env: { LOG_LEVEL: "info" },
+          env: ["LOG_LEVEL"],
           env_from: ["PRIVATE_DOCS_TOKEN"],
           cwd: "/tmp/docs",
           url: null,
