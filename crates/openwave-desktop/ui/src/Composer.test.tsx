@@ -129,6 +129,39 @@ describe("Composer", () => {
     expect(shouldRestoreComposerFocus("chat-1", "chat-1", true)).toBe(false);
   });
 
+  it("shows voice progress in the composer and preserves the editable textarea", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId={null}
+        busy={false}
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft="Existing draft"
+        voice={{
+          available: true,
+          state: "transcribing",
+          error: null,
+          onStart: vi.fn(),
+          onStop: vi.fn(),
+        }}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain('placeholder="Transcribing…"');
+    expect(markup).toContain("Transcribing…");
+    expect(markup).toContain('aria-label="Transcribing voice recording"');
+    expect(markup).not.toContain('<textarea disabled=""');
+  });
+
   it("keeps one action slot and presents the stop control during a turn", () => {
     const markup = renderToStaticMarkup(
       <Composer

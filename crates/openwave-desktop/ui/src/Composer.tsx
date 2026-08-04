@@ -14,6 +14,7 @@ import {
   FolderPlus,
   Image as ImageIcon,
   LoaderCircle,
+  Mic,
   Paperclip,
   Square,
   X,
@@ -133,6 +134,14 @@ export type ComposerFolders = {
   onRemove: (rootId: string) => void;
 };
 
+export type ComposerVoice = {
+  available: boolean;
+  state: "idle" | "requesting" | "recording" | "transcribing";
+  error: string | null;
+  onStart: () => void;
+  onStop: () => void;
+};
+
 /** Whether attached images stop this turn from being sent, and why. */
 export function imageSendBlocker(images: ComposerImages | undefined): string | null {
   if (!images || images.items.length === 0) return null;
@@ -157,6 +166,7 @@ export type ComposerProps = {
   images?: ComposerImages;
   files?: ComposerFiles;
   folders?: ComposerFolders;
+  voice?: ComposerVoice;
   nativeDropTarget?: ReactNode;
   attachError?: string | null;
   onDraftChange: (draft: string) => void;
@@ -180,6 +190,7 @@ export function Composer({
   images,
   files,
   folders,
+  voice,
   nativeDropTarget,
   attachError = null,
   onDraftChange,
@@ -206,6 +217,7 @@ export function Composer({
   const steerTooLong =
     active && [...draft.trim()].length > MAX_STEER_CHARACTERS;
   const imageBlocker = imageSendBlocker(images);
+  const voiceWorking = voice?.state !== undefined && voice.state !== "idle";
   const canSubmit =
     !inputDisabled &&
     !steerPending &&
@@ -372,7 +384,13 @@ export function Composer({
         className="w-full resize-none border-none bg-transparent px-1 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-0"
         value={draft}
         placeholder={
-          active ? "Guide the active response…" : "Message OpenWave…"
+          voice?.state === "requesting" || voice?.state === "recording"
+            ? "Listening…"
+            : voice?.state === "transcribing"
+              ? "Transcribing…"
+              : active
+                ? "Guide the active response…"
+                : "Message OpenWave…"
         }
         aria-label="Message"
         // A stable hook for the shell's focus-composer shortcut, which has to
@@ -430,6 +448,51 @@ export function Composer({
             </WithTooltip>
           )}
           {modelMenu}
+          {voice?.available && (
+            <WithTooltip
+              label={
+                voice.state === "recording"
+                  ? "Stop recording"
+                  : voice.state === "requesting"
+                    ? "Waiting for microphone…"
+                    : voice.state === "transcribing"
+                      ? "Transcribing…"
+                      : "Record voice"
+              }
+            >
+              <Button
+                type="button"
+                variant={voice.state === "recording" ? "secondary" : "ghost"}
+                size="icon-8"
+                aria-label={
+                  voice.state === "recording"
+                    ? "Stop voice recording"
+                    : voice.state === "transcribing"
+                      ? "Transcribing voice recording"
+                      : voice.state === "requesting"
+                        ? "Waiting for microphone permission"
+                        : "Record voice message"
+                }
+                disabled={
+                  inputDisabled ||
+                  voice.state === "requesting" ||
+                  voice.state === "transcribing"
+                }
+                onClick={
+                  voice.state === "recording" ? voice.onStop : voice.onStart
+                }
+              >
+                {voice.state === "requesting" ||
+                voice.state === "transcribing" ? (
+                  <LoaderCircle className="animate-spin" size={15} />
+                ) : voice.state === "recording" ? (
+                  <Square size={12} fill="currentColor" strokeWidth={0} />
+                ) : (
+                  <Mic size={15} />
+                )}
+              </Button>
+            </WithTooltip>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {active ? (
@@ -477,8 +540,24 @@ export function Composer({
         </div>
       </div>
       <span className="sr-only" role="status">
-        {busy ? "Agent is responding" : "Ready to send"}
+        {voiceWorking
+          ? voice?.state === "transcribing"
+            ? "Transcribing voice recording"
+            : "Listening for voice input"
+          : busy
+            ? "Agent is responding"
+            : "Ready to send"}
       </span>
+      {voiceWorking && (
+        <span className="text-xs text-muted-foreground" role="status">
+          {voice?.state === "transcribing" ? "Transcribing…" : "Listening…"}
+        </span>
+      )}
+      {voice?.error && (
+        <span className="text-xs text-destructive" role="alert">
+          {voice.error}
+        </span>
+      )}
       {cancelError && (
         <span className="text-xs text-destructive" role="status">
           {"Couldn’t stop turn: "}{cancelError}
