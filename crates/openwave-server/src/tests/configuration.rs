@@ -591,13 +591,11 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
     );
     let local = &admission[0];
     assert_eq!(local["admitted"], false);
+    // With the published digest pinned, the local backend's image precondition
+    // is satisfied, so its denial list carries only the two remaining gates.
     assert_eq!(
         local["denials"],
-        serde_json::json!([
-            "no_scoped_model_token",
-            "no_external_lifetime_cap",
-            "image_not_verified"
-        ])
+        serde_json::json!(["no_scoped_model_token", "no_external_lifetime_cap"])
     );
 
     let unauthenticated_credentials = router
