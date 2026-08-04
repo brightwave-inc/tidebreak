@@ -42,6 +42,7 @@ import {
   type ConsentStatementSnapshot,
   type GrantLevel,
   type GrantScope,
+  type InboxItemKind,
   type McpServerInfo as WireMcpServerInfo,
   type ManagedPolicy as WireManagedPolicy,
   type ManagedPolicySource as WireManagedPolicySource,
@@ -90,6 +91,7 @@ import {
 export type {
   ApprovalClass,
   ApprovalGrantRung,
+  InboxItemKind,
   GrantLevel,
   GrantScope,
   StandingGrantSnapshot,
@@ -628,6 +630,24 @@ export type PendingOutputWritebackRequest = {
   callId: string;
   turnId: string;
   claimedByDesktop: boolean;
+};
+
+/**
+ * One thing waiting on the reader, wherever it parked.
+ *
+ * Deliberately as opaque as the per-chat attention summary: enough to triage
+ * and to navigate back, never the question, the plan, or the arguments. Those
+ * are read from the conversation the item points at, by the card that owns
+ * them — which is also the only place the item can be answered.
+ */
+export type InboxItem = {
+  chatId: string;
+  chatTitle: string | null;
+  turnId: string;
+  callId: string;
+  kind: InboxItemKind;
+  action: RendererToolName | null;
+  requestedAt: string;
 };
 
 /** Opaque prompt state used to mark another chat as needing attention. */
@@ -1305,6 +1325,31 @@ export class ApiClient {
     return this.json(`/chats/${chatId}`, { headers: this.headers() });
   }
 
+  /**
+   * Everything parked on this reader, across their conversations.
+   *
+   * One server-side read rather than a loop over chats: the shell needs the
+   * whole set to badge the inbox and mark the rail, and asking each chat in
+   * turn would make that cost grow with the profile.
+   */
+  async listInbox(): Promise<InboxItem[]> {
+    const body = await this.json<unknown>("/inbox", { headers: this.headers() });
+    if (!Array.isArray(body)) {
+      throw new Error("inbox response is not an array");
+    }
+    const items: InboxItem[] = [];
+    const seen = new Set<string>();
+    for (const value of body) {
+      const item = parseInboxItem(value);
+      if (!item || seen.has(item.callId)) {
+        throw new Error("inbox response contains invalid data");
+      }
+      seen.add(item.callId);
+      items.push(item);
+    }
+    return items;
+  }
+
   async listPendingChatPrompts(): Promise<PendingChatPrompt[]> {
     const body = await this.json<unknown>("/chats/pending-prompts", {
       headers: this.headers(),
@@ -1892,6 +1937,69 @@ export function parseOutputWritebackRequest(
  * shared shell state. Details belong to the selected chat's recovery route,
  * never to the list indicator.
  */
+const INBOX_ITEM_KINDS = new Set<InboxItemKind>([
+  "tool_approval",
+  "question",
+  "plan_review",
+  "folder_access",
+  "output_writeback",
+]);
+
+export function parseInboxItem(value: unknown): InboxItem | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<{
+      chat_id: string;
+      chat_title?: string;
+      turn_id: string;
+      call_id: string;
+      kind: InboxItemKind;
+      action?: RendererToolName;
+      requested_at: string;
+    }>(value, [
+      "chat_id",
+      "chat_title",
+      "turn_id",
+      "call_id",
+      "kind",
+      "action",
+      "requested_at",
+    ]) ||
+    !nonEmptyBounded(value.chat_id, 128) ||
+    !nonEmptyBounded(value.turn_id, 128) ||
+    !nonEmptyBounded(value.call_id, 128) ||
+    !nonEmptyBounded(value.requested_at, 64) ||
+    typeof value.kind !== "string" ||
+    !INBOX_ITEM_KINDS.has(value.kind as InboxItemKind)
+  ) {
+    return null;
+  }
+  // Both are optional on the wire, and neither may arrive as anything but its
+  // own declared shape — an untitled chat omits the key rather than sending an
+  // empty title, and only the closed tool vocabulary may name an action.
+  if (
+    value.chat_title !== undefined &&
+    !nonEmptyBounded(value.chat_title, 256)
+  ) {
+    return null;
+  }
+  if (
+    value.action !== undefined &&
+    !RENDERER_TOOL_NAMES.includes(value.action as RendererToolName)
+  ) {
+    return null;
+  }
+  return {
+    chatId: value.chat_id,
+    chatTitle: (value.chat_title as string | undefined) ?? null,
+    turnId: value.turn_id,
+    callId: value.call_id,
+    kind: value.kind as InboxItemKind,
+    action: (value.action as RendererToolName | undefined) ?? null,
+    requestedAt: value.requested_at,
+  };
+}
+
 export function parsePendingChatPrompt(value: unknown): PendingChatPrompt | null {
   if (
     !isRecord(value) ||

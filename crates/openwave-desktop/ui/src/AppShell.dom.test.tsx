@@ -40,9 +40,22 @@ const listChats = vi.fn(async () => chats);
 const createChat = vi.fn(async () => chats[0]);
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
-const listPendingChatPrompts = vi.fn(async () => [] as unknown[]);
+const listInbox = vi.fn(async () => [] as unknown[]);
 const listPendingOutputWritebackRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
+
+/** One waiting question, as the shell's cross-chat read returns it. */
+function parked(chatId: string, callId: string) {
+  return {
+    chatId,
+    chatTitle: null,
+    turnId: "turn-1",
+    callId,
+    kind: "question" as const,
+    action: null,
+    requestedAt: "2026-08-04T00:00:00Z",
+  };
+}
 const postMessage = vi.fn(async () => {});
 // Unmanaged is the shape most of these shell tests model; the managed gate
 // has its own DOM tests, and the one shell test that flips this to managed
@@ -80,7 +93,7 @@ vi.mock("./api", () => ({
     createChat = createChat;
     listPendingUserQuestions = listPendingUserQuestions;
     listPendingFolderAccessRequests = listPendingFolderAccessRequests;
-    listPendingChatPrompts = listPendingChatPrompts;
+    listInbox = listInbox;
     listPendingOutputWritebackRequests = listPendingOutputWritebackRequests;
     postMessage = postMessage;
     openEvents = vi.fn(() => ({ close: vi.fn() }));
@@ -196,8 +209,8 @@ beforeEach(() => {
   listPendingUserQuestions.mockResolvedValue([]);
   listPendingFolderAccessRequests.mockReset();
   listPendingFolderAccessRequests.mockResolvedValue([]);
-  listPendingChatPrompts.mockReset();
-  listPendingChatPrompts.mockResolvedValue([]);
+  listInbox.mockReset();
+  listInbox.mockResolvedValue([]);
   listPendingOutputWritebackRequests.mockReset();
   listPendingOutputWritebackRequests.mockResolvedValue([]);
   requestUserAttention.mockClear();
@@ -238,15 +251,7 @@ describe("app shell", () => {
   });
 
   it("marks a parked conversation other than the one that is open", async () => {
-    listPendingChatPrompts.mockResolvedValue([
-      {
-        chatId: "chat-2",
-        questionCallIds: ["call-parked"],
-        planCallIds: [],
-        folderAccessCallIds: [],
-        outputWritebackCallIds: [],
-      },
-    ]);
+    listInbox.mockResolvedValue([parked("chat-2", "call-parked")]);
     await mountApp({ at: "/c/chat-1" });
 
     // The conversation's own rail carries no chat list, so the way back to the
@@ -460,20 +465,12 @@ describe("app shell", () => {
     // question. The summary watcher belongs to the shell, so it is still
     // running with no conversation open. Prompt detail is not fetched here —
     // settings has no chat, and the one being returned to rehydrates its own.
-    const readsBefore = listPendingChatPrompts.mock.calls.length;
-    listPendingChatPrompts.mockResolvedValue([
-      {
-        chatId: "chat-1",
-        questionCallIds: ["call-1"],
-        planCallIds: [],
-        folderAccessCallIds: [],
-        outputWritebackCallIds: [],
-      },
-    ]);
+    const readsBefore = listInbox.mock.calls.length;
+    listInbox.mockResolvedValue([parked("chat-1", "call-1")]);
     useRefreshSignals.getState().signal("userQuestions");
 
     await waitFor(() =>
-      expect(listPendingChatPrompts.mock.calls.length).toBeGreaterThan(readsBefore),
+      expect(listInbox.mock.calls.length).toBeGreaterThan(readsBefore),
     );
     // And the dock still gets told, which is the whole point.
     await waitFor(() => expect(requestUserAttention).toHaveBeenCalled());
@@ -498,7 +495,7 @@ describe("app shell", () => {
     await user.keyboard("{Meta>}n{/Meta}");
 
     expect(createChat).not.toHaveBeenCalled();
-    expect(listPendingChatPrompts).not.toHaveBeenCalled();
+    expect(listInbox).not.toHaveBeenCalled();
   });
 
   it("returns from settings to the conversation that was open", async () => {

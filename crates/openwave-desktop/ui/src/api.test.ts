@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
   parseFolderAccessRequest,
+  parseInboxItem,
   parsePendingChatPrompt,
   parseOutputWritebackRequest,
   parsePendingUserQuestions,
@@ -99,6 +100,44 @@ describe("parseFolderAccessRequest", () => {
         folder_hint: "desktop",
         claimed: "yes",
       }),
+    ).toBeNull();
+  });
+});
+
+describe("inbox items", () => {
+  const safe = {
+    chat_id: "chat-1",
+    chat_title: "Quarterly review",
+    turn_id: "turn-1",
+    call_id: "call-1",
+    kind: "tool_approval",
+    action: "exec",
+    requested_at: "2026-08-04T00:00:00Z",
+  };
+
+  it("accepts the read model, with its optional fields absent", () => {
+    expect(parseInboxItem(safe)).toEqual({
+      chatId: "chat-1",
+      chatTitle: "Quarterly review",
+      turnId: "turn-1",
+      callId: "call-1",
+      kind: "tool_approval",
+      action: "exec",
+      requestedAt: "2026-08-04T00:00:00Z",
+    });
+    const { chat_title: _title, action: _action, ...untitled } = safe;
+    expect(parseInboxItem({ ...untitled, kind: "question" })).toMatchObject({
+      chatTitle: null,
+      action: null,
+      kind: "question",
+    });
+  });
+
+  it("rejects an unknown kind, an unknown tool, and smuggled detail", () => {
+    expect(parseInboxItem({ ...safe, kind: "everything" })).toBeNull();
+    expect(parseInboxItem({ ...safe, action: "rm_rf" })).toBeNull();
+    expect(
+      parseInboxItem({ ...safe, questions: [{ question: "private" }] }),
     ).toBeNull();
   });
 });

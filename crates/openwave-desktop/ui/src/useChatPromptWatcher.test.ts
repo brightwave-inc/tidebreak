@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "./api";
 import { useChatAttention } from "./ChatAttention";
+import { useInbox } from "./Inbox";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
@@ -21,30 +22,26 @@ function folderRequest(callId: string) {
   return { callId, turnId: "turn-1", displayPath: "~/Notes" };
 }
 
-function prompt(
+/** One parked item as the cross-chat read returns it. */
+function inboxItem(
   chatId: string,
-  {
-    questions = [],
-    folderAccess = [],
-    outputWritebacks = [],
-  }: {
-    questions?: string[];
-    folderAccess?: string[];
-    outputWritebacks?: string[];
-  } = {},
+  callId: string,
+  kind: "question" | "folder_access" | "tool_approval" = "question",
 ) {
   return {
     chatId,
-    questionCallIds: questions,
-    planCallIds: [],
-    folderAccessCallIds: folderAccess,
-    outputWritebackCallIds: outputWritebacks,
+    chatTitle: null,
+    turnId: "turn-1",
+    callId,
+    kind,
+    action: null,
+    requestedAt: "2026-08-04T00:00:00Z",
   };
 }
 
 function stubClient(overrides: Record<string, unknown> = {}) {
   return {
-    listPendingChatPrompts: vi.fn().mockResolvedValue([]),
+    listInbox: vi.fn().mockResolvedValue([]),
     listPendingUserQuestions: vi.fn().mockResolvedValue([]),
     listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
     listPendingOutputWritebackRequests: vi.fn().mockResolvedValue([]),
@@ -61,6 +58,7 @@ beforeEach(() => {
     outputWritebacks: [],
   });
   useChatAttention.getState().clear();
+  useInbox.getState().clear();
 });
 afterEach(cleanup);
 
@@ -85,18 +83,18 @@ describe("useChatPromptWatcher", () => {
     act(() => useRefreshSignals.getState().signal("userQuestions"));
 
     await waitFor(() => expect(client.listPendingUserQuestions).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(client.listPendingChatPrompts).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(client.listInbox).toHaveBeenCalledTimes(2));
   });
 
   it("asks for attention once per question, not once per read", async () => {
     const client = stubClient({
-      listPendingChatPrompts: vi.fn().mockResolvedValue([prompt("chat-2", { questions: ["call-1"] })]),
+      listInbox: vi.fn().mockResolvedValue([inboxItem("chat-2", "call-1")]),
     });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
     await waitFor(() => expect(host.requestUserAttention).toHaveBeenCalledTimes(1));
 
     act(() => useRefreshSignals.getState().signal("userQuestions"));
-    await waitFor(() => expect(client.listPendingChatPrompts).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(client.listInbox).toHaveBeenCalledTimes(2));
 
     expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
   });
@@ -104,18 +102,18 @@ describe("useChatPromptWatcher", () => {
   it("forgets a question once it stops being pending", async () => {
     // The announce-set spans the life of the shell, so it has to be pruned or a
     // long session accumulates the id of every question ever asked.
-    const listPendingChatPrompts = vi
+    const listInbox = vi
       .fn()
-      .mockResolvedValueOnce([prompt("chat-1", { questions: ["call-1"] })])
+      .mockResolvedValueOnce([inboxItem("chat-1", "call-1")])
       .mockResolvedValue([]);
-    const client = stubClient({ listPendingChatPrompts });
+    const client = stubClient({ listInbox });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
     await waitFor(() => expect(host.requestUserAttention).toHaveBeenCalledTimes(1));
 
     act(() => useRefreshSignals.getState().signal("userQuestions"));
     await waitFor(() => expect(usePendingPrompts.getState().userQuestions).toHaveLength(0));
 
-    listPendingChatPrompts.mockResolvedValue([prompt("chat-1", { questions: ["call-2"] })]);
+    listInbox.mockResolvedValue([inboxItem("chat-1", "call-2")]);
     act(() => useRefreshSignals.getState().signal("userQuestions"));
 
     await waitFor(() => expect(host.requestUserAttention).toHaveBeenCalledTimes(2));
@@ -162,9 +160,10 @@ describe("useChatPromptWatcher", () => {
 
   it("marks parked chats even when no conversation is open", async () => {
     const client = stubClient({
-      listPendingChatPrompts: vi.fn().mockResolvedValue([
-        prompt("chat-2", { questions: ["call-question"] }),
-        prompt("chat-3", { folderAccess: ["call-folder"] }),
+      listInbox: vi.fn().mockResolvedValue([
+        inboxItem("chat-2", "call-question"),
+        inboxItem("chat-3", "call-folder", "folder_access"),
+        inboxItem("chat-3", "call-approval", "tool_approval"),
       ]),
     });
     renderHook(() => useChatPromptWatcher(client, null));
@@ -174,6 +173,9 @@ describe("useChatPromptWatcher", () => {
         new Set(["chat-2", "chat-3"]),
       ),
     );
+    // The rail's markers and the inbox come from the same read, so a chat
+    // parked on an approval is marked exactly like one parked on a question.
+    expect(useInbox.getState().items).toHaveLength(3);
     expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
     expect(client.listPendingUserQuestions).not.toHaveBeenCalled();
     expect(usePendingPrompts.getState().userQuestions).toEqual([]);

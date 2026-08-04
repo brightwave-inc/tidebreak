@@ -11,6 +11,7 @@ import { AppShell } from "./AppShell";
 import { ChatExplorer } from "./ChatExplorer";
 import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
+import { InboxView } from "./InboxView";
 import { useManagedPolicy } from "./managedPolicy";
 import type { PanelSearch } from "./panel/panelUrl";
 import { RouteFrame } from "./RouteFrame";
@@ -19,6 +20,12 @@ import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
 
 const rootRoute = createRootRoute({ component: AppShell });
+
+/**
+ * A conversation's URL carries its layout and, when arrived at from the inbox,
+ * the parked call the transcript should reveal.
+ */
+type ChatSearch = PanelSearch & { focus?: string };
 
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -54,13 +61,38 @@ function AllChatsRoute() {
   );
 }
 
+/**
+ * The inbox shares home's rail: what is waiting spans conversations, so it is
+ * not scoped to one either.
+ */
+const inboxRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/inbox",
+  component: InboxRoute,
+});
+
+function InboxRoute() {
+  return (
+    <RouteFrame sidebar={<HomeSidebar />}>
+      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+        <InboxView />
+      </div>
+    </RouteFrame>
+  );
+}
+
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/c/$chatId",
-  validateSearch: (search: Record<string, unknown>): PanelSearch => ({
+  validateSearch: (search: Record<string, unknown>): ChatSearch => ({
     left: typeof search.left === "string" ? search.left : undefined,
     right: typeof search.right === "string" ? search.right : undefined,
     fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+    // Where a deep link is pointing: the parked call to reveal once the
+    // transcript is up. It rides beside the layout params because it is
+    // addressing state like they are, and it is dropped from the URL as soon
+    // as it has been honored so a reload does not re-scroll.
+    focus: typeof search.focus === "string" ? search.focus : undefined,
   }),
   component: ChatRouteComponent,
 });
@@ -141,6 +173,7 @@ const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
 export const routeTree = rootRoute.addChildren([
   homeRoute,
   allChatsRoute,
+  inboxRoute,
   chatRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import type { ComposerImages } from "./Composer";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { usePendingPrompts } from "./PendingPrompts";
+import { renderWithRouter } from "./test/router";
 
 vi.mock("./host", () => ({
   hasNativeHost: () => false,
@@ -80,8 +81,8 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
   );
 }
 
-function renderChatView(overrides: Partial<ChatViewProps> = {}) {
-  const props: ChatViewProps = {
+function chatViewProps(overrides: Partial<ChatViewProps> = {}): ChatViewProps {
+  return {
     client,
     chat,
     hydrated: true,
@@ -98,7 +99,11 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     onSend: vi.fn(async () => {}),
     ...overrides,
   };
-  render(<ChatView {...props} />);
+}
+
+async function renderChatView(overrides: Partial<ChatViewProps> = {}) {
+  const props = chatViewProps(overrides);
+  await renderWithRouter(<ChatView {...props} />);
   return props;
 }
 
@@ -110,7 +115,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("ChatView", () => {
-  it("renders the live session transcript straight from the store", () => {
+  it("renders the live session transcript straight from the store", async () => {
     useChatSessionStore.getState().update((session) => ({
       ...session,
       messages: [
@@ -118,7 +123,7 @@ describe("ChatView", () => {
         { id: "m2", role: "assistant", text: "hi!", sources: [] },
       ],
     }));
-    renderChatView();
+    await renderChatView();
     expect(screen.getByText("hello there")).toBeInTheDocument();
     expect(screen.getByText("hi!")).toBeInTheDocument();
   });
@@ -148,9 +153,55 @@ describe("ChatView", () => {
       ] as never,
     });
 
-    renderChatView();
+    await renderChatView();
 
     expect(await screen.findByText("Which quarter?")).toBeInTheDocument();
+  });
+
+  it("reveals the card a deep link named, then drops it from the URL", async () => {
+    // What the inbox promises: opening an item lands on the exact card that
+    // parked, not at the bottom of a transcript the reader has to search.
+    usePendingPrompts.setState({
+      chatId: "chat-1",
+      userQuestions: [
+        {
+          callId: "call-q",
+          turnId: "turn-1",
+          askedAt: "2026-07-24T00:00:00.000Z",
+          questions: [
+            {
+              id: "q1",
+              header: "Scope",
+              question: "Which quarter?",
+              options: [],
+              questionType: "single_select",
+              allowFreeForm: true,
+            },
+          ],
+        },
+      ] as never,
+    });
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+
+    const { router } = await renderWithRouter(
+      <ChatView {...chatViewProps()} />,
+      { initialUrl: "/c/chat-1?focus=call-q" },
+    );
+
+    // The right card, not merely some scroll: the anchor the deep link named
+    // is the element that gets pointed out.
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-pending-call-id="call-q"]'),
+      ).toHaveClass("is-deep-linked"),
+    );
+    expect(scrollIntoView).toHaveBeenCalled();
+    // The link is spent once honored: a reload should show the conversation as
+    // it stands, not scroll to a card that may long since have been answered.
+    await waitFor(() =>
+      expect(router.state.location.search).not.toHaveProperty("focus"),
+    );
+    scrollIntoView.mockRestore();
   });
 
   it("sends an approval decision through its own client", async () => {
@@ -167,7 +218,7 @@ describe("ChatView", () => {
         },
       ],
     }));
-    renderChatView();
+    await renderChatView();
 
     await userEvent.click(screen.getAllByRole("option")[0]!);
 
@@ -181,8 +232,8 @@ describe("ChatView", () => {
     );
   });
 
-  it("re-renders as stream events land in the store", () => {
-    renderChatView();
+  it("re-renders as stream events land in the store", async () => {
+    await renderChatView();
     act(() => {
       useChatSessionStore
         .getState()
@@ -206,7 +257,7 @@ describe("ChatView", () => {
       busy: true,
       activeTurnId: "turn-1",
     }));
-    render(<DraftingChatView />);
+    await renderWithRouter(<DraftingChatView />);
 
     const message = screen.getByLabelText("Message");
     await userEvent.type(message, "go left");
@@ -233,7 +284,7 @@ describe("ChatView", () => {
       busy: true,
       activeTurnId: "turn-1",
     }));
-    render(<DraftingChatView />);
+    await renderWithRouter(<DraftingChatView />);
 
     const message = screen.getByLabelText("Message");
     await userEvent.type(message, "go left");

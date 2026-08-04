@@ -3,6 +3,7 @@ import { LayoutGrid, MessagesSquare } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
+import { InboxButton } from "./InboxButton";
 import { NewChatButton } from "./NewChatButton";
 import { RecentChatsSection } from "./RecentChatsSection";
 import { SidebarButton, SidebarSectionTitle } from "./primitives";
@@ -42,6 +43,10 @@ export function HomeSidebar() {
         disabled={creatingChat || deletingChatId !== null}
         creating={creatingChat}
       />
+
+      <div className="mt-2">
+        <InboxButton />
+      </div>
 
       <SidebarSectionTitle className="mt-4">Chats</SidebarSectionTitle>
       <div className="flex flex-col gap-0.5">

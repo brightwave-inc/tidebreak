@@ -14,6 +14,7 @@ import { listDeliverables, type DeliverablesCatalog } from "@/deliverables";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
 import { useRefreshSignals } from "@/RefreshSignals";
+import { InboxButton } from "./InboxButton";
 import { RecentChatsSection } from "./RecentChatsSection";
 import { SidebarButton, SidebarSectionTitle } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
@@ -67,6 +68,8 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
           </span>
         )}
       </SidebarButton>
+
+      <InboxButton />
 
       <ChatPanelButton
         label="Outputs"
