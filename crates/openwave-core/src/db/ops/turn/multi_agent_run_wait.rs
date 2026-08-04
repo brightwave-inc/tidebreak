@@ -238,17 +238,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         .await
         .map_err(store_err)?
         .is_some();
-    let legacy_wait = entities::turn_agent_run_wait::Entity::find()
-        .filter(entities::turn_agent_run_wait::Column::TurnId.eq(turn_id.0))
-        .filter(
-            entities::turn_agent_run_wait::Column::Status
-                .eq(TurnAgentRunWaitStatus::Waiting.as_str()),
-        )
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    if competing_set || legacy_wait {
+    if competing_set {
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict));
     }
@@ -262,20 +252,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         .await
         .map_err(store_err)?
         .is_some();
-    let reused_legacy_child = entities::turn_agent_run_wait::Entity::find()
-        .filter(
-            entities::turn_agent_run_wait::Column::ChildRunId
-                .is_in(child_run_ids.iter().map(|id| id.0)),
-        )
-        .filter(
-            entities::turn_agent_run_wait::Column::Status
-                .eq(TurnAgentRunWaitStatus::Waiting.as_str()),
-        )
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    if reused_member || reused_legacy_child {
+    if reused_member {
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict));
     }

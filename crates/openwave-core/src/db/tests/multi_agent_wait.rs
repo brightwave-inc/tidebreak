@@ -351,85 +351,6 @@ END"#,
     );
 }
 
-#[tokio::test]
-async fn closed_ordered_wait_history_does_not_block_a_later_legacy_wait() {
-    let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
-    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
-    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
-    assert_eq!(complete_next_child(&store, "already ready").await, child.id);
-    let wait_id = CallId::new();
-    park_wait_set_for_test(
-        &store,
-        wait_id,
-        running.id,
-        &[child.id],
-        AgentRunWaitCondition::All,
-        lease,
-        running.steer_revision,
-        test_checkpoint_progress(),
-        Utc::now(),
-    )
-    .await
-    .unwrap();
-
-    let steer_id = TurnSteerId::new();
-    store
-        .accept_turn_steer(steer_id, running.id, chat.id, "interrupt", true)
-        .await
-        .unwrap();
-    let resumed_lease = uuid::Uuid::new_v4();
-    let resumed = store
-        .claim_turn_run(resumed_lease, Utc::now(), Utc::now() + Duration::minutes(5))
-        .await
-        .unwrap()
-        .turn
-        .unwrap();
-    store
-        .append_turn_event(
-            chat.id,
-            resumed.id,
-            resumed_lease,
-            1,
-            Utc::now(),
-            &AgentEvent::TurnStarted {
-                turn_id: resumed.id,
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .apply_turn_steer(
-            resumed.id,
-            resumed_lease,
-            steer_id,
-            2,
-            None,
-            &[],
-            Utc::now(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let applied = store.get_turn_run(resumed.id).await.unwrap().unwrap();
-
-    assert!(matches!(
-        store
-            .park_turn_for_agent_run_inbox(
-                applied.id,
-                child.id,
-                resumed_lease,
-                applied.steer_revision,
-                test_checkpoint_progress(),
-                Utc::now(),
-            )
-            .await
-            .unwrap(),
-        Some(crate::ParkTurnForAgentRunInboxOutcome::Parked { .. })
-    ));
-}
-
 async fn complete_next_child(store: &crate::DbStore, text: &str) -> AgentRunId {
     let lease = uuid::Uuid::new_v4();
     let child = store
@@ -1094,98 +1015,34 @@ async fn wait_member_composite_foreign_key_rejects_cross_turn_ownership() {
 }
 
 #[tokio::test]
-async fn legacy_and_multi_waits_cannot_reconsume_the_same_child_delivery() {
+async fn a_consumed_wait_set_child_cannot_be_reparked_on_a_new_wait() {
     let (_dir, store) = temp_store().await;
 
-    let legacy_chat = sample_chat();
-    store.create_chat(&legacy_chat).await.unwrap();
-    let (legacy_turn, legacy_lease) = live_turn_for_sandbox_test(&store, legacy_chat.id).await;
-    let legacy_child =
-        admit_sandbox_call_for_test(&store, legacy_chat.id, CallId::new(), "legacy child").await;
-    store
-        .park_turn_for_agent_run_inbox(
-            legacy_turn.id,
-            legacy_child.id,
-            legacy_lease,
-            legacy_turn.steer_revision,
-            test_checkpoint_progress(),
-            Utc::now(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        complete_next_child(&store, "legacy result").await,
-        legacy_child.id
-    );
-    let inbox_lease = uuid::Uuid::new_v4();
-    store
-        .claim_agent_run_inbox_entry(
-            legacy_turn.agent_run_id,
-            legacy_child.id,
-            inbox_lease,
-            Duration::minutes(5),
-        )
-        .await
-        .unwrap();
-    store
-        .consume_agent_run_inbox_entry_and_resume_turn(
-            legacy_turn.agent_run_id,
-            legacy_child.id,
-            inbox_lease,
-        )
-        .await
-        .unwrap();
-    let next_lease = uuid::Uuid::new_v4();
-    let next = store
-        .claim_turn_run(next_lease, Utc::now(), Utc::now() + Duration::minutes(5))
-        .await
-        .unwrap()
-        .turn
-        .unwrap();
-    assert!(matches!(
-        park_wait_set_for_test(
-            &store,
-            CallId::new(),
-            next.id,
-            &[legacy_child.id],
-            AgentRunWaitCondition::All,
-            next_lease,
-            next.steer_revision,
-            test_checkpoint_progress(),
-            Utc::now(),
-        )
-        .await
-        .unwrap(),
-        Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict)
-    ));
-
-    let multi_chat = sample_chat();
-    store.create_chat(&multi_chat).await.unwrap();
-    let (multi_turn, multi_lease) = live_turn_for_sandbox_test(&store, multi_chat.id).await;
-    let multi_child =
-        admit_sandbox_call_for_test(&store, multi_chat.id, CallId::new(), "multi child").await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
     let wait_id = CallId::new();
     park_wait_set_for_test(
         &store,
         wait_id,
-        multi_turn.id,
-        &[multi_child.id],
+        turn.id,
+        &[child.id],
         AgentRunWaitCondition::All,
-        multi_lease,
-        multi_turn.steer_revision,
+        lease,
+        turn.steer_revision,
         test_checkpoint_progress(),
         Utc::now(),
     )
     .await
     .unwrap();
-    assert_eq!(
-        complete_next_child(&store, "multi result").await,
-        multi_child.id
-    );
+    assert_eq!(complete_next_child(&store, "result").await, child.id);
     store
         .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
         .await
-        .unwrap();
+        .unwrap()
+        .expect("ready wait set should resume");
+
     let reclaimed_lease = uuid::Uuid::new_v4();
     let reclaimed = store
         .claim_turn_run(
@@ -1197,19 +1054,22 @@ async fn legacy_and_multi_waits_cannot_reconsume_the_same_child_delivery() {
         .unwrap()
         .turn
         .unwrap();
+    // The child's delivery is consumed, so it can never back a second wait.
     assert!(matches!(
-        store
-            .park_turn_for_agent_run_inbox(
-                reclaimed.id,
-                multi_child.id,
-                reclaimed_lease,
-                reclaimed.steer_revision,
-                test_checkpoint_progress(),
-                Utc::now(),
-            )
-            .await
-            .unwrap(),
-        Some(crate::ParkTurnForAgentRunInboxOutcome::IdentityConflict)
+        park_wait_set_for_test(
+            &store,
+            CallId::new(),
+            reclaimed.id,
+            &[child.id],
+            AgentRunWaitCondition::All,
+            reclaimed_lease,
+            reclaimed.steer_revision,
+            test_checkpoint_progress(),
+            Utc::now(),
+        )
+        .await
+        .unwrap(),
+        Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict)
     ));
 }
 

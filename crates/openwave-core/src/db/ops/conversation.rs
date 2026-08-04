@@ -566,11 +566,6 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::turn_agent_run_wait::Entity::delete_many()
-        .filter(entities::turn_agent_run_wait::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
     entities::turn_steer::Entity::delete_many()
         .filter(entities::turn_steer::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)

@@ -120,10 +120,6 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             agent_run::turn_agent_run_wait_lock_table(),
             agent_run::turn_agent_run_wait_lock_indexes(),
         ),
-        entry(
-            agent_run::turn_agent_run_wait_table(),
-            agent_run::turn_agent_run_wait_indexes(),
-        ),
         // Documents, outputs, and attachments.
         entry(content::document_table(), content::document_indexes()),
         entry(content::output_table(), content::output_indexes()),

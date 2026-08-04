@@ -9,8 +9,7 @@
 
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,8 +17,7 @@ use futures::StreamExt;
 use openwave_core::{
     sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
     sandbox_web_search_tool_spec, validate_sandbox_read_delegated_file_arguments, AgentConfig,
-    AgentError, AgentRun, AgentRunInboxEntry, AgentRunStatus, CallId, ChatMessage, ChatRequest,
-    ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ContentBlock,
+    AgentError, AgentRun, AgentRunStatus, CallId, ChatMessage, ChatRequest, ContentBlock,
     FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, ProviderEvent,
     RequestFolderAccessArgs, Result, ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall,
     SandboxToolCallRequest, SandboxToolCallStatus, StopReason, Store, SubmitAgentRunResultOutcome,
@@ -106,15 +104,9 @@ pub(crate) enum SandboxAgentRunWorkerOutcome {
     RetryScheduled(openwave_core::AgentRunId),
     Failed(openwave_core::AgentRunId),
     Cancelled(openwave_core::AgentRunId),
-    ParentResumed(openwave_core::AgentRunId),
     ParentWaitSetResumed(openwave_core::CallId),
     ToolCheckpointed(openwave_core::CallId),
     LeaseLost(openwave_core::AgentRunId),
-}
-
-enum RecoveryCandidate {
-    Delivery(Box<AgentRunInboxEntry>),
-    WaitSet(openwave_core::AgentRunWaitSetCandidate),
 }
 
 #[derive(Clone)]
@@ -125,7 +117,6 @@ pub(crate) struct SandboxAgentRunWorker {
     turn_wake: Arc<Notify>,
     events: Arc<EventBus>,
     attempts: Arc<SandboxAttemptGuard>,
-    recovery_prefer_wait_sets: Arc<AtomicBool>,
     #[cfg(test)]
     fail_wait_set_resume_responses: Arc<AtomicUsize>,
     agent_config: AgentConfig,
@@ -188,7 +179,6 @@ impl SandboxAgentRunWorker {
             turn_wake,
             events,
             attempts,
-            recovery_prefer_wait_sets: Arc::new(AtomicBool::new(true)),
             #[cfg(test)]
             fail_wait_set_resume_responses: Arc::new(AtomicUsize::new(0)),
             agent_config,
@@ -247,44 +237,12 @@ impl SandboxAgentRunWorker {
     /// so focused integration tests can exercise the real durable transitions
     /// without starting permanent worker lanes.
     pub(crate) async fn run_once(&self) -> Result<SandboxAgentRunWorkerOutcome> {
-        let deliveries = self.store.list_agent_run_inbox_candidates(16).await?;
         let wait_sets = self
             .store
             .list_ready_agent_run_wait_set_candidates(16)
             .await?;
-        let mut deliveries = deliveries.into_iter();
-        let mut wait_sets = wait_sets.into_iter();
-        let mut next_is_wait_set = self
-            .recovery_prefer_wait_sets
-            .fetch_xor(true, Ordering::Relaxed);
-        loop {
-            let candidate = if next_is_wait_set {
-                wait_sets
-                    .next()
-                    .map(RecoveryCandidate::WaitSet)
-                    .or_else(|| {
-                        deliveries
-                            .next()
-                            .map(Box::new)
-                            .map(RecoveryCandidate::Delivery)
-                    })
-            } else {
-                deliveries
-                    .next()
-                    .map(Box::new)
-                    .map(RecoveryCandidate::Delivery)
-                    .or_else(|| wait_sets.next().map(RecoveryCandidate::WaitSet))
-            };
-            let Some(candidate) = candidate else {
-                break;
-            };
-            next_is_wait_set = !next_is_wait_set;
-            let outcome = match candidate {
-                RecoveryCandidate::Delivery(delivery) => self.resume_parent(*delivery).await?,
-                RecoveryCandidate::WaitSet(candidate) => {
-                    self.resume_parent_wait_set(candidate.wait_id).await?
-                }
-            };
+        for candidate in wait_sets {
+            let outcome = self.resume_parent_wait_set(candidate.wait_id).await?;
             if outcome != SandboxAgentRunWorkerOutcome::Idle {
                 return Ok(outcome);
             }
@@ -402,57 +360,6 @@ impl SandboxAgentRunWorker {
             ));
         }
         Ok(outcome)
-    }
-
-    /// Advance one immutable child delivery to a durably resumable parent turn.
-    ///
-    /// The candidate scan is only recovery/latency plumbing. Exact inbox claim
-    /// and consume transitions own the fencing, so concurrent lanes and a
-    /// restart after child completion cannot double-resume the foreground turn.
-    async fn resume_parent(
-        &self,
-        delivery: AgentRunInboxEntry,
-    ) -> Result<SandboxAgentRunWorkerOutcome> {
-        let lease_token = uuid::Uuid::new_v4();
-        let lease = chrono_duration(self.config.lease)?;
-        let Some(claim) = self
-            .store
-            .claim_agent_run_inbox_entry(
-                delivery.parent_run_id,
-                delivery.child_run_id,
-                lease_token,
-                lease,
-            )
-            .await?
-        else {
-            return Ok(SandboxAgentRunWorkerOutcome::Idle);
-        };
-        let entry = match claim {
-            ClaimAgentRunInboxOutcome::Claimed(entry)
-            | ClaimAgentRunInboxOutcome::Existing(entry) => entry,
-        };
-        let Some(outcome) = self
-            .store
-            .consume_agent_run_inbox_entry_and_resume_turn(
-                entry.parent_run_id,
-                entry.child_run_id,
-                lease_token,
-            )
-            .await?
-        else {
-            return Ok(SandboxAgentRunWorkerOutcome::Idle);
-        };
-        match outcome {
-            ConsumeAgentRunInboxAndResumeTurnOutcome::Resumed { .. }
-            | ConsumeAgentRunInboxAndResumeTurnOutcome::Existing { .. } => {
-                // A committed `resuming` turn is authoritative. This only
-                // reduces the latency before the ordinary turn scan sees it.
-                self.turn_wake.notify_one();
-                Ok(SandboxAgentRunWorkerOutcome::ParentResumed(
-                    entry.child_run_id,
-                ))
-            }
-        }
     }
 
     async fn process(
@@ -1339,9 +1246,8 @@ mod tests {
     use chrono::Utc;
     use futures::stream::{self, BoxStream};
     use openwave_core::{
-        AcceptTurnOutcome, AgentRunInboxStatus, CallId, Chat, ChatId, ChatRequest, DbStore,
-        ModelProvider, ProviderId, ReasoningEffort, Role, Store, ToolCallResolution,
-        TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
+        CallId, Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderId, ReasoningEffort,
+        Role, Store, ToolCallResolution, TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
     };
 
     use super::*;
@@ -1643,6 +1549,50 @@ mod tests {
         }
     }
 
+    /// Park one claimed foreground turn on an ordered child set, taking the
+    /// `TurnStarted` event the checkpoint's ordinal precondition requires.
+    async fn park_wait_set(
+        store: &Arc<dyn Store>,
+        wait_id: CallId,
+        turn: &openwave_core::TurnRun,
+        lease_token: uuid::Uuid,
+        child_run_ids: &[openwave_core::AgentRunId],
+    ) {
+        store
+            .append_turn_event(
+                turn.chat_id,
+                turn.id,
+                lease_token,
+                1,
+                Utc::now(),
+                &openwave_core::AgentEvent::TurnStarted { turn_id: turn.id },
+            )
+            .await
+            .unwrap();
+        store
+            .park_turn_for_agent_run_wait_set(
+                &openwave_core::AgentRunWaitSetCheckpointRequest {
+                    call_id: wait_id,
+                    origin_turn_id: turn.id,
+                    child_run_ids: child_run_ids.to_vec(),
+                    condition: openwave_core::AgentRunWaitCondition::All,
+                    lease_token,
+                    expected_steer_revision: turn.steer_revision,
+                    provider_id: format!("provider-{wait_id}"),
+                    arguments: serde_json::json!({"agent_ids": child_run_ids}),
+                    event_ordinal: 2,
+                    progress: TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+            .expect("foreground turn should park on its child set");
+    }
+
     async fn ready_wait_set_for_test(
         store: &Arc<dyn Store>,
         chat_id: openwave_core::ChatId,
@@ -1662,40 +1612,7 @@ mod tests {
             .unwrap();
         let child = admit_sandbox(store, chat_id, CallId::new(), "child").await;
         let wait_id = CallId::new();
-        store
-            .append_turn_event(
-                chat_id,
-                foreground.id,
-                foreground_lease,
-                1,
-                Utc::now(),
-                &openwave_core::AgentEvent::TurnStarted {
-                    turn_id: foreground.id,
-                },
-            )
-            .await
-            .unwrap();
-        store
-            .park_turn_for_agent_run_wait_set(
-                &openwave_core::AgentRunWaitSetCheckpointRequest {
-                    call_id: wait_id,
-                    origin_turn_id: foreground.id,
-                    child_run_ids: vec![child.id],
-                    condition: openwave_core::AgentRunWaitCondition::All,
-                    lease_token: foreground_lease,
-                    expected_steer_revision: foreground.steer_revision,
-                    provider_id: format!("provider-{wait_id}"),
-                    arguments: serde_json::json!({"agent_ids": [child.id]}),
-                    event_ordinal: 2,
-                    progress: TurnCheckpointProgress {
-                        model_steps: 1,
-                        usage: Usage::default(),
-                    },
-                },
-                Utc::now(),
-            )
-            .await
-            .unwrap();
+        park_wait_set(store, wait_id, &foreground, foreground_lease, &[child.id]).await;
         let child_lease = uuid::Uuid::new_v4();
         let claimed = store
             .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 4)
@@ -2066,79 +1983,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_inbox_scan_resumes_a_parked_parent_without_a_wake() {
-        let (worker, store, _provider, chat, _dir) = fixture().await;
-        let turn_id = TurnId::new();
-        assert!(matches!(
-            store
-                .accept_turn(turn_id, chat.id, "sandbox-model", "delegate")
-                .await
-                .unwrap(),
-            AcceptTurnOutcome::Accepted(_)
-        ));
-        let foreground_lease = uuid::Uuid::new_v4();
-        let now = chrono::Utc::now();
-        let foreground = store
-            .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
-            .await
-            .unwrap()
-            .turn
-            .unwrap();
-        let call = CallId::new();
-        let child_id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
-        assert!(matches!(
-            store
-                .accept_sandbox_agent_run_and_park_turn(
-                    child_id,
-                    foreground.id,
-                    call,
-                    "return the child result",
-                    foreground_lease,
-                    foreground.steer_revision,
-                    TurnCheckpointProgress {
-                        model_steps: 1,
-                        usage: Usage::default(),
-                    },
-                    chrono::Utc::now(),
-                )
-                .await
-                .unwrap(),
-            Some(openwave_core::AcceptSandboxAgentRunAndParkTurnOutcome::Parked { .. })
-        ));
-        let child_lease = uuid::Uuid::new_v4();
-        assert_eq!(
-            store
-                .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 2)
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            child_id
-        );
-        store
-            .submit_agent_run_result(child_id, child_lease, "child result")
-            .await
-            .unwrap()
-            .expect("exact child lease should complete");
-
-        // No notification is sent: a restarted worker's durable scan must
-        // still claim and consume this delivery.
-        assert_eq!(
-            worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::ParentResumed(child_id)
-        );
-        let parent = openwave_core::AgentRunId::foreground_for_chat(chat.id);
-        assert_eq!(
-            store.list_agent_run_inbox(parent).await.unwrap()[0].status,
-            AgentRunInboxStatus::Consumed
-        );
-        assert_eq!(
-            store.get_turn_run(turn_id).await.unwrap().unwrap().status,
-            TurnRunStatus::Resuming
-        );
-    }
-
-    #[tokio::test]
     async fn durable_wait_set_scan_resumes_and_publishes_without_a_wake() {
         let (worker, store, _provider, chat, _dir) = fixture().await;
         let mut live_events = worker.events.subscribe(chat.id);
@@ -2219,131 +2063,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_legacy_and_wait_set_recovery_does_not_starve_either_class() {
-        let (worker, store, _provider, set_chat, _dir) = fixture().await;
-        let set_turn_id = TurnId::new();
-        store
-            .accept_turn(set_turn_id, set_chat.id, "sandbox-model", "set")
-            .await
-            .unwrap();
-        let set_lease = uuid::Uuid::new_v4();
-        let now = Utc::now();
-        let set_turn = store
-            .claim_turn_run(set_lease, now, now + chrono::Duration::minutes(1))
-            .await
-            .unwrap()
-            .turn
-            .unwrap();
-        let set_child = admit_sandbox(&store, set_chat.id, CallId::new(), "set child").await;
-        let wait_id = CallId::new();
-        store
-            .append_turn_event(
-                set_chat.id,
-                set_turn.id,
-                set_lease,
-                1,
-                Utc::now(),
-                &openwave_core::AgentEvent::TurnStarted {
-                    turn_id: set_turn.id,
-                },
-            )
-            .await
-            .unwrap();
-        store
-            .park_turn_for_agent_run_wait_set(
-                &openwave_core::AgentRunWaitSetCheckpointRequest {
-                    call_id: wait_id,
-                    origin_turn_id: set_turn.id,
-                    child_run_ids: vec![set_child.id],
-                    condition: openwave_core::AgentRunWaitCondition::All,
-                    lease_token: set_lease,
-                    expected_steer_revision: set_turn.steer_revision,
-                    provider_id: format!("provider-{wait_id}"),
-                    arguments: serde_json::json!({"agent_ids": [set_child.id]}),
-                    event_ordinal: 2,
-                    progress: TurnCheckpointProgress {
-                        model_steps: 1,
-                        usage: Usage::default(),
-                    },
-                },
-                Utc::now(),
-            )
-            .await
-            .unwrap();
-        let child_lease = uuid::Uuid::new_v4();
-        assert_eq!(
-            store
-                .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 4)
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            set_child.id
-        );
-        store
-            .submit_agent_run_result(set_child.id, child_lease, "set result")
-            .await
-            .unwrap();
-
-        let legacy_chat = sandbox_chat();
-        store.create_chat(&legacy_chat).await.unwrap();
-        let legacy_turn_id = TurnId::new();
-        store
-            .accept_turn(legacy_turn_id, legacy_chat.id, "sandbox-model", "legacy")
-            .await
-            .unwrap();
-        let legacy_lease = uuid::Uuid::new_v4();
-        let now = Utc::now();
-        let legacy_turn = store
-            .claim_turn_run(legacy_lease, now, now + chrono::Duration::minutes(1))
-            .await
-            .unwrap()
-            .turn
-            .unwrap();
-        let legacy_call = CallId::new();
-        let legacy_child = openwave_core::AgentRunId::sandbox_for_spawn_call(legacy_call);
-        store
-            .accept_sandbox_agent_run_and_park_turn(
-                legacy_child,
-                legacy_turn.id,
-                legacy_call,
-                "legacy child",
-                legacy_lease,
-                legacy_turn.steer_revision,
-                TurnCheckpointProgress {
-                    model_steps: 1,
-                    usage: Usage::default(),
-                },
-                Utc::now(),
-            )
-            .await
-            .unwrap();
-        let child_lease = uuid::Uuid::new_v4();
-        assert_eq!(
-            store
-                .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 4)
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            legacy_child
-        );
-        store
-            .submit_agent_run_result(legacy_child, child_lease, "legacy result")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id)
-        );
-        assert_eq!(
-            worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::ParentResumed(legacy_child)
-        );
-    }
-
-    #[tokio::test]
     async fn folder_proposal_completes_the_child_then_resumes_the_parent_without_a_tool_checkpoint()
     {
         let dir = tempfile::tempdir().unwrap();
@@ -2371,26 +2090,10 @@ mod tests {
             .turn
             .unwrap();
         let call = CallId::new();
-        let child_id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
-        assert!(matches!(
-            store
-                .accept_sandbox_agent_run_and_park_turn(
-                    child_id,
-                    foreground.id,
-                    call,
-                    "ask whether a folder is needed",
-                    foreground_lease,
-                    foreground.steer_revision,
-                    TurnCheckpointProgress {
-                        model_steps: 1,
-                        usage: Usage::default()
-                    },
-                    chrono::Utc::now(),
-                )
-                .await
-                .unwrap(),
-            Some(openwave_core::AcceptSandboxAgentRunAndParkTurnOutcome::Parked { .. })
-        ));
+        let child = admit_sandbox(&store, chat.id, call, "ask whether a folder is needed").await;
+        let child_id = child.id;
+        let wait_id = CallId::new();
+        park_wait_set(&store, wait_id, &foreground, foreground_lease, &[child_id]).await;
         let provider = Arc::new(EventProvider(vec![
             ProviderEvent::ToolCallStarted {
                 index: 0,
@@ -2437,16 +2140,8 @@ mod tests {
         ));
         assert_eq!(
             worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::ParentResumed(child_id)
+            SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id)
         );
-        let messages = store.list_messages(chat.id).await.unwrap();
-        let proposal = messages.last().unwrap();
-        assert_eq!(proposal.role, Role::System);
-        assert!(proposal.content.contains("This grants no access"));
-        assert!(proposal
-            .content
-            .contains("normal request_folder_access tool"));
-        assert!(!proposal.content.contains("root_id"));
     }
 
     #[tokio::test]

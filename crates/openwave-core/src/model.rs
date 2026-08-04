@@ -1979,38 +1979,6 @@ impl TurnRunStatus {
     }
 }
 
-/// Durable checkpoint linking one foreground turn to an exact sandbox child.
-///
-/// The checkpoint records the worker lease segment that parked the turn and
-/// the progress already committed before it yielded. Once the child's inbox
-/// delivery is consumed under an exact continuation lease, this row becomes
-/// the durable proof that the turn was moved to [`TurnRunStatus::Resuming`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnAgentRunWait {
-    /// Sandboxed child whose immutable result unblocks this checkpoint.
-    pub child_run_id: crate::id::AgentRunId,
-    /// Foreground coordinator shared by the child and turn.
-    pub parent_run_id: crate::id::AgentRunId,
-    /// Foreground turn parked at this continuation boundary.
-    pub turn_id: TurnId,
-    /// Conversation shared by the child and turn.
-    pub chat_id: ChatId,
-    /// Exact worker lease that created the checkpoint.
-    pub park_lease_token: Uuid,
-    /// Failure attempt containing the checkpoint.
-    pub attempt_count: i32,
-    /// Exact lease-segment ordinal containing the checkpoint.
-    pub claim_count: i32,
-    /// Progress committed before releasing the turn worker.
-    pub progress: TurnCheckpointProgress,
-    /// Durable lifecycle of this child-result checkpoint.
-    pub status: TurnAgentRunWaitStatus,
-    /// Database time at which the checkpoint committed.
-    pub parked_at: DateTime<Utc>,
-    /// Database time at which the inbox delivery woke the turn, if any.
-    pub closed_at: Option<DateTime<Utc>>,
-}
-
 /// Explicit completion policy for a durable multi-child foreground wait.
 ///
 /// The first local fan-out contract deliberately supports only `All`: the
@@ -2122,7 +2090,7 @@ impl TurnAgentRunWaitSet {
     pub const MAX_CHILDREN: usize = 4;
 }
 
-/// Durable lifecycle of a [`TurnAgentRunWait`].
+/// Durable lifecycle of a [`TurnAgentRunWaitSet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
