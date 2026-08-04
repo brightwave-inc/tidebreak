@@ -69,7 +69,7 @@ tracing = "=0.1.44"
 # plain profile log file wants neither.
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "env-filter"] }
 # Bounded unified diffs for the post-turn connected-folder change summary.
-similar = "=2.7.0"
+similar = "=3.1.1"
 # Private, automatically removed inputs and outputs for ephemeral document previews.
 tempfile = { workspace = true }
 
