@@ -497,13 +497,17 @@ pub fn app(state: AppState) -> Router {
             auth::require_token,
         ))
         .with_state(state.clone());
-    let frame_state = state;
+    let frame_state = state.clone();
 
-    // Loopback-only + bearer token is the real gate. CORS mirrors the request
-    // Origin so the Tauri webview (and a browser on `vite` during UI work) can
-    // call the API from a different localhost port.
+    // Loopback-only + bearer token is the real gate. CORS names the origins
+    // this app actually loads its frontend from rather than mirroring whatever
+    // asked, so a page on the public web cannot read a response even holding a
+    // leaked bearer. The same predicate backs the `Origin` middleware below,
+    // which covers what CORS does not: WebSocket upgrades.
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::mirror_request())
+        .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+            auth::origin_value_is_this_app(origin)
+        }))
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -534,10 +538,19 @@ pub fn app(state: AppState) -> Router {
         .with_state(frame_state);
 
     Router::new()
-        .route("/healthz", get(healthz))
         .merge(view_frames)
         .merge(api)
+        // Inside CORS, so a foreign preflight is answered by the CORS layer's
+        // own rejection rather than by a bare 403.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            auth::require_app_origin,
+        ))
         .layer(cors)
+        // A liveness probe with no auth, added after both layers so it carries
+        // neither: nothing reads it cross-origin, and answering preflights for
+        // it only helps a page confirm the app is on a guessed port.
+        .route("/healthz", get(healthz))
 }
 
 /// Liveness probe — no auth, no state.

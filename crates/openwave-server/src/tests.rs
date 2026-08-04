@@ -1676,6 +1676,80 @@ async fn test_app_with_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile
     (app(state), token, secrets, dir)
 }
 
+/// The bearer is the gate; this is the second condition that keeps a leaked
+/// one from being enough. CORS does not apply to WebSocket upgrades at all, so
+/// without this a page holding the token could open the event stream — and
+/// `Origin` is the header its script cannot set.
+#[tokio::test]
+async fn a_foreign_origin_is_refused_even_holding_the_bearer() {
+    let (router, token, _store, _dir) = test_app().await;
+
+    let refused = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/chats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ORIGIN, "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    // Same for the socket, which CORS never covered.
+    let refused_upgrade = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/chats/events")
+                .header(header::UPGRADE, "websocket")
+                .header(
+                    header::SEC_WEBSOCKET_PROTOCOL,
+                    format!("openwave-v1, openwave-token.{token}"),
+                )
+                .header(header::ORIGIN, "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused_upgrade.status(), StatusCode::FORBIDDEN);
+
+    // A name that resolved to loopback still carries the name it was reached
+    // by, which is what makes rebinding visible.
+    let rebound = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/chats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::HOST, "rebind.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rebound.status(), StatusCode::FORBIDDEN);
+
+    // The packaged webview's own origin is served as before.
+    let allowed = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/chats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ORIGIN, "tauri://localhost")
+                .header(header::HOST, "127.0.0.1:7777")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn app_state_roots_blob_storage_under_the_data_directory() {
     let (dir, store) = temp_db_store("t.db").await;
