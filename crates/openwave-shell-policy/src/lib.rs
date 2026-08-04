@@ -35,7 +35,10 @@
 //!   paths, and explicit deny rules win over any allow rule, including the `All` ("act without
 //!   asking in this folder") rule.
 //! * **Specificity is the safety dial.** Restricted programs (wrappers, escalators, editors/pagers,
-//!   remote/exfil tools) may only be covered by an `Exact` rule, never by `Prefix`/`All`.
+//!   remote/exfil tools) may only be covered by an `Exact` rule, never by `Prefix`/`All`. Script
+//!   executors (`python`, `node`, ...) and package installers (`pip`, `npm`, ...) run code someone
+//!   else supplied, so they need a rule that names the program: `Exact` or `Prefix` covers them,
+//!   a blanket `All` does not.
 
 use std::sync::OnceLock;
 
@@ -330,14 +333,10 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
 
     // (3) Conjunctive allow — every sub-command must be independently covered.
     for sc in &acc.simples {
-        let permitted_prefix_all = !is_exact_only(&sc.program);
-        let covered = ruleset.allow.iter().any(|rule| {
-            let kind_ok = match rule.kind {
-                CommandRuleKind::Exact => true,
-                CommandRuleKind::Prefix | CommandRuleKind::All => permitted_prefix_all,
-            };
-            kind_ok && rule.matches(&sc.argv)
-        });
+        let covered = ruleset
+            .allow
+            .iter()
+            .any(|rule| rule_may_cover(rule.kind, &sc.program) && rule.matches(&sc.argv));
         if !covered {
             return ShellAnalysis::with_offender(
                 ShellVerdict::Ask,
@@ -1876,6 +1875,77 @@ fn is_exact_only(program: &str) -> bool {
         || b.starts_with("qemu-")
         || b == "ld.so"
         || b == "ld-elf.so.1"
+}
+
+/// Package managers that run code the package author wrote — `setup.py`,
+/// `postinstall`, a formula — as an ordinary part of installing.
+///
+/// Build tools that run code the *project* declares (`cargo`, `make`,
+/// `cmake`, `mvn`) are deliberately not here; that is a wider question than
+/// the one this list answers.
+const PACKAGE_INSTALLER_PROGRAMS: &[&str] = &[
+    "pip",
+    "pip3",
+    "pipenv",
+    "poetry",
+    "pdm",
+    "hatch",
+    "rye",
+    "uv",
+    "conda",
+    "mamba",
+    "micromamba",
+    "npm",
+    "pnpm",
+    "yarn",
+    "gem",
+    "bundle",
+    "bundler",
+    "composer",
+    "cabal",
+    "stack",
+    "brew",
+    "port",
+    "apt",
+    "apt-get",
+    "aptitude",
+    "dnf",
+    "yum",
+    "zypper",
+    "pacman",
+    "apk",
+];
+
+/// Whether running `program` means running code chosen by its arguments or
+/// fetched from a registry, rather than by the program itself.
+///
+/// `python script.py` and `pip install x` are only as safe as whatever wrote
+/// the script or published the package. Naming such a program in a rule is a
+/// real decision about it; a blanket "allow every command" is not.
+fn runs_supplied_code(program: &str) -> bool {
+    let b = basename(program);
+    let normalized = normalize_runtime(b);
+    SCRIPT_EXECUTOR_PROGRAMS.contains(&normalized.as_str())
+        || SCRIPT_EXECUTOR_PROGRAMS.contains(&b)
+        || PACKAGE_INSTALLER_PROGRAMS.contains(&normalized.as_str())
+        || PACKAGE_INSTALLER_PROGRAMS.contains(&b)
+}
+
+/// Whether a rule of this breadth may cover `program` at all.
+///
+/// Breadth is not one axis. A wrapper (`is_exact_only`) has to be named token
+/// for token, because its arguments are a different command and a prefix
+/// grant for `timeout` would carry every program it can launch. A script
+/// executor or package installer may be named by the program — writing
+/// `python` in an allowlist says something about `python` — but is never
+/// reached by a blanket `all`, which names nothing and so cannot have meant
+/// "run whatever the agent just wrote".
+fn rule_may_cover(kind: CommandRuleKind, program: &str) -> bool {
+    match kind {
+        CommandRuleKind::Exact => true,
+        CommandRuleKind::Prefix => !is_exact_only(program),
+        CommandRuleKind::All => !is_exact_only(program) && !runs_supplied_code(program),
+    }
 }
 
 /// Every leaf command's `argv`, or `None` when the command cannot be read

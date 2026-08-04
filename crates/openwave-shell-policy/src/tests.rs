@@ -461,7 +461,7 @@ fn covered_commands_auto_approve() {
             allow(vec![exact(&["pytest", "-q", "tests/"])]),
         ),
         ("ls -la", allow_all()),
-        ("npm run build", allow_all()),
+        ("npm run build", allow(vec![prefix(&["npm", "run"])])),
         ("./scripts/test.sh", allow_all()),
         ("cat <<EOF\nrm -rf /\nEOF", allow(vec![prefix(&["cat"])])),
         (
@@ -526,29 +526,35 @@ fn covered_commands_auto_approve() {
         ("LDFLAGS=-L/usr/lib make", allow_all()),
         (
             "NODE_OPTIONS=--max-old-space-size=4096 npm run build",
-            allow_all(),
+            allow(vec![prefix(&["npm", "run"])]),
         ),
         ("JAVA_TOOL_OPTIONS=-Xmx2g mvn package", allow_all()),
-        ("deno run app.ts", allow_all()),
-        ("node server.js", allow_all()),
-        ("go run .", allow_all()),
-        ("go build ./...", allow_all()),
+        ("deno run app.ts", allow(vec![prefix(&["deno"])])),
+        ("node server.js", allow(vec![prefix(&["node"])])),
+        ("go run .", allow(vec![prefix(&["go", "run"])])),
+        ("go build ./...", allow(vec![prefix(&["go", "build"])])),
         ("cargo run --bin app", allow_all()),
-        ("tsx src/index.ts", allow_all()),
+        ("tsx src/index.ts", allow(vec![prefix(&["tsx"])])),
         ("cat .env.example", allow_all()),
         ("grep DATABASE .env.template", allow_all()),
         ("git restore --staged src/main.py", allow_all()),
         ("git checkout main", allow_all()),
         ("git reset --keep HEAD~1", allow_all()),
-        ("python -E script.py", allow_all()),
-        ("python -B app.py", allow_all()),
-        ("python3.12 manage.py migrate", allow_all()),
-        ("node18 server.js", allow_all()),
-        ("lua -E app.lua", allow_all()),
-        ("R CMD build .", allow_all()),
+        ("python -E script.py", allow(vec![prefix(&["python"])])),
+        ("python -B app.py", allow(vec![prefix(&["python"])])),
+        (
+            "python3.12 manage.py migrate",
+            allow(vec![prefix(&["python3.12"])]),
+        ),
+        ("node18 server.js", allow(vec![prefix(&["node18"])])),
+        ("lua -E app.lua", allow(vec![prefix(&["lua"])])),
+        ("R CMD build .", allow(vec![prefix(&["R", "CMD", "build"])])),
         ("git config diff.tool vimdiff", allow_all()),
         ("git config merge.tool meld", allow_all()),
-        ("GOFLAGS=-mod=vendor go build ./...", allow_all()),
+        (
+            "GOFLAGS=-mod=vendor go build ./...",
+            allow(vec![prefix(&["go", "build"])]),
+        ),
     ];
     for (command, ruleset) in &cases {
         assert_eq!(
@@ -586,6 +592,45 @@ fn uncovered_or_restricted_commands_ask() {
             "should ask: {command:?}"
         );
     }
+}
+
+/// A blanket `All` rule used to auto-run agent-authored code.
+///
+/// `python3 -c …` was caught and `python3 script.py` was not, so in Auto mode
+/// a model could write a script and then run it without a human ever seeing
+/// the call — the analyzer's "act without asking here" rule was standing in
+/// for consent about a program nobody had named. `All` no longer covers a
+/// script executor or a package installer; a rule that names the program
+/// still does.
+#[test]
+fn a_blanket_rule_does_not_cover_code_someone_else_supplied() {
+    for command in [
+        "python3 script.py",
+        "pip install requests",
+        "node server.js",
+    ] {
+        assert_eq!(
+            verdict(command, &allow_all()),
+            ShellVerdict::Ask,
+            "blanket allow must not cover: {command:?}"
+        );
+    }
+
+    // What the person actually wrote about the program still holds.
+    assert_eq!(
+        verdict(
+            "python3 script.py",
+            &allow(vec![exact(&["python3", "script.py"])])
+        ),
+        ShellVerdict::Allow
+    );
+    assert_eq!(
+        verdict(
+            "pip install requests",
+            &allow(vec![prefix(&["pip", "install"])])
+        ),
+        ShellVerdict::Allow
+    );
 }
 
 // --- deny floor returns the strong `Deny` signal ---------------------------
@@ -687,13 +732,13 @@ fn rule_validation() {
 /// can be matched safely.
 #[test]
 fn the_ladder_offers_the_rungs_between_one_invocation_and_everything() {
-    let rungs = suggested_rungs("npm run test --silent");
+    let rungs = suggested_rungs("cargo test --quiet");
     assert_eq!(
         rungs,
         vec![
-            exact(&["npm", "run", "test", "--silent"]),
-            prefix(&["npm", "run", "test"]),
-            prefix(&["npm"]),
+            exact(&["cargo", "test", "--quiet"]),
+            prefix(&["cargo", "test"]),
+            prefix(&["cargo"]),
             all_rule(),
         ]
     );
