@@ -1869,6 +1869,316 @@ async fn pending_chat_prompts_are_cross_chat_opaque_summaries() {
     }
 }
 
+/// The inbox is a read model with no state of its own: an item is listed while
+/// its journal row is parked and gone once that row's own resolution route has
+/// committed. Every kind is exercised in one pass because the value is the
+/// aggregation, not any single branch of it.
+#[tokio::test]
+async fn the_inbox_lists_parked_work_until_its_own_route_resolves_it() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let question_chat = make_chat(&router, &bearer).await;
+    let (_question_turn, question_call) =
+        park_user_questions_for_route_test(&*store, question_chat.id).await;
+
+    let plan_chat = make_chat(&router, &bearer).await;
+    let (_plan_turn, plan_call) = park_plan_for_route_test(&*store, plan_chat.id).await;
+
+    let folder_chat = make_chat(&router, &bearer).await;
+    let folder_access_call = park_folder_access_for_route_test(&*store, folder_chat.id).await;
+
+    let approval_chat = make_chat(&router, &bearer).await;
+    let approval_call = park_tool_approval_for_route_test(&*store, approval_chat.id).await;
+
+    let listed = list_inbox(&router, &bearer).await;
+    let kinds = listed
+        .iter()
+        .map(|item| {
+            (
+                item["call_id"].as_str().unwrap().to_owned(),
+                item["kind"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        kinds,
+        [
+            (question_call.id.to_string(), "question".to_owned()),
+            (plan_call.id.to_string(), "plan_review".to_owned()),
+            (
+                folder_access_call.id.to_string(),
+                "folder_access".to_owned()
+            ),
+            (approval_call.to_string(), "tool_approval".to_owned()),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>(),
+    );
+
+    // Each item carries the chat and the parked call, which is what a deep
+    // link needs to reopen the transcript where it stopped.
+    let approval_item = listed
+        .iter()
+        .find(|item| item["call_id"] == approval_call.to_string())
+        .expect("the parked approval is listed");
+    assert_eq!(approval_item["chat_id"], approval_chat.id.to_string());
+    assert_eq!(approval_item["action"], "search");
+
+    // Resolution goes through each kind's established route, unchanged.
+    assert_eq!(
+        answer_questions(&router, &bearer, question_chat.id, question_call.id).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        decide_plan_request(&router, &bearer, plan_chat.id, plan_call.id).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        decide_approval(&router, &bearer, approval_chat.id, approval_call, "approve").await,
+        StatusCode::NO_CONTENT
+    );
+    resolve_parked_client_call(&*store, folder_chat.id, &folder_access_call).await;
+
+    assert_eq!(
+        list_inbox(&router, &bearer).await,
+        Vec::<serde_json::Value>::new()
+    );
+
+    // First responder wins: answering an item a second time, differently,
+    // meets the same conflict the in-chat card would have met.
+    assert_eq!(
+        decide_approval(&router, &bearer, approval_chat.id, approval_call, "reject").await,
+        StatusCode::CONFLICT
+    );
+}
+
+async fn list_inbox(router: &Router, bearer: &str) -> Vec<serde_json::Value> {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/inbox")
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
+}
+
+async fn park_plan_for_route_test(
+    store: &dyn Store,
+    chat_id: ChatId,
+) -> (TurnId, ClientToolCallRequest) {
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat_id, "fake", "propose a plan")
+        .await
+        .unwrap();
+    let turn_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_turn_run(
+            turn_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let call = ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "provider-plan".into(),
+        name: openwave_core::EXIT_PLAN_MODE_TOOL.into(),
+        arguments: serde_json::json!({
+            "title": "Migrate the importer",
+            "plan": "## Steps\n\n1. Read the current importer.\n2. Write the replacement behind a flag.\n3. Cut over once the fixtures pass.",
+        }),
+    };
+    store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            turn_token,
+            0,
+            test_client_checkpoint_progress(1),
+            chrono::Utc::now(),
+            &call,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    (turn_id, call)
+}
+
+async fn park_folder_access_for_route_test(
+    store: &dyn Store,
+    chat_id: ChatId,
+) -> ClientToolCallRequest {
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat_id, "fake", "read the notes")
+        .await
+        .unwrap();
+    let turn_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_turn_run(
+            turn_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let call = ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "folder-provider".into(),
+        name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+        arguments: serde_json::json!({
+            "reason": "Read the project notes",
+            "requested_capabilities": ["read_files"],
+            "folder_hint": "documents",
+        }),
+    };
+    store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            turn_token,
+            0,
+            test_client_checkpoint_progress(1),
+            chrono::Utc::now(),
+            &call,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    call
+}
+
+async fn park_tool_approval_for_route_test(store: &dyn Store, chat_id: ChatId) -> CallId {
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat_id, "fake", "search the filings")
+        .await
+        .unwrap();
+    let call_id = CallId::new();
+    accept_server_tool_call_for_route_test(store, chat_id, turn_id, call_id).await;
+    assert!(matches!(
+        store
+            .request_tool_call_approval(
+                &openwave_core::ApprovalRequest {
+                    call_id,
+                    chat_id,
+                    turn_id,
+                    tool_name: "search".into(),
+                    class: ApprovalClass::Sensitive,
+                    kind: openwave_core::ToolApprovalKind::for_tool_name("search"),
+                    preview: None,
+                    auto_judge: false,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap(),
+        openwave_core::RequestToolApprovalOutcome::Requested(_)
+    ));
+    call_id
+}
+
+async fn accept_server_tool_call_for_route_test(
+    store: &dyn Store,
+    chat_id: ChatId,
+    turn_id: TurnId,
+    call_id: CallId,
+) {
+    let record = ToolCallRecord {
+        id: call_id,
+        chat_id,
+        turn_id,
+        provider_id: format!("provider-{call_id}"),
+        name: "search".into(),
+        arguments: serde_json::json!({ "query": "quarterly filings" }),
+        raw_arguments: None,
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    assert!(matches!(
+        store.accept_tool_call(&record).await.unwrap(),
+        openwave_core::AcceptToolCallOutcome::Accepted(_)
+    ));
+}
+
+async fn answer_questions(
+    router: &Router,
+    bearer: &str,
+    chat_id: ChatId,
+    call_id: CallId,
+) -> StatusCode {
+    post_json(
+        router,
+        bearer,
+        &format!("/chats/{chat_id}/questions/{call_id}/answer"),
+        serde_json::json!({
+            "answers": [
+                {"question_id": "target", "selected_option_ids": ["staging"]},
+                {"question_id": "note", "selected_option_ids": [], "custom_answer": "nothing else"}
+            ]
+        }),
+    )
+    .await
+    .status()
+}
+
+async fn decide_plan_request(
+    router: &Router,
+    bearer: &str,
+    chat_id: ChatId,
+    call_id: CallId,
+) -> StatusCode {
+    post_json(
+        router,
+        bearer,
+        &format!("/chats/{chat_id}/plans/{call_id}/decision"),
+        serde_json::json!({"decision": "accept"}),
+    )
+    .await
+    .status()
+}
+
+async fn decide_approval(
+    router: &Router,
+    bearer: &str,
+    chat_id: ChatId,
+    call_id: CallId,
+    decision: &str,
+) -> StatusCode {
+    post_json(
+        router,
+        bearer,
+        &format!("/chats/{chat_id}/approvals/{call_id}"),
+        serde_json::json!({"decision": decision}),
+    )
+    .await
+    .status()
+}
+
 #[tokio::test]
 async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
     let dir = tempfile::tempdir().unwrap();

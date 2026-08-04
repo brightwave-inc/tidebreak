@@ -1009,6 +1009,35 @@ height: number,
 byte_len: number, };
 
 /**
+ * What kind of decision one inbox item is waiting for.
+ *
+ * The set is closed and each variant names an existing park/resume surface,
+ * so a reader can route an item back to the card that owns it without the
+ * inbox knowing anything about that card's contents.
+ */
+export type InboxItemKind = "tool_approval" | "question" | "plan_review" | "folder_access" | "output_writeback";
+
+/**
+ * One item waiting on the reader, and where to go to answer it.
+ */
+export type InboxItemSnapshot = { 
+/**
+ * The conversation to open. With `call_id`, the deep link back to the
+ * exact transcript position the item paused at.
+ */
+chat_id: ChatId, 
+/**
+ * Absent, not null, while the conversation is still untitled.
+ */
+chat_title?: string, turn_id: TurnId, call_id: CallId, kind: InboxItemKind, 
+/**
+ * The tool under review, for an approval. Absent for the other kinds,
+ * whose tool is implied by the kind. Closed renderer vocabulary: an
+ * unrecognized name folds to `other` rather than reaching a card.
+ */
+action?: RendererToolName, requested_at: string, };
+
+/**
  * An input modality a model accepts.
  *
  * `snake_case` matches the strings `as_str` has always produced, so the enum

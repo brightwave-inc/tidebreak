@@ -300,6 +300,12 @@ impl ScopedStore {
             .await
     }
 
+    /// Everything parked on the principal, across their own chats, oldest
+    /// first. A cross-chat root read, so it is owner-scoped like the rest.
+    pub async fn list_inbox_items(&self) -> Result<Vec<openwave_core::InboxItem>> {
+        self.store.list_inbox_items_scoped(&self.owner).await
+    }
+
     /// The standing grants reachable through the principal's own chats and
     /// projects, newest first.
     pub async fn list_standing_tool_grants(
