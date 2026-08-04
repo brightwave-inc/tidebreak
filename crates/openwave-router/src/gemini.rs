@@ -2,13 +2,13 @@
 //!
 //! Gemini's GenerateContent protocol differs materially from OpenAI-compatible
 //! chat completions: output limits live under `generationConfig`, streamed SSE
-//! frames are complete (but partial) responses, and tool results must preserve
-//! the model's function-call identity. Keeping that conversion here makes the
+//! frames are complete (but partial) responses, and tool results carry no call
+//! id at all — they are correlated to their calls by function name and order. Keeping that conversion here makes the
 //! catalog's Gemini rows honest rather than depending on a compatibility layer
 //! silently accepting or dropping fields it does not understand.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -37,7 +37,17 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Gemini accepts this documented value when an application cannot replay an
 /// opaque thought signature. OpenWave stores provider-neutral tool calls, so
 /// the bypass keeps their history portable across a per-chat model switch.
+///
+/// `thoughtSignature` is a proto `bytes` field, so the JSON mapping carries its
+/// base64 encoding rather than these ASCII bytes; see
+/// [`thought_signature_bypass`].
 const THOUGHT_SIGNATURE_BYPASS: &str = "skip_thought_signature_validator";
+
+/// The wire value for [`THOUGHT_SIGNATURE_BYPASS`]: base64 of its ASCII bytes.
+fn thought_signature_bypass() -> &'static str {
+    static ENCODED: LazyLock<String> = LazyLock::new(|| BASE64.encode(THOUGHT_SIGNATURE_BYPASS));
+    &ENCODED
+}
 
 #[derive(Clone)]
 enum GeminiAuth {
@@ -681,6 +691,8 @@ fn gemini_thinking_level(effort: ReasoningEffort) -> &'static str {
 /// Gemini requires all responses to the parallel calls in one model turn to
 /// form one following user message. The stored transcript keeps tool results as
 /// independent messages, so consecutive pure result messages are coalesced.
+/// Neither side of the protocol carries a call id, so that ordering is the only
+/// correlation the model has and the coalescing pass is load-bearing.
 fn gemini_contents(
     messages: &[openwave_core::provider::ChatMessage],
     images: &ImageAttachments,
@@ -705,10 +717,12 @@ fn gemini_contents(
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => parts.push(json!({ "text": text })),
-                ContentBlock::ToolUse { id, name, input } => {
+                ContentBlock::ToolUse { name, input, .. } => {
+                    // `FunctionCall` has no id field, and ids minted by other
+                    // providers must never reach Gemini: a call is correlated
+                    // to its response by function name and part order.
                     let mut part = json!({
                         "functionCall": {
-                            "id": id,
                             "name": name,
                             "args": input,
                         },
@@ -717,7 +731,7 @@ fn gemini_contents(
                     // We deliberately use its portable bypass rather than
                     // persisting opaque provider state in a cross-model chat.
                     if !attached_signature {
-                        part["thoughtSignature"] = json!(THOUGHT_SIGNATURE_BYPASS);
+                        part["thoughtSignature"] = json!(thought_signature_bypass());
                         attached_signature = true;
                     }
                     parts.push(part);
@@ -732,13 +746,15 @@ fn gemini_contents(
                             "gemini tool result has no matching function call".to_string(),
                         )
                     })?;
-                    let mut response = json!({ "result": content });
-                    if *is_error {
-                        response["is_error"] = json!(true);
-                    }
+                    // `FunctionResponse` likewise carries no id, and its
+                    // `response` struct expresses failure with an `error` key.
+                    let response = if *is_error {
+                        json!({ "error": content })
+                    } else {
+                        json!({ "output": content })
+                    };
                     parts.push(json!({
                         "functionResponse": {
-                            "call_id": tool_use_id,
                             "name": name,
                             "response": response,
                         },
@@ -1236,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_results_keep_call_identity_and_merge_parallel_results() {
+    fn tool_results_correlate_by_name_and_order_without_ids() {
         let messages = vec![
             ChatMessage {
                 role: Role::Assistant,
@@ -1267,8 +1283,8 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_two".into(),
-                    content: "two".into(),
-                    is_error: false,
+                    content: "boom".into(),
+                    is_error: true,
                 }],
                 reasoning: Vec::new(),
             },
@@ -1277,17 +1293,45 @@ mod tests {
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0]["role"], "model");
+
+        // The proto has no id on either side; correlation is by function name
+        // and the order of the parts, so no provider-minted id may leak out.
+        let calls = contents[0]["parts"].as_array().unwrap();
+        for call in calls {
+            assert!(call["functionCall"].get("id").is_none());
+            assert!(call["functionCall"].get("call_id").is_none());
+        }
+        assert_eq!(calls[0]["functionCall"]["args"]["path"], "one");
+        assert_eq!(calls[1]["functionCall"]["args"]["path"], "two");
+
+        // `thoughtSignature` is proto `bytes`, so the JSON value must be the
+        // base64 encoding of the bypass token, not the token itself, and it
+        // rides only the first call part of the turn.
+        let signature = calls[0]["thoughtSignature"].as_str().unwrap();
         assert_eq!(
-            contents[0]["parts"][0]["thoughtSignature"],
+            String::from_utf8(BASE64.decode(signature).unwrap()).unwrap(),
             THOUGHT_SIGNATURE_BYPASS
         );
-        assert!(contents[0]["parts"][1].get("thoughtSignature").is_none());
+        assert!(calls[1].get("thoughtSignature").is_none());
+
         let responses = contents[1]["parts"].as_array().unwrap();
         assert_eq!(responses.len(), 2);
-        assert_eq!(responses[0]["functionResponse"]["call_id"], "call_one");
-        assert_eq!(responses[0]["functionResponse"]["name"], "read_file");
-        assert_eq!(responses[1]["functionResponse"]["call_id"], "call_two");
-        assert!(responses[0]["functionResponse"].get("id").is_none());
+        for response in responses {
+            assert_eq!(response["functionResponse"]["name"], "read_file");
+            assert!(response["functionResponse"].get("id").is_none());
+            assert!(response["functionResponse"].get("call_id").is_none());
+        }
+        assert_eq!(
+            responses[0]["functionResponse"]["response"]["output"],
+            "one"
+        );
+        assert_eq!(
+            responses[1]["functionResponse"]["response"]["error"],
+            "boom"
+        );
+        assert!(responses[1]["functionResponse"]["response"]
+            .get("is_error")
+            .is_none());
     }
 
     // ── Image blocks ───────────────────────────────────────────────
