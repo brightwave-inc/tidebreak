@@ -10,6 +10,7 @@ const preview = {
   command: "python3",
   args: ["render.py"],
   cwd: ".",
+  files: [],
 };
 
 afterEach(() => {
