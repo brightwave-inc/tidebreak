@@ -35,7 +35,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     ids::{EventCursor, OperationId, RunId, Sequence},
-    oplog::{InMemoryOperationStore, OperationStore},
+    oplog::{InMemoryOperationStore, OperationState, OperationStore},
     protocol::{
         AttachRequest, ErrorCode, Response, MAX_BUFFERED_EVENTS, MAX_EVENT_PAYLOAD_BYTES,
         MAX_MODEL_PROMPT_BYTES, PROTOCOL_VERSION,
@@ -440,7 +440,10 @@ pub async fn reverse_rpc_disconnect_fails_inflight_then_reissue_replays() {
         1,
         "the effect ran exactly once"
     );
-    assert_eq!(store.len(), 1);
+    assert!(matches!(
+        store.state(operation),
+        Some(OperationState::Evicted)
+    ));
 }
 
 /// Re-issuing an operation identity with a different request is refused.

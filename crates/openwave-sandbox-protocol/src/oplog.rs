@@ -14,14 +14,12 @@
 //! [`OperationStore`] trait is the seam a durable, crash-safe implementation
 //! plugs into; this module ships only an [`InMemoryOperationStore`].
 //!
-//! # TODO: durable, crash-safe operation log (follow-ups #858 and #859)
+//! # Storage and retention
 //!
-//! This in-memory store is **not** crash-safe and has **no retention**, and
-//! those are deliberately out of scope for this protocol slice (see the crate
-//! docs) so the durable correctness work gets its own focused review. Two
-//! follow-ups own them:
+//! This crate's in-memory store is **not** crash-safe; production uses the
+//! durable adapter in `openwave-server`. The shared contract is:
 //!
-//! 1. **Commit ordering (#858).** A durable store persists the
+//! 1. A durable store persists the
 //!    `Claimed -> Recorded / Failed` transition on the run, committed
 //!    transactionally, and answers a re-issue from `Recorded`. Critically, a
 //!    re-issue that finds a `Claimed` entry *with no live in-flight execution* —
@@ -31,11 +29,12 @@
 //!    rather than re-execute a call that may already have spent. The
 //!    [`ClaimOutcome::ClaimedElsewhere`] arm is where that predicate belongs;
 //!    in memory it is unreachable, and [`InMemoryOperationStore`] documents why.
-//! 2. **Retention / eviction (#859).** A sandbox-resident loop issues a reverse
-//!    request per step, so the log is a high-cardinality, per-step structure,
-//!    not the bounded receipt it resembles. [`OperationStore::evict`] is the
-//!    eviction seam; a durable store keys retention to un-acknowledged
-//!    operations and may keep only a commit marker past acknowledgement.
+//! 2. A sandbox-resident loop issues a reverse request per step, so full replay
+//!    bodies are retained only until the sandbox acknowledges consuming the
+//!    terminal response. [`OperationStore::evict`] then reduces the durable
+//!    entry to a commit marker. This bounds retained response bodies by the
+//!    request lane's in-flight window; markers remain for audit and to prevent
+//!    an acknowledged identity from ever executing again.
 
 use std::{
     collections::HashMap,
@@ -131,16 +130,25 @@ pub trait OperationStore: Send + Sync {
     /// The current state of `id`, if the log knows it.
     fn state(&self, id: OperationId) -> Option<OperationState>;
 
-    /// Drop a terminal entry once the sandbox can no longer re-issue `id`.
+    /// Drop a terminal entry's replay body once the sandbox acknowledges it has
+    /// consumed the response and can no longer re-issue `id`.
     ///
-    /// The retention follow-up (see the module TODO) defines *when* this is
-    /// safe — keyed to an acknowledgement/cursor on the reverse channel. This
-    /// slice exposes the seam without a policy.
+    /// Stores keep a commit marker so a stale or invalid re-issue can never
+    /// execute again. Durable stores persist that marker; the in-memory
+    /// reference store represents it as [`OperationState::Evicted`].
     fn evict(&self, id: OperationId);
 
-    /// How many operations the log currently retains. Chiefly for tests and,
-    /// later, retention accounting.
+    /// How many operation identities the log knows, including body-evicted
+    /// commit markers. This is audit/identity cardinality, not replay-body
+    /// retention.
     fn len(&self) -> usize;
+
+    /// How many terminal response/error bodies remain available for replay.
+    ///
+    /// The protocol bounds this count by [`MAX_INFLIGHT_REQUESTS`](crate::protocol::MAX_INFLIGHT_REQUESTS):
+    /// a sandbox cannot have consumed-and-unacknowledged responses beyond the
+    /// request lane's in-flight window. Commit markers do not count here.
+    fn retained_body_count(&self) -> usize;
 
     /// Whether the log is empty.
     fn is_empty(&self) -> bool {
@@ -218,11 +226,30 @@ impl OperationStore for InMemoryOperationStore {
     }
 
     fn evict(&self, id: OperationId) {
-        self.entries.lock().expect("operation log lock").remove(&id);
+        let mut entries = self.entries.lock().expect("operation log lock");
+        if let Some(entry) = entries.get_mut(&id) {
+            if !matches!(entry.state, OperationState::Claimed) {
+                entry.state = OperationState::Evicted;
+            }
+        }
     }
 
     fn len(&self) -> usize {
         self.entries.lock().expect("operation log lock").len()
+    }
+
+    fn retained_body_count(&self) -> usize {
+        self.entries
+            .lock()
+            .expect("operation log lock")
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    OperationState::Recorded(_) | OperationState::Failed(_)
+                )
+            })
+            .count()
     }
 }
 
@@ -311,13 +338,19 @@ mod tests {
     }
 
     #[test]
-    fn eviction_removes_the_entry() {
+    fn eviction_leaves_a_commit_marker() {
         let store = InMemoryOperationStore::new();
         let id = OperationId::new();
         store.claim(id, &request("q"));
         store.record(id, result("a")).unwrap();
+        assert_eq!(store.retained_body_count(), 1);
         store.evict(id);
-        assert!(store.is_empty());
-        assert!(store.state(id).is_none());
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.retained_body_count(), 0);
+        assert!(matches!(store.state(id), Some(OperationState::Evicted)));
+        assert!(matches!(
+            store.claim(id, &request("q")),
+            ClaimOutcome::Replay(OperationState::Evicted)
+        ));
     }
 }

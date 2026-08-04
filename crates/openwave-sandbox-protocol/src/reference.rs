@@ -267,7 +267,10 @@ impl SandboxControl {
         };
         let waiter = host.dispatch(envelope);
         tokio::select! {
-            response = waiter.wait() => ReverseCallOutcome::Settled(response),
+            response = waiter.wait() => {
+                host.acknowledge(operation_id);
+                ReverseCallOutcome::Settled(response)
+            },
             () = wait_disconnected(&mut disconnect) => ReverseCallOutcome::Disconnected,
         }
     }

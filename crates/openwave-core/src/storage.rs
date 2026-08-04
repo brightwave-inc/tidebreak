@@ -3618,9 +3618,9 @@ pub trait Store: Send + Sync {
         operation_log_storage_unavailable()
     }
 
-    /// Drop an entry once the sandbox can no longer re-issue it. This slice
-    /// removes the row; #859 owns *when* eviction is safe and may instead null
-    /// the body and clear `retained` to leave a commit marker.
+    /// Drop a terminal entry's replay body once the sandbox acknowledges
+    /// consuming its response. The durable row remains as a commit marker so
+    /// the operation identity can never execute again.
     async fn evict_operation(&self, _run_id: uuid::Uuid, _operation_id: uuid::Uuid) -> Result<()> {
         operation_log_storage_unavailable()
     }
@@ -3628,6 +3628,13 @@ pub trait Store: Send + Sync {
     /// How many operation-log entries a run currently retains. For tests and,
     /// later, retention accounting.
     async fn operation_log_len(&self, _run_id: uuid::Uuid) -> Result<usize> {
+        operation_log_storage_unavailable()
+    }
+
+    /// How many terminal operation-log bodies remain available for replay.
+    /// Commit markers are excluded so this measures replay retention rather
+    /// than audit/identity cardinality.
+    async fn retained_operation_body_count(&self, _run_id: uuid::Uuid) -> Result<usize> {
         operation_log_storage_unavailable()
     }
 }

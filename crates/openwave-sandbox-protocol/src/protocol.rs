@@ -19,9 +19,10 @@ use crate::provisioning::TransportSecret;
 /// protocol is [UNSTABLE](crate) until a named release and offers no
 /// negotiation window across versions.
 ///
-/// Version 2 added the authenticated attach: [`AttachRequest`] carries a per-run
-/// [`TransportSecret`] the sandbox verifies before it installs the connection.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Version 2 added authenticated attach, version 3 added run initialization,
+/// and version 4 adds sandbox acknowledgement of consumed reverse responses so
+/// the host can evict replay bodies safely.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Largest single reverse-RPC or event frame a conforming transport accepts,
 /// so a peer cannot force unbounded buffering with one enormous frame.
