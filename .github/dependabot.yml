@@ -20,6 +20,28 @@ updates:
           - minor
           - patch
 
+  # Desktop UI dependencies. These install with lifecycle scripts inside the
+  # release signing job and ship in the notarized app, so they need the same
+  # automated upgrade path as the Cargo graph.
+  - package-ecosystem: npm
+    directory: "/crates/openwave-desktop/ui"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    # `ui/.npmrc` sets `save-exact=true`; `increase` rewrites the pin to the new
+    # exact version instead of widening it into a range.
+    versioning-strategy: increase
+    commit-message:
+      # The UI ships inside the desktop product, so its bumps are release
+      # candidates like the Cargo ones.
+      prefix: deps
+      include: scope
+    groups:
+      ui-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
   # GitHub Actions used by our workflows.
   - package-ecosystem: github-actions
     directory: "/"
