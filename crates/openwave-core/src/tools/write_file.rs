@@ -5,11 +5,11 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::preview::{ResultEntry, ResultEntryKind};
-use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
+use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec};
 
 use super::arguments;
 use super::definitions;
-use super::private_scratch::{file_name, relative_path, write_utf8_file};
+use super::private_scratch::{file_name, is_published_output_path, relative_path, write_utf8_file};
 
 /// `write_file` — atomically write a UTF-8 text file into private scratch.
 pub struct WriteFile;
@@ -42,6 +42,25 @@ impl Tool for WriteFile {
             Ok(path) => path,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
+        // Publishing an output is an exec-scan responsibility, and the scan
+        // attributes every revision to the call it ran for. Writing here
+        // directly would publish nothing now and hand the bytes to whichever
+        // later exec call happened to run next, which would then be credited
+        // with the revision. Refuse and say where outputs come from.
+        if is_published_output_path(&path) {
+            return Ok(ToolOutput::failed(
+                ToolErrorCategory::InvalidArguments,
+                format!(
+                    "{}/ is reserved for published outputs and cannot be written with write_file: \
+                     {}. Produce user-visible files from an exec command that saves them into {}/ \
+                     — those are published as durable, versioned outputs. Use another scratch path \
+                     for intermediate text.",
+                    crate::EXEC_OUTPUT_DIRECTORY,
+                    arguments.path,
+                    crate::EXEC_OUTPUT_DIRECTORY
+                ),
+            ));
+        }
         let workspace = match ctx.workspace() {
             Ok(workspace) => workspace,
             Err(message) => return Ok(ToolOutput::error(message)),

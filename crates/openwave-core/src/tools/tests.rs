@@ -187,6 +187,28 @@ async fn confinement_rejects_escaping_and_absolute_paths() {
     assert!(absolute.is_error);
 }
 
+/// A direct write to `output/` must be refused rather than silently staged.
+///
+/// The published-output directory is scanned after an exec call, and every
+/// revision it finds is attributed to that call and its turn. Bytes left there
+/// by `write_file` publish nothing of their own and would be credited to the
+/// next unrelated exec call, so the write has to fail at the boundary.
+#[tokio::test]
+async fn write_file_refuses_the_published_output_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(dir.path());
+
+    for path in ["output/report.md", "./output/nested/report.md", "output"] {
+        let refused = WriteFile
+            .execute(&ctx, json!({"path": path, "content": "published?"}))
+            .await
+            .unwrap();
+        assert!(refused.is_error, "{path}: {refused:?}");
+        assert!(refused.content.contains("exec"), "{path}: {refused:?}");
+    }
+    assert!(!dir.path().join("output").exists());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn confinement_rejects_symlink_escape() {
