@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import type { ApiClient } from "./api";
 import { useChatAttention } from "./ChatAttention";
 import { requestUserAttention } from "./host";
+import { useInbox } from "./Inbox";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
 
@@ -10,15 +11,18 @@ const POLL_INTERVAL_MS = 10_000;
 
 const promptActions = usePendingPrompts.getState();
 const attentionActions = useChatAttention.getState();
+const inboxActions = useInbox.getState();
 
 /**
- * Watches every conversation for a parked prompt and keeps detailed prompt
- * cards current for the open one.
+ * Watches every conversation for parked work and keeps detailed prompt cards
+ * current for the open one.
  *
- * The summary poll is deliberately one server-side read, rather than a browser
- * loop over chats. Detail still comes from the selected chat's established
- * recovery routes, which keeps prompt content scoped to the conversation that
- * can render it.
+ * The cross-chat poll is deliberately one server-side read, rather than a
+ * browser loop over chats, and it is the read the inbox is built from — the
+ * rail's attention markers and the inbox are two views of one set, so they
+ * cannot disagree about what is waiting. Detail still comes from the selected
+ * chat's established recovery routes, which keeps prompt content scoped to the
+ * conversation that can render it.
  */
 export function useChatPromptWatcher(client: ApiClient | null, chatId: string | null): void {
   // Which questions the shell has already announced. It spans chat switches
@@ -34,6 +38,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
   useEffect(() => {
     if (!client) {
       attentionActions.clear();
+      inboxActions.clear();
       announcedCallIdsRef.current = new Set();
       refreshRef.current = null;
       return;
@@ -43,6 +48,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
     // sidebar carrying the previous server's attention state until the first
     // summary response arrives.
     attentionActions.clear();
+    inboxActions.clear();
     announcedCallIdsRef.current = new Set();
     let cancelled = false;
     let summarySeq = 0;
@@ -50,20 +56,14 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
     const readSummary = async () => {
       const seq = ++summarySeq;
       try {
-        const pending = await client.listPendingChatPrompts();
+        const pending = await client.listInbox();
         if (cancelled || seq !== summarySeq) return;
 
+        inboxActions.setItems(pending);
         attentionActions.setChatIdsWithPendingPrompts(
-          pending.map((prompt) => prompt.chatId),
+          pending.map((item) => item.chatId),
         );
-        const pendingPromptIds = new Set(
-          pending.flatMap((prompt) => [
-            ...prompt.questionCallIds,
-            ...prompt.planCallIds,
-            ...prompt.folderAccessCallIds,
-            ...prompt.outputWritebackCallIds,
-          ]),
-        );
+        const pendingPromptIds = new Set(pending.map((item) => item.callId));
         const unannounced = [...pendingPromptIds].filter(
           (callId) => !announcedCallIdsRef.current.has(callId),
         );
@@ -77,7 +77,7 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
         if (!cancelled && seq === summarySeq) {
           // Keep the last successful state visible. Clearing it on a transient
           // failure would make a waiting chat look resolved.
-          console.error("failed to refresh pending chat prompts", err);
+          console.error("failed to refresh the inbox", err);
         }
       }
     };

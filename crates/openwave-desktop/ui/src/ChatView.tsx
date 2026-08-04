@@ -23,6 +23,7 @@ import type {
   ComposerReasoning,
 } from "./ComposerToolsMenu";
 import { MessageList, type RetryableTurn } from "./MessageList";
+import { revealPendingCall } from "./TranscriptFocus";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
@@ -32,6 +33,7 @@ import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
 import { useAgentRuns } from "./useAgentRuns";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -128,6 +130,9 @@ export function ChatView({
     [messages],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
+
+  const navigate = useNavigate();
+  const focusCallId = (useSearch({ strict: false }) as { focus?: string }).focus;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
@@ -273,6 +278,47 @@ export function ChatView({
     userQuestions.requests,
     scrollToBottom,
   ]);
+
+  // A deep link from the inbox names the parked call it was opened for. The
+  // card it decides is mounted from a separate poll, so the reveal is retried
+  // for a short while rather than given up on at first paint, and the search
+  // param is dropped once honored so a reload does not re-scroll a transcript
+  // the reader has since moved through.
+  useEffect(() => {
+    if (!focusCallId || !transcriptVisible) return;
+    let settled = false;
+    const clear = () => {
+      settled = true;
+      window.clearInterval(timer);
+      window.clearTimeout(deadline);
+      void navigate({
+        to: "/c/$chatId",
+        params: { chatId: chat.id },
+        search: (previous: Record<string, unknown>) => ({
+          ...previous,
+          focus: undefined,
+        }),
+        replace: true,
+      });
+    };
+    const attempt = () => {
+      if (settled) return;
+      if (!revealPendingCall(scrollRef.current, focusCallId)) return;
+      // Arriving at a specific card means the reader is no longer following
+      // the end of the transcript; letting follow stay armed would scroll them
+      // straight back off it.
+      followsLatestRef.current = false;
+      setScrolledAway(true);
+      clear();
+    };
+    const timer = window.setInterval(attempt, 120);
+    const deadline = window.setTimeout(clear, 5_000);
+    attempt();
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(deadline);
+    };
+  }, [focusCallId, transcriptVisible, chat.id, navigate]);
 
   const jumpToLatest = useCallback(() => {
     followsLatestRef.current = true;

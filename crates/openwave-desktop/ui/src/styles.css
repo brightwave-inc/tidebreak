@@ -519,6 +519,22 @@ body {
   opacity: 1;
 }
 
+/* Where a deep link landed. A brief ring rather than a lasting state: it says
+   "this one" while the scroll settles, then gets out of the way of the card's
+   own affordances. */
+[data-pending-call-id].is-deep-linked {
+  border-radius: var(--radius);
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+  transition: outline-color 400ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-pending-call-id].is-deep-linked {
+    transition: none;
+  }
+}
+
 .message {
   width: 100%;
   overflow-wrap: anywhere;

@@ -24,10 +24,13 @@ export async function renderWithRouter(
   const chatRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/c/$chatId",
-    validateSearch: (search: Record<string, unknown>): PanelSearch => ({
+    validateSearch: (
+      search: Record<string, unknown>,
+    ): PanelSearch & { focus?: string } => ({
       left: typeof search.left === "string" ? search.left : undefined,
       right: typeof search.right === "string" ? search.right : undefined,
       fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+      focus: typeof search.focus === "string" ? search.focus : undefined,
     }),
     component: () => <>{ui}</>,
   });

@@ -375,6 +375,7 @@ export function MessageList({
             }
             onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
           />,
+          request.callId,
         ),
       )}
       {outputWritebackRequests.map((request) =>
@@ -393,6 +394,7 @@ export function MessageList({
               onOutputWritebackCancel(request.callId, request.turnId)
             }
           />,
+          request.callId,
         ),
       )}
       {userQuestionRequests.map((request) =>
@@ -411,6 +413,7 @@ export function MessageList({
               )
             }
           />,
+          request.callId,
         ),
       )}
       {planApprovalRequests.map((request) =>
@@ -424,6 +427,7 @@ export function MessageList({
             onDecide={(decision) => onPlanDecision(request.callId, decision)}
             onCancel={() => onPlanCancel(request.turnId)}
           />,
+          request.callId,
         ),
       )}
       {shouldShowAssistantWorking(
@@ -691,6 +695,12 @@ function isolatedCard(
   key: string,
   signature: string,
   card: ReactNode,
+  /**
+   * The parked call this card decides, when it decides one. It is written to
+   * the DOM so a deep link from the inbox can find the card it named — the
+   * transcript is otherwise addressable only by scroll position.
+   */
+  pendingCallId?: string,
 ): ReactNode {
   return (
     <ErrorBoundary
@@ -698,7 +708,11 @@ function isolatedCard(
       resetKey={signature}
       fallback={<ToolActivityUnavailable />}
     >
-      {card}
+      {pendingCallId ? (
+        <div data-pending-call-id={pendingCallId}>{card}</div>
+      ) : (
+        card
+      )}
     </ErrorBoundary>
   );
 }
@@ -821,6 +835,7 @@ function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
         error={approvalState?.approvalErrors[entry.callId]}
         onDecide={onApproval}
       />,
+      entry.callId,
     );
   }
   if (entry.role !== "tool") return null;
