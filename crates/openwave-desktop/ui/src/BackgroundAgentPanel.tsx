@@ -134,7 +134,7 @@ function BackgroundAgentDetail({
         <div className="flex items-center gap-2">
           <Bot className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <h2 className="min-w-0 flex-1 truncate text-base font-medium">
-            Background agent
+            {run.task ?? "Background agent"}
           </h2>
           <AgentRunStatusBadge status={run.status} />
         </div>
@@ -168,6 +168,16 @@ function BackgroundAgentDetail({
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4" aria-live="polite">
+        {run.terminal_text && (
+          <div className="mb-4 rounded-md border bg-muted/40 px-3 py-2.5">
+            <p className="text-xs font-medium text-muted-foreground">
+              {run.status === "failed" ? "Error" : "Result"}
+            </p>
+            <p className="mt-1 text-sm break-words whitespace-pre-wrap text-foreground">
+              {run.terminal_text}
+            </p>
+          </div>
+        )}
         <AgentActivityTimeline state={activity} />
       </div>
     </div>

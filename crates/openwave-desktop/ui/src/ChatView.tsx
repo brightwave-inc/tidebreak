@@ -58,8 +58,6 @@ export type ChatViewProps = {
   onSend: () => Promise<void>;
   /** Put a failed turn back on the wire, unchanged, as a new turn. */
   onRetryTurn?: (turn: RetryableTurn) => void;
-  /** Open the outputs surface, offered on a completed background run's row. */
-  onViewOutput?: () => void;
   /** Open one background run's panel beside the conversation. */
   onOpenAgentPanel?: (runId: string) => void;
 };
@@ -92,7 +90,6 @@ export function ChatView({
   onSelectPrompt,
   onSend,
   onRetryTurn,
-  onViewOutput,
   onOpenAgentPanel,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
@@ -319,7 +316,6 @@ export function ChatView({
           onRetryBackgroundAgentRuns={agentRuns.refresh}
           onCancelBackgroundAgentRun={agentRuns.cancel}
           onLoadBackgroundAgentActivity={agentRuns.loadActivity}
-          onViewBackgroundAgentOutput={onViewOutput}
           onOpenBackgroundAgent={onOpenAgentPanel}
           busy={busy}
           streamStalled={streamStalled}

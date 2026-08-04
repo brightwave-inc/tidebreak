@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, ChevronDown, ChevronRight, FileOutput, Square } from "lucide-react";
+import { Bot, ChevronDown, ChevronRight, Square } from "lucide-react";
 
 import type { AgentActivityHistoryEntry, AgentRun } from "./api";
 import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
@@ -30,8 +30,6 @@ type BackgroundAgentListProps = {
   onCancel: (runId: string) => Promise<void>;
   /** Fetch a run's ordered, renderer-safe activity history. */
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
-  /** Open the outputs surface, when a completed run produced a result. */
-  onViewOutput?: () => void;
   /** Open one run's dedicated panel beside the conversation. */
   onOpen?: (runId: string) => void;
 };
@@ -49,7 +47,6 @@ export function BackgroundAgentList({
   onRetry,
   onCancel,
   onLoadActivity,
-  onViewOutput,
   onOpen,
 }: BackgroundAgentListProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -112,7 +109,7 @@ export function BackgroundAgentList({
           </button>
         </div>
       ) : (
-        <div aria-live="polite">
+        <div className="max-h-48 overflow-y-auto" aria-live="polite">
           {AGENT_RUN_STATUS_GROUPS.map((group) => {
             const groupRuns = matchedRuns.filter((run) => group.statuses.includes(run.status));
             if (groupRuns.length === 0) return null;
@@ -135,14 +132,12 @@ export function BackgroundAgentList({
                 </button>
                 {!collapsed && (
                   <div className="divide-y divide-border/60">
-                    {groupRuns.map((run, index) => (
+                    {groupRuns.map((run) => (
                       <BackgroundAgentRow
                         key={run.id}
                         run={run}
-                        label={`Background agent ${index + 1}`}
                         onCancel={onCancel}
                         onLoadActivity={onLoadActivity}
-                        onViewOutput={onViewOutput}
                         onOpen={onOpen}
                       />
                     ))}
@@ -167,25 +162,21 @@ export function BackgroundAgentList({
 }
 
 /**
- * One background run: its live status on a line, expandable into the ordered
- * timeline of what it has done, with a Stop control while it is cancellable and
- * a link to its output once it finishes with one. When the panel navigation is
- * wired, the row itself opens the run's dedicated panel; the chevron keeps the
- * inline timeline for a quick glance without leaving the transcript.
+ * One background run: the task it was given, its live status, and a Stop control
+ * while it is cancellable, expandable into the ordered timeline of what it has
+ * done. The row itself opens the run's dedicated panel, which is where the
+ * result belongs — a finished agent's full text inline would bury every sibling
+ * row under it, and a delegation of any size is a list to scan, not to read.
  */
 function BackgroundAgentRow({
   run,
-  label,
   onCancel,
   onLoadActivity,
-  onViewOutput,
   onOpen,
 }: {
   run: AgentRun;
-  label: string;
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
-  onViewOutput?: () => void;
   onOpen?: (runId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -202,7 +193,6 @@ function BackgroundAgentRow({
   const stoppable =
     RUNNING_AGENT_STATUSES.has(run.status) && run.status !== "cancelling";
   const showStopping = stopping || run.status === "cancelling";
-  const canViewOutput = run.produced_output && onViewOutput !== undefined;
 
   // Drop the optimistic bridge once the durable transition has caught up: any
   // status that is no longer a cancellable running state is confirmation
@@ -223,7 +213,6 @@ function BackgroundAgentRow({
   };
 
   const contentId = `background-agent-activity-${run.id}`;
-  const terminalLabel = run.status === "failed" ? "Error" : "Result";
 
   return (
     <div className="px-3 py-2.5">
@@ -255,28 +244,13 @@ function BackgroundAgentRow({
             className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass(run.status))}
             aria-hidden="true"
           />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate font-medium text-foreground">{label}</span>
-            {run.task && (
-              <span className="block truncate text-xs text-muted-foreground">{run.task}</span>
-            )}
+          <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+            {run.task ?? "Background agent"}
           </span>
         </button>
         <span className="shrink-0 text-xs text-muted-foreground">
           {showStopping ? "Stopping" : agentRunStatusDetail(run)}
         </span>
-        {canViewOutput && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 shrink-0 gap-1 px-2 text-xs"
-            onClick={onViewOutput}
-          >
-            <FileOutput className="size-3.5" aria-hidden="true" />
-            View output
-          </Button>
-        )}
         {stoppable && (
           <Button
             type="button"
@@ -291,12 +265,6 @@ function BackgroundAgentRow({
           </Button>
         )}
       </div>
-      {run.terminal_text && (
-        <div className="mt-2 rounded-md bg-muted/50 px-2.5 py-2 text-sm text-foreground">
-          <span className="font-medium">{terminalLabel}: </span>
-          <span className="whitespace-pre-wrap break-words">{run.terminal_text}</span>
-        </div>
-      )}
       {expanded && (
         <div id={contentId} className="mt-2 pl-5">
           <AgentActivityTimeline state={activity} />
