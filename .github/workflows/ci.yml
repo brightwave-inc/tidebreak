@@ -40,16 +40,12 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # The title and labels come from the event payload, so this job never
+      # needs the pull request's own code — only the trusted base-branch copy
+      # of the policy it is judged by.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # Once this policy has landed, always execute its trusted base-branch
-          # copy. The root checkout is retained only to bootstrap this PR.
           ref: ${{ github.event.pull_request.base.sha }}
-          path: .trusted-release-policy
           fetch-depth: 1
       - name: Validate Conventional Commit title
         env:
@@ -58,44 +54,47 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          policy_dir="$GITHUB_WORKSPACE/.trusted-release-policy"
-          bootstrap=false
-          if [[ ! -f "$policy_dir/scripts/check-pr-title.mjs" ]] ||
-            [[ ! -f "$policy_dir/scripts/release-label.mjs" ]]; then
-            policy_dir="$GITHUB_WORKSPACE"
-            bootstrap=true
-            echo "Bootstrapping the release policy from this PR; future PRs use the trusted base copy."
-          fi
-
-          node "$policy_dir/scripts/check-pr-title.mjs" "$PR_TITLE"
-          # The transition PR runs this workflow from its head while loading the
-          # older trusted classifier from main. Fall back once to its single
-          # label interface; after merge, the trusted copy supports --labels.
-          if expected_labels_json="$(node "$policy_dir/scripts/release-label.mjs" --labels "$PR_TITLE" 2>/dev/null)"; then
-            expected_labels="$(jq -r 'sort | join(",")' <<<"$expected_labels_json")"
-          else
-            expected_labels="$(node "$policy_dir/scripts/release-label.mjs" --title "$PR_TITLE")"
-          fi
-          if [[ "$bootstrap" = false ]]; then
-            actual_labels=""
-            for _ in {1..10}; do
-              actual_labels="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
-                --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
-              [[ "$actual_labels" = "$expected_labels" ]] && break
-              sleep 2
-            done
-            test "$actual_labels" = "$expected_labels" || {
-              echo "Expected managed release labels $expected_labels; found: ${actual_labels:-none}." >&2
-              echo "The trusted Release draft workflow may still be synchronizing it." >&2
-              exit 1
-            }
-          fi
+          node scripts/check-pr-title.mjs "$PR_TITLE"
+          expected_labels="$(node scripts/release-label.mjs --labels "$PR_TITLE" |
+            jq -r 'sort | join(",")')"
+          actual_labels=""
+          for _ in {1..10}; do
+            actual_labels="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
+            [[ "$actual_labels" = "$expected_labels" ]] && break
+            sleep 2
+          done
+          test "$actual_labels" = "$expected_labels" || {
+            echo "Expected managed release labels $expected_labels; found: ${actual_labels:-none}." >&2
+            echo "The trusted Release draft workflow may still be synchronizing it." >&2
+            exit 1
+          }
 
   release-policy:
     name: release policy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The workflow-security tests read the checked-out workflows and configs,
+      # so they must run against this pull request's files — but from the base
+      # branch's copy of the test. Otherwise a pull request could introduce a
+      # violation and the assertion that forbids it in the same commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .trusted-release-policy
+          fetch-depth: 1
+      - name: Restore the trusted workflow-security test
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          trusted="$GITHUB_WORKSPACE/.trusted-release-policy/scripts/workflow-security.test.mjs"
+          if [[ ! -f "$trusted" ]]; then
+            echo "Missing the base branch's copy of scripts/workflow-security.test.mjs." >&2
+            echo "This job must not fall back to the pull request's own copy." >&2
+            exit 1
+          fi
+          cp "$trusted" "$GITHUB_WORKSPACE/scripts/workflow-security.test.mjs"
       - name: Test semantic title and tag policy
         run: node --test scripts/*.test.mjs
 
