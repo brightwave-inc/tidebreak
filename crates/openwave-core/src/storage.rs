@@ -1878,6 +1878,18 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// Every app grant whose owning app is still in the library (not
+    /// soft-deleted), in no particular order.
+    ///
+    /// Serves aggregate views over consent — e.g. how many apps currently
+    /// bind one connected app — where fetching grants one app at a time
+    /// would mean walking the whole library. A grant of a deleted app is
+    /// excluded: it can no longer be exercised, so surfaces built on this
+    /// must not count it.
+    async fn list_live_app_grants(&self) -> Result<Vec<AppGrant>> {
+        app_storage_unavailable()
+    }
+
     /// List every connected app the profile holds, oldest first.
     ///
     /// Kind-specific definitions come back as the bounded JSON the owning

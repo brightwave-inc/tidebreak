@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ConnectedAppsInfo, McpServerInfo } from "../api";
@@ -7,7 +13,7 @@ import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 
 const SECRET = "sk-rest-value-hunter2";
 
-/** One configured manual server, so the demoted editor has a row to show. */
+/** One configured manual server, so the editing surface has a row to show. */
 const docsServer: McpServerInfo = {
   name: "docs",
   command: "/usr/local/bin/docs-mcp",
@@ -26,7 +32,8 @@ const docsServer: McpServerInfo = {
 };
 
 /** The app-first listing: a gateway-backed record (org apps ride the
- * `primary` endpoint), a local record, and a REST entry. */
+ * `primary` endpoint), a local record two mini-apps bind, and a REST entry
+ * one mini-app binds. */
 const listing: ConnectedAppsInfo = {
   apps: [
     {
@@ -39,6 +46,7 @@ const listing: ConnectedAppsInfo = {
       diagnostic: null,
       gateway_endpoint: "primary",
       gateway_apps: ["Sentry (org)", "Linear (org)"],
+      used_by_app_count: 0,
     },
     {
       kind: "mcp_server",
@@ -50,6 +58,7 @@ const listing: ConnectedAppsInfo = {
       diagnostic: null,
       gateway_endpoint: null,
       gateway_apps: [],
+      used_by_app_count: 2,
     },
     {
       kind: "rest_api",
@@ -61,6 +70,7 @@ const listing: ConnectedAppsInfo = {
       credential_status: "configured",
       placement: "bearer",
       updated_at: "2026-08-03T00:00:00Z",
+      used_by_app_count: 1,
     },
   ],
 };
@@ -70,7 +80,8 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     listConnectedApps: vi.fn().mockResolvedValue(listing),
     putRestConnectedApp: vi.fn().mockResolvedValue(listing),
     deleteRestConnectedApp: vi.fn().mockResolvedValue(undefined),
-    // The demoted MCP editor reads its own server list and gateway session.
+    reconnectMcpServer: vi.fn().mockResolvedValue({ servers: [docsServer] }),
+    // The embedded MCP surface reads its own server list and gateway session.
     listMcpServers: vi.fn().mockResolvedValue({ servers: [docsServer] }),
     getGatewayStatus: vi.fn().mockResolvedValue({ signed_in: false }),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
@@ -79,7 +90,7 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
 }
 
 /** A signed-in gateway session whose org apps ride the `primary` endpoint,
- * for tests that open the Advanced disclosure's endpoint toggles. */
+ * for tests that exercise the endpoint rows. */
 function signedInOverrides() {
   return {
     getGatewayStatus: vi
@@ -100,37 +111,48 @@ function signedInOverrides() {
   };
 }
 
+/** The one list container the app entries live in. */
+async function appsList(): Promise<HTMLElement> {
+  return await screen.findByRole("list", { name: "Connected apps" });
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("ConnectedAppsPanel", () => {
-  it("leads with apps: org-app names for gateway entries, record names for local ones", async () => {
+  it("leads with apps: org-app names, health chips, and bound-app counts", async () => {
     render(<ConnectedAppsPanel client={api()} managed={false} />);
 
     // The gateway-backed entry leads with the organization's app names, not
     // its endpoint slug; the local record is its own app.
+    const list = await appsList();
     expect(
-      await screen.findByText("Sentry (org), Linear (org)"),
+      within(list).getByText("Sentry (org), Linear (org)"),
     ).toBeInTheDocument();
-    expect(screen.getByText("docs")).toBeInTheDocument();
-    expect(screen.queryByText("primary")).not.toBeInTheDocument();
+    expect(within(list).getByText("docs")).toBeInTheDocument();
+    expect(within(list).queryByText("primary")).not.toBeInTheDocument();
 
     // REST entries are first-class app entries in the same list.
-    expect(screen.getByText("Sentry")).toBeInTheDocument();
+    expect(within(list).getByText("Sentry")).toBeInTheDocument();
     expect(
-      screen.getByText(
+      within(list).getByText(
         /api\.sentry\.example\/v2 · 2 operations · Credential configured/,
       ),
     ).toBeInTheDocument();
+
+    // Bound-app counts render per entry — and only when non-zero.
+    expect(within(list).getByText("Used by 2 local apps")).toBeInTheDocument();
+    expect(within(list).getByText("Used by 1 local app")).toBeInTheDocument();
+    expect(screen.queryByText(/Used by 0/)).not.toBeInTheDocument();
   });
 
   it("expands a collapsed accordion to monospace tool names", async () => {
     const user = userEvent.setup();
     render(<ConnectedAppsPanel client={api()} managed={false} />);
 
-    await screen.findByText("docs");
+    await appsList();
     // Collapsed by default: no tool names anywhere.
     expect(screen.queryByText("search")).not.toBeInTheDocument();
     expect(screen.queryByText("sentry__proxy_api")).not.toBeInTheDocument();
@@ -143,43 +165,56 @@ describe("ConnectedAppsPanel", () => {
     expect(screen.queryByText("sentry__proxy_api")).not.toBeInTheDocument();
   });
 
-  it("keeps endpoints and the manual editor inside the Advanced disclosure", async () => {
-    const user = userEvent.setup();
+  it("unmanaged: no Advanced section; the editor follows the apps list", async () => {
     render(
       <ConnectedAppsPanel client={api(signedInOverrides())} managed={false} />,
     );
 
-    await screen.findByText("docs");
-    // Before expanding: no mount toggles, no editor, no endpoint section.
-    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    const list = await appsList();
+    // No gateway indirection to hide: there is no Advanced disclosure, and
+    // the endpoint toggles and the manual editor are directly reachable.
     expect(
-      screen.queryByRole("button", { name: /Save and verify/ }),
+      screen.queryByRole("button", { name: /Advanced: transport/ }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText("Gateway endpoints")).not.toBeInTheDocument();
-
-    await user.click(
-      screen.getByRole("button", { name: /Advanced: transport & endpoints/ }),
-    );
-    // Every existing capability is reachable: the mount toggle, the manual
-    // editor with its namespace field, and save.
     expect(
       await screen.findByRole("switch", { name: "Mount primary" }),
     ).toBeInTheDocument();
     expect(await screen.findByLabelText(/Namespace/)).toHaveValue("docs");
+    const save = screen.getByRole("button", { name: /Save and verify/ });
+    // The editing surface no longer leads: the apps list comes first.
     expect(
-      screen.getByRole("button", { name: /Save and verify/ }),
-    ).toBeInTheDocument();
+      list.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // The reconnect action rides the entries themselves.
+    expect(
+      within(list).getAllByRole("button", { name: /Reconnect/ }).length,
+    ).toBeGreaterThan(0);
+
+    // The approval boundary is stated once, as the page footer.
+    expect(
+      screen.getAllByText(/existing approval boundary/),
+    ).toHaveLength(1);
   });
 
-  it("managed: keeps the notice and mount toggles but no edit affordances", async () => {
+  it("managed: prose notice, once-only facts, and a collapsed Advanced", async () => {
     const user = userEvent.setup();
     render(<ConnectedAppsPanel client={api(signedInOverrides())} managed />);
 
-    expect(
-      await screen.findByText(/Managed by your organization/),
-    ).toBeInTheDocument();
-    // Entries stay visible read-only; every REST write affordance is gone.
-    expect(screen.getByText("Sentry")).toBeInTheDocument();
+    // The managed notice is one line of muted prose under the Apps heading —
+    // not a card, and not an entry inside the list.
+    const notice = await screen.findByText(
+      /REST connected apps are managed by your organization's gateway/,
+    );
+    expect(notice.tagName).toBe("P");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    const list = await appsList();
+    expect(list.contains(notice)).toBe(false);
+
+    // Entries stay visible read-only; every REST write affordance is gone,
+    // and no entry carries a reconnect action — that lives on the endpoint
+    // row under Advanced.
+    expect(within(list).getByText("Sentry")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Add REST API/ }),
     ).not.toBeInTheDocument();
@@ -189,15 +224,23 @@ describe("ConnectedAppsPanel", () => {
     expect(
       screen.queryByRole("button", { name: /^Remove/ }),
     ).not.toBeInTheDocument();
+    expect(
+      within(list).queryByRole("button", { name: /Reconnect/ }),
+    ).not.toBeInTheDocument();
+
+    // Advanced is collapsed by default: no endpoint machinery on screen.
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: /Advanced: transport & endpoints/ }),
     );
-    // The endpoint toggle — the one write managed policy admits — stays
-    // live; nothing manual is editable.
+    // Compact rows: the mount toggle (the one write managed policy admits)
+    // and the serves-list, with no inner headings and nothing editable.
     expect(
       await screen.findByRole("switch", { name: "Mount primary" }),
     ).toBeEnabled();
+    expect(screen.getByText(/serves: Sentry \(org\)/)).toBeInTheDocument();
+    expect(screen.queryByText("Gateway endpoints")).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
     );
@@ -207,6 +250,16 @@ describe("ConnectedAppsPanel", () => {
     expect(
       screen.queryByRole("button", { name: /Save and verify/ }),
     ).not.toBeInTheDocument();
+
+    // Every fact once: with Advanced open, the tool count still renders only
+    // on the app entry, and the old status sentence is gone everywhere.
+    expect(screen.getAllByText("2 tools")).toHaveLength(1);
+    expect(
+      screen.queryByText(/available to new turns/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText(/existing approval boundary/),
+    ).toHaveLength(1);
   });
 
   it("submits the PUT shape from the create form and never renders the value back", async () => {

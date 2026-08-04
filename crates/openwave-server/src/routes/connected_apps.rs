@@ -70,6 +70,10 @@ pub enum ConnectedAppInfo {
         /// the apps surface: the entry then renders without org-app names
         /// rather than erroring.
         gateway_apps: Vec<String>,
+        /// How many local mini-apps hold a live grant binding this record —
+        /// a count only, never app names or ids, the renderer-safety posture
+        /// of this surface. Grants of library-deleted apps do not count.
+        used_by_app_count: usize,
     },
     RestApi {
         /// The record id app bindings name.
@@ -87,6 +91,10 @@ pub enum ConnectedAppInfo {
         /// configuration; the value never appears on this surface.
         placement: Option<CredentialPlacement>,
         updated_at: DateTime<Utc>,
+        /// How many local mini-apps hold a live grant binding this record —
+        /// a count only, never app names or ids, the renderer-safety posture
+        /// of this surface. Grants of library-deleted apps do not count.
+        used_by_app_count: usize,
     },
 }
 
@@ -332,6 +340,16 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
         .collect();
     let tool_names = state.mcp.tool_names().await;
     let servers = state.mcp.info().await.servers;
+    // How many local mini-apps currently bind each record: distinct live
+    // grants naming the id. The binding grammar forbids a grant naming one
+    // connected app twice, so grants and apps count one-to-one.
+    let mut used_by: std::collections::BTreeMap<ConnectedAppId, usize> =
+        std::collections::BTreeMap::new();
+    for grant in state.store.list_live_app_grants().await? {
+        for binding in &grant.bindings {
+            *used_by.entry(binding.app()).or_default() += 1;
+        }
+    }
     // Org-app display names by endpoint slug, so gateway-backed entries can
     // lead with the apps the organization granted instead of endpoint slugs.
     // Best-effort by design: fetched only when a gateway-backed record exists,
@@ -375,6 +393,7 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
                 diagnostic: server.diagnostic,
                 gateway_endpoint,
                 gateway_apps,
+                used_by_app_count: used_by.get(&id).copied().unwrap_or(0),
             })
         })
         .collect();
@@ -404,6 +423,7 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
             credential_status,
             placement: definition.credential.map(|credential| credential.placement),
             updated_at: record.updated_at,
+            used_by_app_count: used_by.get(&record.id).copied().unwrap_or(0),
         });
     }
     Ok(ConnectedAppsInfo { apps })

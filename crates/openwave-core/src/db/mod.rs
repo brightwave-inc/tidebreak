@@ -825,6 +825,10 @@ impl Store for DbStore {
         ops::app::delete_app_grant(self, app_id).await
     }
 
+    async fn list_live_app_grants(&self) -> Result<Vec<AppGrant>> {
+        ops::app::list_live_app_grants(self).await
+    }
+
     async fn list_connected_apps(&self) -> Result<Vec<ConnectedApp>> {
         ops::connected_app::list_connected_apps(self).await
     }
