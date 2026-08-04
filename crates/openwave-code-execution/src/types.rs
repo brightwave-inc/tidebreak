@@ -58,6 +58,56 @@ impl std::fmt::Display for CodeExecutionProviderKind {
     }
 }
 
+/// Why a provider cannot execute anything on this host right now.
+///
+/// A stable machine-readable code, not a sentence: the reason is decided where
+/// the fact is known (the platform probe, the credential slot) and every
+/// surface renders its own copy from the code. Reasons are what the user can
+/// act on — install a key, switch provider — never an internal failure detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CodeExecutionUnavailableReason {
+    /// The provider's confinement primitive does not exist for this operating
+    /// system at all. Nothing the user installs or pastes changes this.
+    UnsupportedPlatform,
+    /// The platform supports the provider but its sandbox binary is missing
+    /// from the host.
+    MissingSandboxBinary,
+    /// A managed provider whose API key slot is empty.
+    MissingCredential,
+}
+
+impl CodeExecutionUnavailableReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::MissingSandboxBinary => "missing_sandbox_binary",
+            Self::MissingCredential => "missing_credential",
+        }
+    }
+
+    /// One plain sentence for callers that must put the reason in a message
+    /// rather than render it — the model-facing execution error, mainly.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => {
+                "this provider has no sandbox implementation for this operating system"
+            }
+            Self::MissingSandboxBinary => "the host's native sandbox binary is missing",
+            Self::MissingCredential => "no API key is saved for this provider",
+        }
+    }
+}
+
+impl std::fmt::Display for CodeExecutionUnavailableReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Stable provider idempotency key for one canonical tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -634,7 +684,10 @@ pub trait CodeExecutionProvider: Send + Sync {
 pub enum CodeExecutionError {
     #[error("invalid code execution request: {0}")]
     InvalidRequest(String),
-    #[error("code execution is not configured")]
+    #[error(
+        "code execution is not configured: no execution provider is available on this host \
+         (configure one under Settings → Code execution)"
+    )]
     NotConfigured,
     #[error("code execution provider is unavailable: {0}")]
     Unavailable(String),

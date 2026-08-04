@@ -497,7 +497,19 @@ export type CitationLocator = { "kind": "document" } | { "kind": "page", page: n
 /**
  * Renderer-safe configuration and readiness.
  */
-export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, 
+export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, 
+/**
+ * Why the *selected* provider cannot run, when it cannot. Absent while
+ * execution is available or no provider is selected at all.
+ */
+unavailable_reason?: CodeExecutionUnavailableReason, has_credential: boolean, 
+/**
+ * One row per shipped provider: whether it could run here at all, and the
+ * reason it could not. This is what makes an unusable host legible —
+ * "paste an E2B key" is visible instead of being inferred from a generic
+ * execution failure.
+ */
+providers: Array<CodeExecutionProviderAvailability>, 
 /**
  * The configured egress policy and each managed provider's enforcement
  * status, so the renderer can present the policy and disclose which
@@ -556,9 +568,28 @@ policy: EgressConfig,
 enforcement: Array<CodeExecutionEgressEnforcement>, };
 
 /**
+ * Structured capability report for one execution provider on this host.
+ *
+ * `available` and `unavailable_reason` are two views of one decision, made in
+ * [`provider_availability`], so no surface has to re-derive whether a platform
+ * supports a provider or whether a key is saved.
+ */
+export type CodeExecutionProviderAvailability = { provider: CodeExecutionProviderKind, available: boolean, unavailable_reason?: CodeExecutionUnavailableReason, };
+
+/**
  * A configured code-execution backend.
  */
 export type CodeExecutionProviderKind = "local" | "e2b" | "daytona";
+
+/**
+ * Why a provider cannot execute anything on this host right now.
+ *
+ * A stable machine-readable code, not a sentence: the reason is decided where
+ * the fact is known (the platform probe, the credential slot) and every
+ * surface renders its own copy from the code. Reasons are what the user can
+ * act on — install a key, switch provider — never an internal failure detail.
+ */
+export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential";
 
 /**
  * Identifies one profile-scoped connected app — an outside integration

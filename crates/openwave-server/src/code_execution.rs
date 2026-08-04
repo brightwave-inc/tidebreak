@@ -15,14 +15,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use openwave_code_execution::{
     resolve_scratch_directory, sync, CodeExecutionError, CodeExecutionProvider,
-    CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential,
-    DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess,
-    ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
-    MaterializationPrecondition, MaterializedChangeKind, OutputArtifactEntry, OutputArtifactScan,
-    OutputArtifactStatus, PreviewScan, RejectedChangeReason, RemoteSessionPool, SharedPackageCache,
-    StagedUpload, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay,
-    WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
-    E2B_CREDENTIAL_KEY, PACKAGE_CACHE_DIR, PACKAGE_MANAGER_DOMAINS,
+    CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
+    CodeExecutionUnavailableReason, DaytonaCredential, DaytonaExecutionProvider, E2BCredential,
+    E2BExecutionProvider, ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId,
+    LocalExecutionProvider, MaterializationPrecondition, MaterializedChangeKind,
+    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan,
+    RejectedChangeReason, RemoteSessionPool, SharedPackageCache, StagedUpload, WorkspaceFilePath,
+    WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY,
+    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY, PACKAGE_CACHE_DIR,
+    PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, ExecFileRejectionReason,
@@ -183,6 +184,16 @@ const CREDENTIAL_PROVIDERS: [CodeExecutionProviderKind; 2] = [
     CodeExecutionProviderKind::Daytona,
 ];
 
+/// Every execution provider this build ships, in the order the settings
+/// surface reports them. Availability is computed per row, so a host with no
+/// usable provider says so with a reason for each rather than presenting a
+/// selection that cannot run.
+const EXECUTION_PROVIDERS: [CodeExecutionProviderKind; 3] = [
+    CodeExecutionProviderKind::Local,
+    CodeExecutionProviderKind::E2b,
+    CodeExecutionProviderKind::Daytona,
+];
+
 /// Host-owned, non-secret egress policy for the managed exec sandboxes.
 ///
 /// The model never sets this (invariant 1): it is host configuration, carries
@@ -239,10 +250,10 @@ impl EgressConfig {
     }
 }
 
-/// Non-secret host selection. Local is usable by default because its mandatory
-/// sandbox confines writes and enforces each chat's network policy outside the
-/// workload. `None` explicitly removes execution from service without changing
-/// the stable tool contract.
+/// Non-secret host selection. Local is the default only where its mandatory
+/// sandbox actually exists; that sandbox confines writes and enforces each
+/// chat's network policy outside the workload. `None` explicitly removes
+/// execution from service without changing the stable tool contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeExecutionConfig {
     #[serde(default)]
@@ -275,7 +286,15 @@ pub struct CodeExecutionConfig {
 impl Default for CodeExecutionConfig {
     fn default() -> Self {
         Self {
-            provider: Some(CodeExecutionProviderKind::Local),
+            // Local is the default only on hosts where it can actually run.
+            // Selecting it elsewhere would be a dead selection: every exec
+            // would fail and the surface would report a configured provider
+            // that never works. No provider at all is the truthful state, and
+            // the settings surface says which providers are unavailable and
+            // why.
+            provider: LocalExecutionProvider::availability()
+                .is_ok()
+                .then_some(CodeExecutionProviderKind::Local),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             egress: EgressConfig::Open,
             e2b_template: None,
@@ -379,7 +398,17 @@ pub struct CodeExecutionConfigInfo {
     pub provider: Option<CodeExecutionProviderKind>,
     pub timeout_ms: u64,
     pub available: bool,
+    /// Why the *selected* provider cannot run, when it cannot. Absent while
+    /// execution is available or no provider is selected at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unavailable_reason: Option<CodeExecutionUnavailableReason>,
     pub has_credential: bool,
+    /// One row per shipped provider: whether it could run here at all, and the
+    /// reason it could not. This is what makes an unusable host legible —
+    /// "paste an E2B key" is visible instead of being inferred from a generic
+    /// execution failure.
+    pub providers: Vec<CodeExecutionProviderAvailability>,
     /// The configured egress policy and each managed provider's enforcement
     /// status, so the renderer can present the policy and disclose which
     /// providers actually restrict egress today.
@@ -616,6 +645,51 @@ pub struct CodeExecutionCredentialReadiness {
     pub has_credential: bool,
 }
 
+/// Structured capability report for one execution provider on this host.
+///
+/// `available` and `unavailable_reason` are two views of one decision, made in
+/// [`provider_availability`], so no surface has to re-derive whether a platform
+/// supports a provider or whether a key is saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct CodeExecutionProviderAvailability {
+    pub provider: CodeExecutionProviderKind,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unavailable_reason: Option<CodeExecutionUnavailableReason>,
+}
+
+impl CodeExecutionProviderAvailability {
+    fn new(
+        provider: CodeExecutionProviderKind,
+        unavailable_reason: Option<CodeExecutionUnavailableReason>,
+    ) -> Self {
+        Self {
+            provider,
+            available: unavailable_reason.is_none(),
+            unavailable_reason,
+        }
+    }
+}
+
+/// The single place that decides whether a provider can execute here.
+///
+/// Local asks the adapter's own platform probe; the managed providers are
+/// available exactly when their credential slot is filled. Everything else —
+/// the default selection, the settings rows, the selected provider's status —
+/// reads this, so they cannot disagree.
+async fn provider_availability(
+    secrets: &dyn SecretProvider,
+    provider: CodeExecutionProviderKind,
+) -> CodeExecutionProviderAvailability {
+    let reason = match provider {
+        CodeExecutionProviderKind::Local => LocalExecutionProvider::availability().err(),
+        _ => (!has_credential(secrets, provider).await)
+            .then_some(CodeExecutionUnavailableReason::MissingCredential),
+    };
+    CodeExecutionProviderAvailability::new(provider, reason)
+}
+
 /// Credential readiness for every managed provider this host supports, so the
 /// renderer can offer a key field per provider without selecting one first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -685,17 +759,25 @@ pub async fn config_info(
         Some(provider) => has_credential(secrets, provider).await,
         None => false,
     };
-    let available = match config.provider {
-        Some(CodeExecutionProviderKind::Local) => LocalExecutionProvider::is_supported(),
-        Some(CodeExecutionProviderKind::E2b | CodeExecutionProviderKind::Daytona) => has_credential,
-        None => false,
-        _ => false,
-    };
+    let mut providers = Vec::with_capacity(EXECUTION_PROVIDERS.len());
+    for provider in EXECUTION_PROVIDERS {
+        providers.push(provider_availability(secrets, provider).await);
+    }
+    // The selected provider's status is read out of the same rows, so the
+    // headline and the per-provider list can never contradict each other.
+    let selected = config.provider.and_then(|provider| {
+        providers
+            .iter()
+            .find(|candidate| candidate.provider == provider)
+            .copied()
+    });
     Ok(CodeExecutionConfigInfo {
         provider: config.provider,
         timeout_ms: config.timeout_ms,
-        available,
+        available: selected.is_some_and(|row| row.available),
+        unavailable_reason: selected.and_then(|row| row.unavailable_reason),
         has_credential,
+        providers,
         egress: CodeExecutionEgressInfo::from_config(config.egress),
         detached_admission: detached_admission_info(host_config),
     })
@@ -3018,9 +3100,18 @@ mod tests {
     }
 
     #[test]
-    fn local_is_the_only_bounded_default() {
+    fn the_default_selection_is_never_a_provider_that_cannot_run() {
         let config = CodeExecutionConfig::default();
-        assert_eq!(config.provider, Some(CodeExecutionProviderKind::Local));
+        // Local is the only unattended default, and only where its sandbox
+        // exists: on any other host the honest default is no provider, so the
+        // surface reports "not configured" instead of a selection that fails
+        // every exec.
+        assert_eq!(
+            config.provider,
+            LocalExecutionProvider::availability()
+                .is_ok()
+                .then_some(CodeExecutionProviderKind::Local)
+        );
         assert_eq!(config.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(config.validate().is_ok());
         assert!(CodeExecutionConfig {
@@ -3036,7 +3127,11 @@ mod tests {
 
     #[test]
     fn selection_contains_no_endpoint_or_credential_reference() {
-        let json = serde_json::to_value(CodeExecutionConfig::default()).unwrap();
+        let json = serde_json::to_value(CodeExecutionConfig {
+            provider: Some(CodeExecutionProviderKind::Local),
+            ..CodeExecutionConfig::default()
+        })
+        .unwrap();
         assert_eq!(json["provider"], "local");
         assert!(json.get("endpoint").is_none());
         assert!(json.get("credential").is_none());
@@ -3288,6 +3383,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_providers_report_an_actionable_reason() {
+        let (store, dir) = test_store().await;
+        let host_config = openwave_core::Config::desktop(dir.path());
+        let info = config_info(&host_config, &store, &NoSecrets).await.unwrap();
+        let rows: HashMap<_, _> = info
+            .providers
+            .iter()
+            .map(|row| (row.provider, *row))
+            .collect();
+
+        // No key is saved here, so a managed provider must say exactly that —
+        // "paste a key" has to be readable off the report, not inferred from a
+        // failed execution.
+        for managed in CREDENTIAL_PROVIDERS {
+            let row = rows[&managed];
+            assert!(!row.available);
+            assert_eq!(
+                row.unavailable_reason,
+                Some(CodeExecutionUnavailableReason::MissingCredential)
+            );
+        }
+        let local = rows[&CodeExecutionProviderKind::Local];
+        assert_eq!(
+            local.unavailable_reason,
+            LocalExecutionProvider::availability().err()
+        );
+
+        // The untouched host selects a provider only where one can actually
+        // run: on a host without the local sandbox the report is "nothing
+        // configured" plus the reasons above, never a dead Local selection.
+        assert_eq!(info.provider.is_some(), local.available);
+        assert_eq!(info.available, local.available);
+    }
+
+    #[tokio::test]
     async fn workspace_capability_degrades_to_none_instead_of_failing() {
         let (store, dir) = test_store().await;
         let provider = ConfiguredCodeExecutionProvider::new(
@@ -3295,6 +3425,17 @@ mod tests {
             Arc::new(NoSecrets),
             dir.path().join("scratch"),
         );
+        // Selected explicitly: the default no longer picks Local on hosts
+        // without the native sandbox, and this case is about the workspace
+        // surface, not about what a fresh host defaults to.
+        provider
+            .store
+            .set_setting(
+                CODE_EXECUTION_SETTING,
+                &serde_json::json!({ "provider": "local", "timeout_ms": DEFAULT_TIMEOUT_MS }),
+            )
+            .await
+            .unwrap();
         assert!(provider.workspace().await.unwrap().is_some());
 
         // Disabling execution and selecting a managed provider without a

@@ -31,8 +31,8 @@ use crate::sbpl::SANDBOX_EXEC;
 use crate::CodeExecutionProviderKind;
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionRequest, CodeExecutionResponse,
-    ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle,
-    WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    CodeExecutionUnavailableReason, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
+    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 #[cfg(target_os = "macos")]
 use crate::{ExecFolderAccess, ExecFolderGrant};
@@ -120,10 +120,19 @@ impl LocalExecutionProvider {
         self
     }
 
-    /// Whether the mandatory native confinement primitive exists on this host.
-    #[must_use]
-    pub fn is_supported() -> bool {
-        cfg!(target_os = "macos") && Path::new(SANDBOX_EXEC).is_file()
+    /// Structured availability of the native local sandbox on this host.
+    ///
+    /// `Ok(())` means the mandatory confinement primitive exists. The error is
+    /// a stable reason code, so a caller can report *why* local execution is
+    /// impossible without re-deriving the platform rules itself.
+    pub fn availability() -> Result<(), CodeExecutionUnavailableReason> {
+        if !cfg!(target_os = "macos") {
+            return Err(CodeExecutionUnavailableReason::UnsupportedPlatform);
+        }
+        if !Path::new(SANDBOX_EXEC).is_file() {
+            return Err(CodeExecutionUnavailableReason::MissingSandboxBinary);
+        }
+        Ok(())
     }
 
     /// Host knowledge about the local adapter's egress enforcement: Seatbelt
@@ -304,10 +313,11 @@ impl CodeExecutionProvider for LocalExecutionProvider {
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
         request.validate()?;
-        if !Self::is_supported() {
-            return Err(CodeExecutionError::Unavailable(
-                "native local sandboxing is not supported on this host".into(),
-            ));
+        if let Err(reason) = Self::availability() {
+            return Err(CodeExecutionError::Unavailable(format!(
+                "native local sandboxing is not available on this host: {}",
+                reason.message()
+            )));
         }
         let ResolvedExecutionPaths {
             workspace,

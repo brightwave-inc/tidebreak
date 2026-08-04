@@ -70,14 +70,26 @@ const NO_DETACHED: CodeExecutionConfigInfo["detached_admission"] = [
   },
 ];
 
+/** Every provider usable: the macOS shape, where nothing is dark. */
+const ALL_PROVIDERS_AVAILABLE: CodeExecutionConfigInfo["providers"] = [
+  { provider: "local", available: true },
+  { provider: "e2b", available: true },
+  { provider: "daytona", available: true },
+];
+
 function clientFor(
-  config: CodeExecutionConfigInfo,
+  config: Omit<CodeExecutionConfigInfo, "providers"> &
+    Partial<Pick<CodeExecutionConfigInfo, "providers">>,
   credentials: CodeExecutionCredentialReadiness[] = [
     { provider: "e2b", has_credential: false },
     { provider: "daytona", has_credential: false },
   ],
 ) {
-  const putCodeExecutionConfig = vi.fn().mockResolvedValue(config);
+  const resolved: CodeExecutionConfigInfo = {
+    providers: ALL_PROVIDERS_AVAILABLE,
+    ...config,
+  };
+  const putCodeExecutionConfig = vi.fn().mockResolvedValue(resolved);
   const putCodeExecutionCredential = vi
     .fn()
     .mockImplementation((provider: string) =>
@@ -90,7 +102,7 @@ function clientFor(
     );
   return {
     client: {
-      getCodeExecutionConfig: vi.fn().mockResolvedValue(config),
+      getCodeExecutionConfig: vi.fn().mockResolvedValue(resolved),
       listCodeExecutionCredentials: vi.fn().mockResolvedValue({ credentials }),
       putCodeExecutionConfig,
       putCodeExecutionCredential,
@@ -266,5 +278,44 @@ describe("CodeExecutionPanel", () => {
         .length,
     ).toBeGreaterThan(0);
     expect(screen.queryByText(/no_scoped_model_token/)).toBeNull();
+  });
+
+  it("names why each provider is unusable on a host with no execution at all", async () => {
+    const { client } = clientFor({
+      provider: undefined,
+      timeout_ms: 20_000,
+      available: false,
+      has_credential: false,
+      providers: [
+        {
+          provider: "local",
+          available: false,
+          unavailable_reason: "unsupported_platform",
+        },
+        {
+          provider: "e2b",
+          available: false,
+          unavailable_reason: "missing_credential",
+        },
+        {
+          provider: "daytona",
+          available: false,
+          unavailable_reason: "missing_credential",
+        },
+      ],
+      egress: OPEN_EGRESS,
+      detached_admission: NO_DETACHED,
+    });
+
+    render(<CodeExecutionPanel client={client} />);
+
+    // The headline states the host has nothing, and each row says what would
+    // change it — a missing key must be readable here, not archaeological.
+    await screen.findByText(/No execution provider configured/i);
+    expect(
+      screen.getByText(/Not supported on this operating system/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/Add an API key above/i)).toHaveLength(2);
+    expect(screen.queryByText(/missing_credential/)).toBeNull();
   });
 });
