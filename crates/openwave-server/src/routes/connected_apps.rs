@@ -335,6 +335,9 @@ pub async fn put_rest_connected_app(
         .store
         .replace_connected_apps(ConnectedAppKind::RestApi, &rest_records)
         .await?;
+    // Republish the tool registry so `create_app`'s roster sees the record
+    // now — not after the next unrelated MCP reconfiguration.
+    state.mcp.refresh_connected_app_roster().await;
 
     if clear_stored_value {
         // Best-effort, and only ever the derived key: a leftover value is
@@ -376,6 +379,8 @@ pub async fn delete_rest_connected_app(
         .store
         .replace_connected_apps(ConnectedAppKind::RestApi, &remaining)
         .await?;
+    // The removed record must leave the `create_app` roster with the store.
+    state.mcp.refresh_connected_app_roster().await;
     // Best-effort, after the record is gone: a failed secret delete must not
     // strand the record, and the derived key — never a name read out of the
     // definition — is the only secret this surface may touch.
