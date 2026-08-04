@@ -14,7 +14,7 @@ const UTILITY_MODEL: &str = "gpt-5.4-nano";
 /// The model the conversation itself runs on, so the two are never confused.
 const CHAT_MODEL: &str = "gpt-5.6-sol";
 
-/// A stub OpenAI-compatible endpoint recording everything asked of it.
+/// A stub OpenAI Responses endpoint recording everything asked of it.
 ///
 /// One endpoint serves both calls a titled conversation makes, because that is
 /// how the real thing works: the turn and the titling call reach the same
@@ -31,7 +31,7 @@ impl TitlingStub {
             .lock()
             .unwrap()
             .iter()
-            .filter(|request| request.get("response_format").is_some())
+            .filter(|request| request.get("text").is_some())
             .cloned()
             .collect()
     }
@@ -41,7 +41,7 @@ async fn answer_as_stub(
     axum::extract::State(stub): axum::extract::State<Arc<TitlingStub>>,
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> impl axum::response::IntoResponse {
-    let text = if request.get("response_format").is_some() {
+    let text = if request.get("text").is_some() {
         stub.title_answer.clone()
     } else {
         ASSISTANT_ANSWER.to_owned()
@@ -49,8 +49,8 @@ async fn answer_as_stub(
     stub.requests.lock().unwrap().push(request);
     let body = format!(
         "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-        serde_json::json!({"choices": [{"delta": {"content": text}, "finish_reason": null}]}),
-        serde_json::json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        serde_json::json!({"type": "response.output_text.delta", "delta": text}),
+        serde_json::json!({"type": "response.completed", "response": {}}),
     );
     (
         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -78,7 +78,7 @@ async fn titling_app(
         title_answer: title_answer.to_owned(),
     });
     let endpoint = axum::Router::new()
-        .route("/v1/chat/completions", axum::routing::post(answer_as_stub))
+        .route("/v1/responses", axum::routing::post(answer_as_stub))
         .with_state(stub.clone());
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -205,10 +205,10 @@ async fn a_turn_names_the_chat_it_runs_in() {
         "titling advertises no tools; the model has nothing to do but answer",
     );
     assert_eq!(
-        request["response_format"]["json_schema"]["name"], "chat_title",
+        request["text"]["format"]["name"], "chat_title",
         "a provider that enforces the schema is what makes \"no title\" answerable",
     );
-    let material = request["messages"].to_string();
+    let material = request["input"].to_string();
     assert!(material.contains("Reconcile Q3 revenue for me"));
     assert!(
         !material.contains(ASSISTANT_ANSWER),
