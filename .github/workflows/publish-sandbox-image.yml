@@ -48,7 +48,9 @@ run-name: >-
 #
 # The final manifest-list digests land in the run summary, and the `pin` job
 # proposes the follow-up PR that records the documents digest as the local
-# backend's verified pin (see `sandbox_docker` in openwave-server).
+# backend's verified pin (see `sandbox_docker` in openwave-server) and as the
+# ref the Daytona provider registers as a snapshot (see `daytona` in
+# openwave-code-execution).
 #
 # Publishing uses the workflow's own GITHUB_TOKEN; no repository secret is
 # consumed. First-time note: a package created by this workflow is private by
@@ -407,14 +409,34 @@ jobs:
               sys.exit("found more than one PUBLISHED_IMAGE_DIGEST pin block")
           if match.group(1) == digest:
               print(f"digest unchanged ({digest}); nothing to propose")
-              sys.exit(0)
-          replacement = (
-              comment
-              + "const PUBLISHED_IMAGE_DIGEST: Option<&str> =\n"
-              + f'    Some("{digest}");'
-          )
+          else:
+              replacement = (
+                  comment
+                  + "const PUBLISHED_IMAGE_DIGEST: Option<&str> =\n"
+                  + f'    Some("{digest}");'
+              )
+              with open(path, "w") as handle:
+                  handle.write(source[: match.start()] + replacement + source[match.end() :])
+
+          # Daytona cannot pull an arbitrary ref at sandbox creation, so the
+          # code-execution provider registers the same image as a snapshot in
+          # the user's own organization. Its ref and the version-carrying
+          # snapshot name move with the pin above.
+          path = "crates/openwave-code-execution/src/daytona.rs"
+          with open(path) as handle:
+              source = handle.read()
+          pins = {
+              r'(const DOCUMENTS_SNAPSHOT: &str = ")[^"]*(";)':
+                  f"openwave-documents-{os.environ['IMAGE_TAG']}",
+              r'(const DOCUMENTS_IMAGE: &str = ")[^"]*(";)':
+                  f"{os.environ['DOCUMENTS_REPOSITORY']}@{digest}",
+          }
+          for pattern, value in pins.items():
+              source, replaced = re.subn(pattern, lambda m: m.group(1) + value + m.group(2), source)
+              if replaced != 1:
+                  sys.exit(f"expected exactly one match for {pattern}, found {replaced}")
           with open(path, "w") as handle:
-              handle.write(source[: match.start()] + replacement + source[match.end() :])
+              handle.write(source)
           EOF
 
       - name: Open or update the pin PR
@@ -427,13 +449,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$PIN_BRANCH"
           git commit --all \
-            --message "feat(server): pin the sandbox documents image digest for $IMAGE_TAG"
+            --message "feat: pin the sandbox documents image digest for $IMAGE_TAG"
           git push --force origin "HEAD:refs/heads/$PIN_BRANCH"
 
           body_file="$(mktemp)"
           cat > "$body_file" <<EOF
           Automated follow-up from a sandbox image publish: records the new documents
-          image digest as the local backend's verified pin.
+          image digest as the local backend's verified pin, and as the ref the Daytona
+          provider registers as a snapshot.
 
           - Image: \`$DOCUMENTS_REPOSITORY:$IMAGE_TAG\`
           - Digest: \`$DOCUMENTS_DIGEST\`

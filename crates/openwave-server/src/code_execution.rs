@@ -260,10 +260,12 @@ pub struct CodeExecutionConfig {
     /// in-sandbox package install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e2b_template: Option<String>,
-    /// Daytona snapshot name to create sandboxes from. `None` keeps Daytona's
-    /// default snapshot; set it to a snapshot registered from the official
-    /// OpenWave documents image (Daytona cannot pull an arbitrary OCI ref at
-    /// creation — registration is where the digest pin lives).
+    /// Daytona snapshot name to create sandboxes from. An escape hatch, not
+    /// the normal path: `None` lets the provider register and use the official
+    /// OpenWave documents snapshot in the caller's own Daytona organization on
+    /// first use, so a pasted API key needs no further setup. Setting a name
+    /// disables that entirely — the named snapshot is used verbatim, with no
+    /// auto-registration and no fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daytona_snapshot: Option<String>,
 }

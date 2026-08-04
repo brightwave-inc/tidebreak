@@ -33,6 +33,37 @@ const DAYTONA_MAX_NETWORK_ALLOW_ENTRIES: usize = 10;
 /// Daytona accepts at most this many domain entries per sandbox allowlist.
 const DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES: usize = 20;
 
+/// Name of the snapshot the provider registers into the caller's own Daytona
+/// organization for the official OpenWave documents image.
+///
+/// The name carries the image version so a bumped image registers under a
+/// fresh name rather than silently reusing a stale snapshot — snapshot content
+/// is fixed at registration and Daytona has no notion of re-pulling one.
+const DOCUMENTS_SNAPSHOT: &str = "openwave-documents-v0.26.0";
+/// The official documents image, pinned by manifest-list digest. Daytona
+/// requires a tag or a digest (it rejects floating refs), and the digest is
+/// where the integrity pin lives.
+///
+/// This pin and [`DOCUMENTS_SNAPSHOT`] are rewritten together by the pin job in
+/// `.github/workflows/publish-sandbox-image.yml` after every image publish,
+/// alongside `PUBLISHED_IMAGE_DIGEST` in `openwave-server`'s `sandbox_docker`.
+const DOCUMENTS_IMAGE: &str = "ghcr.io/brightwave-inc/openwave-sandbox-agent-documents@sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2";
+/// Resources declared for the documents snapshot, and so for every sandbox
+/// created from it. Daytona's own defaults (1 CPU, 1 GB, 3 GB disk) are below
+/// what the image needs on disk once LibreOffice and the document skills'
+/// Python dependencies are unpacked.
+const DOCUMENTS_SNAPSHOT_CPU: u32 = 2;
+const DOCUMENTS_SNAPSHOT_MEMORY_GB: u32 = 4;
+const DOCUMENTS_SNAPSHOT_DISK_GB: u32 = 10;
+/// First registration makes Daytona pull a multi-gigabyte image into its own
+/// infrastructure, so the wait is generous — but still bounded, and it happens
+/// once per organization rather than once per sandbox.
+const DAYTONA_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DAYTONA_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the wait reports that it is still preparing the image, so a
+/// first run reads as progress rather than as a hang.
+const DAYTONA_SNAPSHOT_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Fixed key for Daytona credentials in OpenWave's host secret store.
 pub const DAYTONA_CREDENTIAL_KEY: &str = "code_execution.daytona.api_key";
 
@@ -79,12 +110,31 @@ pub struct DaytonaExecutionProvider {
     endpoints: DaytonaEndpoints,
     egress: Option<EgressPolicy>,
     snapshot: Option<String>,
+    documents_snapshot: tokio::sync::Mutex<DocumentsSnapshot>,
+}
+
+/// Whether this provider instance has settled how it creates sandboxes when no
+/// explicit snapshot override is configured.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum DocumentsSnapshot {
+    /// Not looked up yet.
+    #[default]
+    Unresolved,
+    /// The official documents snapshot is registered and active.
+    Ready,
+    /// Registration or activation failed once; keep using Daytona's default
+    /// snapshot for the rest of this provider's life instead of retrying on
+    /// every sandbox creation.
+    Fallback,
 }
 
 #[derive(Clone)]
 struct DaytonaEndpoints {
     api_base: String,
     allow_insecure_toolbox: bool,
+    /// Interval between snapshot readiness polls. A field rather than a
+    /// constant so tests exercise the polling loop without sleeping.
+    snapshot_poll_interval: Duration,
 }
 
 impl Default for DaytonaEndpoints {
@@ -92,8 +142,18 @@ impl Default for DaytonaEndpoints {
         Self {
             api_base: DAYTONA_API_BASE.into(),
             allow_insecure_toolbox: false,
+            snapshot_poll_interval: DAYTONA_SNAPSHOT_POLL_INTERVAL,
         }
     }
+}
+
+/// Why the documents snapshot could not be made ready. Separated from
+/// [`CodeExecutionError`] because the two outcomes differ: a rejected
+/// credential is the user's problem and surfaces, while everything else
+/// degrades to Daytona's default snapshot.
+enum SnapshotError {
+    Unauthorized,
+    Degraded(String),
 }
 
 impl DaytonaExecutionProvider {
@@ -138,19 +198,19 @@ impl DaytonaExecutionProvider {
             endpoints,
             egress: None,
             snapshot: None,
+            documents_snapshot: tokio::sync::Mutex::new(DocumentsSnapshot::default()),
         })
     }
 
     /// Create every sandbox from this account-registered Daytona snapshot
-    /// instead of Daytona's default.
+    /// instead of the official OpenWave documents snapshot.
     ///
-    /// Daytona cannot pull an arbitrary OCI ref at sandbox creation: an image
-    /// must first be registered as a *snapshot* in the account (their tooling
-    /// accepts a digest-pinned ref, which is where the integrity pin lives).
-    /// Pointing Daytona at the official OpenWave documents image means
-    /// registering it as a snapshot and naming that snapshot here. Absent an
-    /// override the default snapshot keeps working — skills fall back to
-    /// in-sandbox `pip install`.
+    /// An escape hatch, not the normal path: absent an override the provider
+    /// registers and uses the official documents snapshot itself (see
+    /// [`Self::documents_snapshot_name`]). An override disables that entirely —
+    /// no auto-registration and no fallback, so a snapshot name that does not
+    /// exist in the account stays a visible sandbox-creation error rather than
+    /// quietly becoming Daytona's default.
     #[must_use]
     pub fn with_snapshot(mut self, snapshot: impl Into<String>) -> Self {
         self.snapshot = Some(snapshot.into());
@@ -223,6 +283,7 @@ impl DaytonaExecutionProvider {
         &self,
         workspace_id: &str,
     ) -> Result<RemoteSession, CodeExecutionError> {
+        let snapshot = self.resolve_snapshot().await?;
         let response = self
             .client
             .post(self.api_url("/sandbox"))
@@ -237,7 +298,7 @@ impl DaytonaExecutionProvider {
                 // Delete once the idle stop happens. A later command creates a
                 // fresh chat workspace instead of leaving stopped resources.
                 auto_delete_interval: 0,
-                snapshot: self.snapshot.as_deref(),
+                snapshot,
             })
             .send()
             .await
@@ -250,6 +311,162 @@ impl DaytonaExecutionProvider {
                     "Daytona sandbox disappeared while it was starting".into(),
                 )
             })
+    }
+
+    /// The name of the snapshot the official OpenWave documents image is
+    /// registered under in the caller's own Daytona organization.
+    ///
+    /// Daytona has no cross-organization public snapshots, so a key that has
+    /// never seen OpenWave has nothing to point at. The provider closes that
+    /// gap itself rather than asking the user to register an image by hand.
+    #[must_use]
+    pub fn documents_snapshot_name() -> &'static str {
+        DOCUMENTS_SNAPSHOT
+    }
+
+    /// Decide which snapshot the next sandbox is created from.
+    ///
+    /// An explicit override short-circuits: it is used verbatim, with no
+    /// lookup and no fallback. Otherwise the official documents snapshot is
+    /// made ready once per provider instance — registered from the pinned
+    /// digest if missing, reactivated if Daytona let it lapse — and `None`
+    /// (Daytona's default snapshot) is the degraded answer when that fails.
+    async fn resolve_snapshot(&self) -> Result<Option<&str>, CodeExecutionError> {
+        if let Some(configured) = self.snapshot.as_deref() {
+            return Ok(Some(configured));
+        }
+        let mut state = self.documents_snapshot.lock().await;
+        match *state {
+            DocumentsSnapshot::Ready => return Ok(Some(DOCUMENTS_SNAPSHOT)),
+            DocumentsSnapshot::Fallback => return Ok(None),
+            DocumentsSnapshot::Unresolved => {}
+        }
+        match self.ensure_documents_snapshot().await {
+            Ok(()) => {
+                *state = DocumentsSnapshot::Ready;
+                Ok(Some(DOCUMENTS_SNAPSHOT))
+            }
+            Err(SnapshotError::Unauthorized) => {
+                Err(provider_status_error(StatusCode::UNAUTHORIZED))
+            }
+            Err(SnapshotError::Degraded(reason)) => {
+                tracing::warn!(
+                    snapshot = DOCUMENTS_SNAPSHOT,
+                    "could not prepare the OpenWave documents image in Daytona ({reason}); \
+                     falling back to Daytona's default snapshot — document skills will \
+                     install their dependencies inside each sandbox instead"
+                );
+                *state = DocumentsSnapshot::Fallback;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Idempotently bring the documents snapshot to `active` in this account.
+    async fn ensure_documents_snapshot(&self) -> Result<(), SnapshotError> {
+        match self.fetch_snapshot(DOCUMENTS_SNAPSHOT).await? {
+            Some(snapshot) => self.await_snapshot_active(snapshot).await,
+            None => {
+                tracing::info!(
+                    snapshot = DOCUMENTS_SNAPSHOT,
+                    image = DOCUMENTS_IMAGE,
+                    "preparing the OpenWave documents sandbox image in Daytona \
+                     (first run only; this pulls a multi-gigabyte image)"
+                );
+                let response = self
+                    .client
+                    .post(self.api_url("/snapshots"))
+                    .bearer_auth(self.credential.as_str())
+                    .json(&CreateSnapshotRequest {
+                        name: DOCUMENTS_SNAPSHOT,
+                        image_name: DOCUMENTS_IMAGE,
+                        cpu: DOCUMENTS_SNAPSHOT_CPU,
+                        memory: DOCUMENTS_SNAPSHOT_MEMORY_GB,
+                        disk: DOCUMENTS_SNAPSHOT_DISK_GB,
+                    })
+                    .send()
+                    .await
+                    .map_err(|_| SnapshotError::Degraded("could not reach Daytona".into()))?;
+                let created = decode_snapshot(response).await?;
+                self.await_snapshot_active(created).await
+            }
+        }
+    }
+
+    /// Poll a snapshot to `active`, activating it once if Daytona has let it
+    /// lapse to `inactive` (which it does after two unused weeks).
+    async fn await_snapshot_active(
+        &self,
+        mut snapshot: DaytonaSnapshot,
+    ) -> Result<(), SnapshotError> {
+        let deadline = Instant::now() + DAYTONA_SNAPSHOT_TIMEOUT;
+        let started = Instant::now();
+        let mut reported = Instant::now();
+        let mut requested_activation = false;
+        loop {
+            match snapshot.state.as_deref() {
+                Some("active") => return Ok(()),
+                Some("inactive") if !requested_activation => {
+                    tracing::info!(
+                        snapshot = DOCUMENTS_SNAPSHOT,
+                        "reactivating the OpenWave documents snapshot in Daytona"
+                    );
+                    let response = self
+                        .client
+                        .post(self.api_url(&format!("/snapshots/{DOCUMENTS_SNAPSHOT}/activate")))
+                        .bearer_auth(self.credential.as_str())
+                        .send()
+                        .await
+                        .map_err(|_| SnapshotError::Degraded("could not reach Daytona".into()))?;
+                    snapshot = decode_snapshot(response).await?;
+                    requested_activation = true;
+                    continue;
+                }
+                Some("pending" | "building" | "pulling" | "snapshotting") => {}
+                state => {
+                    return Err(SnapshotError::Degraded(snapshot_failure(
+                        state,
+                        snapshot.error_reason.as_deref(),
+                    )));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(SnapshotError::Degraded(
+                    "snapshot did not become active before its deadline".into(),
+                ));
+            }
+            if reported.elapsed() >= DAYTONA_SNAPSHOT_PROGRESS_INTERVAL {
+                tracing::info!(
+                    snapshot = DOCUMENTS_SNAPSHOT,
+                    state = snapshot.state.as_deref().unwrap_or("unknown"),
+                    elapsed_secs = started.elapsed().as_secs(),
+                    "still preparing the OpenWave documents sandbox image in Daytona"
+                );
+                reported = Instant::now();
+            }
+            tokio::time::sleep(self.endpoints.snapshot_poll_interval).await;
+            snapshot = self
+                .fetch_snapshot(DOCUMENTS_SNAPSHOT)
+                .await?
+                .ok_or_else(|| {
+                    SnapshotError::Degraded("snapshot disappeared while it was building".into())
+                })?;
+        }
+    }
+
+    /// Look a snapshot up by name; `None` when the account has none.
+    async fn fetch_snapshot(&self, name: &str) -> Result<Option<DaytonaSnapshot>, SnapshotError> {
+        let response = self
+            .client
+            .get(self.api_url(&format!("/snapshots/{name}")))
+            .bearer_auth(self.credential.as_str())
+            .send()
+            .await
+            .map_err(|_| SnapshotError::Degraded("could not reach Daytona".into()))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        decode_snapshot(response).await.map(Some)
     }
 
     async fn reconnect_sandbox(
@@ -736,6 +953,52 @@ struct CreateSandboxRequest<'a> {
     snapshot: Option<&'a str>,
 }
 
+/// Registers an image from any publicly reachable registry as a snapshot in
+/// the caller's own Daytona organization.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSnapshotRequest<'a> {
+    name: &'a str,
+    image_name: &'a str,
+    cpu: u32,
+    memory: u32,
+    disk: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaytonaSnapshot {
+    state: Option<String>,
+    #[serde(default)]
+    error_reason: Option<String>,
+}
+
+async fn decode_snapshot(response: Response) -> Result<DaytonaSnapshot, SnapshotError> {
+    if matches!(
+        response.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        return Err(SnapshotError::Unauthorized);
+    }
+    if !response.status().is_success() {
+        return Err(SnapshotError::Degraded(format!(
+            "Daytona refused the snapshot request with status {}",
+            response.status().as_u16()
+        )));
+    }
+    decode_bounded_json(response, "Daytona", MAX_DAYTONA_RESPONSE_BYTES)
+        .await
+        .map_err(|_| SnapshotError::Degraded("Daytona returned an unreadable snapshot".into()))
+}
+
+fn snapshot_failure(state: Option<&str>, error_reason: Option<&str>) -> String {
+    let state = state.unwrap_or("unknown");
+    match error_reason {
+        Some(reason) => format!("snapshot is in state '{state}': {reason}"),
+        None => format!("snapshot is in state '{state}'"),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DaytonaNetworkSettings {
@@ -969,6 +1232,11 @@ mod tests {
         base: Arc<OnceLock<String>>,
         requests: Arc<Mutex<Vec<(String, HeaderMap, Value)>>>,
         files: Arc<Mutex<StdHashMap<String, Vec<u8>>>>,
+        /// Snapshot name to the states `GET /snapshots/{name}` reports in
+        /// order; the last one repeats. Absent means the account has none.
+        snapshots: Arc<Mutex<StdHashMap<String, Vec<&'static str>>>>,
+        /// Status `POST /snapshots` answers with instead of registering.
+        create_snapshot_status: Arc<Mutex<Option<StatusCode>>>,
     }
 
     async fn spawn_mock() -> (String, MockState, tokio::task::JoinHandle<()>) {
@@ -976,6 +1244,9 @@ mod tests {
         let app = Router::new()
             .route("/api/sandbox/{id}", get(get_sandbox).delete(delete_sandbox))
             .route("/api/sandbox", post(create_sandbox))
+            .route("/api/snapshots", post(create_snapshot))
+            .route("/api/snapshots/{name}", get(get_snapshot))
+            .route("/api/snapshots/{name}/activate", post(activate_snapshot))
             .route("/toolbox/{id}/process/execute", post(execute))
             .route("/toolbox/{id}/files", get(list_files))
             .route("/toolbox/{id}/files/upload", post(upload_file))
@@ -991,6 +1262,81 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), state, server)
+    }
+
+    /// A provider pointed at the mock, polling snapshots without sleeping.
+    fn mock_provider(base: &str) -> DaytonaExecutionProvider {
+        DaytonaExecutionProvider::with_endpoints(
+            DaytonaCredential::parse("test-daytona-key").unwrap(),
+            Duration::from_secs(5),
+            RemoteSessionPool::default(),
+            DaytonaEndpoints {
+                api_base: format!("{base}/api"),
+                allow_insecure_toolbox: true,
+                snapshot_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .unwrap()
+    }
+
+    async fn create_snapshot(
+        State(state): State<MockState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push(("snapshot-create".into(), headers, body.clone()));
+        if let Some(status) = *state.create_snapshot_status.lock().unwrap() {
+            return (status, Json(json!({"message": "quota exceeded"})));
+        }
+        let name = body["name"].as_str().unwrap().to_owned();
+        // Registration is asynchronous: the image is pulled, then goes active.
+        state
+            .snapshots
+            .lock()
+            .unwrap()
+            .insert(name, vec!["pulling", "active"]);
+        (StatusCode::OK, Json(json!({"state": "pending"})))
+    }
+
+    async fn get_snapshot(
+        State(state): State<MockState>,
+        Path(name): Path<String>,
+        headers: HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        state.requests.lock().unwrap().push((
+            "snapshot-get".into(),
+            headers,
+            json!({"name": name}),
+        ));
+        let mut snapshots = state.snapshots.lock().unwrap();
+        match snapshots.get_mut(&name) {
+            None => (StatusCode::NOT_FOUND, Json(json!({}))),
+            Some(states) => {
+                let current = states[0];
+                if states.len() > 1 {
+                    states.remove(0);
+                }
+                (StatusCode::OK, Json(json!({"state": current})))
+            }
+        }
+    }
+
+    async fn activate_snapshot(
+        State(state): State<MockState>,
+        Path(name): Path<String>,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        state.requests.lock().unwrap().push((
+            "snapshot-activate".into(),
+            headers,
+            json!({"name": name}),
+        ));
+        state.snapshots.lock().unwrap().insert(name, vec!["active"]);
+        Json(json!({"state": "pulling"}))
     }
 
     async fn create_sandbox(
@@ -1176,16 +1522,7 @@ mod tests {
     #[tokio::test]
     async fn daytona_reuses_the_chat_sandbox_and_replays_an_exact_execution() {
         let (base, state, server) = spawn_mock().await;
-        let provider = DaytonaExecutionProvider::with_endpoints(
-            DaytonaCredential::parse("test-daytona-key").unwrap(),
-            Duration::from_secs(5),
-            RemoteSessionPool::default(),
-            DaytonaEndpoints {
-                api_base: format!("{base}/api"),
-                allow_insecure_toolbox: true,
-            },
-        )
-        .unwrap();
+        let provider = mock_provider(&base);
 
         let first = provider.execute(request("call-123")).await.unwrap();
         let second = provider.execute(request("call-456")).await.unwrap();
@@ -1322,16 +1659,7 @@ mod tests {
     #[tokio::test]
     async fn daytona_workspace_lifecycle_round_trips_files_over_the_toolbox_api() {
         let (base, state, server) = spawn_mock().await;
-        let provider = DaytonaExecutionProvider::with_endpoints(
-            DaytonaCredential::parse("test-daytona-key").unwrap(),
-            Duration::from_secs(5),
-            RemoteSessionPool::default(),
-            DaytonaEndpoints {
-                api_base: format!("{base}/api"),
-                allow_insecure_toolbox: true,
-            },
-        )
-        .unwrap();
+        let provider = mock_provider(&base);
         let workspace = ExecutionWorkspaceId::parse("chat-files").unwrap();
 
         assert!(!provider.connect_workspace(&workspace).await.unwrap());
@@ -1396,20 +1724,150 @@ mod tests {
     #[tokio::test]
     async fn daytona_normalizes_the_toolbox_timeout_error() {
         let (base, _state, server) = spawn_mock().await;
-        let provider = DaytonaExecutionProvider::with_endpoints(
-            DaytonaCredential::parse("test-daytona-key").unwrap(),
-            Duration::from_secs(5),
-            RemoteSessionPool::default(),
-            DaytonaEndpoints {
-                api_base: format!("{base}/api"),
-                allow_insecure_toolbox: true,
-            },
-        )
-        .unwrap();
+        let provider = mock_provider(&base);
 
         let response = provider.execute(timeout_request()).await.unwrap();
         assert!(response.timed_out);
         assert_eq!(response.exit_code, None);
+        server.abort();
+    }
+
+    /// The names of the snapshot API calls a run made, in order.
+    fn snapshot_calls(state: &MockState) -> Vec<String> {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind.starts_with("snapshot-"))
+            .map(|(kind, _, _)| kind.clone())
+            .collect()
+    }
+
+    /// The `snapshot` field of every sandbox creation the run made.
+    fn created_from(state: &MockState) -> Vec<Option<String>> {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| kind == "create")
+            .map(|(_, _, body)| body["snapshot"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn daytona_registers_the_documents_snapshot_into_the_account_on_first_use() {
+        let (base, state, server) = spawn_mock().await;
+        let provider = mock_provider(&base);
+
+        // An account that has never seen OpenWave: the snapshot is missing, so
+        // it is registered from the pinned image and waited out.
+        provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-one").unwrap())
+            .await
+            .unwrap();
+        // Every later sandbox reuses the settled determination.
+        provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-two").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_calls(&state),
+            // missing, register, then poll until it stops pulling
+            [
+                "snapshot-get",
+                "snapshot-create",
+                "snapshot-get",
+                "snapshot-get"
+            ]
+        );
+        let request = state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(kind, _, _)| kind == "snapshot-create")
+            .map(|(_, _, body)| body.clone())
+            .unwrap();
+        assert_eq!(request["name"], DOCUMENTS_SNAPSHOT);
+        assert_eq!(request["imageName"], DOCUMENTS_IMAGE);
+        assert!(
+            request["imageName"].as_str().unwrap().contains("@sha256:"),
+            "the registered image must be digest-pinned"
+        );
+        assert_eq!(
+            created_from(&state),
+            [
+                Some(DOCUMENTS_SNAPSHOT.to_owned()),
+                Some(DOCUMENTS_SNAPSHOT.to_owned())
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn daytona_reactivates_the_documents_snapshot_it_let_lapse() {
+        let (base, state, server) = spawn_mock().await;
+        state
+            .snapshots
+            .lock()
+            .unwrap()
+            .insert(DOCUMENTS_SNAPSHOT.into(), vec!["inactive"]);
+        let provider = mock_provider(&base);
+
+        provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-lapsed").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_calls(&state),
+            // found inactive, activated, then polled until active
+            ["snapshot-get", "snapshot-activate", "snapshot-get"]
+        );
+        assert_eq!(created_from(&state), [Some(DOCUMENTS_SNAPSHOT.to_owned())]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn daytona_degrades_to_its_default_snapshot_when_registration_is_refused() {
+        let (base, state, server) = spawn_mock().await;
+        // Quota, an unsupported API, anything short of a rejected credential.
+        *state.create_snapshot_status.lock().unwrap() = Some(StatusCode::PAYMENT_REQUIRED);
+        let provider = mock_provider(&base);
+
+        provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-one").unwrap())
+            .await
+            .unwrap();
+        provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-two").unwrap())
+            .await
+            .unwrap();
+
+        // Sandboxes still come up, on Daytona's default snapshot, and the
+        // refused registration is not retried on every creation.
+        assert_eq!(created_from(&state), [None, None]);
+        assert_eq!(snapshot_calls(&state), ["snapshot-get", "snapshot-create"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_explicit_snapshot_override_skips_auto_registration_entirely() {
+        let (base, state, server) = spawn_mock().await;
+        let provider = mock_provider(&base).with_snapshot("my-own-snapshot");
+
+        provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-override").unwrap())
+            .await
+            .unwrap();
+
+        // No lookup, no registration — and so nothing that could silently
+        // substitute Daytona's default for a name the user chose.
+        assert!(snapshot_calls(&state).is_empty());
+        assert_eq!(created_from(&state), [Some("my-own-snapshot".to_owned())]);
         server.abort();
     }
 }
