@@ -1,3 +1,9 @@
+# Build-script approvals in both formats: `allowBuilds` for pnpm >= 11,
+# `onlyBuiltDependencies` for pnpm 10 (what CI pins). Keep the lists in sync.
+allowBuilds:
+  canvas: true
+  esbuild: true
+  protobufjs: true
 onlyBuiltDependencies:
   - canvas
   - esbuild
