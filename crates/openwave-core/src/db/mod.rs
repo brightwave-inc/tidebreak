@@ -1097,6 +1097,10 @@ impl Store for DbStore {
         ops::agent_run::list_agent_runs(self, chat_id).await
     }
 
+    async fn get_agent_run_result(&self, id: AgentRunId) -> Result<Option<crate::AgentRunResult>> {
+        ops::agent_run::get_agent_run_result(self, id).await
+    }
+
     async fn claim_agent_run(
         &self,
         lease_token: uuid::Uuid,

@@ -16,11 +16,13 @@ function run(
     tier: "background",
     execution_location: "in_process",
     status,
+    task: `Task for ${id}`,
     started_at: null,
     finished_at: null,
     last_error_code: null,
     activity: null,
     produced_output: status === "completed",
+    terminal_text: status === "completed" ? `Result from ${id}` : null,
     created_at: "2026-07-27T12:00:00Z",
     updated_at: "2026-07-27T12:00:00Z",
   };
@@ -53,8 +55,29 @@ describe("BackgroundAgentList", () => {
     expect(markup).toContain("2 background agents");
     expect(markup).toContain("Working in the background");
     expect(markup).toContain("Finished");
+    expect(markup).toContain("Task for run-running");
+    expect(markup).toContain("Result from run-completed");
     expect(markup).not.toContain("Could not finish");
     expect(markup.indexOf("Running")).toBeLessThan(markup.indexOf("Completed"));
+  });
+
+  it("shows a terminal failure error", () => {
+    const failed = run("run-failed", "call-failed", "failed");
+    failed.terminal_text = "Sandbox task failed (provider_error): request timed out";
+    const markup = renderToStaticMarkup(
+      <BackgroundAgentList
+        spawns={[{ callId: "call-failed", status: "completed" }]}
+        runs={[failed]}
+        loading={false}
+        error={null}
+        onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
+      />,
+    );
+
+    expect(markup).toContain("Error:");
+    expect(markup).toContain("request timed out");
   });
 
   it("shows a skeleton as soon as a spawn is visible but not durable yet", () => {

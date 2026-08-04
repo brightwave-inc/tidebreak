@@ -26,8 +26,8 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunId, CallId, Chat, ChatId,
-    ChatTranscriptSnapshot, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, CallId, Chat,
+    ChatId, ChatTranscriptSnapshot, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord,
     ImageRef, JournaledTurnOutcome, NetworkPolicy, OwnerId, PermissionMode, Project, ProjectId,
     ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
@@ -256,6 +256,11 @@ impl ScopedStore {
     /// [`Store::get_agent_run`].
     pub async fn get_agent_run(&self, id: AgentRunId) -> Result<Option<AgentRun>> {
         self.store.get_agent_run(id).await
+    }
+
+    /// [`Store::get_agent_run_result`].
+    pub async fn get_agent_run_result(&self, id: AgentRunId) -> Result<Option<AgentRunResult>> {
+        self.store.get_agent_run_result(id).await
     }
 
     /// [`Store::request_agent_run_cancellation`].

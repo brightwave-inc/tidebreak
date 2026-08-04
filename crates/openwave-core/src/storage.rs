@@ -2265,6 +2265,11 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Fetch the immutable terminal receipt for one agent run, if it exists.
+    async fn get_agent_run_result(&self, _id: AgentRunId) -> Result<Option<AgentRunResult>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Atomically claim the oldest due sandbox run under exact bounded lease
     /// ownership.
     ///

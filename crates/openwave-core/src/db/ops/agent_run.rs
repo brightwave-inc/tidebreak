@@ -2835,6 +2835,18 @@ pub(in crate::db) async fn list_agent_runs(
         .collect()
 }
 
+pub(in crate::db) async fn get_agent_run_result(
+    store: &DbStore,
+    id: AgentRunId,
+) -> Result<Option<AgentRunResult>> {
+    entities::agent_run_result::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(agent_run_result_from_model)
+        .transpose()
+}
+
 fn validate_request(
     id: AgentRunId,
     parent_id: Option<AgentRunId>,

@@ -74,10 +74,14 @@ export type AgentRunId = string;
 /**
  * Renderer-safe state for one agent run.
  *
- * Worker lease tokens, delegated inputs, scheduling budgets, and other
- * executor-facing fields intentionally remain inside the server/store boundary.
+ * Worker lease tokens, scheduling budgets, and other executor-facing fields
+ * intentionally remain inside the server/store boundary.
  */
-export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, status: AgentRunStatus, started_at: string | null, finished_at: string | null, 
+export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, status: AgentRunStatus, 
+/**
+ * The exact bounded task delegated by the visible spawn step.
+ */
+task: string | null, started_at: string | null, finished_at: string | null, 
 /**
  * Stable, bounded classification suitable for renderer display.
  */
@@ -98,7 +102,11 @@ activity: AgentActivitySnapshot | null,
  * deliverable never cross this boundary. A renderer uses it to offer a
  * "view output" affordance and link to the outputs surface.
  */
-produced_output: boolean, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
+produced_output: boolean, 
+/**
+ * Bounded terminal display text returned to the parent, if settled.
+ */
+terminal_text: string | null, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
 
 /**
  * Durable lifecycle of an [`AgentRun`].
