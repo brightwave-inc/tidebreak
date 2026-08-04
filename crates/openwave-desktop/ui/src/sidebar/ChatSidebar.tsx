@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   CircleAlert,
   FolderOpen,
+  LayoutGrid,
   Shapes,
 } from "lucide-react";
 
@@ -91,6 +92,17 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
       <div className="flex flex-col gap-0.5">
         <RecentChatsSection activeChatId={chat.id} />
       </div>
+
+      {/* Apps outlive every conversation, but reaching one from inside a chat
+          used to mean a trip through home. The library opens beside the
+          conversation like the other navigation panels do. */}
+      <SidebarSectionTitle className="mt-4">Library</SidebarSectionTitle>
+      <ChatPanelButton
+        label="Apps"
+        icon={<LayoutGrid />}
+        active={openPanelTypes.has("apps")}
+        onClick={() => openPanel({ type: "apps" })}
+      />
     </SidebarFrame>
   );
 }

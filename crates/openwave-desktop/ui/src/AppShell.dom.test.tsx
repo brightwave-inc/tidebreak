@@ -141,6 +141,10 @@ vi.mock("./FoldersView", () => ({
   FoldersView: () => <div data-testid="folders">folders</div>,
 }));
 
+vi.mock("./apps/AppsPanel", () => ({
+  AppsPanel: () => <div data-testid="apps">apps</div>,
+}));
+
 // The settings rail (Back to app, section links) is the real thing here; only
 // the section body is stubbed. Providers is where a bare /settings lands, so
 // stubbing it is enough to stand in for whichever section the outlet renders.
@@ -349,6 +353,14 @@ describe("app shell", () => {
     expect(screen.getByTestId("transcript")).toBeInTheDocument();
     await waitFor(() =>
       expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
+    );
+
+    // The Library entry reaches the app catalog without leaving the chat.
+    await user.click(screen.getByRole("button", { name: "Apps" }));
+
+    expect(await screen.findByTestId("apps")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ left: "apps", right: "chat" }),
     );
   });
 
