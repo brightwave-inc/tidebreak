@@ -23,14 +23,13 @@ import {
   type ImageAttachment,
   type PickedImage,
 } from "./ImageAttachments";
-import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
+import { ModelMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { AppsPanel } from "./apps/AppsPanel";
 import { PanelLayout } from "./panel/PanelLayout";
 import type { LayoutState, PanelContent } from "./panel/panelTypes";
 import { useLayoutState } from "./panel/usePanelNav";
-import { NetworkPolicyMenu } from "./NetworkPolicyMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { HomeSidebar } from "./sidebar/HomeSidebar";
@@ -342,34 +341,32 @@ export function HomeRoute() {
             steerPending={false}
             steerStatus={null}
             modelMenu={
-              <>
-                <ModelMenu
-                  models={models}
-                  value={effective.model}
-                  defaultKey={defaultModelKey}
-                  disabled={creatingChat}
-                  onChange={newChat.setModel}
-                />
-                {efforts.length > 0 && (
-                  <ReasoningEffortMenu
-                    levels={efforts}
-                    value={effective.reasoningEffort}
-                    disabled={creatingChat}
-                    onChange={newChat.setReasoningEffort}
-                  />
-                )}
-                <PermissionModeMenu
-                  value={effective.permissionMode}
-                  disabled={creatingChat}
-                  onChange={newChat.setPermissionMode}
-                />
-                <NetworkPolicyMenu
-                  value={effective.networkPolicy}
-                  disabled={creatingChat}
-                  onChange={newChat.setNetworkPolicy}
-                />
-              </>
+              <ModelMenu
+                models={models}
+                value={effective.model}
+                defaultKey={defaultModelKey}
+                disabled={creatingChat}
+                onChange={newChat.setModel}
+              />
             }
+            permissionMenu={
+              <PermissionModeMenu
+                value={effective.permissionMode}
+                disabled={creatingChat}
+                onChange={newChat.setPermissionMode}
+              />
+            }
+            reasoning={{
+              levels: efforts,
+              value: effective.reasoningEffort,
+              disabled: creatingChat,
+              onChange: newChat.setReasoningEffort,
+            }}
+            network={{
+              value: effective.networkPolicy,
+              disabled: creatingChat,
+              onChange: newChat.setNetworkPolicy,
+            }}
             onDraftChange={setDraft}
             onSend={startChat}
             onSteer={async () => {}}

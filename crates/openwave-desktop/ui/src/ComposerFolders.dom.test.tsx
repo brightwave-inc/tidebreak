@@ -61,7 +61,8 @@ it("attaches and confirms revoking a folder from the ordinary chat composer", as
     />,
   );
 
-  await user.click(screen.getByRole("button", { name: "Attach folder" }));
+  await user.click(screen.getByRole("button", { name: "Tools" }));
+  await user.click(screen.getByRole("menuitem", { name: "Attach folder" }));
   expect(onAttach).toHaveBeenCalledOnce();
   expect(screen.getByText("Read and write")).toBeInTheDocument();
 

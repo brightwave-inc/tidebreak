@@ -14,6 +14,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
@@ -330,17 +333,17 @@ export function reasoningEffortOptions(
 }
 
 /**
- * Per-chat reasoning-effort selector, shown next to the model picker. `null`
+ * Per-chat reasoning effort, as a submenu of the composer's tools menu. `null`
  * means "use the provider default".
  *
  * `levels` is the selected model's accepted range, and the menu offers exactly
- * those, since no model takes the whole scale. The caller hides the control
+ * those, since no model takes the whole scale. The caller omits the submenu
  * entirely when that range is empty. A level already stored on the chat still
- * labels the trigger even when the current model does not accept it — the chat
+ * labels the row even when the current model does not accept it — the chat
  * keeps its choice, and the server degrades it to the closest level the model
  * does take rather than sending one the model would reject.
  */
-export function ReasoningEffortMenu({
+export function ReasoningEffortSubMenu({
   levels,
   value,
   disabled,
@@ -354,74 +357,47 @@ export function ReasoningEffortMenu({
   const options = reasoningEffortOptions(levels);
   const isDefault = value === null;
   const label = isDefault ? "Default" : REASONING_EFFORT_LABELS[value];
-  const [open, setOpen] = useState(false);
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          className="h-8 gap-1.5"
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger disabled={disabled}>
+        <Gauge className="size-4 text-muted-foreground" />
+        <span>Reasoning</span>
+        <span className="text-muted-foreground flex-1 text-right text-xs">
+          {label}
+        </span>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-48">
+        <DropdownMenuItem
           disabled={disabled}
-          aria-label={`Reasoning effort: ${label}`}
+          onSelect={() => {
+            if (isDefault) return;
+            void onChange(null);
+          }}
+          className="flex items-center gap-2"
         >
-          <Gauge className="size-4 text-muted-foreground" />
-          <span className="truncate">{label}</span>
-          <ChevronDown className="size-4 opacity-50" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        side="top"
-        className="model-menu-content w-80 overflow-y-auto p-0"
-      >
-        <div className="flex flex-col gap-1 p-1">
-          <DefaultRow
-            isDefault={isDefault}
-            tooltip={
-              isDefault
-                ? "The provider decides how hard the model thinks."
-                : "Override active. Toggle Default to let the provider decide."
-            }
-            disabled={Boolean(disabled)}
-            onToggle={(useDefault) => {
-              if (useDefault) {
-                void onChange(null);
-                setOpen(false);
-                return;
-              }
-              const first = options[0];
-              if (first) {
-                void onChange(first.value);
-                setOpen(false);
-              }
-            }}
-          />
-
-          <DropdownMenuSeparator />
-
-          {options.map((option) => {
-            const selected = !isDefault && value === option.value;
-            return (
-              <DropdownMenuItem
-                key={option.value}
-                disabled={disabled}
-                onSelect={() => {
-                  if (selected) return;
-                  void onChange(option.value);
-                }}
-                className={cn(
-                  "flex items-center gap-2",
-                  isDefault && "opacity-60",
-                )}
-              >
-                <span className="text-sm">{option.label}</span>
-                {selected && <Check className="ml-auto size-4" />}
-              </DropdownMenuItem>
-            );
-          })}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          <span className="text-sm">Default</span>
+          {isDefault && <Check className="ml-auto size-4" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {options.map((option) => {
+          const selected = !isDefault && value === option.value;
+          return (
+            <DropdownMenuItem
+              key={option.value}
+              disabled={disabled}
+              onSelect={() => {
+                if (selected) return;
+                void onChange(option.value);
+              }}
+              className="flex items-center gap-2"
+            >
+              <span className="text-sm">{option.label}</span>
+              {selected && <Check className="ml-auto size-4" />}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   );
 }
 
