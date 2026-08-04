@@ -496,7 +496,7 @@ async fn a_binary_workspace_artifact_is_accepted_published_and_attributed_to_its
 
 #[cfg(feature = "tools")]
 #[tokio::test]
-async fn a_background_run_result_auto_merges_into_a_revertible_text_output() {
+async fn a_background_run_result_becomes_a_revertible_text_output() {
     use crate::deliverable::output_revision_relative_path;
     use crate::deliverable_acceptance::{merge_agent_run_result, AgentResultOutputMerge};
     use crate::id::AgentRunId;
@@ -545,7 +545,7 @@ async fn a_background_run_result_auto_merges_into_a_revertible_text_output() {
     assert_eq!(retried, record);
     assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
 
-    // The auto-merge is safe because it is revertible: retracting it hides the
+    // Recording it is safe because it is revertible: retracting it hides the
     // output while keeping its revision, and restoring brings it back.
     assert!(store.delete_output(record.id, at(30)).await.unwrap());
     assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());

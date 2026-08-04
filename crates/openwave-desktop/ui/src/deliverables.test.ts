@@ -49,7 +49,7 @@ describe("deliverable renderer projections", () => {
     });
   });
 
-  it("carries an auto-merged output's producing run and rejects a malformed one", () => {
+  it("carries a submitted output's producing run and rejects a malformed one", () => {
     const runId = "ce116263-15b5-5df2-b472-269378e9da58";
     const [summary] = parseDeliverablesCatalog({
       deliverables: [

@@ -124,7 +124,7 @@ pub async fn accept_workspace_artifact(
     }
 }
 
-/// A completed background agent run's text result, ready to auto-merge into the
+/// A completed background agent run's text result, ready to record in the
 /// conversation's output record.
 ///
 /// The merge is performed by the host at result-commit time; the model that
@@ -148,8 +148,7 @@ pub struct AgentResultOutputMerge {
     pub created_at: DateTime<Utc>,
 }
 
-/// Auto-merge a completed background run's text result into a conversation
-/// output.
+/// Record a completed background run's text result as a conversation output.
 ///
 /// The bytes are published once at the derived revision path under the exact
 /// conversation's private scratch, then recorded as a text output whose producer

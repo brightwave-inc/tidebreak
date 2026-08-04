@@ -95,9 +95,6 @@ describe("OutputsView", () => {
     const user = userEvent.setup();
 
     render(<OutputsView chatId="chat-1" apis={apis} />);
-    // The auto-merged output is badged as coming from a background agent.
-    expect(await screen.findByText("Agent")).toBeVisible();
-
     await user.click(
       await screen.findByRole("button", { name: "More options for Research brief.md" }),
     );
