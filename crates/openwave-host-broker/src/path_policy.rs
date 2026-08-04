@@ -657,6 +657,15 @@ mod tests {
             Path::new(r"\\?\C:\Windows\System32")
         ));
         assert!(is_within(
+            Path::new(r"\\server\share\projects"),
+            Path::new(r"\\?\UNC\server\share\projects\app")
+        ));
+        // A whole network share carries no named folder, so it is a filesystem
+        // root like `C:\` or `/` — too broad to register, and it contains
+        // nothing for policy purposes. The share-relative root above is the
+        // shallowest UNC path containment is defined for.
+        assert!(is_filesystem_root(Path::new(r"\\server\share")));
+        assert!(!is_within(
             Path::new(r"\\server\share"),
             Path::new(r"\\?\UNC\server\share\folder")
         ));
