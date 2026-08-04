@@ -1231,7 +1231,7 @@ mod tests {
                 ProviderEvent::Failed {
                     error: ProviderErrorInfo {
                         kind: "overloaded".into(),
-                        message: "anthropic returned 500 (overloaded_error)".into(),
+                        message: "anthropic returned 500 (overloaded_error): Overloaded".into(),
                     },
                 },
             ]

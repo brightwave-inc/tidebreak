@@ -888,7 +888,7 @@ mod tests {
                 ProviderEvent::Failed {
                     error: ProviderErrorInfo {
                         kind: "overloaded".into(),
-                        message: "openai-compat returned 500 (server_error)".into(),
+                        message: "openai-compat returned 500 (server_error): upstream is overloaded".into(),
                     },
                 },
             ]
