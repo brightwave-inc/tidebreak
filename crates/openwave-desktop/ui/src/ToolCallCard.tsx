@@ -241,6 +241,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Command complete",
     settled: "Ran a command",
   },
+  create_app: {
+    label: "Create an app",
+    active: "Creating an app",
+    complete: "App created",
+    settled: "Created an app",
+  },
 };
 
 const FALLBACK_TOOL: ToolPresentation = {

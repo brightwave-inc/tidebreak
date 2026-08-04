@@ -206,10 +206,13 @@ impl CreateAppTool {
             record.name, record.id,
         ))
         .with_entries(vec![ResultEntry::new(
-            ResultEntryKind::Output,
+            ResultEntryKind::App,
             record.name.clone(),
         )
-        .with_meta(format!("revision {ordinal}"))])
+        .with_meta(format!("revision {ordinal}"))
+        // The row's navigation target: the renderer opens the app in the
+        // library panel by this id and never prints it.
+        .with_target_id(record.id.to_string())])
     }
 }
 
@@ -697,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_projection_carries_the_name_and_ordinal_and_never_the_bundle() {
+    async fn the_projection_carries_the_name_ordinal_and_app_id_and_never_the_bundle() {
         let fixture = fixture().await;
         let (_, ctx) = fixture.recorded_call().await;
         let output = fixture
@@ -709,12 +712,24 @@ mod tests {
 
         let preview = ToolResultPreview::build(crate::local_app::CREATE_APP_TOOL, &output)
             .expect("create_app projects an entries card");
+        let ToolResultPreview::Entries { entries, .. } = &preview else {
+            panic!("create_app projects entries, not {preview:?}");
+        };
+        let [row] = entries.as_slice() else {
+            panic!("one app row per call");
+        };
+        assert_eq!(row.kind, ResultEntryKind::App);
+        assert_eq!(row.label, "Sentry triage");
+        assert_eq!(row.meta.as_deref(), Some("revision 1"));
+        // The app id is the row's navigation target, so the card can open the
+        // app it just made.
+        assert_eq!(
+            row.target_id.as_deref(),
+            Some(AppId::for_call(ctx.call_id.unwrap()).to_string().as_str())
+        );
+        // Renderer-safe: an id and a name, never the bundle or the bindings.
         let json = serde_json::to_string(&preview).unwrap();
-        assert!(json.contains("Sentry triage"));
-        assert!(json.contains("revision 1"));
-        // Renderer-safe: no bundle markup, no manifest bindings, no ids.
         assert!(!json.contains("doctype"));
         assert!(!json.contains("mcp__sentry__list_issues"));
-        assert!(!json.contains(&AppId::for_call(ctx.call_id.unwrap()).to_string()));
     }
 }

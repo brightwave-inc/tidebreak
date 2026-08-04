@@ -3,6 +3,7 @@ import {
   FileOutput,
   Folder,
   Globe,
+  LayoutGrid,
   Quote,
   BookOpenText as Source,
   X,
@@ -38,6 +39,7 @@ const ENTRY_ICONS: Record<ResultEntryKind, LucideIcon> = {
   passage: Quote,
   link: Globe,
   output: FileOutput,
+  app: LayoutGrid,
 };
 
 /**
@@ -109,24 +111,22 @@ export function ToolEntriesList({ name, result }: ToolEntriesListProps) {
   );
 }
 
+/** The noun a kind counts as, where it is anything more specific than "item". */
+const ENTRY_NOUNS: Readonly<Partial<Record<ResultEntryKind, string>>> = {
+  source: "source",
+  passage: "passage",
+  file: "file",
+  folder: "folder",
+  output: "output",
+  app: "app",
+  link: "result",
+};
+
 /** The noun the count line counts, by what the rows uniformly are. */
 function listNoun(entries: ResultEntry[], total: number): string {
   const kinds = new Set(entries.map((entry) => entry.kind));
   const kind = kinds.size === 1 ? [...kinds][0] : undefined;
-  const noun =
-    kind === "source"
-      ? "source"
-      : kind === "passage"
-        ? "passage"
-        : kind === "file"
-          ? "file"
-          : kind === "folder"
-            ? "folder"
-            : kind === "output"
-              ? "output"
-              : kind === "link"
-                ? "result"
-                : "item";
+  const noun = (kind === undefined ? undefined : ENTRY_NOUNS[kind]) ?? "item";
   return total === 1 ? noun : `${noun}s`;
 }
 

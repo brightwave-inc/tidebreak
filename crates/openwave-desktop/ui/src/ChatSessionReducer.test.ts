@@ -296,7 +296,7 @@ describe("published outputs", () => {
           detail: null,
           meta: "v2 · updated",
           media_type: null,
-          output_id: null,
+          target_id: null,
         },
       ],
     };
@@ -333,7 +333,7 @@ describe("published outputs", () => {
               meta: "v1 · created",
               media_type:
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-              output_id: null,
+              target_id: null,
             },
           ],
         },
