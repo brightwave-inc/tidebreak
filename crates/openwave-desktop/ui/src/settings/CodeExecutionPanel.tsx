@@ -184,17 +184,18 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
             title="Active provider"
             description="Agents execute in this one provider. The others stay configured and idle."
           >
+            <ProviderAvailabilityDisclosure rows={config.providers} />
+
             <ActiveProviderField
               value={provider}
               disabled={working}
               onChange={setProvider}
-              options={[
-                { kind: LOCAL_PROVIDER, label: "Local native sandbox" },
-                ...credentials.map((credential) => ({
-                  kind: credential.provider,
-                  label: `${codeExecutionProviderLabel(credential.provider)} cloud sandbox`,
-                })),
-              ]}
+              options={config.providers.map((row) => ({
+                kind: row.provider,
+                label: row.available
+                  ? PROVIDER_SANDBOX_LABEL[row.provider]
+                  : `${PROVIDER_SANDBOX_LABEL[row.provider]} — unavailable`,
+              }))}
             />
 
             <TimeoutSecondsField
@@ -274,7 +275,7 @@ const DETACHED_DENIAL_SENTENCES: Record<DetachedAdmissionDenialReason, string> =
       "The run would carry third-party credentials without an externally enforced network boundary keeping them from leaving.",
   };
 
-const DETACHED_PROVIDER_LABEL: Record<
+const PROVIDER_SANDBOX_LABEL: Record<
   DetachedAdmissionRow["provider"],
   string
 > = {
@@ -282,6 +283,56 @@ const DETACHED_PROVIDER_LABEL: Record<
   e2b: "E2B cloud sandbox",
   daytona: "Daytona cloud sandbox",
 };
+
+type ProviderAvailabilityRow = CodeExecutionConfigInfo["providers"][number];
+type ProviderUnavailableReason = NonNullable<
+  ProviderAvailabilityRow["unavailable_reason"]
+>;
+
+/**
+ * Each typed unavailability reason as the sentence that tells the user what
+ * would change it. The codes come from the server's single availability
+ * decision, so this list is exactly the set of states execution can be in —
+ * the panel never guesses why a provider is dark.
+ */
+const PROVIDER_UNAVAILABLE_SENTENCES: Record<ProviderUnavailableReason, string> =
+  {
+    unsupported_platform:
+      "Not supported on this operating system. Use a cloud sandbox instead — it runs the same commands with the same staged files.",
+    missing_sandbox_binary:
+      "This host is missing the sandbox binary local execution needs to confine commands.",
+    missing_credential: "Add an API key above to make this provider usable.",
+  };
+
+/**
+ * Per-provider capability, stated plainly: which providers could run here at
+ * all, and for each one that can't, the reason and the fix. Without this a
+ * host with no usable provider looks identical to a misconfigured one.
+ */
+function ProviderAvailabilityDisclosure({
+  rows,
+}: {
+  rows: CodeExecutionConfigInfo["providers"];
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.map((row) => (
+        <div key={row.provider} className="flex items-start gap-2 text-sm">
+          <Badge variant={row.available ? "success" : "warning"} size="sm">
+            {row.available ? "Available" : "Unavailable"}
+          </Badge>
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">
+              {PROVIDER_SANDBOX_LABEL[row.provider]}
+            </span>
+            {row.unavailable_reason &&
+              ` — ${PROVIDER_UNAVAILABLE_SENTENCES[row.unavailable_reason]}`}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Per-provider detached-admission disclosure: for each execution provider,
@@ -303,7 +354,7 @@ function DetachedAdmissionDisclosure({
               {row.admitted ? "Available" : "Not available"}
             </Badge>
             <span className="font-medium text-foreground">
-              {DETACHED_PROVIDER_LABEL[row.provider]}
+              {PROVIDER_SANDBOX_LABEL[row.provider]}
             </span>
           </div>
           {!row.admitted && (
@@ -401,10 +452,16 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
   description: string;
 } {
   if (!config?.provider) {
+    // With no provider selected, say whether that is a choice or the only
+    // honest state this host has: if nothing here could run, the reasons in
+    // the list below are the whole story.
+    const usable = config?.providers.some((row) => row.available) ?? true;
     return {
       kind: "disabled",
-      label: "Disabled",
-      description: "No code-execution provider is selected.",
+      label: usable ? "Disabled" : "No execution provider configured",
+      description: usable
+        ? "No code-execution provider is selected."
+        : "No execution provider is available on this host. Add a cloud sandbox key below to enable code execution.",
     };
   }
   if (config.available) {
@@ -417,17 +474,14 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
           : "The local native sandbox is available.",
     };
   }
-  if (config.provider !== LOCAL_PROVIDER && !config.has_credential) {
-    return {
-      kind: "not-configured",
-      label: "Not configured",
-      description: `${codeExecutionProviderLabel(config.provider)} is selected but needs an API key.`,
-    };
-  }
   return {
     kind: "not-configured",
     label: "Unavailable",
-    description: "The selected execution provider is unavailable.",
+    description: `${codeExecutionProviderLabel(config.provider)} is selected but cannot run: ${
+      config.unavailable_reason
+        ? PROVIDER_UNAVAILABLE_SENTENCES[config.unavailable_reason]
+        : "the provider reported no reason."
+    }`,
   };
 }
 
