@@ -156,7 +156,8 @@ async fn mcp_settings_roundtrip_disabled_typed_definitions_without_credentials()
                 "name": "private_docs",
                 "command": "/not/started/while/disabled",
                 "args": ["--stdio"],
-                "env": {"LOG_LEVEL": "info"},
+                "env": ["LOG_LEVEL"],
+                "env_values": {"LOG_LEVEL": "value-hunter2-not-a-real-key"},
                 "env_from": ["PATH"],
                 "cwd": "/tmp",
                 "request_timeout_ms": 2500,
@@ -173,6 +174,13 @@ async fn mcp_settings_roundtrip_disabled_typed_definitions_without_credentials()
     let encoded = info.to_string();
     assert!(!encoded.contains("resolved_value"));
     assert!(!encoded.contains("inherit_env"));
+    // The name comes back; the value the request set does not, on the
+    // response or on the fetch after it.
+    assert_eq!(info["servers"][0]["env"], serde_json::json!(["LOG_LEVEL"]));
+    assert!(
+        !encoded.contains("value-hunter2"),
+        "an environment value leaked into renderer JSON"
+    );
     if let Ok(path) = std::env::var("PATH") {
         assert!(
             !encoded.contains(&path),

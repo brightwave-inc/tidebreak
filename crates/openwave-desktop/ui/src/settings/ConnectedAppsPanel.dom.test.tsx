@@ -12,7 +12,7 @@ const docsServer: McpServerInfo = {
   name: "docs",
   command: "/usr/local/bin/docs-mcp",
   args: [],
-  env: {},
+  env: [],
   env_from: [],
   cwd: null,
   url: null,

@@ -1101,6 +1101,7 @@ mod tests {
         Arc::new(crate::mcp_config::McpRuntime::new(
             Arc::new(openwave_core::ToolRegistry::new()),
             store.clone(),
+            Arc::new(MockSecrets::default()),
             runtime.clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ))
@@ -1406,7 +1407,8 @@ mod tests {
             name: "tools".to_string(),
             command: None,
             args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            env: std::collections::BTreeSet::new(),
+            env_values: std::collections::BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
             url: None,
@@ -1595,7 +1597,8 @@ mod tests {
                     name: "tools".to_string(),
                     command: None,
                     args: Vec::new(),
-                    env: std::collections::BTreeMap::new(),
+                    env: std::collections::BTreeSet::new(),
+                    env_values: std::collections::BTreeMap::new(),
                     env_from: Vec::new(),
                     cwd: None,
                     url: None,

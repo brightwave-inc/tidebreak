@@ -262,7 +262,11 @@ export type McpHealth = WireMcpHealth;
 /** Typed stdio process data. Values are argv entries, never shell source. */
 export type McpServerDefinition = WireMcpServerDefinition;
 
-/** Renderer-safe health projection. Resolved `env_from` values are never sent. */
+/**
+ * Renderer-safe health projection. No environment value of any kind is sent:
+ * `env` and `env_from` carry names, and the values behind them live in the
+ * host process or the OS credential store.
+ */
 export type McpServerInfo = WireMcpServerInfo;
 
 export type McpServersInfo = WireMcpServersInfo;

@@ -16,8 +16,9 @@ Each server has:
 - a stable namespace containing ASCII letters, numbers, `_`, or `-`;
 - exactly one transport:
   - **stdio** — an executable, zero or more individual arguments, an optional
-    working directory, optional literal **non-secret** environment values, and
-    optional `env_from` names selected from the OpenWave host environment; or
+    working directory, optional environment variable *names* (`env`) whose
+    values are held in the OS credential store, and optional `env_from` names
+    selected from the OpenWave host environment; or
   - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
     name selected from the OpenWave host environment; or
   - **gateway** — the slug of a model-gateway MCP endpoint
@@ -30,18 +31,31 @@ Each server has:
 - a request timeout from 1 to 3,600,000 milliseconds; and
 - an enabled switch.
 
-The child environment starts empty. Literal values are ordinary settings and
-are visible in the Settings form. Executables, arguments, working directories,
-and URLs are also ordinary displayed settings, so do not put credentials in
-any of those fields. For a credential, set it in the environment that launches
-OpenWave and enter only its variable name — under **Forward environment names**
-for a stdio server, or **Bearer token variable** for an HTTP server. OpenWave
-resolves that value at the connection boundary; it does not store it in SQLite
-or return it to the renderer. A missing selected name produces a server-specific
-error containing the name, not a value. Child stderr is discarded so a server
-cannot copy a forwarded credential into OpenWave's host logs, and HTTP
-diagnostics are fixed strings that never echo the URL, a token, or a response
-body.
+The child environment starts empty, and **no environment value of any kind
+lives in a definition**. Executables, arguments, working directories, and URLs
+are ordinary displayed settings, so do not put credentials in any of those
+fields. The two channels that do carry a value are:
+
+- **Environment** (`env`) — the definition holds the variable names; the values
+  live in the OS credential store, keyed by the server's connected-app record.
+  Settings shows a password field per name that starts blank and keeps the
+  stored value if you leave it blank. The values are never returned to the
+  renderer and never enter SQLite. Deleting a name, or the server, deletes its
+  stored value.
+- **`env_from`** and **Bearer token variable** — a name selected from the
+  environment that launched OpenWave, resolved at the connection boundary and
+  never stored at all.
+
+A missing selected name produces a server-specific error containing the name,
+not a value. Child stderr is discarded so a server cannot copy a forwarded
+credential into OpenWave's host logs, and HTTP diagnostics are fixed strings
+that never echo the URL, a token, or a response body.
+
+Definitions saved before the values moved into the credential store held them
+in cleartext in the connected-app record. They are migrated on first load: the
+values move to the credential store and the record is rewritten with names
+only. Names are all the definition fingerprint ever covered, so existing app
+grants stay valid across the migration.
 
 All mounted names use `mcp__{namespace}__{remote_tool}`. MCP tools are sensitive:
 the existing OpenWave approval gate must approve each call before it crosses
@@ -122,7 +136,8 @@ named by `OPENWAVE_MCP_CONFIG`:
       "command": "/absolute/path/to/documents-mcp",
       "args": ["--stdio"],
       "cwd": "/absolute/path/to/workspace",
-      "env": {
+      "env": ["LOG_LEVEL"],
+      "env_values": {
         "LOG_LEVEL": "info"
       },
       "env_from": ["DOCUMENTS_TOKEN"],
@@ -141,6 +156,9 @@ named by `OPENWAVE_MCP_CONFIG`:
 ```
 
 The schema is closed, including at the API boundary. Broad process-environment
-inheritance is not supported. When there is no saved desktop configuration, a
-malformed bootstrap file, missing selected environment name, or failed enabled
-server makes startup fail rather than silently narrowing the advertised tools.
+inheritance is not supported. `env_values` is an input only — it is written to
+the credential store and never appears in a response or a saved record, and a
+bootstrap file's values land in the same place as any other. When there is no
+saved desktop configuration, a malformed bootstrap file, missing selected
+environment name, or failed enabled server makes startup fail rather than
+silently narrowing the advertised tools.
