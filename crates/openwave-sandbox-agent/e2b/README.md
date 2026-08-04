@@ -62,16 +62,23 @@ document skills install their Python dependencies at run time.
 ## Bumping the version
 
 The image tag, the digest in `e2b.Dockerfile`, the alias in `e2b.toml`, and
-`E2B_TEMPLATE` in `e2b.rs` move together:
+`E2B_TEMPLATE` in `e2b.rs` move together — but not all at the same moment. The
+two files in this directory are the template *definition*, so the publish
+workflow's `pin` job rewrites them automatically. `E2B_TEMPLATE` is the client
+pin, and it moves by hand in step 3 below, because until the template is
+actually published from the OpenWave account the new alias does not resolve for
+anyone and every E2B user falls back to `code-interpreter-v1`.
 
 1. Publish the new sandbox image (`.github/workflows/publish-sandbox-image.yml`
-   runs on version tags) and take the `documents` manifest-list digest.
-2. Update `e2b.Dockerfile`'s digest and the comment recording its tag.
-3. Rename the alias in `e2b.toml` and `E2B_TEMPLATE` to match the new version,
-   e.g. `openwave-documents-v0-27-0`.
-4. Build and publish the new alias as above. Leave the previous alias published
+   runs on version tags). Its `pin` job opens a PR that updates
+   `e2b.Dockerfile`'s digest and tag comment and renames the alias in
+   `e2b.toml` to match the new version, e.g. `openwave-documents-v0-27-0`.
+   Merge it.
+2. Build and publish the new alias as above. Leave the previous alias published
    until clients pinned to it are out of circulation — unpublishing it drops
    those users to the degraded fallback.
+3. Only once the new alias is live, update `E2B_TEMPLATE` in `e2b.rs` to it and
+   ship that.
 
 ## Notes on the template
 

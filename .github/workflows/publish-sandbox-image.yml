@@ -48,9 +48,14 @@ run-name: >-
 #
 # The final manifest-list digests land in the run summary, and the `pin` job
 # proposes the follow-up PR that records the documents digest as the local
-# backend's verified pin (see `sandbox_docker` in openwave-server) and as the
+# backend's verified pin (see `sandbox_docker` in openwave-server), as the
 # ref the Daytona provider registers as a snapshot (see `daytona` in
-# openwave-code-execution).
+# openwave-code-execution), and as the base of the E2B template definition
+# (see `crates/openwave-sandbox-agent/e2b/`, whose alias is version-suffixed
+# and so moves with the tag too). The one pin the job deliberately leaves
+# alone is `E2B_TEMPLATE` in `e2b.rs`: that alias only exists once a human has
+# published the template from the OpenWave E2B account, so it moves in that
+# manual step, not here.
 #
 # Publishing uses the workflow's own GITHUB_TOKEN; no repository secret is
 # consumed. First-time note: a package created by this workflow is private by
@@ -437,6 +442,40 @@ jobs:
                   sys.exit(f"expected exactly one match for {pattern}, found {replaced}")
           with open(path, "w") as handle:
               handle.write(source)
+
+          # E2B builds a template from this Dockerfile rather than pulling the
+          # ref, so the template definition carries its own copy of the digest
+          # and of the version-suffixed alias. Both move with the pin above.
+          # `E2B_TEMPLATE` in `crates/openwave-code-execution/src/e2b.rs`
+          # deliberately does not: that alias only exists once a human has
+          # published the template from the OpenWave E2B account, and bumping
+          # the client ahead of the publish would drop every user to the
+          # code-interpreter fallback until it happens.
+          repository = os.environ["DOCUMENTS_REPOSITORY"]
+          alias = f"openwave-documents-{os.environ['IMAGE_TAG']}".replace(".", "-")
+          template_pins = {
+              "crates/openwave-sandbox-agent/e2b/e2b.Dockerfile": {
+                  rf'(?m)^(# {re.escape(repository)}:)[^\n]*()$':
+                      f"{os.environ['IMAGE_TAG']}.",
+                  rf'(?m)^(FROM {re.escape(repository)}@)sha256:[0-9a-f]{{64}}()$':
+                      digest,
+              },
+              "crates/openwave-sandbox-agent/e2b/e2b.toml": {
+                  r'(?m)^(template_id = ")[^"]*(")$': alias,
+                  r'(?m)^(template_name = ")[^"]*(")$': alias,
+              },
+          }
+          for path, pins in template_pins.items():
+              with open(path) as handle:
+                  source = handle.read()
+              for pattern, value in pins.items():
+                  source, replaced = re.subn(
+                      pattern, lambda m: m.group(1) + value + m.group(2), source
+                  )
+                  if replaced != 1:
+                      sys.exit(f"expected exactly one match for {pattern} in {path}, found {replaced}")
+              with open(path, "w") as handle:
+                  handle.write(source)
           EOF
 
       - name: Open or update the pin PR
@@ -455,8 +494,17 @@ jobs:
           body_file="$(mktemp)"
           cat > "$body_file" <<EOF
           Automated follow-up from a sandbox image publish: records the new documents
-          image digest as the local backend's verified pin, and as the ref the Daytona
-          provider registers as a snapshot.
+          image digest as the local backend's verified pin, as the ref the Daytona
+          provider registers as a snapshot, and as the base of the E2B template
+          definition under \`crates/openwave-sandbox-agent/e2b/\` (Dockerfile digest
+          plus the version-suffixed alias in \`e2b.toml\`).
+
+          \`E2B_TEMPLATE\` in \`crates/openwave-code-execution/src/e2b.rs\` is
+          deliberately left alone. That alias exists only once someone publishes the
+          template from the OpenWave E2B account; moving the client pin before that
+          happens points every E2B user at a template that cannot be resolved and drops
+          them to the \`code-interpreter-v1\` fallback. Bump it by hand as part of the
+          publish — see \`crates/openwave-sandbox-agent/e2b/README.md\`.
 
           - Image: \`$DOCUMENTS_REPOSITORY:$IMAGE_TAG\`
           - Digest: \`$DOCUMENTS_DIGEST\`
