@@ -75,14 +75,14 @@ describe("a tool result that cannot render", () => {
         callId: "c2",
         name: "exec",
         status: "waiting_approval",
-        preview: { tool: "exec", command: "cargo", args: ["build"], cwd: "." },
+        preview: { tool: "exec", command: "cargo", args: ["build"], cwd: ".", files: [] },
       },
       {
         id: "a1",
         role: "approval",
         callId: "c2",
         summary: "Allow OpenWave to run a command?",
-        preview: { tool: "exec", command: "cargo", args: ["build"], cwd: "." },
+        preview: { tool: "exec", command: "cargo", args: ["build"], cwd: ".", files: [] },
         canApprove: true,
         canRemember: true,
       },
@@ -153,7 +153,7 @@ describe("an entry that cannot be read while the cards are assembled", () => {
       role: "approval",
       callId: "c1",
       summary: "Allow OpenWave to run a command?",
-      preview: { tool: "exec", command: "cargo", args: ["build"], cwd: "." },
+      preview: { tool: "exec", command: "cargo", args: ["build"], cwd: ".", files: [] },
       canRemember: true,
       get canApprove(): never {
         throw new Error("unreadable approval projection");
@@ -168,7 +168,7 @@ describe("an entry that cannot be read while the cards are assembled", () => {
         callId: "c2",
         name: "exec",
         status: "completed",
-        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: "." },
+        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: ".", files: [] },
       },
     ]);
 

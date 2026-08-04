@@ -310,6 +310,7 @@ describe("pending approval recovery", () => {
           command: "cargo",
           args: ["test", "--workspace"],
           cwd: "checkout",
+          files: [],
         },
       })?.preview,
     ).toEqual({
@@ -317,6 +318,7 @@ describe("pending approval recovery", () => {
       command: "cargo",
       args: ["test", "--workspace"],
       cwd: "checkout",
+      files: [],
     });
   });
 
@@ -327,10 +329,10 @@ describe("pending approval recovery", () => {
       approval: "exec_may_run_networked_command",
     };
     for (const preview of [
-      { tool: "shell", command: "rm", args: [], cwd: "." },
-      { tool: "exec", command: "", args: [], cwd: "." },
-      { tool: "exec", command: "cargo", args: "test", cwd: "." },
-      { tool: "exec", command: "cargo", args: [{ hidden: true }], cwd: "." },
+      { tool: "shell", command: "rm", args: [], cwd: ".", files: [] },
+      { tool: "exec", command: "", args: [], cwd: ".", files: [] },
+      { tool: "exec", command: "cargo", args: "test", cwd: ".", files: [] },
+      { tool: "exec", command: "cargo", args: [{ hidden: true }], cwd: ".", files: [] },
       { tool: "exec", command: "cargo", args: [] },
       "cargo test",
     ]) {

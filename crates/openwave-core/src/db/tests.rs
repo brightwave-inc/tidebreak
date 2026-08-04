@@ -9118,6 +9118,7 @@ async fn recovered_exec_approval_still_names_the_command_it_will_run() {
             command: "cargo".into(),
             args: vec!["build".into()],
             cwd: "checkout".into(),
+            files: Vec::new(),
         })
     );
 }

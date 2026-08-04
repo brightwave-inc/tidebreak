@@ -1220,6 +1220,7 @@ mod standing_grant_tests {
             command: command.into(),
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: ".".into(),
+            files: Vec::new(),
         })
     }
 
@@ -1254,6 +1255,52 @@ mod standing_grant_tests {
         assert!(!grants.covers(chat, None, "exec", kind, &exec_args("rm", &["test"])));
         // An action the renderer could not describe was never the one granted.
         assert!(!grants.covers(chat, None, "exec", kind, &no_args()));
+    }
+
+    /// Staging is part of the action, and a grant retained from before the
+    /// projection carried it must not stretch over calls that stage files.
+    #[test]
+    fn a_grant_that_named_no_staged_files_does_not_cover_a_call_that_stages_them() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        // How a grant stored before `files` existed reads back: the field is
+        // absent from the persisted scope, so it defaults rather than failing
+        // the row's load.
+        let stored = serde_json::json!({
+            "scope": "exact_action",
+            "tool": "exec",
+            "command": "cat",
+            "args": ["notes.txt"],
+            "cwd": "."
+        });
+        let scope: GrantScope = serde_json::from_value(stored).expect("a retained scope loads");
+        grants.record(
+            StandingGrant::scoped(
+                GrantLevel::Chat { chat_id: chat },
+                "exec",
+                kind,
+                scope,
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        // The call it was given for still runs unprompted.
+        assert!(grants.covers(chat, None, "exec", kind, &exec_args("cat", &["notes.txt"])));
+        // The same command handed a document is a different action, and the
+        // retained grant does not reach it.
+        assert!(!grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &serde_json::json!({
+                "command": "cat",
+                "args": ["notes.txt"],
+                "files": ["documents/salaries.csv"]
+            })
+        ));
     }
 
     #[test]
@@ -1349,6 +1396,7 @@ mod standing_grant_tests {
                     command: "npm".into(),
                     args: vec!["install".into()],
                     cwd: "./sandbox".into(),
+                    files: Vec::new(),
                 }),
                 Utc::now(),
             )

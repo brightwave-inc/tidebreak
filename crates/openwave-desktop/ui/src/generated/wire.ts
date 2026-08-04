@@ -1575,7 +1575,24 @@ args: Array<string>,
  * Working directory relative to the chat's private scratch, never a
  * host path.
  */
-cwd: string, } | { "tool": "search", query: string, } | { "tool": "web_search", query: string, 
+cwd: string, 
+/**
+ * Scratch-relative files and directories staged into the sandbox
+ * before the command runs, empty when the model staged none.
+ *
+ * Part of the action, not incidental setup: this list is what the
+ * command can read, so a person approving `python3 analyze.py` is
+ * entitled to see which of their files it is being handed. Omitting
+ * it also made two calls that stage different documents project
+ * identically, which is what `describes_exactly` promises they do
+ * not.
+ *
+ * `default` because grants and approval rows retained before the
+ * field existed carry no staging list; they read back as staging
+ * nothing, which is narrower than what they were given for and so
+ * sends a call that stages anything back to the person.
+ */
+files: Array<string>, } | { "tool": "search", query: string, } | { "tool": "web_search", query: string, 
 /**
  * Sites the search is confined to, empty when the model named none.
  */

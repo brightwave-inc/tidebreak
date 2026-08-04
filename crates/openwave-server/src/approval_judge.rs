@@ -167,9 +167,20 @@ fn action_description(preview: &ToolActionPreview) -> Option<String> {
             }
             Some(description)
         }
-        ToolActionPreview::Exec { command, args, cwd } => {
+        ToolActionPreview::Exec {
+            command,
+            args,
+            cwd,
+            files,
+        } => {
             let mut description = format!("Run: {}", exec_line(command, args));
             description.push_str(&format!("\nWorking directory: {cwd}"));
+            // What the command is handed is part of what it does. A judge that
+            // sees only the argv would rule the same way on a script run over
+            // nothing and the same script run over the user's documents.
+            if !files.is_empty() {
+                description.push_str(&format!("\nFiles staged for it: {}", files.join(", ")));
+            }
             Some(description)
         }
         // Anything else has no business in front of the judge.
@@ -457,6 +468,7 @@ mod tests {
             command: "cargo".into(),
             args: vec!["test".into()],
             cwd: ".".into(),
+            files: Vec::new(),
         };
         assert!(command_clears_the_floor(&routine));
         assert!(action_description(&routine).is_some());
@@ -467,11 +479,13 @@ mod tests {
                 command: "bash".into(),
                 args: vec!["-c".into(), "id".into()],
                 cwd: ".".into(),
+                files: Vec::new(),
             },
             ToolActionPreview::Exec {
                 command: "rm".into(),
                 args: vec!["-rf".into(), "/".into()],
                 cwd: ".".into(),
+                files: Vec::new(),
             },
         ] {
             assert!(

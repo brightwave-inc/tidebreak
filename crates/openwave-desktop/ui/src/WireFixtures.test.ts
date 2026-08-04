@@ -37,7 +37,13 @@ describe("validators against real server output", () => {
       action: "exec",
       approval: "exec_may_run_networked_command",
       class: "sensitive",
-      preview: { tool: "exec", command: "git", args: ["status"], cwd: "." },
+      preview: {
+        tool: "exec",
+        command: "git",
+        args: ["status"],
+        cwd: ".",
+        files: ["documents/report.pdf"],
+      },
       canApprove: true,
       canRemember: true,
       grantRungs: [
