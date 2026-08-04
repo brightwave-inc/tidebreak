@@ -280,12 +280,17 @@ pub async fn get_gateway_apps(
     Ok(Json(state.gateway.apps().await?))
 }
 
-/// `POST /gateway/models/sync` — refetch the entitled models into the
-/// provider's model set.
+/// `POST /gateway/models/sync` — the settings page's explicit "sync with the
+/// gateway": refetch the entitled models into the provider's model set and
+/// reconcile the entitled MCP endpoint mounts, the same pair the periodic
+/// sync tick performs. An explicit click reports failure honestly rather
+/// than degrading quietly the way the background tick does — the user asked
+/// for a sync and deserves to know it didn't complete.
 pub async fn post_gateway_models_sync(
     State(state): State<AppState>,
 ) -> Result<Json<crate::gateway_runtime::GatewayStatus>, ServerError> {
     state.gateway.sync_models().await?;
+    state.gateway.reconcile_endpoint_mounts(&state.mcp).await?;
     Ok(Json(state.gateway.status().await?))
 }
 

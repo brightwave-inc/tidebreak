@@ -21,7 +21,8 @@ const SIGN_IN_POLL_MS = 2_000;
  * management, never from settings — there is no URL field and no enable
  * toggle in any state. Unmanaged profiles render a signpost at that flow;
  * managed profiles get the slim identity panel: who is signed in, the
- * read-only gateway origin from policy, sign in/out, and a models refresh.
+ * read-only gateway origin from policy, sign in/out, and an explicit
+ * gateway sync (models and MCP endpoint mounts together).
  */
 export function GatewayPanel({
   client,
@@ -222,12 +223,12 @@ function ManagedGatewayPanel({
                   void run(async () => {
                     await client.syncGatewayModels();
                     onChanged();
-                    toast.success("Refreshed entitled models");
+                    toast.success("Synced models and MCP endpoints from the gateway");
                   })
                 }
               >
                 <RefreshCw size={14} />
-                Refresh models
+                Sync with gateway
               </Button>
               <Button
                 type="button"

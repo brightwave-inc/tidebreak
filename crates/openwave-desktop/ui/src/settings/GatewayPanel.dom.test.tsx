@@ -131,7 +131,7 @@ describe("GatewayPanel", () => {
     expect(screen.getByText(/2 models entitled/)).toBeInTheDocument();
     expect(screen.getByText(/Installation install-1/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Refresh models/ }));
+    await user.click(screen.getByRole("button", { name: /Sync with gateway/ }));
     await waitFor(() => expect(client.syncGatewayModels).toHaveBeenCalled());
     expect(onChanged).toHaveBeenCalled();
 
