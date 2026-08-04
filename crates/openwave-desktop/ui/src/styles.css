@@ -484,28 +484,39 @@ body {
 }
 
 /* Scroll-edge fades: soften whichever edges have more content beyond them, so
-   the transcript reads as continuing past the frame rather than clipped. */
-.messages.is-faded-top {
-  mask-image: linear-gradient(180deg, transparent, #000 2rem, #000);
+   the transcript reads as continuing past the frame rather than clipped.
+   Painted as overlays on the wrapper rather than a mask-image on `.messages`:
+   masking the composited scroll layer is what WKWebView occasionally failed
+   to repaint after the mount-time catch-up scroll, leaving a fully laid-out
+   transcript blank until the next scroll input. The card behind the
+   transcript is a solid `--background`, so fading to that color is
+   indistinguishable from fading to transparent. */
+.message-view::before,
+.message-view::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2rem;
+  pointer-events: none;
+  opacity: 0;
 }
 
-.messages.is-faded-bottom {
-  mask-image: linear-gradient(
-    180deg,
-    #000,
-    #000 calc(100% - 2rem),
-    transparent
-  );
+.message-view::before {
+  top: 0;
+  background: linear-gradient(180deg, var(--background), transparent);
 }
 
-.messages.is-faded-both {
-  mask-image: linear-gradient(
-    180deg,
-    transparent,
-    #000 2rem,
-    #000 calc(100% - 2rem),
-    transparent
-  );
+.message-view::after {
+  bottom: 0;
+  background: linear-gradient(0deg, var(--background), transparent);
+}
+
+.message-view.is-faded-top::before,
+.message-view.is-faded-both::before,
+.message-view.is-faded-bottom::after,
+.message-view.is-faded-both::after {
+  opacity: 1;
 }
 
 .message {

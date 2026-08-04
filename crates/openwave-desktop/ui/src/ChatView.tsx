@@ -126,7 +126,13 @@ export function ChatView({
   const scrollObserverRef = useRef<ResizeObserver | null>(null);
   const contentObserverRef = useRef<ResizeObserver | null>(null);
   const [scrolledAway, setScrolledAway] = useState(false);
-  const [maskClass, setMaskClass] = useState<string | null>(null);
+  const [fadeClass, setFadeClass] = useState<string | null>(null);
+  // False until the transcript has been scrolled to its resting place once.
+  // The first follow *places* the reader at the latest message, so it must not
+  // animate: WKWebView occasionally fails to repaint the freshly created
+  // scroll layer when a long smooth scroll runs during mount, leaving a
+  // laid-out transcript blank until the next scroll input.
+  const placedRef = useRef(false);
   // True once the reader has sent in this mounted session. Gates the turn pin so
   // a freshly loaded history reads normally, then the just-sent turn is held tall
   // enough to land near the top of the viewport.
@@ -140,7 +146,7 @@ export function ChatView({
     const fromTop = scroll.scrollTop > 0;
     const fromBottom =
       scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 1;
-    setMaskClass(
+    setFadeClass(
       fromTop && fromBottom
         ? "is-faded-both"
         : fromTop
@@ -231,8 +237,10 @@ export function ChatView({
     // Scrolling a transcript that has been expanded away does nothing, so this
     // also runs on the way back to put a following reader at the latest message.
     if (!transcriptVisible) return;
+    const placing = !placedRef.current;
+    if (messages.length > 0) placedRef.current = true;
     if (followsLatestRef.current) {
-      scrollToBottom(followScrollBehavior(busy));
+      scrollToBottom(placing ? "auto" : followScrollBehavior(busy));
     }
     updateEdges();
   }, [messages, busy, transcriptVisible, scrollToBottom, updateEdges]);
@@ -272,7 +280,7 @@ export function ChatView({
 
   return (
     <section className="chat-pane">
-      <div className="message-view">
+      <div className={cn("message-view", fadeClass)}>
         <MessageList
           messages={messages}
           chatId={chat.id}
@@ -307,7 +315,6 @@ export function ChatView({
           streamStalled={streamStalled}
           scrollRef={attachScrollRef}
           contentRef={attachContentRef}
-          maskClass={maskClass}
           pinLastTurn={pinLastTurn}
           onScroll={handleScroll}
           onApproval={approvals.decide}

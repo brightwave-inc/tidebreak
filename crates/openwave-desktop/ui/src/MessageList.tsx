@@ -199,8 +199,6 @@ type MessageListProps = {
   scrollRef: Ref<HTMLDivElement>;
   /** Attached to the transcript content column so growth can drive auto-follow. */
   contentRef?: RefCallback<HTMLDivElement>;
-  /** Extra classes for the scroll container — used for the scroll-edge fades. */
-  maskClass?: string | null;
   /** Lift the trailing exchange into a pinned wrapper so a just-sent message
    *  lands near the top with room below for its streaming reply. */
   pinLastTurn?: boolean;
@@ -269,7 +267,6 @@ export function MessageList({
   streamStalled = false,
   scrollRef,
   contentRef,
-  maskClass,
   pinLastTurn = false,
   onScroll,
   onApproval,
@@ -345,11 +342,7 @@ export function MessageList({
   // history lands.
   if (!hydrated && messages.length === 0) {
     return (
-      <div
-        className={`messages${maskClass ? ` ${maskClass}` : ""}`}
-        ref={scrollRef}
-        onScroll={onScroll}
-      >
+      <div className="messages" ref={scrollRef} onScroll={onScroll}>
         <div className="messages-column">
           <TranscriptSkeleton />
         </div>
@@ -442,11 +435,7 @@ export function MessageList({
   const pin = pinLastTurn && lastTurnStart >= 0;
 
   return (
-    <div
-      className={`messages${maskClass ? ` ${maskClass}` : ""}`}
-      ref={scrollRef}
-      onScroll={onScroll}
-    >
+    <div className="messages" ref={scrollRef} onScroll={onScroll}>
       <div className="messages-column" ref={contentRef}>
         {pin ? (
           <>
