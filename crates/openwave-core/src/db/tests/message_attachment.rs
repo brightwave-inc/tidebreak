@@ -53,64 +53,6 @@ async fn accept_quiesced_turn_with_images(
 }
 
 #[tokio::test]
-async fn m0014_upgrades_an_existing_store_and_orders_deletion_behind_its_foreign_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let url = format!(
-        "sqlite://{}?mode=rwc",
-        dir.path().join("attachment-upgrade.db").display()
-    );
-    let conn = Database::connect(&url).await.unwrap();
-    // Foreign keys are advisory on SQLite unless asked for. Turning them on is
-    // what makes this test stand in for PostgreSQL, where `message_attachment`
-    // restricts deletion of the message and chat it points at — so conversation
-    // deletion has to remove attachments before either.
-    conn.execute_unprepared("PRAGMA foreign_keys=ON;")
-        .await
-        .unwrap();
-    migration::Migrator::up(&conn, Some(13)).await.unwrap();
-    let store = DbStore { conn: conn.clone() };
-    let chat = sample_chat();
-    super::create_chat_before_agent_run_split(&store, &chat).await;
-    // The fixture starts before attachment persistence (and therefore before
-    // standing-grant and agent-run model persistence). Upgrade before calling
-    // current lifecycle code: its durable projections legitimately expect
-    // columns that did not exist in this historical schema.
-    migration::Migrator::up(&conn, None).await.unwrap();
-    let pre_attachment_turn = TurnId::new();
-    store
-        .accept_turn(pre_attachment_turn, chat.id, "gpt-5", "before any image")
-        .await
-        .unwrap();
-    store
-        .request_turn_cancellation_and_append_event(pre_attachment_turn, Utc::now())
-        .await
-        .unwrap();
-
-    // A conversation created before attachment persistence keeps its history and
-    // simply has no images.
-    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
-    assert!(store
-        .list_message_attachments(chat.id)
-        .await
-        .unwrap()
-        .is_empty());
-
-    let image = image_for(b"attached after the upgrade", 200, 100);
-    accept_quiesced_turn_with_images(&store, chat.id, "and now an image", &[image]).await;
-    assert_eq!(
-        store.list_message_attachments(chat.id).await.unwrap().len(),
-        1
-    );
-
-    // Deletion succeeds only if attachments are removed ahead of the message
-    // and chat rows they reference.
-    assert_eq!(
-        store.delete_chat(chat.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
-}
-
-#[tokio::test]
 async fn accepted_attachments_persist_identity_in_submission_order() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

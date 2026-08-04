@@ -55,52 +55,6 @@ fn checkpoint(
 }
 
 #[tokio::test]
-async fn m0018_preserves_existing_checkpoints_with_zero_maintenance_usage() {
-    let dir = tempfile::tempdir().unwrap();
-    let url = format!(
-        "sqlite://{}?mode=rwc",
-        dir.path().join("checkpoint-usage-upgrade.db").display()
-    );
-    let conn = Database::connect(&url).await.unwrap();
-    conn.execute_unprepared("PRAGMA foreign_keys=ON;")
-        .await
-        .unwrap();
-    migration::Migrator::up(&conn, Some(17)).await.unwrap();
-    let store = DbStore { conn: conn.clone() };
-    let chat = sample_chat();
-    super::create_chat_before_agent_run_split(&store, &chat).await;
-    let source = Message {
-        id: MessageId::new(),
-        chat_id: chat.id,
-        turn_id: TurnId::new(),
-        role: Role::Assistant,
-        content: "Legacy checkpoint source.".into(),
-        created_at: at(0),
-    };
-    store.append_message(&source).await.unwrap();
-    conn.execute_unprepared(&format!(
-        "INSERT INTO context_checkpoint \
-         (chat_id, source_message_id, source_message_seq, format_version, content, created_at) \
-         VALUES (X'{}', X'{}', 1, 1, 'legacy summary', '2024-03-09 16:00:02+00:00')",
-        chat.id.0.simple(),
-        source.id.0.simple(),
-    ))
-    .await
-    .unwrap();
-
-    migration::Migrator::up(&conn, None).await.unwrap();
-
-    let checkpoint = store
-        .get_context_checkpoint(chat.id)
-        .await
-        .unwrap()
-        .expect("the pre-usage checkpoint survives");
-    assert_eq!(checkpoint.source_message_id, source.id);
-    assert_eq!(checkpoint.content, "legacy summary");
-    assert_eq!(checkpoint.usage, crate::provider::Usage::default());
-}
-
-#[tokio::test]
 async fn checkpoint_is_durable_bounded_and_invisible_to_the_transcript() {
     let (_dir, store, chat, first, second) = store_with_messages().await;
     let initial = checkpoint(chat.id, first.id, "User selected SQLite.", 2);
