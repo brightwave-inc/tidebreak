@@ -80,6 +80,22 @@ const MAX_PARALLEL_READ_ONLY_CALLS: usize = 8;
 /// proceeds normally.
 const REPEATED_CALL_LIMIT: usize = 3;
 
+struct StreamAttempt {
+    end: StreamEnd,
+    text: String,
+    calls: Vec<PendingCall>,
+    reasoning: Vec<Value>,
+    stop_reason: StopReason,
+    refusal_details: Option<RefusalDetails>,
+}
+
+enum StreamEnd {
+    Done,
+    Cancelled,
+    Steered,
+    Failed(ProviderErrorInfo),
+}
+
 /// Appended in model context to the partial prose a cancelled turn committed
 /// (#1182). Never stored and never rendered — the durable message and the
 /// transcript keep exactly what the user watched stream.
@@ -1306,201 +1322,136 @@ impl Agent {
             // one applied at the boundary above is already part of the prompt.
             let generation_steer_revision = self.durable_generation_revision(turn_id).await?;
 
-            // Fit the transcript to the context window, retrying with tighter
-            // budgets on prompt-too-long errors from the provider.
-            let mut stream = loop {
-                if let Some(created) = self
-                    .maybe_create_context_checkpoint(
-                        chat.id,
-                        &transcript,
-                        &source_boundaries,
-                        checkpoint.as_ref(),
-                        reduction_level,
-                        &mut checkpoint_attempt_boundary,
-                    )
-                    .await
-                {
-                    checkpoint_boundary = source_boundaries
-                        .iter()
-                        .find(|source| source.message_id == created.source_message_id)
-                        .map(|source| source.provider_boundary);
-                    checkpoint = Some(created);
-                }
-                // Cancellation may have arrived while the maintenance stream
-                // was active. Its usage belongs to the checkpoint record, not
-                // the foreground turn, and no user model call should begin.
-                if self.cancel.is_cancelled() {
-                    return Ok(self.finish_cancelled(
-                        events,
-                        total_usage,
-                        steps_before,
-                        publish_terminal,
-                        None,
-                    ));
-                }
-                let (mut fitted, reduced) = self.fit_transcript(
-                    &transcript,
-                    reduction_level,
-                    checkpoint.as_ref(),
-                    checkpoint_boundary,
-                );
-                context::evict_old_tool_result_images(
-                    &mut fitted,
-                    context::TOOL_RESULT_IMAGE_MESSAGE_WINDOW,
-                );
-                // Hydration can evict an image that no longer fits the outbound
-                // bound, so the token estimate is taken after it, not before.
-                let images = self.hydrate_images(&mut fitted).await?;
-                let fitted_tokens = context::estimate_transcript_tokens(&fitted);
-                let request = ChatRequest {
-                    provider: self.config.provider.clone(),
-                    conversation: Some(chat.id),
-                    model: self.config.model.clone(),
-                    reasoning_model: self.config.reasoning_model,
-                    system: self.config.system_prompt.clone(),
-                    messages: fitted,
-                    // Withholding the schemas is what makes the wrap-up
-                    // terminal: a model with no tools to name cannot ask for
-                    // another round of them, so this works on every provider
-                    // without depending on a tool-choice constraint.
-                    tools: if wrap_up {
-                        Vec::new()
-                    } else {
-                        self.tools.specs_for_surface(
-                            self.agent_orchestration_active(),
-                            matches!(chat.permission_mode, Some(PermissionMode::Plan)),
+            // Fit the transcript to the context window, retrying this same
+            // step with tighter budgets on prompt-too-long errors. A provider
+            // may report the overflow before returning a stream or after
+            // streaming a partial candidate; both rejoin this attempt loop.
+            let StreamAttempt {
+                end: stream_end,
+                text,
+                mut calls,
+                mut reasoning,
+                stop_reason,
+                refusal_details,
+            } = 'step_attempt: loop {
+                let stream = loop {
+                    if let Some(created) = self
+                        .maybe_create_context_checkpoint(
+                            chat.id,
+                            &transcript,
+                            &source_boundaries,
+                            checkpoint.as_ref(),
+                            reduction_level,
+                            &mut checkpoint_attempt_boundary,
                         )
-                    },
-                    max_tokens: self.config.max_tokens,
-                    temperature: self.config.temperature,
-                    reasoning_effort: self.config.reasoning_effort,
-                    images,
-                    ..Default::default()
-                };
-
-                progress.model_steps = steps_used;
-                match self.provider.stream(request).await {
-                    Ok(stream) => {
-                        // Tell clients the history was shortened for this call so
-                        // a UI can surface it. Emitted only for the request that
-                        // actually went out (after any retry climb).
-                        if reduced {
-                            events.send(AgentEvent::ContextTruncated {
-                                original_tokens: context::estimate_transcript_tokens(&transcript)
-                                    as u32,
-                                fitted_tokens: fitted_tokens as u32,
-                            });
-                        }
-                        reduction_level = 0;
-                        break stream;
+                        .await
+                    {
+                        checkpoint_boundary = source_boundaries
+                            .iter()
+                            .find(|source| source.message_id == created.source_message_id)
+                            .map(|source| source.provider_boundary);
+                        checkpoint = Some(created);
                     }
-                    Err(AgentError::PromptTooLong(_))
-                        if reduction_level < context::MAX_REDUCTION_LEVEL =>
+                    // Cancellation may have arrived while the maintenance stream
+                    // was active. Its usage belongs to the checkpoint record, not
+                    // the foreground turn, and no user model call should begin.
+                    if self.cancel.is_cancelled() {
+                        return Ok(self.finish_cancelled(
+                            events,
+                            total_usage,
+                            steps_before,
+                            publish_terminal,
+                            None,
+                        ));
+                    }
+                    let (mut fitted, reduced) = self.fit_transcript(
+                        &transcript,
+                        reduction_level,
+                        checkpoint.as_ref(),
+                        checkpoint_boundary,
+                    );
+                    context::evict_old_tool_result_images(
+                        &mut fitted,
+                        context::TOOL_RESULT_IMAGE_MESSAGE_WINDOW,
+                    );
+                    // Hydration can evict an image that no longer fits the outbound
+                    // bound, so the token estimate is taken after it, not before.
+                    let images = self.hydrate_images(&mut fitted).await?;
+                    let fitted_tokens = context::estimate_transcript_tokens(&fitted);
+                    let request = ChatRequest {
+                        provider: self.config.provider.clone(),
+                        conversation: Some(chat.id),
+                        model: self.config.model.clone(),
+                        reasoning_model: self.config.reasoning_model,
+                        system: self.config.system_prompt.clone(),
+                        messages: fitted,
+                        // Withholding the schemas is what makes the wrap-up
+                        // terminal: a model with no tools to name cannot ask for
+                        // another round of them, so this works on every provider
+                        // without depending on a tool-choice constraint.
+                        tools: if wrap_up {
+                            Vec::new()
+                        } else {
+                            self.tools.specs_for_surface(
+                                self.agent_orchestration_active(),
+                                matches!(chat.permission_mode, Some(PermissionMode::Plan)),
+                            )
+                        },
+                        max_tokens: self.config.max_tokens,
+                        temperature: self.config.temperature,
+                        reasoning_effort: self.config.reasoning_effort,
+                        images,
+                        ..Default::default()
+                    };
+
+                    progress.model_steps = steps_used;
+                    match self.provider.stream(request).await {
+                        Ok(stream) => {
+                            // Tell clients the history was shortened for this call so
+                            // a UI can surface it. Emitted only for the request that
+                            // actually went out (after any retry climb).
+                            if reduced {
+                                events.send(AgentEvent::ContextTruncated {
+                                    original_tokens: context::estimate_transcript_tokens(
+                                        &transcript,
+                                    ) as u32,
+                                    fitted_tokens: fitted_tokens as u32,
+                                });
+                            }
+                            break stream;
+                        }
+                        Err(AgentError::PromptTooLong(_))
+                            if reduction_level < context::MAX_REDUCTION_LEVEL =>
+                        {
+                            reduction_level += 1;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                };
+                let attempt = self
+                    .read_stream(stream, events, &mut total_usage, progress)
+                    .await?;
+                // A stream that broke mid-flight left this step's tool-call
+                // arguments possibly truncated mid-JSON. Nothing here is safe to
+                // act on, and nothing was persisted, so fail the turn under the
+                // classified provider error rather than executing the fragment.
+                if let StreamEnd::Failed(error) = &attempt.end {
+                    events.send(AgentEvent::StreamInterrupted);
+                    let error = error.clone().into_agent_error();
+                    if matches!(error, AgentError::PromptTooLong(_))
+                        && reduction_level < context::MAX_REDUCTION_LEVEL
                     {
                         reduction_level += 1;
+                        continue 'step_attempt;
                     }
-                    Err(e) => return Err(e),
+                    return Err(error);
                 }
+                // Prefer cancel when both cancel and interrupt are ready (cancel is
+                // the left arm of the nested select). Also catch a cancel that raced
+                // the final stream event.
+                reduction_level = 0;
+                break 'step_attempt attempt;
             };
-            let mut text = String::new();
-            let mut calls: Vec<PendingCall> = Vec::new();
-            // Reasoning blocks captured from this step's stream, replayed on
-            // the later steps of this turn and dropped when the turn ends.
-            let mut reasoning: Vec<Value> = Vec::new();
-            let mut by_index: HashMap<u32, usize> = HashMap::new();
-            let mut stop_reason = StopReason::EndTurn;
-            let mut refusal_details: Option<RefusalDetails> = None;
-
-            // Race each stream item against cancel and interrupt-steer so a long
-            // model call is preempted promptly. Cancel ends the turn; interrupt
-            // discards this step's partial output and continues after injecting.
-            enum StreamEnd {
-                Done,
-                Cancelled,
-                Steered,
-                Failed(ProviderErrorInfo),
-            }
-            let mut streamed_events = AssistantStreamEventFilter::new(events);
-            let stream_end = loop {
-                let event = match future::select(
-                    stream.next(),
-                    future::select(self.cancel.cancelled(), self.steer.interrupted()),
-                )
-                .await
-                {
-                    Either::Left((Some(event), _)) => event,
-                    Either::Left((None, _)) => break StreamEnd::Done,
-                    Either::Right((Either::Left(((), _)), _)) => break StreamEnd::Cancelled,
-                    Either::Right((Either::Right(((), _)), _)) => break StreamEnd::Steered,
-                };
-                match event {
-                    ProviderEvent::TextDelta { text: delta } => {
-                        text.push_str(&delta);
-                        streamed_events.send_text(&delta);
-                    }
-                    ProviderEvent::ReasoningDelta { text: delta } => {
-                        streamed_events.send(AgentEvent::ReasoningDelta { text: delta });
-                    }
-                    ProviderEvent::ReasoningBlock { data } => {
-                        reasoning.push(data);
-                    }
-                    ProviderEvent::ToolCallStarted { index, id, name } => {
-                        let call_id = CallId::new();
-                        streamed_events.send(AgentEvent::ToolCallStarted {
-                            call_id,
-                            name: name.clone(),
-                        });
-                        by_index.insert(index, calls.len());
-                        calls.push(PendingCall {
-                            call_id,
-                            provider_id: id,
-                            name,
-                            args: String::new(),
-                        });
-                    }
-                    ProviderEvent::ToolCallArgsDelta { index, fragment } => {
-                        if let Some(&i) = by_index.get(&index) {
-                            streamed_events.send(AgentEvent::ToolCallArgsDelta {
-                                call_id: calls[i].call_id,
-                                fragment: fragment.clone(),
-                            });
-                            calls[i].args.push_str(&fragment);
-                        }
-                    }
-                    ProviderEvent::Usage(reported) => {
-                        total_usage = total_usage.checked_add(reported).ok_or_else(|| {
-                            AgentError::msg("provider usage exceeded the supported turn total")
-                        })?;
-                        progress.usage = total_usage;
-                    }
-                    ProviderEvent::Stop { reason } => stop_reason = reason,
-                    ProviderEvent::Refusal { details } => {
-                        stop_reason = StopReason::Refusal;
-                        refusal_details = Some(details);
-                    }
-                    ProviderEvent::Failed { error } => break StreamEnd::Failed(error),
-                }
-            };
-            if matches!(stream_end, StreamEnd::Steered | StreamEnd::Failed(_)) {
-                streamed_events.discard();
-            } else {
-                // Normal completion and cancellation retain malformed or
-                // incomplete marker-like prose exactly. Only a steer or a
-                // broken stream discards the entire candidate under
-                // StreamInterrupted semantics.
-                streamed_events.finish();
-            }
-            // A stream that broke mid-flight left this step's tool-call
-            // arguments possibly truncated mid-JSON. Nothing here is safe to
-            // act on, and nothing was persisted, so fail the turn under the
-            // classified provider error rather than executing the fragment.
-            if let StreamEnd::Failed(error) = stream_end {
-                events.send(AgentEvent::StreamInterrupted);
-                return Err(error.into_agent_error());
-            }
-            // Prefer cancel when both cancel and interrupt are ready (cancel is
-            // the left arm of the nested select). Also catch a cancel that raced
-            // the final stream event.
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
                 // Calls that started before the cancel were already journaled,
                 // so terminalizing silently would leave replay and live clients
@@ -2536,6 +2487,96 @@ impl Agent {
             },
             steer_revision,
         ))
+    }
+
+    async fn read_stream(
+        &self,
+        mut stream: futures::stream::BoxStream<'static, ProviderEvent>,
+        events: &EventSink<'_>,
+        total_usage: &mut Usage,
+        progress: &mut AgentProgress,
+    ) -> Result<StreamAttempt> {
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut by_index = HashMap::new();
+        let mut stop_reason = StopReason::EndTurn;
+        let mut refusal_details = None;
+        let mut streamed_events = AssistantStreamEventFilter::new(events);
+        let end = loop {
+            let event = match future::select(
+                stream.next(),
+                future::select(self.cancel.cancelled(), self.steer.interrupted()),
+            )
+            .await
+            {
+                Either::Left((Some(event), _)) => event,
+                Either::Left((None, _)) => break StreamEnd::Done,
+                Either::Right((Either::Left(((), _)), _)) => break StreamEnd::Cancelled,
+                Either::Right((Either::Right(((), _)), _)) => break StreamEnd::Steered,
+            };
+            match event {
+                ProviderEvent::TextDelta { text: delta } => {
+                    text.push_str(&delta);
+                    streamed_events.send_text(&delta);
+                }
+                ProviderEvent::ReasoningDelta { text: delta } => {
+                    streamed_events.send(AgentEvent::ReasoningDelta { text: delta });
+                }
+                ProviderEvent::ReasoningBlock { data } => reasoning.push(data),
+                ProviderEvent::ToolCallStarted { index, id, name } => {
+                    let call_id = CallId::new();
+                    streamed_events.send(AgentEvent::ToolCallStarted {
+                        call_id,
+                        name: name.clone(),
+                    });
+                    by_index.insert(index, calls.len());
+                    calls.push(PendingCall {
+                        call_id,
+                        provider_id: id,
+                        name,
+                        args: String::new(),
+                    });
+                }
+                ProviderEvent::ToolCallArgsDelta { index, fragment } => {
+                    if let Some(&i) = by_index.get(&index) {
+                        streamed_events.send(AgentEvent::ToolCallArgsDelta {
+                            call_id: calls[i].call_id,
+                            fragment: fragment.clone(),
+                        });
+                        calls[i].args.push_str(&fragment);
+                    }
+                }
+                ProviderEvent::Usage(reported) => {
+                    // Usage accounts for provider work, not durable assistant
+                    // output. A later StreamInterrupted may discard this
+                    // candidate, but the reported tokens were still consumed.
+                    *total_usage = total_usage.checked_add(reported).ok_or_else(|| {
+                        AgentError::msg("provider usage exceeded the supported turn total")
+                    })?;
+                    progress.usage = *total_usage;
+                }
+                ProviderEvent::Stop { reason } => stop_reason = reason,
+                ProviderEvent::Refusal { details } => {
+                    stop_reason = StopReason::Refusal;
+                    refusal_details = Some(details);
+                }
+                ProviderEvent::Failed { error } => break StreamEnd::Failed(error),
+            }
+        };
+        if matches!(end, StreamEnd::Steered | StreamEnd::Failed(_)) {
+            streamed_events.discard();
+        } else {
+            streamed_events.finish();
+        }
+        Ok(StreamAttempt {
+            end,
+            text,
+            calls,
+            reasoning,
+            stop_reason,
+            refusal_details,
+        })
     }
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)
@@ -8718,6 +8759,144 @@ mod tests {
                 AgentEvent::TurnFailed { error } if error.kind == "overloaded"
             )),
             "the classification reaches the client on TurnFailed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_context_overflow_restarts_after_discarding_the_candidate() {
+        struct OverflowThenAnswer {
+            requests: Arc<Mutex<Vec<ChatRequest>>>,
+        }
+
+        #[async_trait]
+        impl ModelProvider for OverflowThenAnswer {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("overflow-then-answer")
+            }
+
+            async fn stream(
+                &self,
+                request: ChatRequest,
+            ) -> Result<BoxStream<'static, ProviderEvent>> {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                let first = requests.len() == 1;
+                drop(requests);
+
+                let events = if first {
+                    vec![
+                        ProviderEvent::TextDelta {
+                            text: "discard me".into(),
+                        },
+                        ProviderEvent::ToolCallStarted {
+                            index: 0,
+                            id: "partial-call".into(),
+                            name: "missing_tool".into(),
+                        },
+                        ProviderEvent::ToolCallArgsDelta {
+                            index: 0,
+                            fragment: "{\"unfinished\":".into(),
+                        },
+                        ProviderEvent::Usage(Usage {
+                            input_tokens: 11,
+                            output_tokens: 3,
+                            ..Usage::default()
+                        }),
+                        ProviderEvent::Failed {
+                            error: ProviderErrorInfo::from_error(&AgentError::PromptTooLong(
+                                "context overflow".into(),
+                            )),
+                        },
+                    ]
+                } else {
+                    vec![
+                        ProviderEvent::TextDelta {
+                            text: "recovered".into(),
+                        },
+                        ProviderEvent::Usage(Usage {
+                            input_tokens: 7,
+                            output_tokens: 2,
+                            ..Usage::default()
+                        }),
+                        ProviderEvent::Stop {
+                            reason: StopReason::EndTurn,
+                        },
+                    ]
+                };
+                Ok(stream::iter(events).boxed())
+            }
+        }
+
+        let (store, chat, _workspace) = cancel_test_chat().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(
+            Arc::new(OverflowThenAnswer {
+                requests: requests.clone(),
+            }),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                context_window: 64,
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        agent
+            .run_turn(&chat, &"word ".repeat(200), &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        let request_tokens = {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2, "the same model step is retried once");
+            [
+                context::estimate_transcript_tokens(&requests[0].messages),
+                context::estimate_transcript_tokens(&requests[1].messages),
+            ]
+        };
+        assert!(
+            request_tokens[1] < request_tokens[0],
+            "the retry uses the next reduction level"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::StreamInterrupted))
+                .count(),
+            1,
+            "clients clear the abandoned prose and tool call before the retry"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextDelta { text } if text == "recovered")));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::TurnCompleted {
+                    usage: Usage {
+                        input_tokens: 18,
+                        output_tokens: 5,
+                        ..
+                    },
+                    ..
+                }
+            )),
+            "usage includes provider work from the discarded attempt"
+        );
+        assert_eq!(
+            store
+                .list_messages(chat.id)
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .content,
+            "recovered",
+            "only the successful candidate is persisted"
         );
     }
 
