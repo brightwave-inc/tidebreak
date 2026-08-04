@@ -3,13 +3,6 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "canvas",
-      "esbuild",
-      "protobufjs"
-    ]
-  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
