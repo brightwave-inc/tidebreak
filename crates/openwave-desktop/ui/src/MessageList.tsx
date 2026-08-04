@@ -17,6 +17,7 @@ import type {
   ModelInfo,
 } from "./api";
 import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
+import { AppCardList } from "./AppCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type {
@@ -786,9 +787,11 @@ function surfacedCards(
   phase.forEach((entry, entryIndex) => {
     let card: ReactNode = null;
     let outputCards: ReactNode = null;
+    let appCards: ReactNode = null;
     try {
       card = surfacedCard(entry, context);
       outputCards = surfacedOutputCards(entry);
+      appCards = surfacedAppCards(entry);
     } catch (error) {
       console.error("tool result card could not be built", error);
       // The entry's own id may be the unreadable part, so the placeholder is
@@ -797,6 +800,7 @@ function surfacedCards(
     }
     if (card !== null) cards.push(card);
     if (outputCards !== null) cards.push(outputCards);
+    if (appCards !== null) cards.push(appCards);
   });
   return cards;
 }
@@ -815,8 +819,27 @@ function surfacedOutputCards(entry: ChatMessage): ReactNode {
   if (outputs.length === 0) return null;
   return isolatedCard(
     `${entry.id}-outputs`,
-    outputs.map((output) => output.outputId ?? output.label).join(" "),
+    outputs.map((output) => output.targetId ?? output.label).join(" "),
     <OutputCardList outputs={outputs} />,
+  );
+}
+
+/**
+ * The app cards a call earns, or `null` when it published none.
+ *
+ * Keyed on the row's kind rather than the tool's name: an app row is the
+ * entries vocabulary saying "this is an app, and here is where it lives", and
+ * a second tool that publishes one should get the same card without being
+ * listed here.
+ */
+function surfacedAppCards(entry: ChatMessage): ReactNode {
+  if (entry.role !== "tool" || entry.result?.tool !== "entries") return null;
+  const apps = entry.result.entries.filter((row) => row.kind === "app");
+  if (apps.length === 0) return null;
+  return isolatedCard(
+    `${entry.id}-apps`,
+    apps.map((app) => app.targetId ?? app.label).join(" "),
+    <AppCardList apps={apps} />,
   );
 }
 

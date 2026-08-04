@@ -10,6 +10,7 @@ import {
   FolderPlus,
   FolderTree,
   Globe,
+  LayoutGrid,
   List,
   Newspaper,
   NotebookPen,
@@ -56,6 +57,9 @@ const TOOL_ICONS: Record<RendererToolName, LucideIcon> = {
   spawn_sandbox_agent: Robot,
   wait_for_agents: Clock,
   exec: Terminal,
+  // The same mark the Apps library carries, so the row and the panel it
+  // opens read as one thing.
+  create_app: LayoutGrid,
   // The server folds every unrecognized tool name to `other`, so this is the
   // one entry that is genuinely "some tool ran" rather than a missing icon.
   other: Wrench,

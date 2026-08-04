@@ -17,7 +17,7 @@ export function OutputCardList({ outputs }: { outputs: ResultEntry[] }) {
   return (
     <div className="flex flex-col items-start gap-2" aria-label="Created outputs">
       {outputs.map((entry) => (
-        <OutputCard key={`${entry.outputId ?? entry.label}`} entry={entry} />
+        <OutputCard key={`${entry.targetId ?? entry.label}`} entry={entry} />
       ))}
     </div>
   );
@@ -30,7 +30,7 @@ export function OutputCardList({ outputs }: { outputs: ResultEntry[] }) {
  */
 function OutputCard({ entry }: { entry: ResultEntry }) {
   const { openPanel } = usePanelNav();
-  const outputId = entry.outputId;
+  const outputId = entry.targetId;
   const body = (
     <>
       <span className="bg-muted rounded-md p-2" aria-hidden="true">

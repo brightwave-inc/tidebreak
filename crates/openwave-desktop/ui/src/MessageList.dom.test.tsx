@@ -690,8 +690,8 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 3,
               entries: [
-                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null, outputId: null },
-                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null, outputId: null },
+                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null, targetId: null },
+                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null, targetId: null },
               ],
               failures: [],
             },
@@ -747,7 +747,7 @@ describe("mcp app views", () => {
                   detail: "Pages 3, 7",
                   meta: "2 matches",
                   mediaType: "application/pdf",
-                  outputId: null,
+                  targetId: null,
                 },
               ],
               failures: [],
@@ -794,7 +794,7 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 0,
               entries: [
-                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null, outputId: null },
+                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null, targetId: null },
               ],
               failures: [
                 { label: "q4.md", error: "file is not valid UTF-8" },
@@ -864,7 +864,7 @@ describe("actionable tool results", () => {
                   meta: "v1 · created",
                   mediaType:
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                  outputId: "output-1",
+                  targetId: "output-1",
                 },
               ],
             },
@@ -891,6 +891,62 @@ describe("actionable tool results", () => {
       expect(router.state.location.search).toMatchObject({
         right: "outputs.output-1",
       });
+    });
+  });
+
+  it("opens the app the turn just created, from a card outside the accordion", async () => {
+    const user = userEvent.setup();
+    const { router } = await renderWithRouter(
+      <MessageList
+        messages={[
+          {
+            id: "create-app-1",
+            role: "tool",
+            callId: "call-1",
+            name: "create_app",
+            status: "completed",
+            result: {
+              tool: "entries",
+              elided: 0,
+              failures: [],
+              entries: [
+                {
+                  kind: "app",
+                  label: "Sentry triage",
+                  detail: null,
+                  meta: "revision 1",
+                  mediaType: null,
+                  targetId: "app-1",
+                },
+              ],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // The card stands on its own, with the activity accordion still collapsed.
+    expect(screen.getByText("Sentry triage")).toBeInTheDocument();
+    expect(screen.getByText("revision 1")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Open app Sentry triage" }),
+    );
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ left: "apps.app-1" });
     });
   });
 

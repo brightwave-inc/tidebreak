@@ -262,6 +262,8 @@ pub enum ResultEntryKind {
     Link,
     /// An output this conversation published.
     Output,
+    /// A local app this profile published.
+    App,
 }
 
 /// One thing a call surfaced.
@@ -287,14 +289,22 @@ pub struct ResultEntry {
     /// projections predate the field.
     #[serde(default)]
     pub media_type: Option<String>,
-    /// The durable output this row names, when the row is one.
+    /// The durable record this row names, when the renderer can open one.
     ///
     /// Data rather than display text: the renderer routes a click through its
-    /// own panel navigation and never prints the id. Present only on
-    /// [`ResultEntryKind::Output`] rows; `default` because retained
-    /// projections predate the field.
-    #[serde(default)]
-    pub output_id: Option<String>,
+    /// own panel navigation and never prints the id, and [`ResultEntryKind`]
+    /// names where that click goes — an [`Output`] row opens the outputs
+    /// panel, an [`App`] row the apps library. A kind with nowhere to go
+    /// leaves this `None`.
+    ///
+    /// Aliased and `default` because retained projections wrote it as
+    /// `output_id`, when a published output was the only place a row could
+    /// point.
+    ///
+    /// [`Output`]: ResultEntryKind::Output
+    /// [`App`]: ResultEntryKind::App
+    #[serde(default, alias = "output_id")]
+    pub target_id: Option<String>,
 }
 
 impl ResultEntry {
@@ -307,7 +317,7 @@ impl ResultEntry {
             detail: None,
             meta: None,
             media_type: None,
-            output_id: None,
+            target_id: None,
         }
     }
 
@@ -332,10 +342,10 @@ impl ResultEntry {
         self
     }
 
-    /// Name the durable output this row is.
+    /// Name the durable record this row points at, which its kind routes.
     #[must_use]
-    pub fn with_output_id(mut self, output_id: impl Into<String>) -> Self {
-        self.output_id = Some(output_id.into());
+    pub fn with_target_id(mut self, target_id: impl Into<String>) -> Self {
+        self.target_id = Some(target_id.into());
         self
     }
 }
@@ -549,8 +559,9 @@ const ENTRY_TOOLS: &[&str] = &[
     crate::READ_CONNECTED_FILE_TOOL,
     crate::IMPORT_CONNECTED_FILE_TOOL,
     crate::WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
-    // Lists the one app record the call created or revised: name and ordinal
-    // only, never the bundle or the manifest's bindings.
+    // Lists the one app record the call created or revised: name, ordinal, and
+    // the app id the card opens it by — never the bundle or the manifest's
+    // bindings.
     crate::local_app::CREATE_APP_TOOL,
 ];
 
@@ -732,7 +743,7 @@ fn exec_output_entries(value: Option<&Value>) -> Vec<ResultEntry> {
                 .with_meta(format!("v{version} · {status}"))
                 .with_media_type(media_type);
             if let Some(output_id) = row.get("output_id").and_then(Value::as_str) {
-                entry = entry.with_output_id(output_id);
+                entry = entry.with_target_id(output_id);
             }
             Some(entry)
         })
@@ -747,7 +758,7 @@ fn result_entry(value: &Value) -> Option<ResultEntry> {
         detail: entry_field(value.get("detail")),
         meta: entry_field(value.get("meta")),
         media_type: entry_field(value.get("media_type")),
-        output_id: entry_field(value.get("output_id")),
+        target_id: entry_field(value.get("target_id")),
     })
 }
 
@@ -1062,12 +1073,14 @@ mod tests {
         // makes the transcript card clickable — and the icon's media type is
         // derived from the filename by the output-creation rules. A row
         // without an id (older journal data) still renders, unrouted.
-        assert_eq!(outputs[0].output_id.as_deref(), Some("output-report"));
+        assert_eq!(outputs[0].target_id.as_deref(), Some("output-report"));
         assert_eq!(outputs[0].media_type.as_deref(), Some("text/markdown"));
-        assert_eq!(outputs[1].output_id, None);
+        assert_eq!(outputs[1].target_id, None);
         assert_eq!(outputs[1].media_type.as_deref(), Some("image/png"));
 
-        // A pre-outputs journal row deserializes with the field defaulted.
+        // A pre-outputs journal row deserializes with the field defaulted, and
+        // a row journaled while the target id was still spelled `output_id`
+        // reads back onto the field that replaced it.
         let stored: ToolResultPreview = serde_json::from_value(serde_json::json!({
             "tool": "exec",
             "exit_code": 0,
@@ -1081,6 +1094,15 @@ mod tests {
             panic!("stored exec row");
         };
         assert!(outputs.is_empty());
+        let retained: ResultEntry = serde_json::from_value(serde_json::json!({
+            "kind": "output",
+            "label": "report.md",
+            "detail": null,
+            "meta": "v3 · updated",
+            "output_id": "output-report",
+        }))
+        .unwrap();
+        assert_eq!(retained.target_id.as_deref(), Some("output-report"));
     }
 
     #[test]

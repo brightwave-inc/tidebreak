@@ -47,6 +47,7 @@ pub enum RendererToolName {
     AskUserQuestions,
     ExitPlanMode,
     Exec,
+    CreateApp,
     /// The fold for anything unrecognized, including a tool that has since been
     /// removed and any name a provider invented.
     Other,
@@ -82,6 +83,7 @@ impl From<&str> for RendererToolName {
             crate::ASK_USER_QUESTIONS_TOOL => Self::AskUserQuestions,
             crate::EXIT_PLAN_MODE_TOOL => Self::ExitPlanMode,
             "exec" => Self::Exec,
+            crate::local_app::CREATE_APP_TOOL => Self::CreateApp,
             _ => Self::Other,
         }
     }
@@ -128,6 +130,7 @@ mod tests {
             crate::ASK_USER_QUESTIONS_TOOL,
             crate::EXIT_PLAN_MODE_TOOL,
             "exec",
+            crate::local_app::CREATE_APP_TOOL,
         ] {
             let folded = RendererToolName::from(name);
             assert_ne!(

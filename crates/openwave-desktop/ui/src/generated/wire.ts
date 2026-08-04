@@ -1523,7 +1523,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "exec" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "exec" | "create_app" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -1571,14 +1571,22 @@ meta: string | null,
  */
 media_type: string | null, 
 /**
- * The durable output this row names, when the row is one.
+ * The durable record this row names, when the renderer can open one.
  *
  * Data rather than display text: the renderer routes a click through its
- * own panel navigation and never prints the id. Present only on
- * [`ResultEntryKind::Output`] rows; `default` because retained
- * projections predate the field.
+ * own panel navigation and never prints the id, and [`ResultEntryKind`]
+ * names where that click goes — an [`Output`] row opens the outputs
+ * panel, an [`App`] row the apps library. A kind with nowhere to go
+ * leaves this `None`.
+ *
+ * Aliased and `default` because retained projections wrote it as
+ * `output_id`, when a published output was the only place a row could
+ * point.
+ *
+ * [`Output`]: ResultEntryKind::Output
+ * [`App`]: ResultEntryKind::App
  */
-output_id: string | null, };
+target_id: string | null, };
 
 /**
  * What one row of a listed result is, which is what picks its icon.
@@ -1586,7 +1594,7 @@ output_id: string | null, };
  * A closed vocabulary rather than an icon name: the renderer chooses how to
  * draw a folder, and a tool must not be able to name a glyph.
  */
-export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" | "output";
+export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" | "output" | "app";
 
 /**
  * One thing a call could not do.
@@ -1995,5 +2003,6 @@ export const RENDERER_TOOL_NAMES = [
   "ask_user_questions",
   "exit_plan_mode",
   "exec",
+  "create_app",
   "other",
 ] as const;
