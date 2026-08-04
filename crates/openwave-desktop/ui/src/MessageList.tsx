@@ -14,6 +14,7 @@ import type {
   ToolResultPreview,
   UserQuestionAnswer,
   ExecFileChangeSummary,
+  ModelInfo,
 } from "./api";
 import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
@@ -116,7 +117,12 @@ export type ChatMessage =
       resolved?: boolean;
     }
   | { id: string; role: "error"; text: string }
-  | { id: string; role: "turn_failure"; category: TurnFailureCategory }
+  | {
+      id: string;
+      role: "turn_failure";
+      category: TurnFailureCategory;
+      model?: { id: string; provider: ModelInfo["provider"] };
+    }
   | {
       id: string;
       role: "change_summary";
@@ -1030,7 +1036,13 @@ function MessageBubbleImpl({
   }
 
   if (message.role === "turn_failure") {
-    return <TurnFailureNotice category={message.category} onRetry={onRetry} />;
+    return (
+      <TurnFailureNotice
+        category={message.category}
+        model={message.model}
+        onRetry={onRetry}
+      />
+    );
   }
 
   if (message.role === "change_summary") {

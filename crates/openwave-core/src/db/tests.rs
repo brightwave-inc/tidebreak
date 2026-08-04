@@ -6863,6 +6863,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             reasoning: String::new(),
             refusal: None,
             failure_kind: None,
+            model: "gpt-5".into(),
             finished_at: acknowledged_at,
         }]
     );

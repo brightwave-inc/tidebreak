@@ -21,6 +21,16 @@ pub enum InputModality {
     Image,
 }
 
+/// How thoroughly OpenWave has exercised a model's agent-facing behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationTier {
+    /// Tool-calling and streaming have been exercised end to end.
+    Verified,
+    /// The model is selectable, but OpenWave has not verified those contracts.
+    Unverified,
+}
+
 impl InputModality {
     /// The wire spelling this modality has always had.
     ///
@@ -91,6 +101,8 @@ pub struct ModelSpec {
     pub display_name: &'static str,
     /// Provider that serves the model.
     pub provider: ProviderKind,
+    /// How thoroughly this exact provider/model row has been exercised.
+    pub verification: VerificationTier,
     /// Maximum context window in tokens.
     pub context_window: u32,
     /// Maximum model output in tokens.
@@ -129,6 +141,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-opus-5",
         display_name: "Claude Opus 5",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         // Image input is advertised only where the provider documents vision
@@ -146,6 +159,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-sonnet-5",
         display_name: "Claude Sonnet 5",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -156,6 +170,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-haiku-4-5-20251001",
         display_name: "Claude Haiku 4.5",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 200_000,
         max_output_tokens: 64_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -168,6 +183,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-opus-4-8",
         display_name: "Claude Opus 4.8",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -178,6 +194,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-opus-4-7",
         display_name: "Claude Opus 4.7",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -188,6 +205,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-opus-4-6",
         display_name: "Claude Opus 4.6",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -198,6 +216,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "claude-sonnet-4-6",
         display_name: "Claude Sonnet 4.6",
         provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -208,6 +227,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gpt-5.6-sol",
         display_name: "GPT-5.6 Sol",
         provider: ProviderKind::Openai,
+        verification: VerificationTier::Verified,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -221,6 +241,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gpt-5.6-terra",
         display_name: "GPT-5.6 Terra",
         provider: ProviderKind::Openai,
+        verification: VerificationTier::Verified,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -231,6 +252,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gpt-5.6-luna",
         display_name: "GPT-5.6 Luna",
         provider: ProviderKind::Openai,
+        verification: VerificationTier::Verified,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -241,6 +263,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gpt-5.5",
         display_name: "GPT-5.5",
         provider: ProviderKind::Openai,
+        verification: VerificationTier::Verified,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -251,6 +274,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gpt-5.4-mini",
         display_name: "GPT-5.4 mini",
         provider: ProviderKind::Openai,
+        verification: VerificationTier::Verified,
         context_window: 400_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -261,6 +285,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gpt-5.4-nano",
         display_name: "GPT-5.4 nano",
         provider: ProviderKind::Openai,
+        verification: VerificationTier::Verified,
         context_window: 400_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
@@ -275,6 +300,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gemini-3.6-flash",
         display_name: "Gemini 3.6 Flash",
         provider: ProviderKind::Gemini,
+        verification: VerificationTier::Verified,
         context_window: 1_048_576,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
@@ -285,6 +311,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gemini-3.5-flash",
         display_name: "Gemini 3.5 Flash",
         provider: ProviderKind::Gemini,
+        verification: VerificationTier::Verified,
         context_window: 1_048_576,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
@@ -295,6 +322,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gemini-3.5-flash-lite",
         display_name: "Gemini 3.5 Flash-Lite",
         provider: ProviderKind::Gemini,
+        verification: VerificationTier::Verified,
         context_window: 1_048_576,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
@@ -305,6 +333,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         id: "gemini-3.1-pro-preview",
         display_name: "Gemini 3.1 Pro Preview",
         provider: ProviderKind::Gemini,
+        verification: VerificationTier::Verified,
         context_window: 1_048_576,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
@@ -478,6 +507,14 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    #[test]
+    fn every_curated_row_declares_a_verification_tier() {
+        assert!(MODEL_REGISTRY.iter().all(|spec| matches!(
+            spec.verification,
+            VerificationTier::Verified | VerificationTier::Unverified
+        )));
     }
 
     #[test]

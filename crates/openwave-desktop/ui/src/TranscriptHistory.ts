@@ -54,6 +54,7 @@ export type HydratedTranscriptEntry =
       text: string;
       reasoning?: string;
       failureCategory?: NonNullable<ChatTerminalTurn["failure_category"]>;
+      failureModel?: NonNullable<ChatTerminalTurn["failure_model"]>;
       createdAt: string;
     }
   | {
@@ -161,6 +162,7 @@ export function hydrateTranscriptHistory(
         text: turn.partial_content,
         reasoning: turn.reasoning,
         failureCategory: turn.failure_category,
+        failureModel: turn.failure_model,
         createdAt: turn.finished_at,
       })),
     ...terminalTurns

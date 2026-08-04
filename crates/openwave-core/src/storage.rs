@@ -115,6 +115,8 @@ pub struct ChatTerminalTurnSnapshot {
     /// Stable internal failure kind. Renderer projections must classify this
     /// before it crosses the server boundary.
     pub failure_kind: Option<String>,
+    /// Provider-qualified model selection captured when the turn was accepted.
+    pub model: String,
     pub finished_at: chrono::DateTime<chrono::Utc>,
 }
 

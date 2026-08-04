@@ -404,7 +404,7 @@ origin: RootAttachmentOrigin, };
  * cancelled turns have no message, but remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
-export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, file_changes: Array<ExecFileChangeSummary>, finished_at: string, };
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, finished_at: string, };
 
 export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 
@@ -1141,6 +1141,10 @@ display_name: string,
  */
 provider: ProviderKind, 
 /**
+ * How thoroughly OpenWave has exercised this provider/model combination.
+ */
+verification: VerificationTier, 
+/**
  * Whether the provider is enabled, configured, and credentialed.
  */
 available: boolean, 
@@ -1413,7 +1417,7 @@ result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_r
  * Why the turn failed, at the only resolution a client can act on.
  * The failure's `kind` and `message` stay internal.
  */
-category: TurnFailureCategory, } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
+category: TurnFailureCategory, model?: RendererModelIdentity, } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
 
 /**
  * One frame on a chat's event socket.
@@ -1431,6 +1435,11 @@ export type RendererChatFrame = RendererSequencedEvent | RendererChatMetadata;
  * Chat metadata pushed to an open client, outside the turn journal.
  */
 export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, } | { "metadata": "sandbox_preparing", preparing: boolean, };
+
+/**
+ * Exact model route involved in a provider failure, with no diagnostics.
+ */
+export type RendererModelIdentity = { id: string, provider: ProviderKind, };
 
 /**
  * Bounded refusal metadata safe to present in the desktop transcript.
@@ -1843,6 +1852,11 @@ export type UserQuestionOption = { id: string, label: string, description: strin
  * Whether the reader may select one option or several independent options.
  */
 export type UserQuestionType = "single_select" | "multi_select";
+
+/**
+ * How thoroughly OpenWave has exercised a model's agent-facing behavior.
+ */
+export type VerificationTier = "verified" | "unverified";
 
 /**
  * Public state returned by the local API. It intentionally reports only

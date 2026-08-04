@@ -86,6 +86,21 @@ pub(crate) struct RendererRefusal {
     pub partial_output: bool,
 }
 
+/// Exact model route involved in a provider failure, with no diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub(crate) struct RendererModelIdentity {
+    pub id: String,
+    pub provider: crate::providers::ProviderKind,
+}
+
+pub(crate) fn model_identity(selection: &str) -> Option<RendererModelIdentity> {
+    let (provider, id) = crate::model_registry::parse_selection_key(selection)?;
+    Some(RendererModelIdentity {
+        id: id.to_owned(),
+        provider,
+    })
+}
+
 impl From<&openwave_core::RefusalOutcome> for RendererRefusal {
     fn from(value: &openwave_core::RefusalOutcome) -> Self {
         Self {
@@ -174,6 +189,9 @@ pub(crate) enum RendererAgentEvent {
         /// Why the turn failed, at the only resolution a client can act on.
         /// The failure's `kind` and `message` stay internal.
         category: TurnFailureCategory,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        model: Option<RendererModelIdentity>,
     },
     TurnCancelled,
     /// The message body is available through the transcript endpoint. Keeping
@@ -319,6 +337,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
             },
             AgentEvent::TurnFailed { error } => RendererAgentEvent::TurnFailed {
                 category: TurnFailureCategory::from_kind(&error.kind),
+                model: None,
             },
             AgentEvent::TurnCancelled { .. } => RendererAgentEvent::TurnCancelled,
             AgentEvent::UserSteered {
@@ -336,6 +355,15 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
             seq: value.seq,
             event,
         }
+    }
+}
+
+impl RendererSequencedEvent {
+    pub(crate) fn with_turn_model(mut self, selection: Option<&str>) -> Self {
+        if let RendererAgentEvent::TurnFailed { model, .. } = &mut self.event {
+            *model = selection.and_then(model_identity);
+        }
+        self
     }
 }
 
@@ -475,10 +503,8 @@ mod tests {
         );
     }
 
-    /// The category is the one thing a failure is allowed to tell a client, and
-    /// a client branches on it — so both halves of that boundary are contract:
-    /// the classification each failure lands in, and the diagnostics that stay
-    /// behind.
+    /// A failure carries only the category and, when attached later from the
+    /// turn receipt, its safe model identity. Provider diagnostics stay behind.
     #[test]
     fn failure_projection_carries_a_category_and_nothing_else() {
         let cases = [
@@ -513,15 +539,14 @@ mod tests {
             });
             assert_eq!(
                 projected.event,
-                RendererAgentEvent::TurnFailed { category: expected },
+                RendererAgentEvent::TurnFailed {
+                    category: expected,
+                    model: None,
+                },
                 "{error}"
             );
             let encoded = serde_json::to_value(&projected).unwrap();
-            assert_eq!(
-                encoded["event"].as_object().unwrap().len(),
-                2,
-                "the failure frame carries only its type and category: {encoded}"
-            );
+            assert_eq!(encoded["event"].as_object().unwrap().len(), 2, "{encoded}");
         }
     }
 

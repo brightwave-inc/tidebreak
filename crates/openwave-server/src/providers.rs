@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use openwave_core::{AgentConfig, ProviderId, ReasoningEffort, Result, SecretProvider, Store};
 
 use crate::error::ServerError;
-use crate::model_registry::{self, InputModality, ModelSpec};
+use crate::model_registry::{self, InputModality, ModelSpec, VerificationTier};
 
 /// Setting-key prefix for per-provider non-secret config (`provider.<kind>`).
 const PROVIDER_SETTING_PREFIX: &str = "provider.";
@@ -469,6 +469,8 @@ pub struct ResolvedModelPolicy {
     pub display_name: String,
     /// Exact provider route.
     pub provider: ProviderKind,
+    /// How thoroughly this exact provider/model combination has been exercised.
+    pub verification: VerificationTier,
     /// Runtime context reduction limit.
     pub context_window: u32,
     /// Runtime output cap.
@@ -489,6 +491,7 @@ impl ResolvedModelPolicy {
             id: spec.id.to_owned(),
             display_name: spec.display_name.to_owned(),
             provider: spec.provider,
+            verification: spec.verification,
             context_window: spec.context_window,
             max_output_tokens: spec.max_output_tokens,
             input_modalities: spec.input_modalities.to_vec(),
@@ -506,6 +509,7 @@ impl ResolvedModelPolicy {
                 .clone()
                 .unwrap_or_else(|| model_registry::display_name_for(&model.id)),
             provider,
+            verification: VerificationTier::Unverified,
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
             input_modalities: vec![InputModality::Text],
@@ -1554,6 +1558,7 @@ mod tests {
                 max_output_tokens: 4_096,
             },
         );
+        assert_eq!(custom.verification, VerificationTier::Unverified);
         apply_model_policy(&mut config, &custom, Some(ReasoningEffort::High)).unwrap();
         assert!(!config.image_input);
         assert_eq!(config.provider, Some(ProviderId::new("openai_compatible")));

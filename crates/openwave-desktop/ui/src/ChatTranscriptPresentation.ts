@@ -54,6 +54,7 @@ export function presentChatTranscript(
                 id: `failure:${entry.id}`,
                 role: "turn_failure",
                 category: entry.failureCategory ?? "unknown",
+                model: entry.failureModel,
               } satisfies ChatMessage)
             : ({
                 id: `cancellation:${entry.id}`,

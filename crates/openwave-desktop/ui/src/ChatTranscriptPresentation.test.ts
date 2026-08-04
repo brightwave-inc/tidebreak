@@ -441,6 +441,7 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           reasoning: "Trying a fallback",
           failure_category: "transient",
+          failure_model: { id: "gpt-5.6-sol", provider: "openai" },
           file_changes: [],
           finished_at: "2026-07-19T10:02:00Z",
         },
@@ -475,6 +476,7 @@ describe("terminal transcript presentation", () => {
       id: "failure:turn-failed",
       role: "turn_failure",
       category: "transient",
+      model: { id: "gpt-5.6-sol", provider: "openai" },
     });
   });
 
