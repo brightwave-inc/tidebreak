@@ -37,6 +37,7 @@ import { HomeSidebar } from "./sidebar/HomeSidebar";
 import { WelcomeState } from "./WelcomeState";
 import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
+import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 
 const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
@@ -55,6 +56,10 @@ export function HomeRoute() {
   const draft = useComposerDraft(HOME_DRAFT_KEY);
   const setDraft = (text: string) =>
     composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
+  const voice = useVoiceComposer((audio) => client.transcribeVoice(audio), (transcript) => {
+    const current = useComposerDrafts.getState().drafts[HOME_DRAFT_KEY] ?? "";
+    setDraft(appendTranscript(current, transcript));
+  });
   const [error, setError] = useState<string | null>(null);
   const newChat = useNewChatSettings();
   // What the pickers show and the created chat will get: this visit's picks
@@ -289,6 +294,13 @@ export function HomeRoute() {
             disabled={creatingChat}
             draft={draft}
             images={composerImages}
+            voice={{
+              available: voice.available,
+              state: voice.state,
+              error: voice.error,
+              onStart: () => void voice.start(),
+              onStop: voice.stop,
+            }}
             files={{
               items: pendingFiles,
               attaching,

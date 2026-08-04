@@ -142,6 +142,8 @@ const TRANSPORT_SECRET_ENV: &str = "OPENWAVE_TRANSPORT_SECRET";
 /// container. The sandbox agent's entrypoint reads it and exits when it elapses.
 /// Kept in sync with the agent's own constant of the same name.
 pub const LIFETIME_CAP_ENV: &str = "OPENWAVE_SANDBOX_LIFETIME_CAP_SECS";
+/// Idle watchdog configured in the sandbox agent image.
+pub const IDLE_TIMEOUT_ENV: &str = "OPENWAVE_SANDBOX_IDLE_TIMEOUT_SECS";
 /// Go-template that lists a tagged container's id and correlation tag, tab-separated.
 /// Kept in sync with [`RUN_TAG_LABEL`] by a unit test.
 const TAG_LIST_FORMAT: &str = "{{.ID}}\t{{.Label \"openwave.run-tag\"}}";
@@ -212,6 +214,8 @@ const DEFAULT_LISTENER_PORT: u16 = 8080;
 /// legitimate run, short enough that a container stranded by a dead host does not
 /// outlive the day.
 const DEFAULT_LIFETIME_CAP_SECS: u64 = 4 * 60 * 60;
+/// Reclaim a container whose host no longer proves ownership within two minutes.
+pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 2 * 60;
 
 /// The unprivileged `uid:gid` the container runs as. Kept in sync with the
 /// `USER` directive and the workspace ownership in the sandbox-agent image's
@@ -845,6 +849,8 @@ fn proxy_run_args(
         args.push("--env".to_owned());
         args.push(format!("{LIFETIME_CAP_ENV}={secs}"));
     }
+    args.push("--env".to_owned());
+    args.push(format!("{IDLE_TIMEOUT_ENV}={DEFAULT_IDLE_TIMEOUT_SECS}"));
     args.extend(proxy_hardening_args(&config.hardening));
     args.extend([
         "--publish".to_owned(),
@@ -953,6 +959,8 @@ fn run_args(
         args.push("--env".to_owned());
         args.push(format!("{LIFETIME_CAP_ENV}={secs}"));
     }
+    args.push("--env".to_owned());
+    args.push(format!("{IDLE_TIMEOUT_ENV}={DEFAULT_IDLE_TIMEOUT_SECS}"));
     args.push(config.image.clone());
     args.extend(config.command.iter().cloned());
     args
@@ -1283,6 +1291,7 @@ mod tests {
         // The cap reaches the container as a value, since the agent inside is what
         // enforces it.
         assert!(args.contains(&format!("{LIFETIME_CAP_ENV}=900")));
+        assert!(args.contains(&format!("{IDLE_TIMEOUT_ENV}={DEFAULT_IDLE_TIMEOUT_SECS}")));
 
         // An uncapped provisioning names no cap at all rather than passing a zero
         // the container would read as "expire now".
@@ -1318,6 +1327,7 @@ mod tests {
         assert!(args.contains(&format!("{RELAY_LISTEN_ENV}=0.0.0.0:9000")));
         assert!(args.contains(&format!("{RELAY_TARGET_ENV}={}:9000", sandbox_name(tag))));
         assert!(args.contains(&format!("{LIFETIME_CAP_ENV}=900")));
+        assert!(args.contains(&format!("{IDLE_TIMEOUT_ENV}={DEFAULT_IDLE_TIMEOUT_SECS}")));
         // The default command is the agent image's second face.
         assert_eq!(args.last().unwrap(), "egress-proxy");
         // The proxy keeps the non-root, no-capability, read-only profile.

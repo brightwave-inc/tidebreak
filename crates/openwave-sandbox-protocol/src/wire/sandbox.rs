@@ -97,6 +97,8 @@ struct RunInner {
     /// The run init the host delivers after attach. First delivery wins; a
     /// redelivery on reattach is ignored.
     init: watch::Sender<Option<crate::init::RunInit>>,
+    /// Monotonic activity generation observed by the sandbox idle watchdog.
+    activity: watch::Sender<u64>,
 }
 
 /// One run-scoped, cloneable sandbox. Every clone shares one event buffer and one
@@ -140,6 +142,7 @@ impl SandboxRun {
     ) -> Self {
         let (conn, _) = watch::channel(None);
         let (init, _) = watch::channel(None);
+        let (activity, _) = watch::channel(0);
         Self {
             inner: Arc::new(RunInner {
                 protocol_version,
@@ -155,8 +158,21 @@ impl SandboxRun {
                 }),
                 conn,
                 init,
+                activity,
             }),
         }
+    }
+
+    /// Subscribe to authenticated host traffic and sandbox run activity.
+    #[must_use]
+    pub fn activity(&self) -> watch::Receiver<u64> {
+        self.inner.activity.subscribe()
+    }
+
+    fn mark_activity(&self) {
+        self.inner
+            .activity
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     /// Wait for the host to deliver the run init — the task, policy snapshot,
@@ -227,6 +243,7 @@ impl SandboxRun {
 
     async fn emit(&self, payload: EventPayload) -> Result<Sequence, EmitError> {
         let event = self.buffer_event(payload)?;
+        self.mark_activity();
         let sequence = event.sequence;
         if let Some(conn) = self.current_conn() {
             // Live delivery on the current connection. A send failure only means
@@ -297,6 +314,7 @@ impl SandboxRun {
                 .remove(&request_id);
             return ReverseOutcome::Disconnected;
         }
+        self.mark_activity();
 
         match rx.await {
             Ok(response) => ReverseOutcome::Settled(response),
@@ -475,6 +493,7 @@ where
     // for want of one and leave the slot empty — `send_replace` updates the value
     // unconditionally, and a `call` that subscribes afterward still sees it.
     run.inner.conn.send_replace(Some(conn.clone()));
+    run.mark_activity();
     // The resume cursor is this host's own committed position, so take it as an
     // acknowledgement. It is what makes ignoring a superseded peer's acks below
     // lossless: the incoming host restates its commitment on attach rather than
@@ -495,6 +514,7 @@ where
         };
         match frame {
             WireFrame::Request(RequestFrame::Response(envelope)) => {
+                run.mark_activity();
                 if let Some(tx) = pending
                     .lock()
                     .expect("pending lock")
@@ -504,11 +524,13 @@ where
                 }
             }
             WireFrame::Control(ControlFrame::Ping { nonce }) => {
+                run.mark_activity();
                 let _ = conn
                     .control
                     .send(WireFrame::Control(ControlFrame::Pong { nonce }))
                     .await;
             }
+            WireFrame::Control(ControlFrame::Keepalive) => run.mark_activity(),
             // An acknowledgement is run-scoped state, so only the connection that
             // is currently installed may advance it. A superseded peer still
             // draining its socket after a reconnect speaks for a delivery the
@@ -516,13 +538,17 @@ where
             // already taken from its resume cursor at attach.
             WireFrame::EventAck { cursor } => {
                 if run.is_live(&closed) {
+                    run.mark_activity();
                     run.acknowledge(cursor);
                 }
             }
             // The run init: task, policy, and token, delivered only over an
             // authenticated connection (an unauthenticated dial never reaches
             // this loop). First delivery wins.
-            WireFrame::Init(init) => run.deliver_init(init),
+            WireFrame::Init(init) => {
+                run.mark_activity();
+                run.deliver_init(init);
+            }
             // The sandbox originates cancels and requests; it never receives
             // them. Pong is liveness only. Ignore rather than trust peer input.
             WireFrame::Control(ControlFrame::Pong { .. } | ControlFrame::Cancel { .. })

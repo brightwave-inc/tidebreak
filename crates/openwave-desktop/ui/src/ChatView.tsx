@@ -16,6 +16,7 @@ import {
   type ComposerFiles,
   type ComposerFolders,
   type ComposerImages,
+  type ComposerVoice,
 } from "./Composer";
 import { MessageList, type RetryableTurn } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
@@ -42,6 +43,7 @@ export type ChatViewProps = {
   composerImages: ComposerImages;
   files: ComposerFiles;
   folders?: ComposerFolders;
+  voice?: ComposerVoice;
   nativeDropTarget?: ReactNode;
   attachError: string | null;
   onDraftChange: (value: string) => void;
@@ -73,6 +75,7 @@ export function ChatView({
   composerImages,
   files,
   folders,
+  voice,
   nativeDropTarget,
   attachError,
   onDraftChange,
@@ -351,6 +354,7 @@ export function ChatView({
           images={composerImages}
           files={files}
           folders={folders}
+          voice={voice}
           nativeDropTarget={nativeDropTarget}
           attachError={attachError}
           // Typing retires the verdict on the last piece of guidance. Accepted

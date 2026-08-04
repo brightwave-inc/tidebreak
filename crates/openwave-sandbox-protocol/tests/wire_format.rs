@@ -236,6 +236,10 @@ fn control_lane_frames_wire_shapes() {
     let pong = ControlFrame::Pong { nonce: 9 };
     roundtrip(&pong);
     golden(&pong, &[("/control", json!("pong"))]);
+
+    let keepalive = ControlFrame::Keepalive;
+    roundtrip(&keepalive);
+    golden(&keepalive, &[("/control", json!("keepalive"))]);
 }
 
 #[test]

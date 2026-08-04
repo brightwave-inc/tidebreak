@@ -16,6 +16,8 @@
 //! there), hand it the [`AttachRequest`] and the run's `CapabilityHost`, and
 //! drive the returned [`HostConnection`].
 
+use std::time::Duration;
+
 use tokio::{
     io::{split, AsyncRead, AsyncWrite, BufReader},
     sync::mpsc,
@@ -237,6 +239,31 @@ impl HostConnection {
             .send(WireFrame::Control(ControlFrame::Ping { nonce }))
             .await;
     }
+
+    /// Start sending host-ownership keepalives over the reserved control lane.
+    ///
+    /// The first keepalive is immediate, then one is sent every `interval` until
+    /// this connection closes. A zero interval is ignored rather than spinning.
+    pub fn start_keepalives(&mut self, interval: Duration) {
+        if interval.is_zero() {
+            return;
+        }
+        let control = self.outbound.control.clone();
+        self.tasks.push(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if control
+                    .send(WireFrame::Control(ControlFrame::Keepalive))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
 }
 
 impl Drop for HostConnection {
@@ -294,7 +321,7 @@ async fn read_loop<R>(
                     .send(WireFrame::Control(ControlFrame::Pong { nonce }))
                     .await;
             }
-            WireFrame::Control(ControlFrame::Pong { .. }) => {}
+            WireFrame::Control(ControlFrame::Pong { .. } | ControlFrame::Keepalive) => {}
             WireFrame::Event(event) => {
                 // An inbound event is untrusted input. `read_frame` bounds a frame
                 // at MAX_FRAME_BYTES; re-enforce the smaller per-event payload cap
@@ -336,6 +363,7 @@ mod tests {
         oplog::InMemoryOperationStore,
         protocol::{Response, MAX_EVENT_PAYLOAD_BYTES, PROTOCOL_VERSION},
         reverse::{CapabilityResponder, GrantSet, ReverseRequest, ReverseResult, RunProvenance},
+        SandboxRun, TransportSecret,
     };
 
     /// A responder that is never invoked: these tests drive only the event lane.
@@ -357,6 +385,42 @@ mod tests {
             Arc::new(NoopResponder),
             Arc::new(InMemoryOperationStore::new()),
         )
+    }
+
+    /// The public host keepalive API must cross the real framed transport and
+    /// become sandbox activity; otherwise the image watchdog would expire a
+    /// healthy attached run despite the host still owning it.
+    #[tokio::test(start_paused = true)]
+    async fn host_keepalives_reach_the_sandbox_activity_watchdog() {
+        let secret = TransportSecret::new("keepalive-boundary");
+        let run = SandboxRun::new([], Some(secret.clone()));
+        let mut activity = run.activity();
+        let (host_side, sandbox_side) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(crate::serve_connection(sandbox_side, run));
+        let attach = AttachRequest {
+            protocol_version: PROTOCOL_VERSION,
+            run_id: RunId::new(),
+            resume_from: EventCursor::START,
+            transport_secret: secret,
+        };
+        let mut connection = WireClient::connect(host_side, attach, events_only_host())
+            .await
+            .expect("attach succeeds");
+
+        activity.changed().await.expect("attach marks activity");
+        connection.start_keepalives(Duration::from_secs(30));
+        activity
+            .changed()
+            .await
+            .expect("first keepalive marks activity");
+        tokio::time::advance(Duration::from_secs(30)).await;
+        activity
+            .changed()
+            .await
+            .expect("periodic keepalive marks activity");
+
+        drop(connection);
+        server.abort();
     }
 
     fn attach() -> AttachRequest {

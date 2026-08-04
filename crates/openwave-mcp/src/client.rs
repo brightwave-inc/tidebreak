@@ -1027,14 +1027,20 @@ impl Tool for McpTool {
                 json!({"name": self.remote_name, "arguments": args}),
                 bearer.as_deref(),
             )
-            .await
-            .map_err(|error| {
-                mcp_message(format!(
-                    "MCP server {} failed to call {}: {error}",
-                    self.server_name, self.remote_name
-                ))
-            })?;
-        let result: CallToolResponse = decode_result("tools/call", result)?;
+            .await;
+        let result: CallToolResponse =
+            match result.and_then(|result| decode_result("tools/call", result)) {
+                Ok(result) => result,
+                Err(error) => {
+                    return Ok(ToolOutput::failed(
+                        openwave_core::ToolErrorCategory::TransportFailed,
+                        format!(
+                        "MCP server {} could not complete {} because its channel failed: {error}",
+                        self.server_name, self.remote_name
+                    ),
+                    ));
+                }
+            };
         let split = split_call_content(&result.content);
         let (content, data) = clamp_call_result(split.text, result.structured_content);
         Ok(ToolOutput {
@@ -1869,6 +1875,82 @@ mod tests {
         // Text siblings keep their order, and the degraded image items keep
         // the stringified form the model saw before images were surfaced.
         assert_eq!(split.text, format!("before\n{garbage}\n{oversized}\nafter"));
+    }
+
+    #[tokio::test]
+    async fn mounted_tool_distinguishes_channel_failure_from_remote_tool_failure() {
+        async fn execute_response(result: Value) -> ToolOutput {
+            let (client_stream, server_stream) = duplex(16 * 1024);
+            let (reader, writer) = tokio::io::split(client_stream);
+            tokio::spawn(async move {
+                let (server_reader, mut server_writer) = split(server_stream);
+                let mut lines = BufReader::new(server_reader).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let Some(id) = request.get("id").cloned() else {
+                        continue;
+                    };
+                    let response_result = match request["method"].as_str().unwrap() {
+                        "initialize" => json!({
+                            "protocolVersion": PROTOCOL_VERSION,
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "fixture", "version": "1"}
+                        }),
+                        "tools/list" => json!({
+                            "tools": [{
+                                "name": "fail",
+                                "description": "Fail in one of two ways",
+                                "inputSchema": {"type": "object"}
+                            }]
+                        }),
+                        "tools/call" => result.clone(),
+                        method => panic!("unexpected method: {method}"),
+                    };
+                    let mut response = serde_json::to_vec(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": response_result
+                    }))
+                    .unwrap();
+                    response.push(b'\n');
+                    server_writer.write_all(&response).await.unwrap();
+                    server_writer.flush().await.unwrap();
+                }
+            });
+            let client = McpClient::connect("fixture", reader, writer).await.unwrap();
+            let mut registry = ToolRegistry::new();
+            client.mount(&mut registry);
+            registry
+                .get("mcp__fixture__fail")
+                .unwrap()
+                .execute(
+                    &ToolCtx::new_legacy_workspace(
+                        ChatId::new(),
+                        None,
+                        PathBuf::from("unused-by-mcp"),
+                    ),
+                    json!({}),
+                )
+                .await
+                .unwrap()
+        }
+
+        let remote = execute_response(json!({
+            "content": [{"type": "text", "text": "tool rejected the input"}],
+            "isError": true
+        }))
+        .await;
+        assert_eq!(
+            remote.error_category,
+            Some(openwave_core::ToolErrorCategory::ToolFailed)
+        );
+
+        let channel = execute_response(json!({"content": "not an MCP content array"})).await;
+        assert_eq!(
+            channel.error_category,
+            Some(openwave_core::ToolErrorCategory::TransportFailed)
+        );
+        assert!(channel.content.contains("channel failed"));
     }
 
     mod http_transport {
