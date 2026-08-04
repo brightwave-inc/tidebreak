@@ -1,7 +1,7 @@
 //! Native-only lifecycle client for the capability-gated host-broker sidecar.
 
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Mutex as StdMutex,
@@ -60,6 +60,8 @@ impl BrokerClient {
                 app,
                 data_dir,
                 home_dir,
+                execute_commands: openwave_code_execution::LocalExecutionProvider::availability()
+                    .is_ok(),
                 session: None,
             }
             .run(receiver),
@@ -170,6 +172,7 @@ struct BrokerWorker {
     app: AppHandle,
     data_dir: PathBuf,
     home_dir: PathBuf,
+    execute_commands: bool,
     session: Option<Session>,
 }
 
@@ -259,7 +262,15 @@ impl BrokerWorker {
             return Err(BrokerClientError::DispatchExpired);
         }
         if self.session.is_none() {
-            self.session = Some(Session::start(&self.app, &self.data_dir, &self.home_dir).await?);
+            self.session = Some(
+                Session::start(
+                    &self.app,
+                    &self.data_dir,
+                    &self.home_dir,
+                    self.execute_commands,
+                )
+                .await?,
+            );
         }
         if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(BrokerClientError::DispatchExpired);
@@ -306,17 +317,22 @@ impl Session {
         app: &AppHandle,
         data_dir: &Path,
         home_dir: &Path,
+        execute_commands: bool,
     ) -> Result<Self, BrokerClientError> {
+        let mut args = vec![
+            OsString::from("--data-dir"),
+            data_dir.as_os_str().to_owned(),
+            OsString::from("--home"),
+            home_dir.as_os_str().to_owned(),
+        ];
+        if execute_commands {
+            args.push(OsString::from("--execute-commands"));
+        }
         let mut sidecar = app
             .shell()
             .sidecar(SIDECAR_NAME)
             .map_err(|_| BrokerClientError::Start)?
-            .args([
-                OsStr::new("--data-dir"),
-                data_dir.as_os_str(),
-                OsStr::new("--home"),
-                home_dir.as_os_str(),
-            ])
+            .args(args)
             .env_clear();
         sidecar = sidecar.envs(minimal_environment());
 

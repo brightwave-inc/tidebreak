@@ -95,7 +95,11 @@ impl StateFile {
         })
     }
 
-    pub(super) fn load(&self, policy: &RootPolicy) -> Result<State, BrokerError> {
+    pub(super) fn load(
+        &self,
+        policy: &RootPolicy,
+        execute_commands: bool,
+    ) -> Result<State, BrokerError> {
         let mut file = match File::open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(State::default()),
@@ -150,8 +154,11 @@ impl StateFile {
         }
 
         let mut grants = persisted.grants;
-        if persisted.version < 4 {
+        if persisted.version < 4 && execute_commands {
             carry_forward_exec_grants(&mut grants)?;
+        }
+        if !execute_commands {
+            grants.retain(|grant| grant.capability() != Capability::ExecuteCommands);
         }
         let mut attachments = persisted.attachments;
         for root in &mut unavailable {
