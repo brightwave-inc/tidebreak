@@ -567,7 +567,9 @@ fn serialize_result(call: &ToolCallRecord, result: OperationResult) -> StoredRes
     }
 }
 
-fn granted_folder_capabilities(capabilities: &[Capability]) -> Vec<GrantedFolderCapability> {
+pub(super) fn granted_folder_capabilities(
+    capabilities: &[Capability],
+) -> Vec<GrantedFolderCapability> {
     capabilities
         .iter()
         .filter_map(|capability| match capability {
@@ -575,6 +577,9 @@ fn granted_folder_capabilities(capabilities: &[Capability]) -> Vec<GrantedFolder
             Capability::WriteFiles => Some(GrantedFolderCapability::WriteFiles),
             Capability::ExecuteCommands => Some(GrantedFolderCapability::ExecuteCommands),
             Capability::ListRoots => None,
+            // Capability is non-exhaustive. Unknown future per-folder reach is
+            // intentionally under-reported until this one conversion and the
+            // model-facing vocabulary are extended together.
             _ => None,
         })
         .collect()

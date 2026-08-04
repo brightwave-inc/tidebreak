@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 use openwave_core::{
-    validate_request_folder_access_arguments, CallId, ChatId, GrantedFolderCapability,
-    RequestFolderAccessArgs, RequestFolderAccessResult, RequestedFolderHint, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
+    validate_request_folder_access_arguments, CallId, ChatId, RequestFolderAccessArgs,
+    RequestFolderAccessResult, RequestedFolderHint, ToolCallExecution, ToolCallRecord,
+    ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
 };
 use openwave_host_broker::{
     Capability, ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
@@ -22,6 +22,8 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
+
+use self::folder_operations::granted_folder_capabilities;
 
 mod control_plane;
 pub(crate) mod delegated_file_read;
@@ -511,7 +513,7 @@ async fn connected_resolution(
     context: AuthoritativeContext,
     root: openwave_host_broker::RootSummary,
 ) -> Result<StoredResolution, String> {
-    let listed = state
+    let capabilities = state
         .broker
         .operation(OperationEnvelope {
             protocol_version: PROTOCOL_VERSION,
@@ -520,30 +522,31 @@ async fn connected_resolution(
             request: OperationRequest::ListRoots,
         })
         .await
-        .map_err(|_| "could not verify the selected folder's capabilities".to_owned())?;
-    let OperationResult::ListRoots { roots } = listed else {
-        return Err("host broker returned an unexpected folder listing".to_owned());
-    };
-    let access = roots
-        .into_iter()
-        .find(|candidate| candidate.root_id == root.root_id)
-        .ok_or_else(|| {
-            "the selected folder is no longer available to this conversation".to_owned()
-        })?;
+        .ok()
+        .and_then(|listed| match listed {
+            OperationResult::ListRoots { roots } => roots
+                .into_iter()
+                .find(|candidate| candidate.root_id == root.root_id)
+                .map(|access| access.capabilities),
+            _ => None,
+        });
+    connected_resolution_from_capabilities(root, capabilities.as_deref())
+}
+
+fn connected_resolution_from_capabilities(
+    root: openwave_host_broker::RootSummary,
+    capabilities: Option<&[Capability]>,
+) -> Result<StoredResolution, String> {
     let result = RequestFolderAccessResult::Connected {
         root_id: root.root_id.as_uuid(),
         display_name: root.display_name,
-        capabilities: access
-            .capabilities
-            .into_iter()
-            .filter_map(|capability| match capability {
-                Capability::ReadFiles => Some(GrantedFolderCapability::ReadFiles),
-                Capability::WriteFiles => Some(GrantedFolderCapability::WriteFiles),
-                Capability::ExecuteCommands => Some(GrantedFolderCapability::ExecuteCommands),
-                Capability::ListRoots => None,
-                _ => None,
-            })
-            .collect(),
+        // A revocation or broker outage can race this post-consent projection.
+        // Consent already succeeded, so return the pathless root identity and
+        // under-report reach rather than turning that race into a user-facing
+        // failure immediately after the picker closes.
+        capabilities: capabilities
+            .map(granted_folder_capabilities)
+            .unwrap_or_default(),
     };
     Ok(StoredResolution::Completed {
         result: serde_json::to_string(&result)
@@ -656,7 +659,24 @@ mod tests {
     }
 
     #[test]
-    fn declined_results_are_typed() {
+    fn terminal_results_are_typed_and_path_free() {
+        let connected = connected_resolution_from_capabilities(
+            openwave_host_broker::RootSummary {
+                root_id: openwave_host_broker::RootId::new(),
+                display_name: "Documents".into(),
+            },
+            Some(&[
+                Capability::ReadFiles,
+                Capability::WriteFiles,
+                Capability::ExecuteCommands,
+            ]),
+        )
+        .unwrap();
+        let StoredResolution::Completed { result, .. } = connected else {
+            panic!("expected completed result")
+        };
+        assert!(result.contains("connected"));
+        assert!(!result.contains("/Users/"));
         assert!(matches!(
             declined_resolution().unwrap(),
             StoredResolution::Completed { result, .. } if result.contains("declined")
