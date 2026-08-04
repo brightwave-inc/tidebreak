@@ -13,22 +13,56 @@ run-name: >-
 #                                                             local backend's
 #                                                             default)
 #
+# Publishes happen on four triggers:
+#
+#   - a `v*` release tag push (the release cadence);
+#   - a push to `main` that touches the image inputs — the agent crate
+#     (including its Dockerfile and documents-requirements.txt), the
+#     exec-documents scripts, or this workflow — scoped by the `resolve` job
+#     below rather than an `on.push.paths` filter, because a `paths` filter
+#     combined with a `tags` filter would also gate the tag trigger;
+#   - a weekly scheduled rebuild, so Debian security patches and the
+#     vulnerability gate flush through even when nothing in-repo changes;
+#   - manual dispatch with an explicit release-style tag.
+#
+# Release publishes keep human `vX.Y.Z` tags. Scheduled and main-push rebuilds
+# mint `main-<utc date>-<short sha>-r<run number>` instead:
+#
+#   - it never starts with `v`, so no future release tag can collide with a
+#     rebuild tag (release tags always do, and the tag validation below keeps
+#     the two shapes disjoint);
+#   - the run number makes every publish unique, so rebuilding the same commit
+#     (the weekly patch flush) still gets an immutable tag;
+#   - the date and short SHA make provenance readable at a glance.
+#
 # Each publish is multi-arch (amd64 + arm64, built on native runners — the
 # development fleet is Apple Silicon, so an amd64-only image would run the
-# whole sandbox under emulation there). Version tags are treated as immutable:
+# whole sandbox under emulation there). Image tags are treated as immutable:
 # a tag that already exists on GHCR fails the run rather than being repointed.
-# The final manifest-list digests land in the run summary; the local backend
-# records the documents digest as its verified pin (see `sandbox_docker` in
-# openwave-server for the recorded pin and the follow-up-PR step).
 #
-# Publishing uses the workflow's own GITHUB_TOKEN with packages:write only; no
-# repository secret is consumed. First-time note: a package created by this
-# workflow is private by default — making it publicly pullable (and linking it
-# to the repository) is a one-time manual toggle in the GHCR package settings.
+# Before anything is pushed, both variants pass a trivy vulnerability and
+# secret scan (pinned binary release, checksum-verified — this workflow avoids
+# third-party actions). The full all-severities report lands in the run
+# summary; the publish itself fails only on CRITICAL vulnerabilities with a
+# released fix, or on any detected secret.
+#
+# The final manifest-list digests land in the run summary, and the `pin` job
+# proposes the follow-up PR that records the documents digest as the local
+# backend's verified pin (see `sandbox_docker` in openwave-server).
+#
+# Publishing uses the workflow's own GITHUB_TOKEN; no repository secret is
+# consumed. First-time note: a package created by this workflow is private by
+# default — making it publicly pullable (and linking it to the repository) is
+# a one-time manual toggle in the GHCR package settings.
 
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+  schedule:
+    # Weekly patch flush: Thursday 04:43 UTC, off the busy on-the-hour and
+    # on-the-half-hour scheduling spikes.
+    - cron: "43 4 * * 4"
   workflow_dispatch:
     inputs:
       image_tag:
@@ -48,16 +82,107 @@ concurrency:
 env:
   SLIM_REPOSITORY: ghcr.io/${{ github.repository_owner }}/openwave-sandbox-agent
   DOCUMENTS_REPOSITORY: ghcr.io/${{ github.repository_owner }}/openwave-sandbox-agent-documents
-  IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
+  TRIVY_VERSION: 0.73.0
 
 jobs:
+  resolve:
+    name: resolve tag and scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      image_tag: ${{ steps.decide.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Decide the image tag and whether to publish
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.image_tag }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.event.after }}
+        run: |
+          release_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          rebuild_pattern='^main-[0-9]{8}-[0-9a-f]{7}-r[0-9]+$'
+          rebuild_tag="main-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}-r${GITHUB_RUN_NUMBER}"
+
+          publish=false
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              image_tag="$DISPATCH_TAG"
+              [[ "$image_tag" =~ $release_pattern ]] || {
+                echo "Dispatched image tag must look like vX.Y.Z (optional pre-release suffix): $image_tag" >&2
+                exit 1
+              }
+              publish=true
+              ;;
+            schedule)
+              image_tag="$rebuild_tag"
+              publish=true
+              ;;
+            push)
+              if [[ "$REF_TYPE" == tag ]]; then
+                image_tag="$REF_NAME"
+                [[ "$image_tag" =~ $release_pattern ]] || {
+                  echo "Release image tag must look like vX.Y.Z (optional pre-release suffix): $image_tag" >&2
+                  exit 1
+                }
+                publish=true
+              else
+                image_tag="$rebuild_tag"
+                if [[ -z "$PUSH_BASE_SHA" || -z "$PUSH_HEAD_SHA" || "$PUSH_BASE_SHA" =~ ^0+$ || "$PUSH_HEAD_SHA" =~ ^0+$ ]]; then
+                  echo "missing comparison range; rebuilding conservatively" >&2
+                  publish=true
+                else
+                  git diff --no-renames --name-only -z "$PUSH_BASE_SHA..$PUSH_HEAD_SHA" \
+                    > "$RUNNER_TEMP/changed-files"
+                  while IFS= read -r -d '' file; do
+                    case "$file" in
+                      # Everything the published images are built from: the
+                      # agent crate (Dockerfile and documents-requirements.txt
+                      # included), the exec-documents scripts baked into the
+                      # documents variant, and this workflow itself.
+                      crates/openwave-sandbox-agent/*|scripts/exec-documents/*|.github/workflows/publish-sandbox-image.yml)
+                        publish=true
+                        ;;
+                    esac
+                  done < "$RUNNER_TEMP/changed-files"
+                fi
+              fi
+              ;;
+            *)
+              echo "unknown event $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          [[ "$image_tag" =~ $release_pattern || "$image_tag" =~ $rebuild_pattern ]] || {
+            echo "Resolved image tag matches neither publish scheme: $image_tag" >&2
+            exit 1
+          }
+          {
+            echo "publish=$publish"
+            echo "image_tag=$image_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "publish=$publish image_tag=$image_tag"
+
   build:
     name: build and push · ${{ matrix.arch }}
+    needs: resolve
+    if: needs.resolve.outputs.publish == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+    env:
+      IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
     strategy:
       fail-fast: true
       matrix:
@@ -69,19 +194,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Reject an invalid image tag
-        run: |
-          [[ "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || {
-            echo "Image tag must look like vX.Y.Z (optional pre-release suffix): $IMAGE_TAG" >&2
-            exit 1
-          }
-
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-      # Version tags are immutable: refuse the whole build when the final
+      # Image tags are immutable: refuse the whole build when the final
       # manifest-list tag already exists, before any per-arch push mutates
       # anything.
       - name: Refuse to republish an existing version tag
@@ -115,6 +233,56 @@ jobs:
             "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
             --version
 
+      # This workflow deliberately uses no third-party actions; the scanner is
+      # the trivy release binary, pinned by version and sha256 checksum the
+      # same way the base images are pinned by digest.
+      - name: Install trivy
+        run: |
+          case "${{ matrix.arch }}" in
+            amd64)
+              asset="Linux-64bit"
+              sha256="2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+              ;;
+            arm64)
+              asset="Linux-ARM64"
+              sha256="13833d97e8a1a5367471c372a173180157f593bece570e20d5d925fef552f5dd"
+              ;;
+          esac
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${asset}.tar.gz"
+          echo "$sha256  $RUNNER_TEMP/trivy.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          trivy --version
+
+      # The gate is deliberately narrower than the report. The documents image
+      # carries LibreOffice and its long tail of Debian CVE noise; failing on
+      # every finding would train everyone to ignore the lane. Publishing
+      # stops only for what is actionable now — a CRITICAL vulnerability with
+      # a released fix, or any detected secret — while the full all-severities
+      # report lands in the run summary for the record.
+      - name: Scan both variants before push
+        run: |
+          for repository in "$SLIM_REPOSITORY" "$DOCUMENTS_REPOSITORY"; do
+            image="$repository:$IMAGE_TAG-${{ matrix.arch }}"
+            report="$(mktemp)"
+            trivy image --timeout 15m --scanners vuln,secret \
+              --format table --output "$report" "$image"
+            {
+              echo "<details><summary>trivy report (all severities): <code>$image</code></summary>"
+              echo
+              echo '```'
+              head -c 200000 "$report"
+              echo '```'
+              echo
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+            trivy image --timeout 15m --scanners vuln \
+              --severity CRITICAL --ignore-unfixed --exit-code 1 "$image"
+            trivy image --timeout 15m --scanners secret --exit-code 1 "$image"
+          done
+
       - name: Push per-architecture tags
         run: |
           docker push "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
@@ -122,12 +290,14 @@ jobs:
 
   manifest:
     name: assemble multi-arch manifests
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       packages: write
+    env:
+      IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
     steps:
       - name: Log in to GHCR
         env:
@@ -159,6 +329,140 @@ jobs:
               echo "- \`$repository:$IMAGE_TAG\` → \`$digest\`"
             done
             echo
-            echo "Pin the documents digest as \`PUBLISHED_IMAGE_DIGEST\` in"
-            echo "\`crates/openwave-server/src/sandbox_docker.rs\` (one-line follow-up PR)."
+            echo "The \`pin\` job proposes the follow-up PR that records the"
+            echo "documents digest as \`PUBLISHED_IMAGE_DIGEST\` in"
+            echo "\`crates/openwave-server/src/sandbox_docker.rs\`."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Closes the pin loop: after a successful publish, propose (or refresh) the
+  # one-line PR bumping the recorded documents digest. The branch push and PR
+  # both use the workflow's own GITHUB_TOKEN — chosen over a PAT or GitHub App
+  # because it adds no credential surface today. The known cost: GitHub never
+  # triggers workflows on events created with GITHUB_TOKEN, so required checks
+  # will not start on the PR by themselves; the PR body says so and names the
+  # one-step fix (close/reopen or an empty commit). This job only ever pushes
+  # to its automation branch — never to main.
+  pin:
+    name: propose the digest pin bump
+    needs: [resolve, manifest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      packages: read
+    env:
+      IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+      PIN_BRANCH: automation/sandbox-image-pin
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Update the recorded documents digest
+        run: |
+          digest="$(docker buildx imagetools inspect \
+            "$DOCUMENTS_REPOSITORY:$IMAGE_TAG" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "unexpected digest for $DOCUMENTS_REPOSITORY:$IMAGE_TAG: $digest" >&2
+            exit 1
+          }
+          echo "DOCUMENTS_DIGEST=$digest" >> "$GITHUB_ENV"
+          python3 - "$digest" <<'EOF'
+          import datetime
+          import os
+          import re
+          import sys
+
+          digest = sys.argv[1]
+          path = "crates/openwave-server/src/sandbox_docker.rs"
+          with open(path) as handle:
+              source = handle.read()
+
+          date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+          comment = (
+              f"// Manifest-list digest of {os.environ['DOCUMENTS_REPOSITORY']}:"
+              f"{os.environ['IMAGE_TAG']},\n"
+              f"// published by workflow run {os.environ['GITHUB_RUN_ID']} "
+              f"({os.environ['GITHUB_EVENT_NAME']}, {date}); the run's\n"
+              "// step summary records the same value from a post-push "
+              "`imagetools inspect`.\n"
+          )
+          pattern = re.compile(
+              r"// Manifest-list digest of [^\n]*\n(?:// [^\n]*\n)*"
+              r"const PUBLISHED_IMAGE_DIGEST: Option<&str> =\n"
+              r'    Some\("(sha256:[0-9a-f]{64})"\);'
+          )
+          match = pattern.search(source)
+          if match is None:
+              sys.exit("could not find the PUBLISHED_IMAGE_DIGEST pin block")
+          if pattern.search(source, match.end()) is not None:
+              sys.exit("found more than one PUBLISHED_IMAGE_DIGEST pin block")
+          if match.group(1) == digest:
+              print(f"digest unchanged ({digest}); nothing to propose")
+              sys.exit(0)
+          replacement = (
+              comment
+              + "const PUBLISHED_IMAGE_DIGEST: Option<&str> =\n"
+              + f'    Some("{digest}");'
+          )
+          with open(path, "w") as handle:
+              handle.write(source[: match.start()] + replacement + source[match.end() :])
+          EOF
+
+      - name: Open or update the pin PR
+        run: |
+          if git diff --quiet; then
+            echo "Documents digest already pinned; no PR proposed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$PIN_BRANCH"
+          git commit --all \
+            --message "feat(server): pin the sandbox documents image digest for $IMAGE_TAG"
+          git push --force origin "HEAD:refs/heads/$PIN_BRANCH"
+
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          Automated follow-up from a sandbox image publish: records the new documents
+          image digest as the local backend's verified pin.
+
+          - Image: \`$DOCUMENTS_REPOSITORY:$IMAGE_TAG\`
+          - Digest: \`$DOCUMENTS_DIGEST\`
+          - Publish run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          This PR was opened with the workflow's own GITHUB_TOKEN, and GitHub does not
+          trigger workflows on events created with that token — required checks will not
+          start on their own. Close and reopen the PR, or push an empty commit, to kick
+          CI. A fine-scoped PAT or GitHub App token could remove that manual step later.
+          EOF
+
+          if [[ "$(gh pr list --head "$PIN_BRANCH" --state open --json number --jq length)" != 0 ]]; then
+            echo "Updated the open pin PR on \`$PIN_BRANCH\` with digest \`$DOCUMENTS_DIGEST\`." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if gh pr create --base main --head "$PIN_BRANCH" \
+            --title "feat(server): pin the sandbox documents image digest for $IMAGE_TAG" \
+            --body-file "$body_file"; then
+            echo "Proposed the digest pin PR from \`$PIN_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Repositories can bar Actions from creating PRs; the branch is
+            # pushed either way, so hand the maintainer the one-liner.
+            {
+              echo "Pushed \`$PIN_BRANCH\` but could not open the PR. Create it with:"
+              echo
+              echo '```'
+              echo "gh pr create --base main --head $PIN_BRANCH" \
+                "--title 'feat(server): pin the sandbox documents image digest for $IMAGE_TAG'"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

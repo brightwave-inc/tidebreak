@@ -184,8 +184,10 @@ const PUBLISHED_IMAGE_REPOSITORY: &str = "ghcr.io/brightwave-inc/openwave-sandbo
 /// documents image the default configuration runs.
 ///
 /// PROVENANCE: recorded from the publish workflow's run summary — the digest
-/// each publish run prints next to the documents ref. Update it in a one-line
-/// PR whenever a new image version is published.
+/// each publish run prints next to the documents ref. The workflow's `pin`
+/// job proposes the bump PR automatically after every successful publish
+/// (release `vX.Y.Z` tags and `main-<date>-<sha>-r<run>` rebuild tags alike),
+/// rewriting the comment below with the published tag and run id.
 ///
 /// `None` until the first publish run exists: the digest cannot be pinned
 /// before an image is published, and the publish workflow lands together with

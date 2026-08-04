@@ -126,3 +126,44 @@ test("the image builds only from digest-pinned bases", () => {
   }
   assert.ok(stages.has("documents"), "the documents stage must exist");
 });
+
+test("the publish workflow rebuilds when any image input changes", () => {
+  const workflow = readFileSync(
+    new URL(
+      "../.github/workflows/publish-sandbox-image.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  // The main-push trigger publishes only when the resolve job sees an image
+  // input change; these prefixes are that scope. The weekly schedule flushes
+  // everything else (base-image patches) through regardless.
+  const rebuildScopes = [
+    "crates/openwave-sandbox-agent/*",
+    "scripts/exec-documents/*",
+    ".github/workflows/publish-sandbox-image.yml",
+  ];
+  for (const scope of rebuildScopes) {
+    assert.ok(
+      workflow.includes(scope),
+      `publish workflow must rebuild on changes to ${scope}`,
+    );
+  }
+
+  // Every in-repo path the final image stages copy from must fall inside a
+  // rebuild scope, or a Dockerfile edit can silently stop republishing. The
+  // builder stage's `COPY . .` is the compile context, deliberately covered
+  // by the agent-crate scope plus the weekly rebuild rather than publishing
+  // on every workspace commit.
+  for (const match of dockerfile.matchAll(/^COPY\s+(?!--from=)(\S+)\s+\S+/gm)) {
+    const source = match[1];
+    if (source === ".") {
+      continue;
+    }
+    assert.ok(
+      rebuildScopes.some((scope) => source.startsWith(scope.replace(/\*$/, ""))),
+      `Dockerfile input outside the publish rebuild scope: ${source}`,
+    );
+  }
+});
