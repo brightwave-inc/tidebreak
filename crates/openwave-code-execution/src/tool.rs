@@ -206,6 +206,17 @@ impl Tool for ExecTool {
         if response.output_truncated {
             content.push_str("\noutput_truncated: true");
         }
+        if response.degraded.is_some() {
+            // The model is told too: a run that installs its own dependencies
+            // is slower and can fail on a network policy, and that is not a
+            // fact it should have to infer from a pip log.
+            content.push_str(
+                "\n\nsandbox: the prepared OpenWave sandbox image was unavailable, so this \
+                 command ran on the backend's stock image. Document tooling installs its \
+                 dependencies at run time here, which is slower and needs package-registry \
+                 network access.",
+            );
+        }
         if !response.sync_notes.is_empty() {
             content.push_str("\n\nworkspace sync:");
             for note in &response.sync_notes {
@@ -265,6 +276,7 @@ impl Tool for ExecTool {
                 "stdout": response.stdout,
                 "stderr": response.stderr,
                 "sync_notes": response.sync_notes,
+                "degraded": response.degraded,
                 "outputs": artifacts
                     .entries
                     .iter()
@@ -318,6 +330,7 @@ mod tests {
                 output_truncated: false,
                 duration_ms: 3,
                 sync_notes: Vec::new(),
+                degraded: None,
             })
         }
     }
@@ -393,6 +406,7 @@ mod tests {
                 output_truncated: false,
                 duration_ms: 60_012,
                 sync_notes: Vec::new(),
+                degraded: None,
             })
         }
     }
@@ -444,6 +458,7 @@ mod tests {
                 output_truncated: false,
                 duration_ms: 1,
                 sync_notes: Vec::new(),
+                degraded: None,
             })
         }
 
@@ -490,6 +505,7 @@ mod tests {
                 output_truncated: false,
                 duration_ms: 1,
                 sync_notes: Vec::new(),
+                degraded: None,
             })
         }
 

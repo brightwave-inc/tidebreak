@@ -787,6 +787,16 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
 export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed";
 
 /**
+ * A way the execution backend ran with less than its intended setup.
+ *
+ * Closed, and deliberately coarse: what a reader needs is what happened and
+ * what it costs them, not which vendor API returned which status. A provider
+ * that degrades a second way earns a second variant here rather than a free
+ * string, because the sentence the card shows is written on this side.
+ */
+export type ExecDegradation = "sandbox_image_unavailable";
+
+/**
  * Renderer-safe selection metadata; bytes remain behind the scoped endpoint.
  */
 export type ExecFileBinaryPreview = { format: ExecFilePreviewFormat, before: ExecFilePreviewAvailability, after: ExecFilePreviewAvailability, };
@@ -1376,7 +1386,7 @@ export type RendererChatFrame = RendererSequencedEvent | RendererChatMetadata;
 /**
  * Chat metadata pushed to an open client, outside the turn journal.
  */
-export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, };
+export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, } | { "metadata": "sandbox_preparing", preparing: boolean, };
 
 /**
  * Bounded refusal metadata safe to present in the desktop transcript.
@@ -1634,7 +1644,13 @@ images?: Array<ImageRef>,
  * not listed. Defaulted so exec rows persisted before the field
  * existed read back unchanged.
  */
-outputs?: Array<ResultEntry>, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
+outputs?: Array<ResultEntry>, 
+/**
+ * How the execution backend fell short of its intended setup, when it
+ * did. Reported on the first execution that degrades and not on the
+ * ones after it, so a chat says this once rather than on every card.
+ */
+degraded?: ExecDegradation, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */

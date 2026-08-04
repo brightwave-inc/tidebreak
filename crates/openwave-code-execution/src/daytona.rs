@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use openwave_core::SecretProvider;
+use openwave_core::{ExecDegradation, SecretProvider};
 use openwave_egress::{EgressEnforcement, EgressPolicy};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -17,9 +19,9 @@ use crate::remote::{
 };
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionWorkspaceId, StagedUpload, WorkspaceFileEntry,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES,
-    MAX_WORKSPACE_LIST_ENTRIES,
+    CodeExecutionResponse, ExecutionWorkspaceId, SandboxPreparation, SandboxPreparationSink,
+    StagedUpload, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
+    MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
@@ -111,6 +113,11 @@ pub struct DaytonaExecutionProvider {
     egress: Option<EgressPolicy>,
     snapshot: Option<String>,
     documents_snapshot: tokio::sync::Mutex<DocumentsSnapshot>,
+    /// Set when the documents snapshot latches to [`DocumentsSnapshot::Fallback`],
+    /// and taken by the execution that observes it. The latch means one
+    /// provider instance degrades once, so the report goes out once too.
+    degradation_pending: AtomicBool,
+    preparation: Option<Arc<dyn SandboxPreparationSink>>,
 }
 
 /// Whether this provider instance has settled how it creates sandboxes when no
@@ -156,6 +163,44 @@ enum SnapshotError {
     Degraded(String),
 }
 
+/// A first-run image preparation, announced at most once and always closed.
+///
+/// Only the paths that actually make the caller wait announce — a snapshot
+/// already `active` costs one request and must not flash a progress state on
+/// screen. Ending it lives in `Drop` so every early return, error, and
+/// cancellation closes the report rather than leaving a wait showing forever.
+struct PreparationReport<'a> {
+    sink: Option<&'a dyn SandboxPreparationSink>,
+    workspace_id: &'a str,
+    announced: AtomicBool,
+}
+
+impl<'a> PreparationReport<'a> {
+    fn new(sink: Option<&'a dyn SandboxPreparationSink>, workspace_id: &'a str) -> Self {
+        Self {
+            sink,
+            workspace_id,
+            announced: AtomicBool::new(false),
+        }
+    }
+
+    fn announce(&self) {
+        let Some(sink) = self.sink else { return };
+        if self.announced.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        sink.report(self.workspace_id, SandboxPreparation::Started);
+    }
+}
+
+impl Drop for PreparationReport<'_> {
+    fn drop(&mut self) {
+        if let (Some(sink), true) = (self.sink, self.announced.load(Ordering::Relaxed)) {
+            sink.report(self.workspace_id, SandboxPreparation::Finished);
+        }
+    }
+}
+
 impl DaytonaExecutionProvider {
     pub fn new(
         credential: DaytonaCredential,
@@ -199,7 +244,20 @@ impl DaytonaExecutionProvider {
             egress: None,
             snapshot: None,
             documents_snapshot: tokio::sync::Mutex::new(DocumentsSnapshot::default()),
+            degradation_pending: AtomicBool::new(false),
+            preparation: None,
         })
+    }
+
+    /// Report first-run image preparation to the host while it runs.
+    ///
+    /// Registering the documents snapshot pulls a multi-gigabyte image into the
+    /// caller's Daytona organization, which takes minutes and returns nothing
+    /// until it finishes. Without a sink the wait is silent, exactly as before.
+    #[must_use]
+    pub fn with_preparation_sink(mut self, sink: Arc<dyn SandboxPreparationSink>) -> Self {
+        self.preparation = Some(sink);
+        self
     }
 
     /// Create every sandbox from this account-registered Daytona snapshot
@@ -283,7 +341,7 @@ impl DaytonaExecutionProvider {
         &self,
         workspace_id: &str,
     ) -> Result<RemoteSession, CodeExecutionError> {
-        let snapshot = self.resolve_snapshot().await?;
+        let snapshot = self.resolve_snapshot(workspace_id).await?;
         let response = self
             .client
             .post(self.api_url("/sandbox"))
@@ -331,7 +389,10 @@ impl DaytonaExecutionProvider {
     /// made ready once per provider instance — registered from the pinned
     /// digest if missing, reactivated if Daytona let it lapse — and `None`
     /// (Daytona's default snapshot) is the degraded answer when that fails.
-    async fn resolve_snapshot(&self) -> Result<Option<&str>, CodeExecutionError> {
+    async fn resolve_snapshot(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<&str>, CodeExecutionError> {
         if let Some(configured) = self.snapshot.as_deref() {
             return Ok(Some(configured));
         }
@@ -341,7 +402,13 @@ impl DaytonaExecutionProvider {
             DocumentsSnapshot::Fallback => return Ok(None),
             DocumentsSnapshot::Unresolved => {}
         }
-        match self.ensure_documents_snapshot().await {
+        // Scoped so the report closes — and the host stops showing a wait —
+        // before this returns, whichever way it returns.
+        let outcome = {
+            let preparing = PreparationReport::new(self.preparation.as_deref(), workspace_id);
+            self.ensure_documents_snapshot(&preparing).await
+        };
+        match outcome {
             Ok(()) => {
                 *state = DocumentsSnapshot::Ready;
                 Ok(Some(DOCUMENTS_SNAPSHOT))
@@ -357,15 +424,19 @@ impl DaytonaExecutionProvider {
                      install their dependencies inside each sandbox instead"
                 );
                 *state = DocumentsSnapshot::Fallback;
+                self.degradation_pending.store(true, Ordering::Relaxed);
                 Ok(None)
             }
         }
     }
 
     /// Idempotently bring the documents snapshot to `active` in this account.
-    async fn ensure_documents_snapshot(&self) -> Result<(), SnapshotError> {
+    async fn ensure_documents_snapshot(
+        &self,
+        preparing: &PreparationReport<'_>,
+    ) -> Result<(), SnapshotError> {
         match self.fetch_snapshot(DOCUMENTS_SNAPSHOT).await? {
-            Some(snapshot) => self.await_snapshot_active(snapshot).await,
+            Some(snapshot) => self.await_snapshot_active(snapshot, preparing).await,
             None => {
                 tracing::info!(
                     snapshot = DOCUMENTS_SNAPSHOT,
@@ -373,6 +444,7 @@ impl DaytonaExecutionProvider {
                     "preparing the OpenWave documents sandbox image in Daytona \
                      (first run only; this pulls a multi-gigabyte image)"
                 );
+                preparing.announce();
                 let response = self
                     .client
                     .post(self.api_url("/snapshots"))
@@ -388,7 +460,7 @@ impl DaytonaExecutionProvider {
                     .await
                     .map_err(|_| SnapshotError::Degraded("could not reach Daytona".into()))?;
                 let created = decode_snapshot(response).await?;
-                self.await_snapshot_active(created).await
+                self.await_snapshot_active(created, preparing).await
             }
         }
     }
@@ -398,6 +470,7 @@ impl DaytonaExecutionProvider {
     async fn await_snapshot_active(
         &self,
         mut snapshot: DaytonaSnapshot,
+        preparing: &PreparationReport<'_>,
     ) -> Result<(), SnapshotError> {
         let deadline = Instant::now() + DAYTONA_SNAPSHOT_TIMEOUT;
         let started = Instant::now();
@@ -411,6 +484,7 @@ impl DaytonaExecutionProvider {
                         snapshot = DOCUMENTS_SNAPSHOT,
                         "reactivating the OpenWave documents snapshot in Daytona"
                     );
+                    preparing.announce();
                     let response = self
                         .client
                         .post(self.api_url(&format!("/snapshots/{DOCUMENTS_SNAPSHOT}/activate")))
@@ -422,7 +496,7 @@ impl DaytonaExecutionProvider {
                     requested_activation = true;
                     continue;
                 }
-                Some("pending" | "building" | "pulling" | "snapshotting") => {}
+                Some("pending" | "building" | "pulling" | "snapshotting") => preparing.announce(),
                 state => {
                     return Err(SnapshotError::Degraded(snapshot_failure(
                         state,
@@ -932,7 +1006,11 @@ impl CodeExecutionProvider for DaytonaExecutionProvider {
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
-        execute_remote(self, &self.pool, request).await
+        let mut response = execute_remote(self, &self.pool, request).await?;
+        if self.degradation_pending.swap(false, Ordering::Relaxed) {
+            response.degraded = Some(ExecDegradation::SandboxImageUnavailable);
+        }
+        Ok(response)
     }
 
     fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
@@ -1500,6 +1578,32 @@ mod tests {
         .unwrap()
     }
 
+    fn request_in(workspace_id: &str, execution_id: &str) -> CodeExecutionRequest {
+        CodeExecutionRequest::new(
+            ExecutionId::parse(execution_id).unwrap(),
+            ExecutionWorkspaceId::parse(workspace_id).unwrap(),
+            "printf",
+            vec!["ok".into()],
+            ".",
+        )
+        .unwrap()
+    }
+
+    /// Records what a host would have shown while an image was being prepared.
+    #[derive(Default)]
+    struct RecordingPreparationSink {
+        stages: Mutex<Vec<(String, SandboxPreparation)>>,
+    }
+
+    impl SandboxPreparationSink for RecordingPreparationSink {
+        fn report(&self, workspace_id: &str, stage: SandboxPreparation) {
+            self.stages
+                .lock()
+                .unwrap()
+                .push((workspace_id.to_owned(), stage));
+        }
+    }
+
     fn timeout_request() -> CodeExecutionRequest {
         CodeExecutionRequest::new(
             ExecutionId::parse("call-timeout").unwrap(),
@@ -1807,6 +1911,41 @@ mod tests {
         server.abort();
     }
 
+    /// A first run pulls a multi-gigabyte image and returns nothing until it
+    /// finishes, so the wait has to be visible where the person is looking.
+    /// A snapshot that is already active is not a wait and must not flash one.
+    #[tokio::test]
+    async fn daytona_reports_first_run_image_preparation_but_not_a_ready_one() {
+        let (base, _state, server) = spawn_mock().await;
+        let sink = Arc::new(RecordingPreparationSink::default());
+        let provider = mock_provider(&base).with_preparation_sink(sink.clone());
+
+        provider
+            .execute(request_in("chat-first-run", "call-one"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.stages.lock().unwrap().as_slice(),
+            [
+                ("chat-first-run".to_owned(), SandboxPreparation::Started),
+                ("chat-first-run".to_owned(), SandboxPreparation::Finished),
+            ]
+        );
+
+        // A fresh provider against the now-registered snapshot: one lookup,
+        // nothing to wait for, and so nothing to say.
+        let ready_sink = Arc::new(RecordingPreparationSink::default());
+        mock_provider(&base)
+            .with_preparation_sink(ready_sink.clone())
+            .execute(request_in("chat-second-run", "call-two"))
+            .await
+            .unwrap();
+
+        assert!(ready_sink.stages.lock().unwrap().is_empty());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn daytona_reactivates_the_documents_snapshot_it_let_lapse() {
         let (base, state, server) = spawn_mock().await;
@@ -1838,12 +1977,12 @@ mod tests {
         *state.create_snapshot_status.lock().unwrap() = Some(StatusCode::PAYMENT_REQUIRED);
         let provider = mock_provider(&base);
 
-        provider
-            .create_workspace(&ExecutionWorkspaceId::parse("chat-one").unwrap())
+        let first = provider
+            .execute(request_in("chat-one", "call-one"))
             .await
             .unwrap();
-        provider
-            .create_workspace(&ExecutionWorkspaceId::parse("chat-two").unwrap())
+        let second = provider
+            .execute(request_in("chat-two", "call-two"))
             .await
             .unwrap();
 
@@ -1851,6 +1990,13 @@ mod tests {
         // refused registration is not retried on every creation.
         assert_eq!(created_from(&state), [None, None]);
         assert_eq!(snapshot_calls(&state), ["snapshot-get", "snapshot-create"]);
+        // The run that discovered the shortfall says so; the ones after it
+        // inherit the latched decision and have nothing new to report.
+        assert_eq!(
+            first.degraded,
+            Some(ExecDegradation::SandboxImageUnavailable)
+        );
+        assert_eq!(second.degraded, None);
         server.abort();
     }
 

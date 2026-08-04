@@ -210,6 +210,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           chatListActions.applyDerivedTitle(chatId, metadata.title);
           return;
         }
+        if (metadata.metadata === "sandbox_preparing") {
+          updateSession((session) => ({
+            ...session,
+            sandboxPreparing: metadata.preparing,
+          }));
+          return;
+        }
         const generation = ++terminalHydrationGenerationRef.current;
         void refreshTerminalTranscript(generation);
       },

@@ -37,6 +37,14 @@ export type ChatSessionState = {
   hydratedMessageIds: ReadonlySet<string>;
   /** One truncation notice per turn, however many truncation events arrive. */
   contextTruncationNoted: boolean;
+  /**
+   * Whether code execution is preparing its sandbox image right now.
+   *
+   * Pushed outside the journal, so it is not reduced from an event and never
+   * survives a reload — which is correct: it describes a wait that is either
+   * happening or over.
+   */
+  sandboxPreparing: boolean;
 };
 
 export type ChatSessionEffect =
@@ -81,6 +89,7 @@ export function initialChatSessionState(): ChatSessionState {
     provisionalToolCallIds: new Set(),
     hydratedMessageIds: new Set(),
     contextTruncationNoted: false,
+    sandboxPreparing: false,
   };
 }
 

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -356,10 +356,14 @@ fn configured_daytona(
     pool: RemoteSessionPool,
     egress: &EgressConfig,
     snapshot: Option<&str>,
+    preparation: Option<Arc<dyn openwave_code_execution::SandboxPreparationSink>>,
 ) -> std::result::Result<DaytonaExecutionProvider, CodeExecutionError> {
     let mut provider = DaytonaExecutionProvider::with_session_pool(credential, timeout, pool)?;
     if let Some(snapshot) = snapshot {
         provider = provider.with_snapshot(snapshot);
+    }
+    if let Some(sink) = preparation {
+        provider = provider.with_preparation_sink(sink);
     }
     match resolve_egress_policy(egress)? {
         Some(policy) => provider.with_egress_policy(policy),
@@ -847,6 +851,39 @@ pub struct ConfiguredCodeExecutionProvider {
     /// Whether a host-side cache population pass is running or has succeeded;
     /// cleared again on failure so a later exec can retry.
     package_cache_population: Arc<std::sync::atomic::AtomicBool>,
+    /// Where live sandbox-preparation progress is announced. Installed after
+    /// the app's state is assembled, because the bus is built there; execution
+    /// works exactly as before until it is.
+    events: OnceLock<Arc<crate::bus::EventBus>>,
+    /// Chats already told that execution is running degraded.
+    ///
+    /// The providers latch the degradation per instance, and an instance is
+    /// built per execution — so without this the same warning would land on
+    /// every card that recreates a sandbox. Warning once per chat is what a
+    /// reader needs: the second card says nothing new.
+    degradation_reported: Mutex<HashSet<ChatId>>,
+}
+
+/// Publishes a provider's first-run image preparation to the chat that is
+/// waiting on it.
+struct SandboxPreparationNotices {
+    events: Arc<crate::bus::EventBus>,
+}
+
+impl openwave_code_execution::SandboxPreparationSink for SandboxPreparationNotices {
+    fn report(&self, workspace_id: &str, stage: openwave_code_execution::SandboxPreparation) {
+        // The workspace identity is the chat's; a workspace that does not name
+        // one has no window to tell, and the execution itself proceeds.
+        let Ok(chat) = workspace_id.parse::<ChatId>() else {
+            return;
+        };
+        self.events.publish_metadata(
+            chat,
+            crate::bus::ChatMetadataNotice::SandboxPreparing {
+                preparing: matches!(stage, openwave_code_execution::SandboxPreparation::Started),
+            },
+        );
+    }
 }
 
 /// One turn's staging for one chat.
@@ -1000,7 +1037,20 @@ impl ConfiguredCodeExecutionProvider {
             write_overlays: Mutex::new(HashMap::new()),
             package_cache_runtime: tokio::sync::OnceCell::new(),
             package_cache_population: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            events: OnceLock::new(),
+            degradation_reported: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Install the chat event bus this provider announces sandbox preparation
+    /// on. Called once, after the app state that owns the bus is assembled.
+    pub fn attach_event_bus(&self, events: Arc<crate::bus::EventBus>) {
+        let _ = self.events.set(events);
+    }
+
+    fn preparation_sink(&self) -> Option<Arc<dyn openwave_code_execution::SandboxPreparationSink>> {
+        let events = self.events.get()?.clone();
+        Some(Arc::new(SandboxPreparationNotices { events }))
     }
 
     /// Install the blob lifecycle lock the write-back snapshot publishes under.
@@ -1625,6 +1675,7 @@ impl ConfiguredCodeExecutionProvider {
                     self.remote_sessions.clone(),
                     &egress,
                     config.daytona_snapshot.as_deref(),
+                    self.preparation_sink(),
                 )?)
             }
             _ => {
@@ -1840,6 +1891,18 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             notes.push(staged_set_note(&request.files));
         }
         response.sync_notes.extend(notes);
+        // Degrading is news once. The provider reports it on the execution that
+        // discovered it; a later sandbox rebuild rediscovers the same thing, and
+        // repeating it on every card would be noise rather than information.
+        if response.degraded.is_some()
+            && !self
+                .degradation_reported
+                .lock()
+                .map(|mut reported| reported.insert(chat_id))
+                .unwrap_or(false)
+        {
+            response.degraded = None;
+        }
         Ok(response)
     }
 
@@ -3150,6 +3213,7 @@ mod tests {
             pool.clone(),
             &allowlist,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(daytona.egress_policy(), Some(&expected));
@@ -3170,6 +3234,7 @@ mod tests {
             timeout,
             pool,
             &EgressConfig::Open,
+            None,
             None,
         )
         .unwrap();

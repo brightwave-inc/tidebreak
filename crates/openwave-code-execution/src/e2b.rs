@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
-use openwave_core::SecretProvider;
+use openwave_core::{ExecDegradation, SecretProvider};
 use openwave_egress::{
     CidrBlock, EgressEnforcement, EgressPolicy, EnforcementException, ExceptionReach,
     ExceptionScope,
@@ -114,6 +114,10 @@ pub struct E2BExecutionProvider {
     /// remaining sandbox creations of this provider's life skip the doomed
     /// first attempt.
     template_unavailable: AtomicBool,
+    /// Set when `template_unavailable` latches, and taken by the execution that
+    /// observes it. The latch means one provider instance degrades once, so the
+    /// report goes out once too.
+    degradation_pending: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -175,6 +179,7 @@ impl E2BExecutionProvider {
             template: E2B_TEMPLATE.into(),
             default_template: true,
             template_unavailable: AtomicBool::new(false),
+            degradation_pending: AtomicBool::new(false),
         })
     }
 
@@ -270,6 +275,7 @@ impl E2BExecutionProvider {
                     self.template
                 );
                 self.template_unavailable.store(true, Ordering::Relaxed);
+                self.degradation_pending.store(true, Ordering::Relaxed);
                 self.create_sandbox_from(workspace_id, E2B_FALLBACK_TEMPLATE)
                     .await
                     .map_err(|failure| failure.into_error(E2B_FALLBACK_TEMPLATE))
@@ -700,7 +706,11 @@ impl CodeExecutionProvider for E2BExecutionProvider {
         &self,
         request: CodeExecutionRequest,
     ) -> Result<CodeExecutionResponse, CodeExecutionError> {
-        execute_remote(self, &self.pool, request).await
+        let mut response = execute_remote(self, &self.pool, request).await?;
+        if self.degradation_pending.swap(false, Ordering::Relaxed) {
+            response.degraded = Some(ExecDegradation::SandboxImageUnavailable);
+        }
+        Ok(response)
     }
 
     fn workspace_lifecycle(&self) -> Option<&dyn WorkspaceLifecycle> {
@@ -1721,11 +1731,11 @@ mod tests {
         let (state, base, server) = mock_server_without_template(E2B_TEMPLATE).await;
         let provider = provider_at(&base, RemoteSessionPool::default(), None);
 
-        provider
+        let first = provider
             .execute(request("execution-1", "workspace-a", "first"))
             .await
             .unwrap();
-        provider
+        let second = provider
             .execute(request("execution-2", "workspace-b", "second"))
             .await
             .unwrap();
@@ -1734,6 +1744,13 @@ mod tests {
             state.create_templates.lock().unwrap().as_slice(),
             [E2B_TEMPLATE, E2B_FALLBACK_TEMPLATE, E2B_FALLBACK_TEMPLATE]
         );
+        // The run that discovered the missing template reports the degraded
+        // setup; the ones after it inherit the latch and report nothing.
+        assert_eq!(
+            first.degraded,
+            Some(ExecDegradation::SandboxImageUnavailable)
+        );
+        assert_eq!(second.degraded, None);
         server.abort();
     }
 

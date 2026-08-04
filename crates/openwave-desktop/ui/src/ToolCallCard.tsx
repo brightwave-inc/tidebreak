@@ -1,6 +1,7 @@
 import { Check, Clock, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
+  type ExecDegradation,
   type ExecResultPreview,
   type RendererToolName,
   type ToolActionPreview,
@@ -15,6 +16,22 @@ import { ScrollableContainer } from "./ScrollableContainer";
 import { ToolCardShell } from "./ToolCardShell";
 import { toolPreviewPresentation } from "./ToolPreview";
 import { ChatImage } from "./TranscriptImageAttachments";
+import { useChatSessionStore } from "./ChatSessionStore";
+
+/**
+ * What a first-run sandbox image pull is doing, said where the person is
+ * already looking. Registering the image pulls several gigabytes into the
+ * account and returns nothing until it finishes, so a command card with no
+ * output is otherwise indistinguishable from a hang.
+ */
+const SANDBOX_PREPARING_NOTICE =
+  "Preparing the sandbox image (first run only). This downloads several gigabytes and can take a few minutes; the command runs as soon as it is ready.";
+
+/** One line per way execution can fall short of its intended setup. */
+const EXEC_DEGRADATION_NOTICE: Record<ExecDegradation, string> = {
+  sandbox_image_unavailable:
+    "The prepared OpenWave sandbox image was unavailable, so commands run on the backend's stock image — document tools will install their dependencies at run time, which is slower.",
+};
 
 export type ToolCallStatus =
   | "running"
@@ -244,6 +261,10 @@ export function ToolCommandCard({
   const presentation = toolCallPresentation(name, status);
   const command = toolPreviewPresentation(preview, result);
   const running = presentation.tone === "running";
+  // Live, unjournaled state: only a command that is still running can be the
+  // one waiting on the image, and a settled card must never claim it is.
+  const preparing =
+    useChatSessionStore((session) => session.sandboxPreparing) && running;
   const output = commandOutput(result);
   const images = result?.images ?? [];
   // A command that finished silently has nothing to tab between, and a
@@ -251,73 +272,97 @@ export function ToolCommandCard({
   const tabbed = running || output !== null || images.length > 0;
 
   return (
-    <ToolCardShell
-      label={`${presentation.label}: ${presentation.statusLabel}`}
-      icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
-      title={command.headline}
-      titleClassName="font-mono"
-      badge={<ToolStatusBadge presentation={presentation} result={result} />}
-      defaultExpanded={running || images.length > 0}
-    >
-      {tabbed ? (
-        <Tabs defaultValue="output">
-          <TabsList className="flex w-full items-center justify-start gap-1 border-b px-1">
-            <TabsTrigger value="command" className="py-1 text-xs capitalize">
-              command
-            </TabsTrigger>
-            <TabsTrigger value="output" className="py-1 text-xs capitalize">
-              output
-            </TabsTrigger>
-          </TabsList>
-          <div className="p-1">
-            <TabsContent value="command" className="mt-0">
-              <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-                {command.detail}
-              </ScrollableContainer>
-            </TabsContent>
-            <TabsContent value="output" className="mt-0">
-              {output === null ? (
-                <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
-                  <Spinner className="size-3.5" aria-hidden="true" />
-                  Waiting for output…
-                </p>
-              ) : null}
-              {output !== null && (
+    <div className="flex max-w-prose flex-col gap-1.5">
+      <ToolCardShell
+        label={`${presentation.label}: ${presentation.statusLabel}`}
+        icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
+        title={command.headline}
+        titleClassName="font-mono"
+        badge={
+          <ToolStatusBadge
+            presentation={presentation}
+            result={result}
+            preparing={preparing}
+          />
+        }
+        defaultExpanded={running || images.length > 0}
+      >
+        {tabbed ? (
+          <Tabs defaultValue="output">
+            <TabsList className="flex w-full items-center justify-start gap-1 border-b px-1">
+              <TabsTrigger value="command" className="py-1 text-xs capitalize">
+                command
+              </TabsTrigger>
+              <TabsTrigger value="output" className="py-1 text-xs capitalize">
+                output
+              </TabsTrigger>
+            </TabsList>
+            <div className="p-1">
+              <TabsContent value="command" className="mt-0">
                 <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-                  {output}
+                  {command.detail}
                 </ScrollableContainer>
-              )}
-              {images.length > 0 && imageClient && chatId && (
-                <div
-                  className="message-image-grid mt-2"
-                  aria-label="Command preview images"
-                >
-                  {images.map((image, index) => (
-                    <ChatImage
-                      key={image.attachmentId}
-                      client={imageClient}
-                      chatId={chatId}
-                      attachmentId={image.attachmentId}
-                      mediaType={image.mediaType}
-                      width={image.width}
-                      height={image.height}
-                      label={`Command preview ${index + 1}: ${image.width} by ${image.height} pixels`}
-                      unavailableLabel="Command preview unavailable"
-                    />
-                  ))}
-                </div>
-              )}
-            </TabsContent>
+              </TabsContent>
+              <TabsContent value="output" className="mt-0">
+                {output === null ? (
+                  <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
+                    <Spinner className="size-3.5" aria-hidden="true" />
+                    Waiting for output…
+                  </p>
+                ) : null}
+                {output !== null && (
+                  <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+                    {output}
+                  </ScrollableContainer>
+                )}
+                {images.length > 0 && imageClient && chatId && (
+                  <div
+                    className="message-image-grid mt-2"
+                    aria-label="Command preview images"
+                  >
+                    {images.map((image, index) => (
+                      <ChatImage
+                        key={image.attachmentId}
+                        client={imageClient}
+                        chatId={chatId}
+                        attachmentId={image.attachmentId}
+                        mediaType={image.mediaType}
+                        width={image.width}
+                        height={image.height}
+                        label={`Command preview ${index + 1}: ${image.width} by ${image.height} pixels`}
+                        unavailableLabel="Command preview unavailable"
+                      />
+                    ))}
+                  </div>
+                )}
+              </TabsContent>
+            </div>
+          </Tabs>
+        ) : (
+          <div className="p-1">
+            <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+              {command.detail}
+            </ScrollableContainer>
           </div>
-        </Tabs>
-      ) : (
-        <div className="p-1">
-          <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-            {command.detail}
-          </ScrollableContainer>
-        </div>
+        )}
+      </ToolCardShell>
+      {/* Outside the collapsible body on purpose: a card that reports a
+          degraded run only when someone expands it has not reported it. */}
+      {preparing && (
+        <p
+          className="text-muted-foreground flex items-start gap-1.5 text-xs"
+          role="status"
+        >
+          <Spinner className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+          {SANDBOX_PREPARING_NOTICE}
+        </p>
       )}
-    </ToolCardShell>
+      {result?.degraded && (
+        <p className="text-muted-foreground text-xs" role="status">
+          {EXEC_DEGRADATION_NOTICE[result.degraded]}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -345,15 +390,17 @@ export function commandOutput(result: ExecResultPreview | null): string | null {
 function ToolStatusBadge({
   presentation,
   result,
+  preparing = false,
 }: {
   presentation: ToolCallPresentation;
   result: ExecResultPreview | null;
+  preparing?: boolean;
 }) {
   if (presentation.tone === "running") {
     return (
       <Badge variant="outline" className="shrink-0 gap-1">
         <Spinner className="size-3" aria-hidden="true" />
-        Running…
+        {preparing ? "Preparing sandbox…" : "Running…"}
       </Badge>
     );
   }
