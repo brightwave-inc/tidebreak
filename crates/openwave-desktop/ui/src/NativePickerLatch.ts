@@ -28,6 +28,7 @@ export const PICKER_HOLDERS = {
   grantFolderCapability: "grant-folder-capability",
   importSource: "import-source",
   exportOutput: "export-output",
+  saveDebugBundle: "save-debug-bundle",
   attachImage: "attach-image",
 } as const;
 

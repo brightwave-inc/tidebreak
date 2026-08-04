@@ -16,6 +16,7 @@ use openwave_core::Config;
 
 mod attachments;
 mod broker;
+mod chat_debug;
 mod client_execution;
 mod deep_link;
 mod deliverables;
@@ -224,6 +225,8 @@ pub fn run() {
             deliverables::read_output_revision,
             deliverables::restore_output_revision,
             deliverables::delete_output,
+            chat_debug::copy_chat_debug_bundle,
+            chat_debug::save_chat_debug_bundle,
             office_pdf::convert_presentation_to_pdf,
             office_install::install_presentation_converter,
             office_install::cancel_presentation_converter_install,

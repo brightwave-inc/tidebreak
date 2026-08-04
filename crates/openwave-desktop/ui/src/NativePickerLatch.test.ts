@@ -46,16 +46,18 @@ describe("native picker latch", () => {
   });
 
   it("names every surface that opens a host picker", () => {
-    // Seven Tauri commands take the host picker mutex: resolving a folder-access
-    // decision (keyed by call id), connecting a folder, confirming a previously
-    // approved one, granting a capability on an attached folder, importing a
-    // source, exporting an output, and attaching an image to a message.
+    // Eight Tauri commands take the host picker mutex: resolving a
+    // folder-access decision (keyed by call id), connecting a folder,
+    // confirming a previously approved one, granting a capability on an
+    // attached folder, importing a source, exporting an output, saving a chat
+    // debug bundle, and attaching an image to a message.
     expect(Object.values(PICKER_HOLDERS)).toEqual([
       "connect-folder",
       "confirm-approved-folder",
       "grant-folder-capability",
       "import-source",
       "export-output",
+      "save-debug-bundle",
       "attach-image",
     ]);
   });
