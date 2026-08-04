@@ -20,6 +20,7 @@ import {
   cancelPresentationConverterInstall,
   ConverterMissingError,
   installPresentationConverter,
+  PresentationConversionError,
   presentationPdfSource,
   type ConverterInstallProgress,
 } from "@/document/officePdf";
@@ -93,6 +94,16 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
         </span>
         {error?.message ? (
           <span className="mt-1 block">{error.message}</span>
+        ) : null}
+        {error instanceof PresentationConversionError ? (
+          <details className="mt-3 w-full text-left">
+            <summary className="cursor-pointer text-xs font-medium text-foreground">
+              Troubleshooting details
+            </summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 font-mono text-xs text-foreground">
+              {error.details}
+            </pre>
+          </details>
         ) : null}
         <span className="mt-1 block">Save as… exports the original file.</span>
       </PresentationNotice>
@@ -224,7 +235,7 @@ function formatMegabytes(bytes: number): string {
 function PresentationNotice({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex grow items-center justify-center p-6">
-      <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+      <div className="flex w-full max-w-xl flex-col items-center gap-3 text-center">
         <PresentationIcon className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground" role="status">
           {children}

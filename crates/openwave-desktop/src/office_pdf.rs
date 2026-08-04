@@ -77,6 +77,12 @@ pub(crate) enum PresentationPdfResult {
         /// and waits for an explicit retry instead of re-downloading.
         install_failure: Option<String>,
     },
+    Failed {
+        /// Short, user-facing summary of the failure.
+        message: String,
+        /// Complete converter diagnostics, safe to carry over Tauri IPC.
+        details: String,
+    },
 }
 
 fn converter_missing() -> PresentationPdfResult {
@@ -146,9 +152,17 @@ pub(crate) async fn convert_presentation_to_pdf(
         // LibreOffice at all: the install hint is the actionable message.
         Err(ConversionError::Spawn) => return Ok(converter_missing()),
         Err(ConversionError::Sandbox(reason)) => {
-            return Err(format!("Could not sandbox LibreOffice: {reason}"))
+            return Ok(PresentationPdfResult::Failed {
+                message: "Could not sandbox LibreOffice".to_owned(),
+                details: sanitize_diagnostic(&reason),
+            })
         }
-        Err(ConversionError::Failed(reason)) => return Err(reason),
+        Err(ConversionError::Failed(failure)) => {
+            return Ok(PresentationPdfResult::Failed {
+                message: failure.message,
+                details: sanitize_diagnostic(&failure.details),
+            })
+        }
     };
 
     // Cache best-effort: a preview that converted but failed to persist is
@@ -308,7 +322,26 @@ enum ConversionError {
     /// host, and it must never be answered by running LibreOffice unconfined.
     Sandbox(String),
     /// LibreOffice ran and did not produce a usable PDF.
-    Failed(String),
+    Failed(ConversionFailure),
+}
+
+struct ConversionFailure {
+    message: String,
+    details: String,
+}
+
+impl ConversionFailure {
+    fn new(message: impl Into<String>, details: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            details: details.into(),
+        }
+    }
+
+    fn message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self::new(message.clone(), message)
+    }
 }
 
 /// The command that runs one conversion: on macOS, `sandbox-exec` wrapping
@@ -349,18 +382,21 @@ async fn run_conversion(
     let workdir = tempfile::Builder::new()
         .prefix("openwave-office-pdf-")
         .tempdir()
-        .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
+        .map_err(|error| {
+            ConversionError::Failed(ConversionFailure::message(format!("workspace: {error}")))
+        })?;
     let input = workdir.path().join(format!("slides.{extension}"));
     let out_dir = workdir.path().join("out");
     let profile = workdir.path().join("profile");
-    let profile_uri = file_uri(&profile)
-        .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
-    tokio::fs::write(&input, bytes)
-        .await
-        .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
-    tokio::fs::create_dir(&out_dir)
-        .await
-        .map_err(|error| ConversionError::Failed(format!("workspace: {error}")))?;
+    let profile_uri = file_uri(&profile).map_err(|error| {
+        ConversionError::Failed(ConversionFailure::message(format!("workspace: {error}")))
+    })?;
+    tokio::fs::write(&input, bytes).await.map_err(|error| {
+        ConversionError::Failed(ConversionFailure::message(format!("workspace: {error}")))
+    })?;
+    tokio::fs::create_dir(&out_dir).await.map_err(|error| {
+        ConversionError::Failed(ConversionFailure::message(format!("workspace: {error}")))
+    })?;
 
     let mut command = converter_command(soffice, workdir.path())?;
     command
@@ -402,8 +438,14 @@ async fn run_conversion(
     // process before the workspace directory is removed.
     let output = tokio::time::timeout(CONVERT_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| ConversionError::Failed("Converting the presentation timed out".to_owned()))?
-        .map_err(|error| ConversionError::Failed(format!("conversion: {error}")))?;
+        .map_err(|_| {
+            ConversionError::Failed(ConversionFailure::message(
+                "Converting the presentation timed out",
+            ))
+        })?
+        .map_err(|error| {
+            ConversionError::Failed(ConversionFailure::message(format!("conversion: {error}")))
+        })?;
 
     // LibreOffice can exit zero without writing anything, so the produced
     // file — present and non-empty — is the success signal, not the code.
@@ -411,14 +453,16 @@ async fn run_conversion(
     let metadata = tokio::fs::metadata(&produced).await;
     let produced_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     if !output.status.success() || produced_len == 0 {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = brief(detail.trim());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = stderr.trim();
+        let stdout = stdout.trim();
         // `sandbox-exec` announces its own failures — an unusable profile, a
         // converter it could not launch under one — before LibreOffice writes
         // anything. Keeping that distinct matters: it is a host problem to
         // report, not a document that failed to convert.
-        if detail.starts_with("sandbox-exec:") {
-            return Err(ConversionError::Sandbox(detail));
+        if stderr.starts_with("sandbox-exec:") {
+            return Err(ConversionError::Sandbox(stderr.to_owned()));
         }
         // Package managers leave launcher scripts behind after the
         // application is removed; those spawn fine and then exit with the
@@ -429,7 +473,7 @@ async fn run_conversion(
         // The reason travels to the failure card, so it names what actually
         // happened: LibreOffice's own words when it said any, its exit status
         // when it did not.
-        return Err(ConversionError::Failed(if detail.is_empty() {
+        let message = if stderr.is_empty() {
             format!(
                 "LibreOffice produced no PDF ({})",
                 if output.status.success() {
@@ -439,29 +483,48 @@ async fn run_conversion(
                 }
             )
         } else {
-            format!("LibreOffice failed: {detail}")
-        }));
+            format!("LibreOffice failed: {}", first_line(stderr))
+        };
+        let mut details = format!("Exit status: {}", output.status);
+        if !stderr.is_empty() {
+            details.push_str("\n\nStandard error:\n");
+            details.push_str(stderr);
+        }
+        if !stdout.is_empty() {
+            details.push_str("\n\nStandard output:\n");
+            details.push_str(stdout);
+        }
+        return Err(ConversionError::Failed(ConversionFailure::new(
+            message, details,
+        )));
     }
     if produced_len > MAX_PDF_BYTES {
-        return Err(ConversionError::Failed(
-            "The converted preview is too large to show".to_owned(),
-        ));
+        return Err(ConversionError::Failed(ConversionFailure::message(
+            "The converted preview is too large to show",
+        )));
     }
-    tokio::fs::read(&produced)
-        .await
-        .map_err(|error| ConversionError::Failed(format!("conversion: {error}")))
+    tokio::fs::read(&produced).await.map_err(|error| {
+        ConversionError::Failed(ConversionFailure::message(format!("conversion: {error}")))
+    })
 }
 
-/// The leading slice of a tool's stderr that fits a failure card. LibreOffice
-/// can dump pages; the first lines carry the diagnosis.
-fn brief(detail: &str) -> String {
-    const MAX_CHARS: usize = 400;
-    if detail.chars().count() <= MAX_CHARS {
-        return detail.to_owned();
-    }
-    let mut cut: String = detail.chars().take(MAX_CHARS).collect();
-    cut.push('…');
-    cut
+fn first_line(detail: &str) -> &str {
+    detail.lines().next().unwrap_or(detail)
+}
+
+/// Tauri command results are JSON strings. Converter diagnostics can contain
+/// C0 control bytes that serde_json rejects with “The string contains invalid
+/// characters”, hiding LibreOffice's real failure. Preserve whitespace that
+/// helps troubleshooting while replacing only characters JSON cannot carry.
+fn sanitize_diagnostic(detail: &str) -> String {
+    detail
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => character,
+            character if character.is_control() => '�',
+            character => character,
+        })
+        .collect()
 }
 
 /// A percent-encoded `file:` URI for LibreOffice's `UserInstallation` value.
@@ -579,7 +642,10 @@ impl openwave_code_execution::HostOfficeConverter for ExecOfficeConverter {
             Err(ConversionError::Sandbox(reason)) => Err(OfficeConvertError::Failed(format!(
                 "could not sandbox LibreOffice: {reason}"
             ))),
-            Err(ConversionError::Failed(reason)) => Err(OfficeConvertError::Failed(reason)),
+            Err(ConversionError::Failed(failure)) => Err(OfficeConvertError::Failed(format!(
+                "{}\n{}",
+                failure.message, failure.details
+            ))),
         }
     }
 }
@@ -637,6 +703,14 @@ mod tests {
         assert!(uri.contains("OpenWave%20Preview/profile%20%231"), "{uri}");
     }
 
+    #[test]
+    fn converter_diagnostics_replace_json_invalid_control_characters() {
+        assert_eq!(
+            sanitize_diagnostic("first\0line\nsecond\tline\u{001b}"),
+            "first�line\nsecond\tline�"
+        );
+    }
+
     /// End-to-end proof against a real LibreOffice, when one is installed —
     /// and, on macOS, proof that it converts *under the Seatbelt profile*,
     /// which is the only way that profile is ever checked against a real
@@ -663,8 +737,11 @@ mod tests {
             Err(ConversionError::Sandbox(reason)) => {
                 panic!("the converter could not be sandboxed: {reason}")
             }
-            Err(ConversionError::Failed(reason)) => {
-                panic!("conversion failed with LibreOffice present: {reason}")
+            Err(ConversionError::Failed(failure)) => {
+                panic!(
+                    "conversion failed with LibreOffice present: {}\n{}",
+                    failure.message, failure.details
+                )
             }
         }
     }

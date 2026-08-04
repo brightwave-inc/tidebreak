@@ -10,6 +10,7 @@ import {
   convertPresentationToPdf,
   installPresentationConverter,
   presentationPdfSource,
+  PresentationConversionError,
   resetConverterInstallStateForTest,
   warmPresentationConverter,
 } from "./officePdf";
@@ -61,6 +62,30 @@ describe("presentation-to-PDF conversion", () => {
     const missing = error as ConverterMissingError;
     expect(missing.installable).toBe(true);
     expect(missing.installFailure).toBe("Download cancelled");
+  });
+
+  it("preserves complete converter diagnostics for the failure panel", async () => {
+    invokeMock.mockResolvedValue({
+      status: "failed",
+      message: "LibreOffice failed: source file could not be loaded",
+      details:
+        "Exit status: exit status: 1\n\nStandard error:\nfirst line\nsecond line",
+    });
+
+    const error = await convertPresentationToPdf(
+      new Uint8Array([1]),
+      PPTX,
+    ).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(PresentationConversionError);
+    expect(error).toMatchObject({
+      message: "LibreOffice failed: source file could not be loaded",
+      details:
+        "Exit status: exit status: 1\n\nStandard error:\nfirst line\nsecond line",
+    });
   });
 
   it("relays install progress events and tears the listener down after", async () => {

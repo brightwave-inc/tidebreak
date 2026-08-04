@@ -48,7 +48,18 @@ type PresentationPdfResponse =
       status: "converterMissing";
       installable: boolean;
       installFailure: string | null;
-    };
+    }
+  | { status: "failed"; message: string; details: string };
+
+export class PresentationConversionError extends Error {
+  readonly details: string;
+
+  constructor(message: string, details: string) {
+    super(message);
+    this.name = "PresentationConversionError";
+    this.details = details;
+  }
+}
 
 /**
  * Convert one presentation's bytes to PDF on the host.
@@ -68,6 +79,9 @@ export async function convertPresentationToPdf(
       response.installable,
       response.installFailure,
     );
+  }
+  if (response.status === "failed") {
+    throw new PresentationConversionError(response.message, response.details);
   }
   return decodeBase64(response.pdfBase64);
 }
