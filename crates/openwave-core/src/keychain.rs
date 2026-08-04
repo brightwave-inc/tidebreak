@@ -34,10 +34,10 @@ impl KeychainSecretProvider {
     /// Use the default service name (`openwave`).
     ///
     /// If [`use_mock`](Self::use_mock) was called earlier in the process, all
-    /// operations go to an in-memory store instead of the OS keychain. The
-    /// `OPENWAVE_KEYCHAIN_MOCK` env var (any non-empty value) has the same
-    /// effect — useful for subprocess-based integration tests where you can't
-    /// call `use_mock` before `main`.
+    /// operations go to an in-memory store instead of the OS keychain. In
+    /// **debug builds only**, the `OPENWAVE_KEYCHAIN_MOCK` env var (any
+    /// non-empty value) has the same effect — useful for subprocess-based
+    /// integration tests where you can't call `use_mock` before `main`.
     #[must_use]
     pub fn new() -> Self {
         Self::with_service(DEFAULT_SERVICE)
@@ -47,6 +47,13 @@ impl KeychainSecretProvider {
     /// Honors [`use_mock`](Self::use_mock) and `OPENWAVE_KEYCHAIN_MOCK` the
     /// same way [`new`](Self::new) does.
     pub fn with_service(service: impl Into<String>) -> Self {
+        // Debug-only on purpose. In a shipped build this env var would let
+        // anything that can set the app's environment silently swap the OS
+        // keychain for a process-local store: secrets written during the run
+        // evaporate, and reads that should have returned a stored credential
+        // return nothing. Only debug-binary tests consume it, so a release
+        // binary has no reason to honor it and every reason not to.
+        #[cfg(debug_assertions)]
         if std::env::var("OPENWAVE_KEYCHAIN_MOCK").is_ok_and(|v| !v.is_empty()) {
             Self::use_mock();
         }
