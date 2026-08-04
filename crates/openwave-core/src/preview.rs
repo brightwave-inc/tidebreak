@@ -420,6 +420,21 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// A way the execution backend ran with less than its intended setup.
+///
+/// Closed, and deliberately coarse: what a reader needs is what happened and
+/// what it costs them, not which vendor API returned which status. A provider
+/// that degrades a second way earns a second variant here rather than a free
+/// string, because the sentence the card shows is written on this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecDegradation {
+    /// The prepared OpenWave sandbox image could not be used, so commands run
+    /// on the backend's stock image and document tooling installs its
+    /// dependencies inside the sandbox on every run.
+    SandboxImageUnavailable,
+}
+
 /// What a call produced, in a form a human can read.
 ///
 /// A command's output is the whole reason to run it. Withholding it leaves the
@@ -445,6 +460,12 @@ pub enum ToolResultPreview {
         /// existed read back unchanged.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         outputs: Vec<ResultEntry>,
+        /// How the execution backend fell short of its intended setup, when it
+        /// did. Reported on the first execution that degrades and not on the
+        /// ones after it, so a chat says this once rather than on every card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        degraded: Option<ExecDegradation>,
     },
     /// Web search is available after the reader chooses and configures a
     /// provider. Carries no model- or provider-authored text.
@@ -546,6 +567,11 @@ impl ToolResultPreview {
                     stderr: stream(data.get("stderr")),
                     images: output.images.clone(),
                     outputs: exec_output_entries(data.get("outputs")),
+                    // Read through the closed enum rather than as a string:
+                    // a tool's data is not a place the card takes prose from.
+                    degraded: data.get("degraded").and_then(|value| {
+                        serde_json::from_value::<ExecDegradation>(value.clone()).ok()
+                    }),
                 })
             }
             // Only an external MCP proxy can carry a view declaration, and a
@@ -1393,6 +1419,7 @@ mod tests {
                 stderr: "boom\n".into(),
                 images: Vec::new(),
                 outputs: Vec::new(),
+                degraded: None,
             })
         );
         assert!(result.unwrap().has_output());
@@ -1416,6 +1443,7 @@ mod tests {
                 stderr: String::new(),
                 images: Vec::new(),
                 outputs: Vec::new(),
+                degraded: None,
             }
         );
         assert!(!result.has_output());

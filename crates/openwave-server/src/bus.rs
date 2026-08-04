@@ -39,6 +39,15 @@ pub enum ChatMetadataNotice {
     Titled { title: String },
     /// A terminal turn's connected-folder write report is durable and readable.
     FileChangesRecorded { turn_id: TurnId },
+    /// Whether code execution is currently preparing its sandbox image before
+    /// it can run anything.
+    ///
+    /// Deliberately live-only, like everything else here: it describes what is
+    /// happening right now, and a journaled row would still be asserting it
+    /// months later. A client that connects mid-pull learns about it on the
+    /// next report rather than from replay, which is the right trade for a
+    /// state whose whole meaning is "still waiting".
+    SandboxPreparing { preparing: bool },
 }
 
 /// Per-chat broadcast channels for live turn events and metadata notices.

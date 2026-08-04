@@ -910,6 +910,10 @@ async fn bind_inner(
     // root-attachment mutations stay off — matching `AppState::new`.
     state.root_attachment_routes_enabled = client_executor_id.is_some();
     state.blobs = blobs;
+    // The bus is built with the app state, after the exec provider it belongs
+    // to; handing it over here is what lets a first-run image pull reach the
+    // chat that is waiting on it.
+    code_execution.attach_event_bus(state.events.clone());
     if let Some(local_voice) = local_voice {
         state.set_local_voice_runner(local_voice);
     }

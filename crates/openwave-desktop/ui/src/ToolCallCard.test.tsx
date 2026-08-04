@@ -124,6 +124,32 @@ describe("ToolCommandCard", () => {
     }
   });
 
+  it("says a degraded run is degraded without needing the card opened", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCommandCard
+        name="exec"
+        status="completed"
+        preview={preview}
+        result={{
+          tool: "exec",
+          exitCode: 0,
+          timedOut: false,
+          outputTruncated: false,
+          stdout: "",
+          stderr: "",
+          degraded: "sandbox_image_unavailable",
+        }}
+      />,
+    );
+
+    // A settled card is collapsed, so a warning inside its body would never
+    // be read. What it costs the reader has to be on the outside.
+    expect(markup).toContain('aria-expanded="false"');
+    expect(visibleText(markup)).toContain(
+      "install their dependencies at run time",
+    );
+  });
+
   it("renders exec preview images inside the output surface", () => {
     const markup = renderToStaticMarkup(
       <ToolCommandCard

@@ -49,6 +49,10 @@ pub(crate) enum RendererChatMetadata {
     Titled { title: String },
     /// A post-turn file-change summary is ready for transcript hydration.
     FileChangesRecorded { turn_id: TurnId },
+    /// Code execution is preparing its sandbox image, or has stopped doing so.
+    /// A first run pulls a multi-gigabyte image, which returns nothing for
+    /// minutes; this is how the running command's card says so.
+    SandboxPreparing { preparing: bool },
 }
 
 impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
@@ -59,6 +63,11 @@ impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
             },
             crate::bus::ChatMetadataNotice::FileChangesRecorded { turn_id } => {
                 Self::FileChangesRecorded { turn_id: *turn_id }
+            }
+            crate::bus::ChatMetadataNotice::SandboxPreparing { preparing } => {
+                Self::SandboxPreparing {
+                    preparing: *preparing,
+                }
             }
         }
     }

@@ -68,6 +68,10 @@ function metadataFrame(frame: ChatFrame): ChatMetadataFrame | null {
     const { title } = frame as { title?: unknown };
     return typeof title === "string" ? { metadata, title } : null;
   }
+  if (metadata === "sandbox_preparing") {
+    const { preparing } = frame as { preparing?: unknown };
+    return typeof preparing === "boolean" ? { metadata, preparing } : null;
+  }
   if (metadata === "file_changes_recorded") {
     const { turn_id } = frame as { turn_id?: unknown };
     return typeof turn_id === "string" ? { metadata, turn_id } : null;

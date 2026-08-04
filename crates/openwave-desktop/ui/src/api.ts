@@ -68,6 +68,7 @@ import {
   type ChatTerminalTurnSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type ExecDegradation,
   type ExecFileChangeSummary as WireExecFileChangeSummary,
   type RendererAgentEvent,
   type RendererChatFrame,
@@ -96,6 +97,7 @@ export type {
   ResultEntryKind,
   ToolActionPreview,
   RendererRefusal,
+  ExecDegradation,
 };
 
 /**
@@ -411,6 +413,12 @@ export type ToolResultPreview =
       }[];
       /** Durable outputs the command's output/ files created or updated. */
       outputs?: ResultEntry[];
+      /**
+       * How the execution backend fell short of its intended setup, when it
+       * did. Sent on the first command that degrades and not on the ones
+       * after it, so a conversation says this once.
+       */
+      degraded?: ExecDegradation;
     }
   | {
       /** Web search is available after the reader configures a provider. */
@@ -2418,6 +2426,7 @@ export function parseToolResultPreview(
     stderr,
     images,
     outputs,
+    degraded,
   }: UncheckedExecResult = value;
   const imageValues = images ?? [];
   const outputValues = outputs ?? [];
@@ -2469,7 +2478,14 @@ export function parseToolResultPreview(
     stderr,
     images: parsedImages,
     outputs: parsedOutputs,
+    // Unknown to this build means unshowable, not unusable: the command's
+    // output still renders, without a sentence nobody wrote copy for.
+    degraded: isExecDegradation(degraded) ? degraded : undefined,
   };
+}
+
+function isExecDegradation(value: unknown): value is ExecDegradation {
+  return value === "sandbox_image_unavailable";
 }
 
 /**

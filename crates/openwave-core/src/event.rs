@@ -360,6 +360,7 @@ mod tests {
                     stderr: String::new(),
                     images: Vec::new(),
                     outputs: Vec::new(),
+                    degraded: None,
                 }),
             },
             AgentEvent::TurnCompleted {

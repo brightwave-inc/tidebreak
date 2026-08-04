@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
+use openwave_core::ExecDegradation;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -513,6 +514,38 @@ pub struct CodeExecutionResponse {
     /// provider shares the host filesystem or the mirror was complete.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sync_notes: Vec<String>,
+    /// How this execution's backend fell short of its intended setup, when it
+    /// did. Set on the execution that discovered the shortfall; the providers
+    /// latch the degradation itself, so later executions run the same degraded
+    /// way without repeating the report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<ExecDegradation>,
+}
+
+/// A stage of the one-time sandbox image preparation a managed provider may
+/// perform before it can create its first sandbox.
+///
+/// Reported out of band rather than returned, because the whole problem it
+/// solves is that nothing is returned for minutes while it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxPreparation {
+    /// The provider is registering and pulling the OpenWave sandbox image into
+    /// the user's own account. First run only, and measured in minutes.
+    Started,
+    /// Preparation finished — ready, degraded, or failed. The distinction is
+    /// the execution's own outcome to report; this only ends the waiting.
+    Finished,
+}
+
+/// Where a provider reports out-of-band preparation progress.
+///
+/// The crate has no view of chats, sockets, or clients; the host installs a
+/// sink that knows how to show it. Implementations must not block: a provider
+/// calls this from inside the request it is trying to make progress on.
+pub trait SandboxPreparationSink: Send + Sync {
+    /// `workspace_id` is the opaque workspace identity the execution was
+    /// requested under — the same one sandbox creation is labelled with.
+    fn report(&self, workspace_id: &str, stage: SandboxPreparation);
 }
 
 /// What one file under `output/` did to the durable output record.
