@@ -429,24 +429,24 @@ mod tests {
         let (store, _directory) = test_store().await;
         let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
 
-        let outcome = register_pending_pairing(&handle, "http://gw.invalid")
+        let outcome = register_pending_pairing(&handle, "https://gw.invalid")
             .await
             .unwrap();
         assert_eq!(outcome, PendingRegistration::Registered);
         assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
         assert_eq!(
             gateway.pending_pairing_url().await.as_deref(),
-            Some("http://gw.invalid/"),
+            Some("https://gw.invalid/"),
             "the parked URL is the normalized one the commit will write"
         );
 
-        let outcome = register_pending_pairing(&handle, "http://other.invalid")
+        let outcome = register_pending_pairing(&handle, "https://other.invalid")
             .await
             .unwrap();
         assert_eq!(outcome, PendingRegistration::Registered);
         assert_eq!(
             gateway.pending_pairing_url().await.as_deref(),
-            Some("http://other.invalid/")
+            Some("https://other.invalid/")
         );
 
         gateway.dismiss_pending_pairing().await;
@@ -460,12 +460,12 @@ mod tests {
     #[tokio::test]
     async fn registration_refuses_a_gateway_other_than_the_managing_one() {
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "http://managed.invalid/")
+        managed_policy::provision(&*store, "https://managed.invalid/")
             .await
             .unwrap();
         let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
 
-        let error = register_pending_pairing(&handle, "http://other.invalid")
+        let error = register_pending_pairing(&handle, "https://other.invalid")
             .await
             .err()
             .unwrap();
@@ -474,7 +474,7 @@ mod tests {
                 provisioned_url,
                 replaceable,
             } => {
-                assert_eq!(provisioned_url, "http://managed.invalid/");
+                assert_eq!(provisioned_url, "https://managed.invalid/");
                 assert!(
                     replaceable,
                     "a provisioned row is user-consented state, so the shell may offer re-pairing"
@@ -485,7 +485,7 @@ mod tests {
         assert!(error.to_string().contains("already provisioned"));
         assert_eq!(gateway.pending_pairing_url().await, None);
 
-        let outcome = register_pending_pairing(&handle, "http://managed.invalid")
+        let outcome = register_pending_pairing(&handle, "https://managed.invalid")
             .await
             .unwrap();
         assert_eq!(outcome, PendingRegistration::AlreadyManaged);
@@ -494,7 +494,7 @@ mod tests {
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert_eq!(
             policy.gateway_url.as_deref(),
-            Some("http://managed.invalid/")
+            Some("https://managed.invalid/")
         );
     }
 
@@ -505,45 +505,48 @@ mod tests {
     #[tokio::test]
     async fn a_replacing_registration_holds_the_row_to_the_confirmed_expectation() {
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "http://managed.invalid/")
+        managed_policy::provision(&*store, "https://managed.invalid/")
             .await
             .unwrap();
         let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
 
         let outcome =
-            register_replacing_pairing(&handle, "http://new.invalid", "http://managed.invalid/")
+            register_replacing_pairing(&handle, "https://new.invalid", "https://managed.invalid/")
                 .await
                 .unwrap();
         assert_eq!(outcome, PendingRegistration::Registered);
         assert_eq!(
             gateway.pending_pairing_url().await.as_deref(),
-            Some("http://new.invalid/")
+            Some("https://new.invalid/")
         );
         // Parking is process-ephemeral: the durable row has not moved.
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
         assert_eq!(
             policy.gateway_url.as_deref(),
-            Some("http://managed.invalid/")
+            Some("https://managed.invalid/")
         );
 
         // A confirmation that raced a row change: the expectation no longer
         // matches, so the registration is the typed conflict naming what the
         // row now holds — and the already-parked pairing is not clobbered.
-        let error =
-            register_replacing_pairing(&handle, "http://new.invalid", "http://elsewhere.invalid/")
-                .await
-                .err()
-                .unwrap();
+        let error = register_replacing_pairing(
+            &handle,
+            "https://new.invalid",
+            "https://elsewhere.invalid/",
+        )
+        .await
+        .err()
+        .unwrap();
         match &error {
             PairingError::Conflict {
                 provisioned_url,
                 replaceable: true,
-            } => assert_eq!(provisioned_url, "http://managed.invalid/"),
+            } => assert_eq!(provisioned_url, "https://managed.invalid/"),
             other => panic!("expected the replaceable conflict, got {other:?}"),
         }
         assert_eq!(
             gateway.pending_pairing_url().await.as_deref(),
-            Some("http://new.invalid/")
+            Some("https://new.invalid/")
         );
     }
 
@@ -556,7 +559,7 @@ mod tests {
 
         impl crate::managed_policy::OsPolicySource for OsAsserted {
             fn gateway_url(&self) -> Result<Option<String>> {
-                Ok(Some("http://mdm.invalid/".to_string()))
+                Ok(Some("https://mdm.invalid/".to_string()))
             }
         }
 
@@ -575,11 +578,11 @@ mod tests {
         let handle = PairingHandle::new(store.clone(), mcp, gateway.clone());
 
         for error in [
-            register_pending_pairing(&handle, "http://other.invalid")
+            register_pending_pairing(&handle, "https://other.invalid")
                 .await
                 .err()
                 .unwrap(),
-            register_replacing_pairing(&handle, "http://other.invalid", "http://mdm.invalid/")
+            register_replacing_pairing(&handle, "https://other.invalid", "https://mdm.invalid/")
                 .await
                 .err()
                 .unwrap(),
@@ -588,7 +591,7 @@ mod tests {
                 PairingError::Conflict {
                     provisioned_url,
                     replaceable: false,
-                } => assert_eq!(provisioned_url, "http://mdm.invalid/"),
+                } => assert_eq!(provisioned_url, "https://mdm.invalid/"),
                 other => panic!("expected the non-replaceable conflict, got {other:?}"),
             }
         }
@@ -605,7 +608,7 @@ mod tests {
         providers::write_gateway_snapshot(
             &*store,
             &providers::GatewayModelSnapshot {
-                gateway_url: "http://old.gateway.test/".to_string(),
+                gateway_url: "https://old.gateway.test/".to_string(),
                 models: vec![providers::CustomModelConfig {
                     id: "stale-model".into(),
                     display_name: None,
@@ -622,7 +625,7 @@ mod tests {
             &NoOsPolicy,
             test_secrets(),
             &mcp,
-            "http://gateway-a.invalid/",
+            "https://gateway-a.invalid/",
             None,
         )
         .await
@@ -632,7 +635,7 @@ mod tests {
         assert!(policy.managed);
         assert_eq!(
             policy.gateway_url.as_deref(),
-            Some("http://gateway-a.invalid/")
+            Some("https://gateway-a.invalid/")
         );
 
         // The stale snapshot carries the old deployment's stamp, so the new
@@ -648,7 +651,7 @@ mod tests {
             &NoOsPolicy,
             test_secrets(),
             &mcp,
-            "http://gateway-a.invalid/",
+            "https://gateway-a.invalid/",
             None,
         )
         .await
@@ -662,7 +665,7 @@ mod tests {
     async fn a_commit_refuses_a_profile_claimed_mid_flow() {
         let (store, _directory) = test_store().await;
         let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
-        managed_policy::provision(&*store, "http://mdm.invalid/")
+        managed_policy::provision(&*store, "https://mdm.invalid/")
             .await
             .unwrap();
 
@@ -671,17 +674,17 @@ mod tests {
             &NoOsPolicy,
             test_secrets(),
             &mcp,
-            "http://pending.invalid/",
+            "https://pending.invalid/",
             None,
         )
         .await
         .err()
         .unwrap();
-        assert!(error.to_string().contains("http://mdm.invalid/"));
+        assert!(error.to_string().contains("https://mdm.invalid/"));
         assert!(!error.to_string().contains("pending.invalid"));
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
-        assert_eq!(policy.gateway_url.as_deref(), Some("http://mdm.invalid/"));
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://mdm.invalid/"));
     }
 
     /// A minimal gateway that answers session revocation, standing in for
@@ -752,7 +755,7 @@ mod tests {
             &NoOsPolicy,
             secrets.clone(),
             &mcp,
-            "http://new-gw.invalid/",
+            "https://new-gw.invalid/",
             Some(&old_url),
         )
         .await
@@ -762,7 +765,7 @@ mod tests {
         assert!(policy.managed);
         assert_eq!(
             policy.gateway_url.as_deref(),
-            Some("http://new-gw.invalid/")
+            Some("https://new-gw.invalid/")
         );
         assert!(
             revoked
@@ -785,16 +788,16 @@ mod tests {
     #[tokio::test]
     async fn a_replacing_commit_refuses_a_row_that_moved_mid_flow() {
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "http://old.invalid/")
+        managed_policy::provision(&*store, "https://old.invalid/")
             .await
             .unwrap();
         let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
         // Another pairing path re-pointed the row after the user's
-        // confirmation named http://old.invalid/.
+        // confirmation named https://old.invalid/.
         store
             .set_setting(
                 "managed_policy_v1",
-                &json!({"gateway_url": "http://third.invalid/"}),
+                &json!({"gateway_url": "https://third.invalid/"}),
             )
             .await
             .unwrap();
@@ -804,16 +807,19 @@ mod tests {
             &NoOsPolicy,
             test_secrets(),
             &mcp,
-            "http://new-gw.invalid/",
-            Some("http://old.invalid/"),
+            "https://new-gw.invalid/",
+            Some("https://old.invalid/"),
         )
         .await
         .err()
         .unwrap();
-        assert!(error.to_string().contains("http://third.invalid/"));
+        assert!(error.to_string().contains("https://third.invalid/"));
 
         let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
-        assert_eq!(policy.gateway_url.as_deref(), Some("http://third.invalid/"));
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("https://third.invalid/")
+        );
     }
 
     /// The commit applies the policy it writes, not just persists it: a
@@ -852,7 +858,7 @@ mod tests {
             &NoOsPolicy,
             test_secrets(),
             &mcp,
-            "http://gateway.invalid/",
+            "https://gateway.invalid/",
             None,
         )
         .await

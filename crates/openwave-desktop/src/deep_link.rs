@@ -128,7 +128,8 @@ pub(crate) fn focus_main_window(app: &tauri::AppHandle) {
 /// The contract is strict — scheme `openwave` (dev builds also answer
 /// `openwave-dev`), action `provision` with no userinfo, port, or extra
 /// path, exactly one query parameter named `gateway`, and a gateway value
-/// that is an http(s) URL with no userinfo, query, or fragment — so a
+/// that is an https URL (http only on loopback) with no userinfo, query, or
+/// fragment — so a
 /// malformed or hostile link is refused whole rather than partially honored.
 /// Near-miss gateway values matter: the conflict check on the write path
 /// compares normalized URL strings, so accepting a decorated variant would
@@ -174,6 +175,12 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     if !matches!(gateway.scheme(), "http" | "https") {
         return Err("the gateway URL must use http or https".into());
     }
+    // A provision link is reachable by any webpage, and pairing spends an
+    // OAuth code and stores the tokens it returns. Cleartext is only tolerated
+    // for a gateway on this machine — a developer deployment on localhost.
+    if gateway.scheme() == "http" && !gateway_host_is_loopback(&gateway) {
+        return Err("the gateway URL must use https unless it is on loopback".into());
+    }
     if !gateway.username().is_empty() || gateway.password().is_some() {
         return Err("the gateway URL must not carry credentials".into());
     }
@@ -183,6 +190,21 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     Ok(ProvisionLink {
         origin: gateway.origin().ascii_serialization(),
         gateway_url: value.into_owned(),
+    })
+}
+
+/// Whether a gateway URL's host is the local machine. `localhost` counts
+/// because the resolver is required to map it to a loopback address; other
+/// names do not, since what they resolve to is not knowable here. Mirrors the
+/// connectors-side check that holds the same line server-side.
+fn gateway_host_is_loopback(url: &tauri::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
     })
 }
 
@@ -496,6 +518,23 @@ mod tests {
             ),
             (
                 "openwave://provision?gateway=https%3A%2F%2Fgw.example%2F%23frag",
+                None,
+            ),
+            // Cleartext is only tolerated toward this machine: any webpage can
+            // fire a provision link, and pairing spends an OAuth code and
+            // stores the tokens it buys.
+            (
+                "openwave://provision?gateway=http%3A%2F%2F127.0.0.1%3A28081",
+                Some("http://127.0.0.1:28081"),
+            ),
+            (
+                "openwave://provision?gateway=http%3A%2F%2Flocalhost%3A28081",
+                Some("http://localhost:28081"),
+            ),
+            ("openwave://provision?gateway=http://gw.example", None),
+            ("openwave://provision?gateway=http://10.0.0.5:28081", None),
+            (
+                "openwave://provision?gateway=http://localhost.attacker.example",
                 None,
             ),
         ];
