@@ -218,7 +218,7 @@ impl TurnFailureCategory {
     pub(crate) fn from_kind(kind: &str) -> Self {
         match kind {
             "rate_limited" | "overloaded" => Self::RateLimited,
-            "authentication" => Self::Auth,
+            "authentication" | "missing_credential" => Self::Auth,
             "provider" | "store" | "secret" | "empty_model_response" => Self::Transient,
             _ => Self::Unknown,
         }
@@ -479,6 +479,10 @@ mod tests {
             ),
             (
                 AgentError::Authentication("invalid x-api-key sk-live".into()),
+                TurnFailureCategory::Auth,
+            ),
+            (
+                AgentError::MissingCredential("no model provider is configured".into()),
                 TurnFailureCategory::Auth,
             ),
             (

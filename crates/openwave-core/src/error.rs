@@ -65,6 +65,10 @@ pub enum AgentError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// No credential is configured for the selected model provider.
+    #[error("provider credential missing: {0}")]
+    MissingCredential(String),
+
     /// A persistence failure from the `Store` / `BlobStore`.
     #[error("store error: {0}")]
     Store(String),
@@ -133,6 +137,7 @@ impl AgentError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Config(_) => "config",
+            Self::MissingCredential(_) => "missing_credential",
             Self::Store(_) => "store",
             Self::ProjectNotFound(_) => "not_found",
             Self::Secret(_) => "secret",

@@ -20,8 +20,8 @@ impl ModelProvider for UnconfiguredProvider {
     }
 
     async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        Err(AgentError::config(
-            "no model provider is configured (enable a provider and set its credential)",
+        Err(AgentError::MissingCredential(
+            "no model provider is configured (enable a provider and set its credential)".into(),
         ))
     }
 }
