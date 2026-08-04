@@ -2548,6 +2548,9 @@ impl Agent {
                     }
                 }
                 ProviderEvent::Usage(reported) => {
+                    // Usage accounts for provider work, not durable assistant
+                    // output. A later StreamInterrupted may discard this
+                    // candidate, but the reported tokens were still consumed.
                     *total_usage = total_usage.checked_add(reported).ok_or_else(|| {
                         AgentError::msg("provider usage exceeded the supported turn total")
                     })?;
@@ -8794,6 +8797,11 @@ mod tests {
                             index: 0,
                             fragment: "{\"unfinished\":".into(),
                         },
+                        ProviderEvent::Usage(Usage {
+                            input_tokens: 11,
+                            output_tokens: 3,
+                            ..Usage::default()
+                        }),
                         ProviderEvent::Failed {
                             error: ProviderErrorInfo::from_error(&AgentError::PromptTooLong(
                                 "context overflow".into(),
@@ -8805,6 +8813,11 @@ mod tests {
                         ProviderEvent::TextDelta {
                             text: "recovered".into(),
                         },
+                        ProviderEvent::Usage(Usage {
+                            input_tokens: 7,
+                            output_tokens: 2,
+                            ..Usage::default()
+                        }),
                         ProviderEvent::Stop {
                             reason: StopReason::EndTurn,
                         },
@@ -8855,6 +8868,20 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, AgentEvent::TextDelta { text } if text == "recovered")));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::TurnCompleted {
+                    usage: Usage {
+                        input_tokens: 18,
+                        output_tokens: 5,
+                        ..
+                    },
+                    ..
+                }
+            )),
+            "usage includes provider work from the discarded attempt"
+        );
         assert_eq!(
             store
                 .list_messages(chat.id)
