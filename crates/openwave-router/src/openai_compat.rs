@@ -195,7 +195,12 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         body["max_completion_tokens"] = json!(max_tokens);
         // Only reasoning models understand `reasoning_effort`; forwarding it to a
         // plain chat model would be rejected. Absent, the provider's default holds.
-        if let Some(effort) = req
+        // Chat Completions rejects function tools with an active reasoning
+        // effort. Keep tools usable by explicitly disabling effort for that
+        // request; without tools, preserve the chat's selected level.
+        if !req.tools.is_empty() {
+            body["reasoning_effort"] = json!(openwave_core::ReasoningEffort::None.as_str());
+        } else if let Some(effort) = req
             .reasoning_effort
             .filter(|effort| *effort != openwave_core::ReasoningEffort::None)
         {
@@ -776,6 +781,29 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_models_disable_effort_when_tools_are_advertised() {
+        for effort in [None, Some(ReasoningEffort::Low)] {
+            let req = ChatRequest {
+                provider: Some(ProviderId::new("openai")),
+                model: "gpt-5.6-sol".into(),
+                reasoning_model: true,
+                messages: vec![ChatMessage::text(Role::User, "call a tool")],
+                tools: vec![ToolSpec {
+                    name: "exec".into(),
+                    description: "run a command".into(),
+                    input_schema: json!({"type": "object"}),
+                }],
+                max_tokens: Some(1024),
+                reasoning_effort: effort,
+                ..Default::default()
+            };
+            let body = build_request_json(&req).unwrap();
+            assert_eq!(body["reasoning_effort"], "none");
+            assert_eq!(body["tools"][0]["function"]["name"], "exec");
+        }
+    }
+
+    #[test]
     fn gpt_5_6_none_uses_the_provider_default() {
         let req = ChatRequest {
             provider: Some(ProviderId::new("openai")),
@@ -888,7 +916,9 @@ mod tests {
                 ProviderEvent::Failed {
                     error: ProviderErrorInfo {
                         kind: "overloaded".into(),
-                        message: "openai-compat returned 500 (server_error): upstream is overloaded".into(),
+                        message:
+                            "openai-compat returned 500 (server_error): upstream is overloaded"
+                                .into(),
                     },
                 },
             ]
