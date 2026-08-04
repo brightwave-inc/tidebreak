@@ -1,0 +1,7 @@
+template_id = "openwave-documents-v0-26-0"
+template_name = "openwave-documents-v0-26-0"
+dockerfile = "e2b.Dockerfile"
+cpu_count = 2
+# LibreOffice's headless renderers are the memory floor here; E2B's defaults
+# (512 MB on the v1 CLI, 1024 MB on v2) are not enough to convert a deck.
+memory_mb = 2048

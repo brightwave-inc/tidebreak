@@ -254,10 +254,12 @@ pub struct CodeExecutionConfig {
     /// open-internet creation they already had.
     #[serde(default)]
     pub egress: EgressConfig,
-    /// E2B template id to create sandboxes from. `None` keeps E2B's public
-    /// code-interpreter template; set it to the id of a template registered
-    /// from the official OpenWave documents image so document runs need no
-    /// in-sandbox package install.
+    /// E2B template id to create sandboxes from. `None` — the normal case —
+    /// uses the OpenWave documents template E2B publishes publicly, so an
+    /// account that has only pasted an API key still gets the official image
+    /// with no template setup of its own. Set this only to override that with
+    /// an account's own template; the override is used verbatim and, unlike the
+    /// default, never falls back to E2B's public code-interpreter template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e2b_template: Option<String>,
     /// Daytona snapshot name to create sandboxes from. `None` keeps Daytona's
