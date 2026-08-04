@@ -167,11 +167,11 @@ describe("Composer", () => {
     expect(markup).toContain("lucide-mic");
     expect(markup).not.toContain("lucide-loader-circle");
     expect(markup).not.toContain('<textarea disabled=""');
-    // The mic belongs with send, not with the attachment controls.
+    // The mic belongs with send, not with the tools menu.
     expect(markup.indexOf("lucide-mic")).toBeLessThan(
       markup.indexOf('aria-label="Send message"'),
     );
-    expect(markup.indexOf("lucide-paperclip")).toBeLessThan(
+    expect(markup.indexOf("lucide-plus")).toBeLessThan(
       markup.indexOf("lucide-mic"),
     );
   });

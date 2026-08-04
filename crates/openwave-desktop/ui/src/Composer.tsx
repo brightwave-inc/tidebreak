@@ -11,15 +11,17 @@ import {
 import {
   ArrowUpRight,
   FolderOpen,
-  FolderPlus,
   Image as ImageIcon,
-  LoaderCircle,
   Mic,
-  Paperclip,
   Square,
   X,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
+import {
+  ComposerToolsMenu,
+  type ComposerNetwork,
+  type ComposerReasoning,
+} from "./ComposerToolsMenu";
 import {
   describeImageAttachment,
   imageFilesFrom,
@@ -163,6 +165,9 @@ export type ComposerProps = {
   disabled: boolean;
   draft: string;
   modelMenu?: ReactNode;
+  permissionMenu?: ReactNode;
+  network?: ComposerNetwork;
+  reasoning?: ComposerReasoning;
   images?: ComposerImages;
   files?: ComposerFiles;
   folders?: ComposerFolders;
@@ -187,6 +192,9 @@ export function Composer({
   disabled,
   draft,
   modelMenu,
+  permissionMenu,
+  network,
+  reasoning,
   images,
   files,
   folders,
@@ -410,51 +418,29 @@ export function Composer({
       />
       <div className="flex items-center justify-between gap-2">
         <div className="flex grow items-center gap-2">
-          {files?.onAttach && (
-            <WithTooltip label={files.attaching ? "Attaching…" : "Attach files"}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-8"
-                aria-label={files.attaching ? "Attaching files" : "Attach files"}
-                disabled={inputDisabled || files.attaching}
-                onClick={files.onAttach}
-              >
-                {files.attaching ? (
-                  <LoaderCircle className="animate-spin" size={15} />
-                ) : (
-                  <Paperclip size={15} />
-                )}
-              </Button>
-            </WithTooltip>
-          )}
-          {folders?.onAttach && (
-            <WithTooltip
-              label={folders.working ? "Updating folders…" : "Attach folder"}
-            >
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-8"
-                aria-label={
-                  folders.working ? "Updating attached folders" : "Attach folder"
-                }
-                disabled={inputDisabled || folders.working}
-                onClick={folders.onAttach}
-              >
-                {folders.working ? (
-                  <LoaderCircle className="animate-spin" size={15} />
-                ) : (
-                  <FolderPlus size={15} />
-                )}
-              </Button>
-            </WithTooltip>
-          )}
+          <ComposerToolsMenu
+            disabled={inputDisabled}
+            attachFiles={
+              files?.onAttach
+                ? { attaching: files.attaching, onAttach: files.onAttach }
+                : undefined
+            }
+            attachFolder={
+              folders?.onAttach
+                ? { working: folders.working, onAttach: folders.onAttach }
+                : undefined
+            }
+            network={network}
+            reasoning={reasoning}
+          />
           {modelMenu}
         </div>
         <div className="flex items-center gap-2">
+          {/* The permission mode sits with the send cluster: it is what the
+              next turn will be allowed to do, not another way to prepare it. */}
+          {permissionMenu}
           {/* The mic sits immediately before send: both act on the draft, so
-              they belong in the same cluster, apart from the attachment and
+              they belong in the same cluster, apart from the tools and
               model controls that only set the turn up. */}
           {voice?.available && (
             <WithTooltip

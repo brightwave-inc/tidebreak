@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   firstAvailableModel,
   ModelMenu,
-  ReasoningEffortMenu,
   reasoningEffortOptions,
   visibleModelGroups,
 } from "./ModelMenu";
@@ -180,50 +179,5 @@ describe("reasoningEffortOptions", () => {
 
   it("labels the off level as Off, distinct from the menu's Default entry", () => {
     expect(reasoningEffortOptions(["none"])[0].label).toBe("Off");
-  });
-});
-
-describe("ReasoningEffortMenu", () => {
-  const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
-
-  it("labels the trigger 'Default' when no effort is set", () => {
-    const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu levels={LEVELS} value={null} onChange={() => {}} />,
-    );
-    expect(markup).toContain('aria-label="Reasoning effort: Default"');
-    expect(markup).toContain(">Default<");
-  });
-
-  it("labels the trigger with the selected effort level", () => {
-    const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu levels={LEVELS} value="high" onChange={() => {}} />,
-    );
-    expect(markup).toContain('aria-label="Reasoning effort: High"');
-    expect(markup).toContain(">High<");
-  });
-
-  it("labels a level above high without falling back to its wire token", () => {
-    const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu levels={LEVELS} value="xhigh" onChange={() => {}} />,
-    );
-    expect(markup).toContain('aria-label="Reasoning effort: X-high"');
-  });
-
-  it("still labels a stored level the current model no longer accepts", () => {
-    const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu
-        levels={["none", "low", "medium", "high", "xhigh"]}
-        value="max"
-        onChange={() => {}}
-      />,
-    );
-    expect(markup).toContain('aria-label="Reasoning effort: Max"');
-  });
-
-  it("disables the trigger when asked", () => {
-    const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu levels={LEVELS} value={null} disabled onChange={() => {}} />,
-    );
-    expect(markup).toContain("disabled");
   });
 });

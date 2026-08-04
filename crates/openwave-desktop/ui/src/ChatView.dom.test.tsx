@@ -65,6 +65,7 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       deletingChat={false}
       draftRef={draftRef}
       composerModelMenu={null}
+      composerPermissionMenu={null}
       composerImages={noImages()}
       files={noFiles()}
       attachError={null}
@@ -88,6 +89,7 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     deletingChat: false,
     draftRef: { current: "" },
     composerModelMenu: null,
+    composerPermissionMenu: null,
     composerImages: noImages(),
     files: noFiles(),
     attachError: null,

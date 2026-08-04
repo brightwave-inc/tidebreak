@@ -54,8 +54,7 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
-import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
-import { NetworkPolicyMenu } from "./NetworkPolicyMenu";
+import { ModelMenu } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -607,34 +606,32 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onRetry: images.retry,
             }}
             composerModelMenu={
-              <>
-                <ModelMenu
-                  models={models}
-                  value={chat!.model}
-                  defaultKey={defaultModelKey}
-                  disabled={deletingChatId !== null}
-                  onChange={onModelChange}
-                />
-                {efforts.length > 0 && (
-                  <ReasoningEffortMenu
-                    levels={efforts}
-                    value={chat!.reasoning_effort}
-                    disabled={deletingChatId !== null}
-                    onChange={onReasoningEffortChange}
-                  />
-                )}
-                <PermissionModeMenu
-                  value={chat!.permission_mode}
-                  disabled={deletingChatId !== null}
-                  onChange={onPermissionModeChange}
-                />
-                <NetworkPolicyMenu
-                  value={chat!.network_policy}
-                  disabled={deletingChatId !== null}
-                  onChange={onNetworkPolicyChange}
-                />
-              </>
+              <ModelMenu
+                models={models}
+                value={chat!.model}
+                defaultKey={defaultModelKey}
+                disabled={deletingChatId !== null}
+                onChange={onModelChange}
+              />
             }
+            composerPermissionMenu={
+              <PermissionModeMenu
+                value={chat!.permission_mode}
+                disabled={deletingChatId !== null}
+                onChange={onPermissionModeChange}
+              />
+            }
+            composerReasoning={{
+              levels: efforts,
+              value: chat!.reasoning_effort,
+              disabled: deletingChatId !== null,
+              onChange: onReasoningEffortChange,
+            }}
+            composerNetwork={{
+              value: chat!.network_policy,
+              disabled: deletingChatId !== null,
+              onChange: onNetworkPolicyChange,
+            }}
             onDraftChange={setComposerDraft}
             onSelectPrompt={setComposerDraft}
             onSend={onSend}

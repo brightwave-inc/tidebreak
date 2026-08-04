@@ -18,6 +18,10 @@ import {
   type ComposerImages,
   type ComposerVoice,
 } from "./Composer";
+import type {
+  ComposerNetwork,
+  ComposerReasoning,
+} from "./ComposerToolsMenu";
 import { MessageList, type RetryableTurn } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
@@ -40,6 +44,9 @@ export type ChatViewProps = {
   /** The composer draft, readable synchronously — see [useTurnControls]. */
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
+  composerPermissionMenu: ReactNode;
+  composerNetwork?: ComposerNetwork;
+  composerReasoning?: ComposerReasoning;
   composerImages: ComposerImages;
   files: ComposerFiles;
   folders?: ComposerFolders;
@@ -72,6 +79,9 @@ export function ChatView({
   deletingChat,
   draftRef,
   composerModelMenu,
+  composerPermissionMenu,
+  composerNetwork,
+  composerReasoning,
   composerImages,
   files,
   folders,
@@ -358,6 +368,9 @@ export function ChatView({
           disabled={deletingChat}
           draft={draft}
           modelMenu={composerModelMenu}
+          permissionMenu={composerPermissionMenu}
+          network={composerNetwork}
+          reasoning={composerReasoning}
           images={composerImages}
           files={files}
           folders={folders}

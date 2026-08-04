@@ -1,7 +1,6 @@
 import { useState } from "react";
 import {
   Check,
-  ChevronDown,
   Globe2,
   Package,
   ShieldOff,
@@ -12,10 +11,12 @@ import type { NetworkPolicy } from "./api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 
 const OPTIONS = [
@@ -49,32 +50,50 @@ function optionFor(policy: NetworkPolicy) {
   return OPTIONS.find((option) => option.mode === policy.mode) ?? OPTIONS[0];
 }
 
-export function NetworkPolicyMenu({
+/** The policy's short name, for the menu row that opens this. */
+export function networkPolicyLabel(policy: NetworkPolicy): string {
+  return optionFor(policy).label;
+}
+
+export function networkPolicyIcon(policy: NetworkPolicy) {
+  return optionFor(policy).icon;
+}
+
+/**
+ * The per-chat network policy, in a dialog rather than a control of its own on
+ * the message bar. It is set once for a workspace and then left alone, so it
+ * lives behind the composer's tools menu with the other setup actions; the
+ * dialog also gives the custom-host list room a popover never had.
+ */
+export function NetworkPolicyDialog({
+  open,
+  onOpenChange,
   value,
   disabled,
   onChange,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   value: NetworkPolicy;
   disabled?: boolean;
   onChange: (policy: NetworkPolicy) => void | Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
+  // Seeded from the stored policy each time the dialog opens, so an abandoned
+  // edit does not survive into the next visit.
   const [hosts, setHosts] = useState("");
   const [includePackages, setIncludePackages] = useState(false);
-  const current = optionFor(value);
-  const CurrentIcon = current.icon;
 
-  function setOpenAndHydrate(next: boolean) {
+  function openAndHydrate(next: boolean) {
     if (next && value.mode === "allowed_hosts") {
       setHosts(value.allowed_hosts.join("\n"));
       setIncludePackages(value.package_managers);
     }
-    setOpen(next);
+    onOpenChange(next);
   }
 
   function select(policy: NetworkPolicy) {
     void onChange(policy);
-    setOpen(false);
+    onOpenChange(false);
   }
 
   function saveCustom() {
@@ -94,26 +113,14 @@ export function NetworkPolicyMenu({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpenAndHydrate}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          className="h-8 gap-1.5"
-          disabled={disabled}
-          aria-label={`Network: ${current.label}`}
-        >
-          <CurrentIcon className="size-4 text-muted-foreground" />
-          {current.label}
-          <ChevronDown className="size-4 opacity-50" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" side="top" className="w-80 space-y-3">
-        <div>
-          <p className="font-medium">Code execution network</p>
-          <p className="text-xs text-muted-foreground">
+    <Dialog open={open} onOpenChange={openAndHydrate}>
+      <DialogContent className="max-w-md space-y-3">
+        <DialogHeader>
+          <DialogTitle>Code execution network</DialogTitle>
+          <DialogDescription>
             This applies only to this conversation workspace.
-          </p>
-        </div>
+          </DialogDescription>
+        </DialogHeader>
 
         <div className="space-y-1">
           {OPTIONS.filter((option) => option.mode !== "allowed_hosts").map(
@@ -176,7 +183,7 @@ export function NetworkPolicyMenu({
             Use custom policy
           </Button>
         </div>
-      </PopoverContent>
-    </Popover>
+      </DialogContent>
+    </Dialog>
   );
 }
