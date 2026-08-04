@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import type { ApiClient, Chat } from "./api";
+import type { ApiClient, Chat, ModelInfo } from "./api";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useComposerDraft } from "./ComposerDrafts";
@@ -38,6 +38,7 @@ import { cn } from "@/lib/utils";
 export type ChatViewProps = {
   client: ApiClient;
   chat: Chat;
+  failureModel?: ModelInfo | null;
   hydrated: boolean;
   nativeHost: boolean;
   deletingChat: boolean;
@@ -74,6 +75,7 @@ export type ChatViewProps = {
 export function ChatView({
   client,
   chat,
+  failureModel,
   hydrated,
   nativeHost,
   deletingChat,
@@ -293,6 +295,7 @@ export function ChatView({
       <div className={cn("message-view", fadeClass)}>
         <MessageList
           messages={messages}
+          failureModel={failureModel}
           chatId={chat.id}
           folderAccessRequests={folderAccess.requests}
           outputWritebackRequests={outputWritebacks.requests}

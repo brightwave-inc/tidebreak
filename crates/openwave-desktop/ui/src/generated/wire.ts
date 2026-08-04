@@ -1141,6 +1141,10 @@ display_name: string,
  */
 provider: ProviderKind, 
 /**
+ * How thoroughly OpenWave has exercised this provider/model combination.
+ */
+verification: VerificationTier, 
+/**
  * Whether the provider is enabled, configured, and credentialed.
  */
 available: boolean, 
@@ -1843,6 +1847,11 @@ export type UserQuestionOption = { id: string, label: string, description: strin
  * Whether the reader may select one option or several independent options.
  */
 export type UserQuestionType = "single_select" | "multi_select";
+
+/**
+ * How thoroughly OpenWave has exercised a model's agent-facing behavior.
+ */
+export type VerificationTier = "verified" | "unverified";
 
 /**
  * Public state returned by the local API. It intentionally reports only

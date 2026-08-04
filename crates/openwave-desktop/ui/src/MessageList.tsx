@@ -14,6 +14,7 @@ import type {
   ToolResultPreview,
   UserQuestionAnswer,
   ExecFileChangeSummary,
+  ModelInfo,
 } from "./api";
 import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
@@ -165,6 +166,7 @@ export function retryableTurn(
 
 type MessageListProps = {
   messages: ChatMessage[];
+  failureModel?: ModelInfo | null;
   /** Enables MCP App cards to fetch their call's result envelope. */
   chatId?: string;
   folderAccessRequests: PendingFolderAccessRequest[];
@@ -240,6 +242,7 @@ type MessageListProps = {
 
 export function MessageList({
   messages,
+  failureModel,
   chatId,
   folderAccessRequests,
   outputWritebackRequests = [],
@@ -317,6 +320,7 @@ export function MessageList({
       open: onOpenBackgroundAgent,
     },
     retry,
+    failureModel,
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
@@ -538,6 +542,7 @@ export function groupMessageItems(
     loadActivity: async () => [],
   },
   retry?: { failureId: string; onRetry: () => void },
+  failureModel?: ModelInfo | null,
 ) {
   const items: ReactNode[] = [];
   // The item index at which the trailing turn opens (its user message). Lets the
@@ -584,6 +589,7 @@ export function groupMessageItems(
           onRetry={
             retry?.failureId === message.id ? retry.onRetry : undefined
           }
+          failureModel={failureModel}
         />,
       );
       index += 1;
@@ -902,6 +908,7 @@ function MessageBubbleImpl({
   chatId,
   changeClient,
   onRetry,
+  failureModel,
 }: {
   message: ChatMessage;
   busy: boolean;
@@ -915,6 +922,7 @@ function MessageBubbleImpl({
   >;
   /** Present only on the transcript's newest retryable failure. */
   onRetry?: () => void;
+  failureModel?: ModelInfo | null;
 }) {
   const sourceNav = useSourceNav();
   // One way into the source panel for both anchors a citation has: the phrase
@@ -1030,7 +1038,13 @@ function MessageBubbleImpl({
   }
 
   if (message.role === "turn_failure") {
-    return <TurnFailureNotice category={message.category} onRetry={onRetry} />;
+    return (
+      <TurnFailureNotice
+        category={message.category}
+        model={failureModel}
+        onRetry={onRetry}
+      />
+    );
   }
 
   if (message.role === "change_summary") {

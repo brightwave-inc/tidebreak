@@ -1215,6 +1215,8 @@ pub struct ModelInfo {
     pub display_name: String,
     /// The provider that serves the model.
     pub provider: ProviderKind,
+    /// How thoroughly OpenWave has exercised this provider/model combination.
+    pub verification: crate::model_registry::VerificationTier,
     /// Whether the provider is enabled, configured, and credentialed.
     pub available: bool,
     /// Approximate context window in tokens.
@@ -1288,6 +1290,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             id: entry.policy.id,
             display_name: entry.policy.display_name,
             provider: entry.policy.provider,
+            verification: entry.policy.verification,
             available: entry.available,
             context_window: entry.policy.context_window,
             max_output_tokens: entry.policy.max_output_tokens,
@@ -2823,6 +2826,7 @@ mod image_capability_tests {
         id: "text-only-model",
         display_name: "Text Only Model",
         provider: ProviderKind::Anthropic,
+        verification: crate::model_registry::VerificationTier::Unverified,
         context_window: 200_000,
         max_output_tokens: 64_000,
         input_modalities: &[InputModality::Text],

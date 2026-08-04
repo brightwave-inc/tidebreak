@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   firstAvailableModel,
   ModelMenu,
+  ModelVerificationChip,
   reasoningEffortOptions,
   visibleModelGroups,
 } from "./ModelMenu";
@@ -15,6 +16,7 @@ const MODELS: ModelInfo[] = [
     id: "claude-sonnet-4",
     display_name: "Claude Sonnet 4",
     provider: "anthropic",
+    verification: "verified",
     context_window: 200_000,
     max_output_tokens: 64_000,
     input_modalities: ["text", "image"],
@@ -28,6 +30,7 @@ const MODELS: ModelInfo[] = [
     id: "gpt-4o",
     display_name: "GPT-4o",
     provider: "openai",
+    verification: "verified",
     context_window: 128_000,
     max_output_tokens: 16_384,
     input_modalities: ["text", "image"],
@@ -77,6 +80,25 @@ describe("ModelMenu", () => {
       <ModelMenu models={MODELS} value={null} disabled onChange={() => {}} />,
     );
     expect(markup).toContain("disabled");
+  });
+
+  it("labels an unverified model with its explanation", () => {
+    const markup = renderToStaticMarkup(
+      <ModelVerificationChip
+        model={{
+          ...MODELS[1],
+          key: "openai_compatible::local-model",
+          id: "local-model",
+          display_name: "Local Model",
+          provider: "openai_compatible",
+          verification: "unverified",
+        }}
+      />,
+    );
+    expect(markup).toContain("Unverified");
+    expect(markup).toContain(
+      "Unverified. OpenWave hasn&#x27;t verified tool-calling and streaming for this model; issues are likely the model or provider, not the app",
+    );
   });
 });
 

@@ -31,6 +31,23 @@ import { cn } from "@/lib/utils";
  */
 const PROVIDER_ORDER: readonly ProviderKind[] = ["anthropic", "openai", "gemini"];
 
+const UNVERIFIED_TOOLTIP =
+  "OpenWave hasn't verified tool-calling and streaming for this model; issues are likely the model or provider, not the app";
+
+export function ModelVerificationChip({ model }: { model: ModelInfo }) {
+  if (model.verification !== "unverified") return null;
+  return (
+    <WithTooltip label={UNVERIFIED_TOOLTIP} side="top">
+      <span
+        className="text-muted-foreground border-border rounded-full border px-1.5 py-0.5 text-[0.65rem] leading-none"
+        aria-label={`Unverified. ${UNVERIFIED_TOOLTIP}`}
+      >
+        Unverified
+      </span>
+    </WithTooltip>
+  );
+}
+
 /** Catalog rows by provider, in {@link PROVIDER_ORDER}, then the rest as found. */
 function groupByProvider(
   models: readonly ModelInfo[],
@@ -278,6 +295,7 @@ export function ModelMenu({
                       className="size-4 shrink-0"
                     />
                     <span className="text-sm">{model.display_name}</span>
+                    <ModelVerificationChip model={model} />
                     {selected && <Check className="ml-auto size-4" />}
                   </DropdownMenuItem>
                 );
@@ -400,4 +418,3 @@ export function ReasoningEffortSubMenu({
     </DropdownMenuSub>
   );
 }
-

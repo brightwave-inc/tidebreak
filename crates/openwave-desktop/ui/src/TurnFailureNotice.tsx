@@ -3,6 +3,8 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
 import type { TurnFailureCategory } from "./generated/wire";
+import type { ModelInfo } from "./api";
+import { providerLabel } from "./ModelSelection";
 
 /**
  * Whether a category's recovery is "send it again".
@@ -48,9 +50,11 @@ export function turnFailureCopy(category: TurnFailureCategory): string {
  */
 export function TurnFailureNotice({
   category,
+  model,
   onRetry,
 }: {
   category: TurnFailureCategory;
+  model?: ModelInfo | null;
   onRetry?: () => void;
 }) {
   const navigate = useNavigate();
@@ -60,7 +64,14 @@ export function TurnFailureNotice({
 
   return (
     <div className="message-notice is-error message-turn-failure" role="alert">
-      <p className="message-turn-failure-text">{turnFailureCopy(category)}</p>
+      <div className="message-turn-failure-text">
+        {model && (
+          <p className="text-muted-foreground mb-1 text-xs font-medium">
+            {model.id} · {providerLabel(model.provider)}
+          </p>
+        )}
+        <p>{turnFailureCopy(category)}</p>
+      </div>
       {turnFailureOffersRetry(category) ? (
         onRetry && (
           <Button
