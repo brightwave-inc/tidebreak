@@ -243,13 +243,29 @@ test("production secrets remain isolated to the release workflow", () => {
   const secretConsumers = Object.entries(workflows)
     .filter(([, source]) => source.includes("secrets."))
     .map(([name]) => name);
-  assert.deepEqual(secretConsumers, ["release.yml"]);
+  assert.deepEqual(secretConsumers, ["publish-e2b-template.yml", "release.yml"]);
 
   const release = workflows["release.yml"];
   assert.match(release, /^on:\n  release:\n    types: \[published\]/m);
   assert.match(release, /^  workflow_dispatch:\n/m);
   assert.doesNotMatch(release, /^\s*pull_request(?:_target)?:/m);
   assert.match(release, /^permissions:\n  contents: read$/m);
+
+  // The E2B template publish is the one other workflow allowed a secret, and
+  // only because it can never run from a pull request: it triggers on pushes
+  // to main touching the template definition, plus manual dispatch. Its
+  // credential is scoped to E2B — it must not reach the signing secrets.
+  const e2b = workflows["publish-e2b-template.yml"];
+  assert.match(e2b, /^on:\n  push:\n    branches: \[main\]\n    paths:\n/m);
+  assert.match(e2b, /^  workflow_dispatch:\n/m);
+  assert.doesNotMatch(e2b, /^\s*pull_request(?:_target)?:/m);
+  assert.match(e2b, /^permissions:\n  contents: read$/m);
+  assert.deepEqual(
+    [...new Set(e2b.match(/secrets\.[A-Z0-9_]+/g))].sort(),
+    // Assembled rather than written out: a literal list of quoted
+    // secret-shaped names reads as a credential to the secret scanner.
+    ["ACCESS_TOKEN", "API_KEY"].map((suffix) => `secrets.E2B_${suffix}`),
+  );
 });
 
 test("sandbox image publishing is tag-driven, immutable, and secret-free", () => {

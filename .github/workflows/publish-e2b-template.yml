@@ -1,0 +1,451 @@
+name: Publish E2B template
+
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+    && 'Publish E2B template (manual)'
+    || 'Publish E2B template' }}
+
+# Builds and publishes the OpenWave documents template on E2B from the
+# definition in crates/openwave-sandbox-agent/e2b/, then proposes the client
+# pin that points OpenWave at it.
+#
+# Why this exists: E2B provisions sandboxes from account-registered templates,
+# not from arbitrary OCI refs. The documents image reaches E2B only by being
+# built into a template and published (made public) from the OpenWave account,
+# and until that happens every E2B user falls back to `code-interpreter-v1`.
+# That publish used to be a manual runbook, which left a window where the
+# `pin` job in publish-sandbox-image.yml had already bumped the alias in
+# `e2b.toml` but nothing had built it.
+#
+# The loop, end to end:
+#
+#   1. publish-sandbox-image.yml builds the documents image and its `pin` job
+#      opens a PR bumping `e2b.Dockerfile`'s digest and `e2b.toml`'s alias.
+#   2. Merging that PR touches crates/openwave-sandbox-agent/e2b/, which
+#      triggers this workflow.
+#   3. This workflow builds the template under the new alias and publishes it.
+#   4. Its `pin` job opens a PR bumping `E2B_TEMPLATE` in e2b.rs to that alias.
+#      That pin moves last on purpose: pointing the client at an alias that is
+#      not published yet drops every E2B user to the fallback.
+#
+# Idempotence is the whole design. The alias is version-suffixed, so a run
+# whose alias is already published is a no-op — re-runs, README edits, and
+# edits to this workflow all cost one API call and exit. See the `resolve` job.
+#
+# Credentials: the run needs an E2B API key for the OpenWave account in the
+# `E2B_API_KEY` Actions secret (Settings → Secrets and variables → Actions;
+# the key itself comes from the E2B dashboard's Keys tab). A repository admin
+# has to set it once — nothing else in this repository consumes it. Without it
+# the run fails with instructions rather than skipping quietly, because a
+# silent skip here is indistinguishable from "nothing to do" and would leave
+# the template unpublished with no signal.
+#
+# `E2B_API_KEY` rather than `E2B_ACCESS_TOKEN`: the CLI's `template create`
+# and `template list` both hard-require an API key (`ensureAPIKey()` in
+# packages/cli/src/api.ts), and E2B's OpenAPI spec marks the access-token
+# scheme deprecated in favour of the `X-API-Key` header. The optional
+# `E2B_ACCESS_TOKEN` secret below is passed through when set, for the few
+# team-scoped endpoints that still take it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/openwave-sandbox-agent/e2b/**"
+      - ".github/workflows/publish-e2b-template.yml"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: >-
+          Rebuild and republish even when the alias is already public. Use
+          after editing e2b.Dockerfile without bumping the alias.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openwave-e2b-template
+  cancel-in-progress: false
+
+env:
+  # The E2B management API the client crate also talks to
+  # (`E2B_API_BASE` in crates/openwave-code-execution/src/e2b.rs).
+  E2B_API_BASE: https://api.e2b.app
+  TEMPLATE_DIR: crates/openwave-sandbox-agent/e2b
+  # Pinned exactly, like every other direct dependency in this repository.
+  # 2.16.1 (published 2026-07-31) is the current release of the v2 CLI, the
+  # line that carries Build System 2.0 — `template create`, which builds on
+  # E2B's infrastructure instead of shelling out to a local Docker daemon the
+  # way the v1 `template build` did.
+  E2B_CLI_VERSION: 2.16.1
+
+jobs:
+  # Reads the template definition and decides whether anything needs building.
+  # Deliberately a separate job with no write permissions and no credentials
+  # beyond the API key: the expensive job below only starts when this one says
+  # there is work.
+  resolve:
+    name: resolve the alias and whether it needs publishing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      alias: ${{ steps.definition.outputs.alias }}
+      cpu_count: ${{ steps.definition.outputs.cpu_count }}
+      memory_mb: ${{ steps.definition.outputs.memory_mb }}
+      publish: ${{ steps.state.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Require the E2B credential
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          if [[ -z "$E2B_API_KEY" ]]; then
+            cat >&2 <<'MESSAGE'
+          This workflow needs an E2B API key for the OpenWave E2B account.
+
+          A repository admin must add it once, under
+            Settings → Secrets and variables → Actions → New repository secret
+          with the name
+            E2B_API_KEY
+          and the value copied from the E2B dashboard's Keys tab
+          (https://e2b.dev/dashboard?tab=keys) for the OpenWave team.
+
+          Until then the documents template stays unpublished and every OpenWave
+          user on E2B falls back to `code-interpreter-v1`.
+          MESSAGE
+            exit 1
+          fi
+
+      - name: Read the template definition
+        id: definition
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import os
+          import re
+          import sys
+
+          directory = os.environ["TEMPLATE_DIR"]
+          with open(f"{directory}/e2b.toml") as handle:
+              config = handle.read()
+
+          def scalar(key, pattern):
+              # e2b.toml is a flat table of strings and integers; a full TOML
+              # parser is not worth a dependency, but the value must still be
+              # exactly what is committed, so each key is matched strictly and
+              # a missing or unexpected one fails the run.
+              match = re.search(rf'(?m)^{key} = "?({pattern})"?\s*$', config)
+              if match is None:
+                  sys.exit(f"could not read {key} from {directory}/e2b.toml")
+              return match.group(1)
+
+          # E2B template names are lowercase alphanumerics, dashes, and
+          # underscores; the CLI rejects anything else, so reject it here where
+          # the error is readable.
+          alias = scalar("template_id", r"[a-z0-9][a-z0-9._-]*")
+          name = scalar("template_name", r"[a-z0-9][a-z0-9._-]*")
+          if name != alias:
+              sys.exit(
+                  f"template_name ({name}) and template_id ({alias}) disagree; "
+                  "the publish would be ambiguous"
+              )
+
+          cpu_count = int(scalar("cpu_count", r"[0-9]+"))
+          memory_mb = int(scalar("memory_mb", r"[0-9]+"))
+          if cpu_count < 1:
+              sys.exit(f"cpu_count must be at least 1, got {cpu_count}")
+          # The CLI rejects an odd megabyte count outright.
+          if memory_mb < 128 or memory_mb % 2 != 0:
+              sys.exit(f"memory_mb must be an even number of at least 128, got {memory_mb}")
+
+          print(f"alias={alias}")
+          print(f"cpu_count={cpu_count}")
+          print(f"memory_mb={memory_mb}")
+          EOF
+
+      # `GET /templates/aliases/{alias}` is E2B's "check template alias"
+      # endpoint: 200 with `{templateID, public}` when the alias resolves, 404
+      # when it does not, 403 when it belongs to another team. That last case
+      # matters — E2B aliases are global, so a 403 means the name we want is
+      # taken by someone else and the run must stop loudly rather than build
+      # something nobody can reach.
+      - name: Decide whether the alias still needs publishing
+        id: state
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          ALIAS: ${{ steps.definition.outputs.alias }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          body="$RUNNER_TEMP/alias.json"
+          status="$(curl --silent --show-error --location \
+            --output "$body" --write-out '%{http_code}' \
+            --header "X-API-Key: $E2B_API_KEY" \
+            "$E2B_API_BASE/templates/aliases/$ALIAS")"
+
+          publish=false
+          case "$status" in
+            200)
+              public="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1])).get("public")).lower())' "$body")"
+              if [[ "$public" == "true" ]]; then
+                if [[ "$FORCE_REBUILD" == "true" ]]; then
+                  echo "::notice::$ALIAS is already public; rebuilding because force_rebuild was requested."
+                  publish=true
+                else
+                  echo "$ALIAS is already built and public; nothing to do."
+                  echo "\`$ALIAS\` is already built and public; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+                fi
+              else
+                # A template built but never published — a previous run that
+                # stopped between the two steps. Rebuild rather than publish
+                # blind, so what goes public is the committed Dockerfile.
+                echo "::notice::$ALIAS exists but is private; rebuilding and publishing it."
+                publish=true
+              fi
+              ;;
+            404)
+              echo "$ALIAS does not exist yet; building and publishing it."
+              publish=true
+              ;;
+            403)
+              echo "The alias $ALIAS belongs to another E2B team. Pick a different alias in e2b.toml." >&2
+              exit 1
+              ;;
+            *)
+              echo "Unexpected HTTP $status from $E2B_API_BASE/templates/aliases/$ALIAS:" >&2
+              head -c 2000 "$body" >&2
+              exit 1
+              ;;
+          esac
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: build and publish the template
+    needs: resolve
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # E2B builds the template on its own infrastructure and the CLI streams the
+    # log, so the wall clock here is E2B's pull of a multi-gigabyte image plus
+    # its snapshotting, not a local Docker build.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      published: ${{ steps.verify.outputs.published }}
+    env:
+      ALIAS: ${{ needs.resolve.outputs.alias }}
+      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+      # Optional; deprecated in E2B's API in favour of the API key, but still
+      # accepted by team-scoped endpoints. Passed through when the secret is
+      # set and simply absent when it is not.
+      E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - name: Install the E2B CLI
+        run: |
+          npm install --global "@e2b/cli@$E2B_CLI_VERSION"
+          e2b --version
+
+      # `e2b template create` takes no config file: it reads the Dockerfile and
+      # takes sizing as flags, so e2b.toml's numbers are passed explicitly
+      # rather than duplicated here.
+      - name: Build the template
+        working-directory: ${{ env.TEMPLATE_DIR }}
+        env:
+          CPU_COUNT: ${{ needs.resolve.outputs.cpu_count }}
+          MEMORY_MB: ${{ needs.resolve.outputs.memory_mb }}
+        run: |
+          e2b template create "$ALIAS" \
+            --dockerfile e2b.Dockerfile \
+            --cpu-count "$CPU_COUNT" \
+            --memory-mb "$MEMORY_MB"
+
+      # Makes the template public, which is the entire point: a published
+      # template is creatable by alias from any E2B account, so a user who has
+      # pasted nothing but their own API key gets the documents image.
+      - name: Publish the template
+        working-directory: ${{ env.TEMPLATE_DIR }}
+        run: e2b template publish "$ALIAS" --yes
+
+      # Confirms the publish took from the account that performed it. It cannot
+      # prove the other half of the claim — that a *different* E2B account can
+      # create a sandbox from the alias — because that needs a second account's
+      # API key, which this workflow deliberately does not hold. The README
+      # keeps that as a manual one-liner.
+      - name: Verify the alias resolves and is public
+        id: verify
+        run: |
+          body="$RUNNER_TEMP/alias.json"
+          status="$(curl --silent --show-error --location \
+            --output "$body" --write-out '%{http_code}' \
+            --header "X-API-Key: $E2B_API_KEY" \
+            "$E2B_API_BASE/templates/aliases/$ALIAS")"
+          if [[ "$status" != 200 ]]; then
+            echo "Published $ALIAS but the alias check returned HTTP $status:" >&2
+            head -c 2000 "$body" >&2
+            exit 1
+          fi
+          python3 - "$body" <<'EOF'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as handle:
+              alias = json.load(handle)
+          if alias.get("public") is not True:
+              sys.exit(f"the alias resolves but is not public: {alias}")
+          print(f"published template {alias['templateID']}")
+          EOF
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Published E2B template"
+            echo
+            echo "- Alias: \`$ALIAS\`"
+            echo "- Public: yes"
+            echo
+            echo "Cross-account resolution is not proven here — see"
+            echo "\`crates/openwave-sandbox-agent/e2b/README.md\` for the one-liner"
+            echo "that checks it with a second account's key."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Closes the client half of the pin loop. `E2B_TEMPLATE` in e2b.rs is the
+  # only pin that must not move before the template is live, so it moves here
+  # and nowhere else — publish-sandbox-image.yml's `pin` job deliberately
+  # leaves it alone.
+  #
+  # This runs whenever the alias is confirmed public, including on a run that
+  # found it already published: if e2b.rs is in sync the job ends without a
+  # commit, and if it has drifted the PR reappears. The branch push and the PR
+  # both use the workflow's own GITHUB_TOKEN, with the same known cost as the
+  # image pin job — GitHub does not trigger workflows on GITHUB_TOKEN events,
+  # so checks need a nudge. This job only ever pushes to its automation branch.
+  pin:
+    name: propose the client template pin
+    needs: [resolve, publish]
+    if: always() && !cancelled() && needs.resolve.result == 'success' && needs.publish.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      ALIAS: ${{ needs.resolve.outputs.alias }}
+      PIN_BRANCH: automation/e2b-template-pin
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+
+      - name: Point the client at the published alias
+        run: |
+          python3 - <<'EOF'
+          import os
+          import re
+          import sys
+
+          directory = os.environ["TEMPLATE_DIR"]
+          alias = os.environ["ALIAS"]
+
+          # The client's doc comment names the exact image the alias was built
+          # from. That ref lives in the template Dockerfile, which the image
+          # publish workflow keeps current, so read it rather than restating it.
+          with open(f"{directory}/e2b.Dockerfile") as handle:
+              dockerfile = handle.read()
+
+          def one(pattern, text, what):
+              matches = re.findall(pattern, text)
+              if len(matches) != 1:
+                  sys.exit(f"expected exactly one {what}, found {len(matches)}")
+              return matches[0]
+
+          repository, digest = one(
+              r"(?m)^FROM (\S+)@(sha256:[0-9a-f]{64})\s*$", dockerfile, "FROM line"
+          )
+          tag = one(
+              rf"(?m)^# {re.escape(repository)}:(\S+)\.$", dockerfile, "image tag comment"
+          )
+
+          path = "crates/openwave-code-execution/src/e2b.rs"
+          with open(path) as handle:
+              source = handle.read()
+
+          pins = {
+              rf'(?m)^(/// `{re.escape(repository)}:)[^`\n]*(`)$': tag,
+              r'(?m)^(/// \(`)sha256:[0-9a-f]{64}(`\),)$': digest,
+              r'(?m)^(const E2B_TEMPLATE: &str = ")[^"\n]*(";)$': alias,
+          }
+          for pattern, value in pins.items():
+              source, replaced = re.subn(
+                  pattern, lambda match: match.group(1) + value + match.group(2), source
+              )
+              if replaced != 1:
+                  sys.exit(f"expected exactly one match for {pattern}, found {replaced}")
+
+          with open(path, "w") as handle:
+              handle.write(source)
+          EOF
+
+      - name: Open or update the pin PR
+        run: |
+          if git diff --quiet; then
+            echo "\`E2B_TEMPLATE\` already points at \`$ALIAS\`; no PR proposed." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$PIN_BRANCH"
+          git commit --all \
+            --message "feat: point E2B sandboxes at the published $ALIAS template"
+          git push --force origin "HEAD:refs/heads/$PIN_BRANCH"
+
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          Automated follow-up from an E2B template publish: \`$ALIAS\` is now built and
+          public on E2B, so \`E2B_TEMPLATE\` in
+          \`crates/openwave-code-execution/src/e2b.rs\` can point at it. Until this
+          lands, E2B sandboxes still resolve the previous alias.
+
+          The doc comment above the constant is refreshed from
+          \`crates/openwave-sandbox-agent/e2b/e2b.Dockerfile\`, so the image tag and
+          digest it names stay the ones the template was actually built from.
+
+          - Alias: \`$ALIAS\`
+          - Publish run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          This PR was opened with the workflow's own GITHUB_TOKEN, and GitHub does not
+          trigger workflows on events created with that token — required checks will not
+          start on their own. Close and reopen the PR, or push an empty commit, to kick
+          CI.
+          EOF
+
+          if [[ "$(gh pr list --head "$PIN_BRANCH" --state open --json number --jq length)" != 0 ]]; then
+            echo "Updated the open pin PR on \`$PIN_BRANCH\` to \`$ALIAS\`." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if gh pr create --base main --head "$PIN_BRANCH" \
+            --title "feat(code-execution): pin E2B sandboxes to the published $ALIAS template" \
+            --body-file "$body_file"; then
+            echo "Proposed the client pin PR from \`$PIN_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Repositories can bar Actions from creating PRs; the branch is
+            # pushed either way, so hand the maintainer the one-liner.
+            {
+              echo "Pushed \`$PIN_BRANCH\` but could not open the PR. Create it with:"
+              echo
+              echo '```'
+              echo "gh pr create --base main --head $PIN_BRANCH" \
+                "--title 'feat(code-execution): pin E2B sandboxes to the published $ALIAS template'"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
