@@ -194,6 +194,24 @@ in-process worker rather than failing. A container-located run is attached-only
 and proxies its model inference back through the host, so no model credential
 enters the container. See [Sandbox providers](sandbox-providers.md).
 
+### Delegation and consent
+
+Both orchestration tools declare the `Sensitive` approval class. A child's own
+calls never pass back through the parent chat's approval gate — the sandbox
+worker advances them under its own lease — so the delegation is the only place
+in the chat where the reader could speak about what the child does. Classing it
+below the authority it hands out would state the opposite.
+
+Declaring the class is not the same as gating on it. The gate parks a *pending
+server tool call* on a durable approval receipt, and a spawn has no such
+record: its tool call is written already completed, inside the same transaction
+that admits the child. So the class today decides advertisement — a plan turn
+never sees the pair — and not admission. The consequence worth naming: in a
+chat where a foreground `web_search` would stop and ask, the same egress
+performed by a delegated child does not. Closing that requires a durable
+pending-spawn checkpoint the reader can answer, which is its own change
+(issue #1477), not a flag.
+
 ## Bounded scheduling
 
 Concurrency control has three independent purposes: protecting the machine,
