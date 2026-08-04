@@ -1,9 +1,8 @@
 import type { CustomCellRendererProps } from "ag-grid-react";
 import { format } from "date-fns";
-import { BotIcon, DownloadIcon, MoreHorizontalIcon, Trash2Icon } from "lucide-react";
+import { DownloadIcon, MoreHorizontalIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
 import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,14 +57,6 @@ export function NameCellRenderer(props: CellProps) {
         </WithTooltip>
         <span className="truncate">{output.filename}</span>
       </button>
-      {output.producingRunId !== null && (
-        <WithTooltip label="Auto-merged from a background agent">
-          <Badge variant="outline" size="sm" className="ml-2 shrink-0 px-1.5 text-2xs font-medium">
-            <BotIcon className="size-3" />
-            Agent
-          </Badge>
-        </WithTooltip>
-      )}
     </div>
   );
 }

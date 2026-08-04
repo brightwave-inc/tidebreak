@@ -68,7 +68,7 @@ pub(crate) struct DeliverableSummary {
     revision_count: u32,
     updated_at: String,
     /// Background run that produced the current revision, when the output was
-    /// auto-merged from a background agent rather than a foreground turn. The
+    /// submitted by a background agent rather than a foreground turn. The
     /// renderer uses it to badge the output and correlate it with the agent-run
     /// surface; it is a display key, not authority.
     producing_run_id: Option<Uuid>,

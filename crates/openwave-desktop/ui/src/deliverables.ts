@@ -8,7 +8,7 @@ export type DeliverableSummary = {
   revisionCount: number;
   updatedAt: string;
   // The background run that produced the current revision, when this output was
-  // auto-merged from a background agent rather than written by a foreground
+  // submitted by a background agent rather than written by a foreground
   // turn. `null` for a foreground deliverable.
   producingRunId: string | null;
 };

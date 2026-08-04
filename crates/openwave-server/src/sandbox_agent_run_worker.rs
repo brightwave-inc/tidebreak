@@ -717,11 +717,11 @@ impl SandboxAgentRunWorker {
             Some(SubmitAgentRunResultOutcome::Completed(result))
             | Some(SubmitAgentRunResultOutcome::Existing(result)) => {
                 // The result is durably committed and delivered to the parent
-                // inbox. Now the host — never the model — merges it into the
+                // inbox. Now the host — never the model — records it in the
                 // conversation's output record as a revertible version. The
                 // merge runs on the committed text, so the model that produced
-                // it cannot author, decline, or steer the merge.
-                self.auto_merge_result_output(run, &result).await;
+                // it cannot author, decline, or steer it.
+                self.record_result_output(run, &result).await;
                 Ok(SandboxAgentRunWorkerOutcome::Completed(id))
             }
             None => {
@@ -731,19 +731,15 @@ impl SandboxAgentRunWorker {
         }
     }
 
-    /// Auto-merge a completed background run's text result into its
-    /// conversation's outputs.
+    /// Record a completed background run's text result in its conversation's
+    /// outputs.
     ///
     /// This is best-effort after the result has already committed: the merge is
     /// idempotent on the run's derived output identity, so an ambiguous submit
     /// retry re-runs it harmlessly, and a failure here never fails a run whose
     /// result is already delivered. Only a `FinalText` result becomes an output;
     /// a folder-access proposal or cancellation is not conversation content.
-    async fn auto_merge_result_output(
-        &self,
-        run: &AgentRun,
-        result: &openwave_core::AgentRunResult,
-    ) {
+    async fn record_result_output(&self, run: &AgentRun, result: &openwave_core::AgentRunResult) {
         let openwave_core::AgentRunResultPayload::FinalText { text } = &result.payload else {
             return;
         };
@@ -757,7 +753,7 @@ impl SandboxAgentRunWorker {
             Ok(scratch) => scratch,
             Err(error) => {
                 tracing::warn!(
-                    "could not open scratch to auto-merge agent run {} output: {error}",
+                    "could not open scratch to record agent run {} output: {error}",
                     run.id
                 );
                 return;
@@ -766,7 +762,7 @@ impl SandboxAgentRunWorker {
         let merge = openwave_core::AgentResultOutputMerge {
             run_id: run.id,
             chat_id: run.chat_id,
-            filename: agent_result_filename(run.id),
+            filename: agent_result_filename(run.input.as_deref()),
             text: text.clone(),
             created_at: result.submitted_at,
         };
@@ -774,7 +770,7 @@ impl SandboxAgentRunWorker {
             openwave_core::merge_agent_run_result(&*self.store, &scratch, &merge).await
         {
             tracing::warn!(
-                "could not auto-merge agent run {} result into outputs: {error}",
+                "could not record agent run {} result in outputs: {error}",
                 run.id
             );
         }
@@ -1030,15 +1026,44 @@ fn open_chat_scratch(
     })
 }
 
-/// Host-derived, portable display filename for an auto-merged agent result.
+/// Host-derived, portable display filename for a submitted agent result.
 ///
-/// The model never names the output. A short, run-derived suffix keeps several
-/// background results in one conversation distinguishable while the record's
-/// opaque identity remains the authority.
-fn agent_result_filename(run_id: openwave_core::AgentRunId) -> String {
-    let id = run_id.to_string();
-    let short = id.get(..8).unwrap_or(id.as_str());
-    format!("Agent result {short}.md")
+/// The model never names the output, but the task it was given is the closest
+/// thing to a title the host has, and it is what the reader recognises in the
+/// outputs catalog. The record's opaque identity remains the authority, so two
+/// runs given the same task are still two outputs that happen to read alike.
+fn agent_result_filename(task: Option<&str>) -> String {
+    const MAX_TITLE_CHARS: usize = 60;
+
+    let title: String = task
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        // Portable ASCII only: the name reaches a filesystem on export, and a
+        // task is free-form model-facing prose that can hold anything.
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '-' | '_' => character,
+            _ => ' ',
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let title = match title.char_indices().nth(MAX_TITLE_CHARS) {
+        // Cut back to the last whole word so the name ends on something
+        // readable rather than mid-token.
+        Some((cut, _)) => title[..title[..cut].rfind(' ').unwrap_or(cut)].to_string(),
+        None => title,
+    };
+
+    if title.is_empty() {
+        "Agent result.md".to_string()
+    } else {
+        format!("{title}.md")
+    }
 }
 
 fn delegated_file_admission_matches(
@@ -3145,6 +3170,29 @@ mod tests {
             openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
         );
         assert_eq!(calls[0].arguments, serde_json::json!({}));
+    }
+
+    /// The task is free-form model-facing prose and the filename reaches a real
+    /// filesystem on export, so the two things this has to get right are that
+    /// nothing unportable survives and that a long task still ends on a word.
+    #[test]
+    fn a_result_filename_is_a_portable_title_drawn_from_the_task() {
+        assert_eq!(
+            agent_result_filename(Some("Summarize the Q3 revenue report")),
+            "Summarize the Q3 revenue report.md"
+        );
+        assert_eq!(
+            agent_result_filename(Some("Read ../etc/passwd: \"now\"\nthen stop")),
+            "Read etc passwd now.md"
+        );
+        assert_eq!(
+            agent_result_filename(Some(
+                "Compare every competitor pricing page and write up where our own tiers sit"
+            )),
+            "Compare every competitor pricing page and write up where.md"
+        );
+        assert_eq!(agent_result_filename(Some("   ")), "Agent result.md");
+        assert_eq!(agent_result_filename(None), "Agent result.md");
     }
 
     fn sandbox_chat() -> Chat {

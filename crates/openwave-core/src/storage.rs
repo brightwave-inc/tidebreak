@@ -1807,7 +1807,7 @@ pub trait Store: Send + Sync {
     }
 
     /// Restore a soft-deleted output, returning it to the catalog. This is the
-    /// exact inverse of [`Store::delete_output`], so retracting an auto-merged
+    /// exact inverse of [`Store::delete_output`], so retracting a submitted
     /// output is reversible. Returns `false` only when the output does not
     /// exist; restoring a live output is the same durable outcome, not a
     /// conflict. Nothing about the revision history changes.

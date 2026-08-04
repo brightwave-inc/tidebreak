@@ -391,7 +391,7 @@ impl OutputId {
 
     /// Derive the retry-stable output identity for one background agent run.
     ///
-    /// A completed background run auto-merges its result into exactly one
+    /// A completed background run records its result as exactly one
     /// conversation output. Deriving the identity from the run makes the merge
     /// idempotent: an ambiguous submit retry lands on the same output rather than
     /// forking a second record.
@@ -438,7 +438,7 @@ impl OutputRevisionId {
     }
 
     /// Derive the retry-stable first-revision identity for one background agent
-    /// run's auto-merged output.
+    /// run's submitted output.
     #[must_use]
     pub fn for_run(run_id: AgentRunId) -> Self {
         Self(Uuid::new_v5(&Self::NAMESPACE, run_id.as_uuid().as_bytes()))
