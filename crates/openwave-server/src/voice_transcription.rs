@@ -11,17 +11,12 @@ use crate::providers::{self, ProviderKind};
 const SETTING_KEY: &str = "voice.transcription_v1";
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceTranscriptionModel {
+    #[default]
     Local,
     Gpt4oTranscribe,
-}
-
-impl Default for VoiceTranscriptionModel {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
