@@ -573,9 +573,9 @@ impl SandboxContainerRunner {
             crate::providers::apply_model_policy(&mut config, &policy, chat.reasoning_effort)?;
         } else {
             // A test or custom embedder that injects one provider keeps its
-            // free-form model contract, as elsewhere in the server.
-            config.model = model;
-            config.reasoning_effort = chat.reasoning_effort;
+            // free-form model contract, as elsewhere in the server — but a
+            // registered model still runs under its own policy.
+            crate::providers::apply_free_form_model(&mut config, model, chat.reasoning_effort)?;
         }
         let network_policy = crate::sandbox_docker::compile_network_policy(&chat.network_policy);
         Ok((config, network_policy))
