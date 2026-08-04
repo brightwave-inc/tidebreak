@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
-use openwave_server::{LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
+use openwave_server::{LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 use sha2::{Digest, Sha256};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::codecs::CodecParameters;
@@ -197,23 +197,37 @@ impl LocalVoiceRunner for DesktopLocalVoiceRunner {
         self.ensure_installed().await
     }
 
-    async fn transcribe(&self, content_type: &str, audio: Vec<u8>) -> Result<String, String> {
-        self.ensure_installed().await?;
+    async fn transcribe(
+        &self,
+        content_type: &str,
+        audio: Vec<u8>,
+    ) -> Result<String, LocalVoiceError> {
+        self.ensure_installed()
+            .await
+            .map_err(LocalVoiceError::Runner)?;
         let model = self.model_path();
         let content_type = content_type.to_owned();
         tokio::task::spawn_blocking(move || transcribe_blocking(&model, &content_type, audio))
             .await
-            .map_err(|_| "Local voice transcription worker stopped unexpectedly".to_owned())?
+            .map_err(|_| {
+                LocalVoiceError::Runner(
+                    "Local voice transcription worker stopped unexpectedly".to_owned(),
+                )
+            })?
     }
 }
 
-fn transcribe_blocking(model: &Path, content_type: &str, audio: Vec<u8>) -> Result<String, String> {
+fn transcribe_blocking(
+    model: &Path,
+    content_type: &str,
+    audio: Vec<u8>,
+) -> Result<String, LocalVoiceError> {
     let samples = decode_audio(content_type, audio)?;
     let context = WhisperContext::new_with_params(model, WhisperContextParameters::default())
-        .map_err(|_| "Could not load the local voice model".to_owned())?;
-    let mut state = context
-        .create_state()
-        .map_err(|_| "Could not initialize local voice transcription".to_owned())?;
+        .map_err(|_| LocalVoiceError::Runner("Could not load the local voice model".to_owned()))?;
+    let mut state = context.create_state().map_err(|_| {
+        LocalVoiceError::Runner("Could not initialize local voice transcription".to_owned())
+    })?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_language(Some("en"));
     params.set_translate(false);
@@ -223,22 +237,24 @@ fn transcribe_blocking(model: &Path, content_type: &str, audio: Vec<u8>) -> Resu
     params.set_print_timestamps(false);
     state
         .full(params, &samples)
-        .map_err(|_| "Local voice transcription failed".to_owned())?;
+        .map_err(|_| LocalVoiceError::Runner("Local voice transcription failed".to_owned()))?;
     let mut text = String::new();
     for segment in state.as_iter() {
-        text.push_str(
-            &segment
-                .to_str_lossy()
-                .map_err(|_| "Local voice transcription returned invalid text".to_owned())?,
-        );
+        text.push_str(&segment.to_str_lossy().map_err(|_| {
+            LocalVoiceError::Runner("Local voice transcription returned invalid text".to_owned())
+        })?);
     }
     Ok(text.trim().to_owned())
 }
 
-fn decode_audio(content_type: &str, audio: Vec<u8>) -> Result<Vec<f32>, String> {
+fn decode_audio(content_type: &str, audio: Vec<u8>) -> Result<Vec<f32>, LocalVoiceError> {
+    let undecodable =
+        |message: &str| -> LocalVoiceError { LocalVoiceError::Undecodable(message.to_owned()) };
     let mime = content_type.split(';').next().unwrap_or("");
     if !matches!(mime, "audio/webm" | "audio/mp4") {
-        return Err("Unsupported voice recording format".into());
+        return Err(LocalVoiceError::UnsupportedMedia(
+            "Unsupported voice recording format".into(),
+        ));
     }
     let mut hint = Hint::new();
     hint.with_extension(if mime == "audio/mp4" { "m4a" } else { "webm" });
@@ -250,40 +266,40 @@ fn decode_audio(content_type: &str, audio: Vec<u8>) -> Result<Vec<f32>, String> 
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|_| "Could not read the voice recording container".to_owned())?;
+        .map_err(|_| undecodable("Could not read the voice recording container"))?;
     let track = format
         .default_track(TrackType::Audio)
-        .ok_or_else(|| "The voice recording has no audio track".to_owned())?;
+        .ok_or_else(|| undecodable("The voice recording has no audio track"))?;
     let track_id = track.id;
     let CodecParameters::Audio(params) = track
         .codec_params
         .as_ref()
-        .ok_or_else(|| "The voice recording has no audio codec".to_owned())?
+        .ok_or_else(|| undecodable("The voice recording has no audio codec"))?
     else {
-        return Err("The voice recording has no audio codec".into());
+        return Err(undecodable("The voice recording has no audio codec"));
     };
     let rate = params
         .sample_rate
-        .ok_or_else(|| "The voice recording has no sample rate".to_owned())?;
+        .ok_or_else(|| undecodable("The voice recording has no sample rate"))?;
     let channels = params
         .channels
         .as_ref()
         .map(|channels| channels.count())
-        .ok_or_else(|| "The voice recording has no channel layout".to_owned())?;
+        .ok_or_else(|| undecodable("The voice recording has no channel layout"))?;
     if !(1..=2).contains(&channels) {
-        return Err("Voice recordings must be mono or stereo".into());
+        return Err(undecodable("Voice recordings must be mono or stereo"));
     }
     let mut interleaved = Vec::new();
     if params.codec.to_string() == "0x1001" {
         let mut decoder = opus_decoder::OpusDecoder::new(rate, channels)
-            .map_err(|_| "Could not initialize the Opus decoder".to_owned())?;
+            .map_err(|_| LocalVoiceError::Runner("Could not initialize the Opus decoder".into()))?;
         let mut pcm = vec![0_i16; decoder.max_frame_size_per_channel() * channels];
         loop {
             match format.next_packet() {
                 Ok(Some(packet)) if packet.track_id == track_id => {
                     let frames = decoder
                         .decode(&packet.data, &mut pcm, false)
-                        .map_err(|_| "Could not decode the WebM/Opus recording".to_owned())?;
+                        .map_err(|_| undecodable("Could not decode the WebM/Opus recording"))?;
                     interleaved.extend(
                         pcm[..frames * channels]
                             .iter()
@@ -292,13 +308,15 @@ fn decode_audio(content_type: &str, audio: Vec<u8>) -> Result<Vec<f32>, String> 
                 }
                 Ok(Some(_)) => {}
                 Ok(None) | Err(SymphoniaError::IoError(_)) => break,
-                Err(_) => return Err("Could not read the WebM/Opus recording".into()),
+                Err(_) => return Err(undecodable("Could not read the WebM/Opus recording")),
             }
         }
     } else {
         let mut decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
-            .map_err(|_| "Unsupported codec in voice recording".to_owned())?;
+            .map_err(|_| {
+                LocalVoiceError::UnsupportedMedia("Unsupported codec in voice recording".into())
+            })?;
         loop {
             match format.next_packet() {
                 Ok(Some(packet)) if packet.track_id == track_id => match decoder.decode(&packet) {
@@ -308,16 +326,18 @@ fn decode_audio(content_type: &str, audio: Vec<u8>) -> Result<Vec<f32>, String> 
                         buffer.copy_to_slice_interleaved(&mut interleaved[start..]);
                     }
                     Err(SymphoniaError::DecodeError(_)) => {}
-                    Err(_) => return Err("Could not decode the MP4 recording".into()),
+                    Err(_) => return Err(undecodable("Could not decode the MP4 recording")),
                 },
                 Ok(Some(_)) => {}
                 Ok(None) | Err(SymphoniaError::IoError(_)) => break,
-                Err(_) => return Err("Could not read the MP4 recording".into()),
+                Err(_) => return Err(undecodable("Could not read the MP4 recording")),
             }
         }
     }
     if interleaved.is_empty() {
-        return Err("The voice recording contained no decodable audio".into());
+        return Err(undecodable(
+            "The voice recording contained no decodable audio",
+        ));
     }
     let mono: Vec<f32> = if channels == 1 {
         interleaved
@@ -390,6 +410,24 @@ mod tests {
         )
         .unwrap();
         assert!(!runner.installed());
+    }
+
+    #[test]
+    fn decodes_a_recording_whose_clusters_have_an_unknown_size() {
+        // A browser's MediaRecorder muxes into a non-seekable sink, so neither
+        // the Segment nor any Cluster length is known when its header is
+        // written. The fixture is a 1.5s 48 kHz mono Opus recording rewritten
+        // into exactly that shape: every Cluster carries the unknown-size vint
+        // and the seek-oriented elements are gone. Reading it used to stop at
+        // the first cluster boundary with "Could not read the WebM/Opus
+        // recording".
+        let samples = decode_audio(
+            "audio/webm;codecs=opus",
+            include_bytes!("../tests/fixtures/mediarecorder-opus.webm").to_vec(),
+        )
+        .expect("decodes live-muxed WebM/Opus");
+        let seconds = samples.len() as f32 / WHISPER_SAMPLE_RATE as f32;
+        assert!(seconds > 1.4, "decoded only {seconds}s of the recording");
     }
 
     #[test]

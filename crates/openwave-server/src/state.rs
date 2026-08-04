@@ -37,6 +37,31 @@ pub enum LocalVoiceState {
     Unavailable,
 }
 
+/// Why a local transcription attempt failed.
+///
+/// The distinction is the caller's, not the runner's: a recording the decoder
+/// rejects is the upload's problem and answers `4xx`, while a model or worker
+/// fault is ours and answers `500`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalVoiceError {
+    /// The recording's container or codec is not one this runner accepts.
+    UnsupportedMedia(String),
+    /// The recording is in an accepted format but could not be decoded.
+    Undecodable(String),
+    /// The runner itself failed — model install, inference, or its worker.
+    Runner(String),
+}
+
+impl LocalVoiceError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::UnsupportedMedia(message)
+            | Self::Undecodable(message)
+            | Self::Runner(message) => message,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait LocalVoiceRunner: Send + Sync {
     async fn status(&self) -> LocalVoiceStatus;
@@ -45,7 +70,7 @@ pub trait LocalVoiceRunner: Send + Sync {
         &self,
         content_type: &str,
         audio: Vec<u8>,
-    ) -> std::result::Result<String, String>;
+    ) -> std::result::Result<String, LocalVoiceError>;
 }
 
 struct UnavailableLocalVoiceRunner;
@@ -69,8 +94,10 @@ impl LocalVoiceRunner for UnavailableLocalVoiceRunner {
         &self,
         _content_type: &str,
         _audio: Vec<u8>,
-    ) -> std::result::Result<String, String> {
-        Err("local voice input is available only in the desktop app".into())
+    ) -> std::result::Result<String, LocalVoiceError> {
+        Err(LocalVoiceError::Runner(
+            "local voice input is available only in the desktop app".into(),
+        ))
     }
 }
 
