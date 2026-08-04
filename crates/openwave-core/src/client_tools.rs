@@ -45,6 +45,23 @@ pub enum RequestedFolderCapability {
     ReadFiles,
 }
 
+/// One folder capability the trusted host reports as currently granted.
+///
+/// This vocabulary is deliberately separate from [`RequestedFolderCapability`]:
+/// the request remains a narrow, untrusted proposal while the result reports
+/// the broker's real authorization decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GrantedFolderCapability {
+    /// List directories and read files below the selected folder.
+    ReadFiles,
+    /// Create files or replace them after any required approval.
+    WriteFiles,
+    /// Expose the selected folder to model-authored commands.
+    ExecuteCommands,
+}
+
 /// Non-authoritative, well-known starting location for the native picker.
 ///
 /// This is deliberately not a free-form path. The trusted desktop decides how
@@ -113,14 +130,14 @@ pub struct RequestFolderAccessArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestFolderAccessResult {
-    /// The user selected a folder and the broker reports live read access.
+    /// The user selected a folder and the broker reports its live capabilities.
     Connected {
         /// Opaque broker-local root identity, never a host path.
         root_id: uuid::Uuid,
         /// Bounded leaf name safe for display.
         display_name: String,
         /// Capabilities the trusted host actually granted.
-        capabilities: Vec<RequestedFolderCapability>,
+        capabilities: Vec<GrantedFolderCapability>,
     },
     /// The user declined or closed the picker; no access was granted.
     Declined,
@@ -416,7 +433,7 @@ pub fn validate_write_output_to_connected_folder_arguments(arguments: &Value) ->
 pub fn list_connected_folders_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ListConnectedFoldersArgs>(
         LIST_CONNECTED_FOLDERS_TOOL,
-        "List folders already connected to this conversation. Results contain opaque root IDs and display names only; use request_folder_access to ask the user to choose another folder.",
+        "List folders already connected to this conversation. Results contain opaque root IDs, display names, and the capabilities the trusted host currently grants on each folder; use request_folder_access to ask the user to choose another folder.",
     )
 }
 
@@ -563,7 +580,11 @@ mod tests {
         let result = RequestFolderAccessResult::Connected {
             root_id: uuid::Uuid::new_v4(),
             display_name: "Documents".into(),
-            capabilities: vec![RequestedFolderCapability::ReadFiles],
+            capabilities: vec![
+                GrantedFolderCapability::ReadFiles,
+                GrantedFolderCapability::WriteFiles,
+                GrantedFolderCapability::ExecuteCommands,
+            ],
         };
         let encoded = serde_json::to_value(&result).unwrap();
         assert_eq!(encoded["status"], "connected");

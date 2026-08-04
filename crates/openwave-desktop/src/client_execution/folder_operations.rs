@@ -10,14 +10,14 @@ use std::collections::HashSet;
 use openwave_code_execution::host_paths::{resolve_scratch_directory, ScratchEntryKind};
 use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
-    validate_list_folder_arguments, validate_read_connected_file_arguments, CallId, ListFolderArgs,
-    ReadConnectedFileArgs, ResultEntry, ResultEntryKind, ToolCallExecution, ToolCallRecord,
-    ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
-    READ_CONNECTED_FILE_TOOL,
+    validate_list_folder_arguments, validate_read_connected_file_arguments, CallId,
+    GrantedFolderCapability, ListFolderArgs, ReadConnectedFileArgs, ResultEntry, ResultEntryKind,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL,
+    LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, READ_CONNECTED_FILE_TOOL,
 };
 use openwave_host_broker::{
-    DirectoryEntry, EntryKind, OperationEnvelope, OperationRequest, OperationResult, PathRequest,
-    ReadFileResult, RelativePath, RootId, PROTOCOL_VERSION,
+    Capability, DirectoryEntry, EntryKind, OperationEnvelope, OperationRequest, OperationResult,
+    PathRequest, ReadFileResult, RelativePath, RootId, PROTOCOL_VERSION,
 };
 use tauri::Manager;
 
@@ -493,6 +493,7 @@ fn serialize_result(call: &ToolCallRecord, result: OperationResult) -> StoredRes
                     "folders": roots.iter().map(|root| serde_json::json!({
                         "root_id": root.root_id,
                         "display_name": root.display_name,
+                        "capabilities": granted_folder_capabilities(&root.capabilities),
                     })).collect::<Vec<_>>(),
                 }),
                 rows,
@@ -564,6 +565,24 @@ fn serialize_result(call: &ToolCallRecord, result: OperationResult) -> StoredRes
             "The connected-folder result was too large to return.",
         ),
     }
+}
+
+pub(super) fn granted_folder_capabilities(
+    capabilities: &[Capability],
+) -> Vec<GrantedFolderCapability> {
+    capabilities
+        .iter()
+        .filter_map(|capability| match capability {
+            Capability::ReadFiles => Some(GrantedFolderCapability::ReadFiles),
+            Capability::WriteFiles => Some(GrantedFolderCapability::WriteFiles),
+            Capability::ExecuteCommands => Some(GrantedFolderCapability::ExecuteCommands),
+            Capability::ListRoots => None,
+            // Capability is non-exhaustive. Unknown future per-folder reach is
+            // intentionally under-reported until this one conversion and the
+            // model-facing vocabulary are extended together.
+            _ => None,
+        })
+        .collect()
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
@@ -661,6 +680,52 @@ fn read_file_name(path: &str) -> String {
 mod tests {
     use super::*;
     use openwave_core::ChatId;
+
+    #[test]
+    fn broker_capabilities_reach_the_model_facing_folder_listing() {
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: ChatId::new(),
+            turn_id: openwave_core::TurnId::new(),
+            provider_id: "tool-1".into(),
+            name: LIST_CONNECTED_FOLDERS_TOOL.into(),
+            arguments: serde_json::json!({}),
+            raw_arguments: None,
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        let root_id = RootId::new();
+        let resolution = serialize_result(
+            &call,
+            OperationResult::ListRoots {
+                roots: vec![openwave_host_broker::RootAccess {
+                    root_id,
+                    display_name: "Documents".into(),
+                    capabilities: vec![
+                        Capability::ReadFiles,
+                        Capability::WriteFiles,
+                        Capability::ExecuteCommands,
+                    ],
+                }],
+            },
+        );
+        let StoredResolution::Completed { result, .. } = resolution else {
+            panic!("expected completed result");
+        };
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            result["folders"][0]["capabilities"],
+            serde_json::json!(["read_files", "write_files", "execute_commands"])
+        );
+    }
 
     /// The confusion this exists to prevent: the agent writes a file with
     /// `exec`, calls `list_folder` to confirm it, and is shown a folder that

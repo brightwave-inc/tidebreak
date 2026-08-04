@@ -150,7 +150,7 @@ async fn drive_product_attachment(
     match begun.change.phase {
         RootAttachmentChangePhase::Completed => {
             verify_completed_product_attachment(state, &begun.change).await?;
-            return connected_resolution(root);
+            return connected_resolution(state, current_context, root).await;
         }
         RootAttachmentChangePhase::Failed => {
             verify_failed_product_attachment(state, &begun.change).await?;
@@ -168,7 +168,7 @@ async fn drive_product_attachment(
     match finished.change.phase {
         RootAttachmentChangePhase::Completed => {
             verify_completed_product_attachment(state, &finished.change).await?;
-            connected_resolution(root)
+            connected_resolution(state, current_context, root).await
         }
         RootAttachmentChangePhase::Failed => {
             verify_failed_product_attachment(state, &finished.change).await?;

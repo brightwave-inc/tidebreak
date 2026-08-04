@@ -9,18 +9,21 @@ use std::path::PathBuf;
 
 use openwave_core::{
     validate_request_folder_access_arguments, CallId, ChatId, RequestFolderAccessArgs,
-    RequestFolderAccessResult, RequestedFolderCapability, RequestedFolderHint, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
+    RequestFolderAccessResult, RequestedFolderHint, ToolCallExecution, ToolCallRecord,
+    ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
 };
 use openwave_host_broker::{
-    ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
-    RegisterRootReceipt, RegisterRootRequest, RootSummary,
+    Capability, ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
+    OperationEnvelope, OperationRequest, OperationResult, RegisterRootReceipt, RegisterRootRequest,
+    RootSummary, PROTOCOL_VERSION,
 };
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
+
+use self::folder_operations::granted_folder_capabilities;
 
 mod control_plane;
 pub(crate) mod delegated_file_read;
@@ -505,13 +508,45 @@ fn picker_start(
     candidate.is_dir().then_some(candidate)
 }
 
-fn connected_resolution(
+async fn connected_resolution(
+    state: &HostAccess,
+    context: AuthoritativeContext,
     root: openwave_host_broker::RootSummary,
+) -> Result<StoredResolution, String> {
+    let capabilities = state
+        .broker
+        .operation(OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: openwave_host_broker::RequestId::new(),
+            context: context.execution,
+            request: OperationRequest::ListRoots,
+        })
+        .await
+        .ok()
+        .and_then(|listed| match listed {
+            OperationResult::ListRoots { roots } => roots
+                .into_iter()
+                .find(|candidate| candidate.root_id == root.root_id)
+                .map(|access| access.capabilities),
+            _ => None,
+        });
+    connected_resolution_from_capabilities(root, capabilities.as_deref())
+}
+
+fn connected_resolution_from_capabilities(
+    root: openwave_host_broker::RootSummary,
+    capabilities: Option<&[Capability]>,
 ) -> Result<StoredResolution, String> {
     let result = RequestFolderAccessResult::Connected {
         root_id: root.root_id.as_uuid(),
         display_name: root.display_name,
-        capabilities: vec![RequestedFolderCapability::ReadFiles],
+        // A revocation or broker outage can race this post-consent projection.
+        // Consent already succeeded, so return the pathless root identity and
+        // under-report reach rather than turning that race into a user-facing
+        // failure immediately after the picker closes.
+        capabilities: capabilities
+            .map(granted_folder_capabilities)
+            .unwrap_or_default(),
     };
     Ok(StoredResolution::Completed {
         result: serde_json::to_string(&result)
@@ -625,10 +660,17 @@ mod tests {
 
     #[test]
     fn terminal_results_are_typed_and_path_free() {
-        let connected = connected_resolution(openwave_host_broker::RootSummary {
-            root_id: openwave_host_broker::RootId::new(),
-            display_name: "Documents".into(),
-        })
+        let connected = connected_resolution_from_capabilities(
+            openwave_host_broker::RootSummary {
+                root_id: openwave_host_broker::RootId::new(),
+                display_name: "Documents".into(),
+            },
+            Some(&[
+                Capability::ReadFiles,
+                Capability::WriteFiles,
+                Capability::ExecuteCommands,
+            ]),
+        )
         .unwrap();
         let StoredResolution::Completed { result, .. } = connected else {
             panic!("expected completed result")
