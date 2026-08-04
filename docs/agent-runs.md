@@ -184,6 +184,16 @@ The sandbox boundary should remain useful outside the desktop product. A local
 process sandbox is the first execution adapter; self-hosted and managed profiles
 may later supply stronger isolation behind the same contract.
 
+Which adapter a child gets is decided once per server process, not per spawn.
+The default is the in-process worker described above, whose isolation is the
+narrow tool surface rather than a runtime boundary. Setting
+`OPENWAVE_CONTAINER_EXECUTION_ENABLED=true` routes newly admitted children to a
+local container instead, when a container runtime is detected; an absent
+runtime reports the capability as unavailable and admission falls back to the
+in-process worker rather than failing. A container-located run is attached-only
+and proxies its model inference back through the host, so no model credential
+enters the container. See [Sandbox providers](sandbox-providers.md).
+
 ## Bounded scheduling
 
 Concurrency control has three independent purposes: protecting the machine,
@@ -274,15 +284,14 @@ provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
 activity projection.
 
-No desktop surface consumes that projection today. An activity panel used to
-render it as foreground and background status rows with a Stop control for
-cancellable sandbox states, but it restated what the transcript already showed
-and was removed. The projection, the run routes, and the cancellation route all
-remain, so a future surface can render them without rebuilding the server side.
-Whatever renders it next must keep the same posture: bind every request to the
-exact chat and run, hold a pending or retryable error state until polling
-confirms the durable transition, and never receive a worker lease or direct
-scheduler control.
+The desktop consumes that projection in two places. The transcript renders one
+status row per spawned child beside the delegation it came from, correlated by
+the snapshot's spawn-call id, and a background-agent panel renders the same
+runs with their activity history and a Stop control for cancellable sandbox
+states. Both keep the posture the projection assumes: every request is bound to
+the exact chat and run, a pending or retryable error state is held until
+polling confirms the durable transition, and no worker lease or direct
+scheduler control ever crosses the boundary.
 
 ## Reliability contract
 

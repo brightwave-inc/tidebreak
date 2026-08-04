@@ -50,10 +50,12 @@ pub(crate) struct SandboxContainerRunWorker {
 impl SandboxContainerRunWorker {
     /// Build the service only when container execution is enabled.
     ///
-    /// Production assembly passes `false` until the profile flag lands. The
-    /// caller separately checks backend availability before spawning the
-    /// returned worker, so absence of a container runtime stays an inert
-    /// capability miss rather than a boot failure.
+    /// Production assembly passes the resolved admission decision
+    /// ([`crate::sandbox_admission::resolve`]): the configured opt-in and a
+    /// detected container runtime together. The caller separately checks
+    /// backend availability before spawning the returned worker, so absence of
+    /// a container runtime stays an inert capability miss rather than a boot
+    /// failure.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn Store>,
