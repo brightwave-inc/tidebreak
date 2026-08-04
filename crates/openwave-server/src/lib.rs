@@ -70,7 +70,7 @@ mod source_tools;
 mod state;
 mod turn_worker;
 mod view_frames;
-mod voice_transcription;
+pub mod voice_transcription;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
 mod wire_types;

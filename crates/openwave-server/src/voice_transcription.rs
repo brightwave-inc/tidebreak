@@ -14,6 +14,91 @@ use crate::state::{LocalVoiceError, LocalVoiceRunner, LocalVoiceState};
 const SETTING_KEY: &str = "voice.transcription_v1";
 pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 
+/// The whisper.cpp model repository revision every local artifact is pinned to.
+///
+/// One revision for the whole catalog: the artifacts are content-addressed by
+/// the SHA-256 below, so the revision only decides which files exist.
+pub const LOCAL_VOICE_REPO_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+
+/// One installable local speech model.
+///
+/// The catalog is a plain list because that is all it needs to be: adding a
+/// model is one entry with its artifact name, exact size, and exact digest.
+/// `file`/`sha256` never reach the renderer — the desktop runner uses them to
+/// fetch and verify, and the wire projection carries only what the picker shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalVoiceModel {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// One line on the quality/speed trade-off, shown under the label.
+    pub description: &'static str,
+    pub bytes: u64,
+    /// English-only models transcribe faster and refuse other languages.
+    pub english_only: bool,
+    pub recommended: bool,
+    pub file: &'static str,
+    pub sha256: &'static str,
+}
+
+pub const DEFAULT_LOCAL_VOICE_MODEL: &str = "tiny.en-q5_1";
+
+pub const LOCAL_VOICE_MODELS: &[LocalVoiceModel] = &[
+    LocalVoiceModel {
+        id: "tiny.en-q5_1",
+        label: "Whisper tiny (English)",
+        description: "Fastest and smallest. Accurate enough for short dictation.",
+        bytes: 32_166_155,
+        english_only: true,
+        recommended: true,
+        file: "ggml-tiny.en-q5_1.bin",
+        sha256: "c77c5766f1cef09b6b7d47f21b546cbddd4157886b3b5d6d4f709e91e66c7c2b",
+    },
+    LocalVoiceModel {
+        id: "base.en-q5_1",
+        label: "Whisper base (English)",
+        description: "Clearly more accurate than tiny on names and long sentences, still fast.",
+        bytes: 59_721_011,
+        english_only: true,
+        recommended: false,
+        file: "ggml-base.en-q5_1.bin",
+        sha256: "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
+    },
+    LocalVoiceModel {
+        id: "small.en-q5_1",
+        label: "Whisper small (English)",
+        description: "Best English accuracy that still runs comfortably on a laptop CPU.",
+        bytes: 190_098_681,
+        english_only: true,
+        recommended: false,
+        file: "ggml-small.en-q5_1.bin",
+        sha256: "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30",
+    },
+    LocalVoiceModel {
+        id: "small-q5_1",
+        label: "Whisper small (multilingual)",
+        description: "Same size as small English, and transcribes other languages.",
+        bytes: 190_085_487,
+        english_only: false,
+        recommended: false,
+        file: "ggml-small-q5_1.bin",
+        sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
+    },
+    LocalVoiceModel {
+        id: "large-v3-turbo-q5_0",
+        label: "Whisper large v3 turbo (multilingual)",
+        description: "Highest accuracy. Wants a fast machine and over half a gigabyte of disk.",
+        bytes: 574_041_195,
+        english_only: false,
+        recommended: false,
+        file: "ggml-large-v3-turbo-q5_0.bin",
+        sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+    },
+];
+
+pub fn local_voice_model(id: &str) -> Option<&'static LocalVoiceModel> {
+    LOCAL_VOICE_MODELS.iter().find(|model| model.id == id)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceTranscriptionModel {
@@ -23,17 +108,51 @@ pub enum VoiceTranscriptionModel {
     GeminiFlash,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VoiceTranscriptionConfig {
     model: VoiceTranscriptionModel,
+    /// Which catalog entry the local option means. Kept beside the provider
+    /// choice rather than folded into it so switching to the cloud and back
+    /// does not forget the model already downloaded.
+    #[serde(default = "default_local_model")]
+    local_model: String,
+}
+
+fn default_local_model() -> String {
+    DEFAULT_LOCAL_VOICE_MODEL.to_owned()
+}
+
+impl Default for VoiceTranscriptionConfig {
+    fn default() -> Self {
+        Self {
+            model: VoiceTranscriptionModel::default(),
+            local_model: default_local_model(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct VoiceTranscriptionInfo {
     pub model: VoiceTranscriptionModel,
-    pub local: LocalVoiceInfo,
+    /// The selected catalog entry's id, whether or not local is the active
+    /// provider.
+    pub local_model: String,
+    pub local_models: Vec<LocalVoiceModelInfo>,
     pub openai_ready: bool,
     pub gemini_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub struct LocalVoiceModelInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub total_bytes: u64,
+    pub english_only: bool,
+    pub recommended: bool,
+    pub state: String,
+    pub downloaded_bytes: Option<u64>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
@@ -47,14 +166,39 @@ pub struct LocalVoiceInfo {
 #[derive(Debug, Deserialize)]
 pub struct VoiceTranscriptionUpdate {
     pub model: VoiceTranscriptionModel,
+    #[serde(default)]
+    pub local_model: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct LocalVoiceInstall {
+    /// Which model to install. Absent means the one currently selected.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 async fn read_config(store: &dyn Store) -> openwave_core::Result<VoiceTranscriptionConfig> {
-    Ok(store
+    let mut config: VoiceTranscriptionConfig = store
         .get_setting(SETTING_KEY)
         .await?
         .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default())
+        .unwrap_or_default();
+    // A model can leave the catalog; a stale selection must not strand voice
+    // input on an artifact nothing can install.
+    if local_voice_model(&config.local_model).is_none() {
+        config.local_model = default_local_model();
+    }
+    Ok(config)
+}
+
+fn state_name(state: LocalVoiceState) -> &'static str {
+    match state {
+        LocalVoiceState::NotInstalled => "not_installed",
+        LocalVoiceState::Downloading => "downloading",
+        LocalVoiceState::Ready => "ready",
+        LocalVoiceState::Failed => "failed",
+        LocalVoiceState::Unavailable => "unavailable",
+    }
 }
 
 pub async fn info(
@@ -65,22 +209,25 @@ pub async fn info(
     let config = read_config(store).await?;
     let openai = providers::read_config(store, ProviderKind::Openai).await?;
     let gemini = providers::read_config(store, ProviderKind::Gemini).await?;
-    let local = local_voice.status().await;
+    let mut local_models = Vec::with_capacity(LOCAL_VOICE_MODELS.len());
+    for model in LOCAL_VOICE_MODELS {
+        let status = local_voice.status(model.id).await;
+        local_models.push(LocalVoiceModelInfo {
+            id: model.id.to_owned(),
+            label: model.label.to_owned(),
+            description: model.description.to_owned(),
+            total_bytes: model.bytes,
+            english_only: model.english_only,
+            recommended: model.recommended,
+            state: state_name(status.state).to_owned(),
+            downloaded_bytes: status.downloaded_bytes,
+            error: status.error,
+        });
+    }
     Ok(VoiceTranscriptionInfo {
         model: config.model,
-        local: LocalVoiceInfo {
-            state: match local.state {
-                LocalVoiceState::NotInstalled => "not_installed",
-                LocalVoiceState::Downloading => "downloading",
-                LocalVoiceState::Ready => "ready",
-                LocalVoiceState::Failed => "failed",
-                LocalVoiceState::Unavailable => "unavailable",
-            }
-            .to_owned(),
-            downloaded_bytes: local.downloaded_bytes,
-            total_bytes: local.total_bytes,
-            error: local.error,
-        },
+        local_model: config.local_model,
+        local_models,
         openai_ready: openai.enabled
             && providers::has_credential(secrets, ProviderKind::Openai).await,
         gemini_ready: gemini.enabled
@@ -108,8 +255,16 @@ pub async fn update(
         }
         _ => {}
     }
+    let local_model = match update.local_model {
+        Some(id) if local_voice_model(&id).is_none() => {
+            return Err(ServerError::bad_request("unknown local voice model"))
+        }
+        Some(id) => id,
+        None => current.local_model,
+    };
     let value = serde_json::to_value(VoiceTranscriptionConfig {
         model: update.model,
+        local_model,
     })
     .map_err(|_| ServerError::internal("failed to serialize voice transcription settings"))?;
     store.set_setting(SETTING_KEY, &value).await?;
@@ -117,18 +272,25 @@ pub async fn update(
 }
 
 pub async fn install_local(
+    store: &dyn Store,
     local_voice: &dyn LocalVoiceRunner,
+    request: LocalVoiceInstall,
 ) -> Result<LocalVoiceInfo, ServerError> {
-    let status = local_voice.install().await.map_err(ServerError::internal)?;
-    Ok(LocalVoiceInfo {
-        state: match status.state {
-            LocalVoiceState::NotInstalled => "not_installed",
-            LocalVoiceState::Downloading => "downloading",
-            LocalVoiceState::Ready => "ready",
-            LocalVoiceState::Failed => "failed",
-            LocalVoiceState::Unavailable => "unavailable",
+    let id = match request.model {
+        Some(id) => {
+            if local_voice_model(&id).is_none() {
+                return Err(ServerError::bad_request("unknown local voice model"));
+            }
+            id
         }
-        .to_owned(),
+        None => read_config(store).await?.local_model,
+    };
+    let status = local_voice
+        .install(&id)
+        .await
+        .map_err(ServerError::internal)?;
+    Ok(LocalVoiceInfo {
+        state: state_name(status.state).to_owned(),
         downloaded_bytes: status.downloaded_bytes,
         total_bytes: status.total_bytes,
         error: status.error,
@@ -148,7 +310,7 @@ pub async fn transcribe(
     let config = read_config(store).await?;
     if config.model == VoiceTranscriptionModel::Local {
         return local_voice
-            .transcribe(content_type, audio.to_vec())
+            .transcribe(&config.local_model, content_type, audio.to_vec())
             .await
             .map_err(|error| match error {
                 LocalVoiceError::UnsupportedMedia(message) => {
@@ -297,7 +459,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LocalVoiceRunner for ReadyLocal {
-        async fn status(&self) -> LocalVoiceStatus {
+        async fn status(&self, _model: &str) -> LocalVoiceStatus {
             LocalVoiceStatus {
                 state: LocalVoiceState::Ready,
                 downloaded_bytes: Some(10),
@@ -306,15 +468,17 @@ mod tests {
             }
         }
 
-        async fn install(&self) -> Result<LocalVoiceStatus, String> {
-            Ok(self.status().await)
+        async fn install(&self, model: &str) -> Result<LocalVoiceStatus, String> {
+            Ok(self.status(model).await)
         }
 
         async fn transcribe(
             &self,
+            model: &str,
             content_type: &str,
             audio: Vec<u8>,
         ) -> Result<String, LocalVoiceError> {
+            assert_eq!(model, DEFAULT_LOCAL_VOICE_MODEL);
             assert_eq!(content_type, "audio/webm");
             assert_eq!(audio, b"local audio");
             Ok("local transcript".into())
@@ -343,9 +507,69 @@ mod tests {
         let info = info(&store, &TestSecrets::default(), &ReadyLocal)
             .await
             .unwrap();
-        assert_eq!(info.local.state, "ready");
+        assert_eq!(info.local_model, DEFAULT_LOCAL_VOICE_MODEL);
+        assert_eq!(info.local_models.len(), LOCAL_VOICE_MODELS.len());
+        assert_eq!(info.local_models[0].state, "ready");
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("model.bin"));
         assert!(!json.contains("models/voice"));
+        // The artifact identity is the runner's business, not the renderer's.
+        assert!(!json.contains(LOCAL_VOICE_MODELS[0].sha256));
+        assert!(!json.contains(LOCAL_VOICE_MODELS[0].file));
+    }
+
+    /// Every id must be unique and installable: the picker, the stored
+    /// selection, and the runner's on-disk layout are all keyed by it.
+    #[test]
+    fn the_catalog_has_unique_ids_and_a_recommended_default() {
+        let mut ids: Vec<&str> = LOCAL_VOICE_MODELS.iter().map(|model| model.id).collect();
+        ids.sort_unstable();
+        let count = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "duplicate local voice model id");
+        let default = local_voice_model(DEFAULT_LOCAL_VOICE_MODEL).expect("default is in catalog");
+        assert!(default.recommended);
+        assert_eq!(
+            LOCAL_VOICE_MODELS
+                .iter()
+                .filter(|model| model.recommended)
+                .count(),
+            1,
+        );
+        for model in LOCAL_VOICE_MODELS {
+            assert_eq!(model.sha256.len(), 64, "{} digest", model.id);
+            assert!(model.bytes > 0, "{} size", model.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_local_model_is_refused_rather_than_stored() {
+        let (_directory, store) = test_store().await;
+        let secrets = TestSecrets::default();
+        let error = update(
+            &store,
+            &secrets,
+            &ReadyLocal,
+            VoiceTranscriptionUpdate {
+                model: VoiceTranscriptionModel::Local,
+                local_model: Some("whisper-imaginary".into()),
+            },
+        )
+        .await
+        .expect_err("unknown model");
+        assert!(format!("{error:?}").contains("unknown local voice model"));
+
+        let stored = update(
+            &store,
+            &secrets,
+            &ReadyLocal,
+            VoiceTranscriptionUpdate {
+                model: VoiceTranscriptionModel::Local,
+                local_model: Some("base.en-q5_1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.local_model, "base.en-q5_1");
     }
 }
