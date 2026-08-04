@@ -20,6 +20,60 @@ use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::view_frames::ViewFrameTokens;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVoiceStatus {
+    pub state: LocalVoiceState,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalVoiceState {
+    NotInstalled,
+    Downloading,
+    Ready,
+    Failed,
+    Unavailable,
+}
+
+#[async_trait::async_trait]
+pub trait LocalVoiceRunner: Send + Sync {
+    async fn status(&self) -> LocalVoiceStatus;
+    async fn install(&self) -> std::result::Result<LocalVoiceStatus, String>;
+    async fn transcribe(
+        &self,
+        content_type: &str,
+        audio: Vec<u8>,
+    ) -> std::result::Result<String, String>;
+}
+
+struct UnavailableLocalVoiceRunner;
+
+#[async_trait::async_trait]
+impl LocalVoiceRunner for UnavailableLocalVoiceRunner {
+    async fn status(&self) -> LocalVoiceStatus {
+        LocalVoiceStatus {
+            state: LocalVoiceState::Unavailable,
+            downloaded_bytes: None,
+            total_bytes: None,
+            error: Some("local voice input is available only in the desktop app".into()),
+        }
+    }
+
+    async fn install(&self) -> std::result::Result<LocalVoiceStatus, String> {
+        Err("local voice input is available only in the desktop app".into())
+    }
+
+    async fn transcribe(
+        &self,
+        _content_type: &str,
+        _audio: Vec<u8>,
+    ) -> std::result::Result<String, String> {
+        Err("local voice input is available only in the desktop app".into())
+    }
+}
+
 /// The state cloned into each handler: the boot config, the durable store, the
 /// agent's dependencies (provider + tools + tuning), the per-launch bearer token,
 /// and the guard that keeps a chat to one running turn at a time.
@@ -101,6 +155,7 @@ pub struct AppState {
     pub events: Arc<EventBus>,
     /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
     pub approvals: Arc<ApprovalBroker>,
+    pub(crate) local_voice: Arc<dyn LocalVoiceRunner>,
 }
 
 impl AppState {
@@ -203,7 +258,12 @@ impl AppState {
             sandbox_attempts: Arc::new(SandboxAttemptGuard::default()),
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new(store)),
+            local_voice: Arc::new(UnavailableLocalVoiceRunner),
         })
+    }
+
+    pub fn set_local_voice_runner(&mut self, runner: Arc<dyn LocalVoiceRunner>) {
+        self.local_voice = runner;
     }
 }
 

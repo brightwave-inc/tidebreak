@@ -166,11 +166,18 @@ export type StickyChatDefaults = WireStickyChatDefaults;
 
 export type ProviderInfo = WireProviderInfo;
 
-export type VoiceTranscriptionModel = "local" | "gpt4o_transcribe";
+export type VoiceTranscriptionModel = "local" | "gpt4o_transcribe" | "gemini_flash";
+export type LocalVoiceInfo = {
+  state: "not_installed" | "downloading" | "ready" | "failed" | "unavailable";
+  downloaded_bytes: number | null;
+  total_bytes: number | null;
+  error: string | null;
+};
 export type VoiceTranscriptionInfo = {
   model: VoiceTranscriptionModel;
-  local_ready: boolean;
+  local: LocalVoiceInfo;
   openai_ready: boolean;
+  gemini_ready: boolean;
 };
 
 export type CustomModelConfig = WireCustomModelConfig;
@@ -792,6 +799,13 @@ export class ApiClient {
       method: "PUT",
       headers: this.headers(true),
       body: JSON.stringify({ model }),
+    });
+  }
+
+  installLocalVoice(): Promise<LocalVoiceInfo> {
+    return this.json("/voice-transcription/install", {
+      method: "POST",
+      headers: this.headers(),
     });
   }
 

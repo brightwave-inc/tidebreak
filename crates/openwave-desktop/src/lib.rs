@@ -26,6 +26,7 @@ mod media_type;
 mod office_install;
 mod office_pdf;
 mod updater;
+mod voice_transcription;
 
 /// Connection details the webview needs to reach the in-process API.
 #[derive(Clone, Serialize)]
@@ -323,15 +324,19 @@ async fn boot_server(
     ));
     // The exec provider renders office outputs with the same managed/system
     // LibreOffice the preview panel converts with.
-    let office_converter = Arc::new(office_pdf::ExecOfficeConverter::new(data_dir));
+    let office_converter = Arc::new(office_pdf::ExecOfficeConverter::new(data_dir.clone()));
     // Skill-declared host tools warm and report through the managed installer.
     let host_tool_broker = Arc::new(office_install::DesktopHostToolBroker::new(app.clone()));
+    let local_voice = Arc::new(voice_transcription::DesktopLocalVoiceRunner::new(
+        data_dir.clone(),
+    ));
     let server = openwave_server::bind_configured_with_desktop_executor_and_folder_grants(
         config,
         client_executor_id,
         folder_grants,
         Some(office_converter),
         Some(host_tool_broker),
+        Some(local_voice),
     )
     .await
     .map_err(|e| e.to_string())?;

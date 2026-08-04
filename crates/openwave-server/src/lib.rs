@@ -111,7 +111,7 @@ pub use pairing::{
     register_pending_pairing, register_replacing_pairing, PairingError, PairingHandle,
     PendingRegistration,
 };
-pub use state::AppState;
+pub use state::{AppState, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 
 pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
@@ -390,6 +390,10 @@ pub fn app(state: AppState) -> Router {
                 .put(routes::put_voice_transcription)
                 .post(routes::post_voice_transcription)
                 .layer(DefaultBodyLimit::max(voice_transcription::MAX_AUDIO_BYTES)),
+        )
+        .route(
+            "/voice-transcription/install",
+            post(routes::post_voice_transcription_install),
         )
         .route(
             "/providers/{kind}",
@@ -676,6 +680,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -686,7 +691,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None).await
+    bind_inner(config, None, mcp_servers, None, None, None, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -704,6 +709,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
         None,
         None,
         None,
@@ -728,6 +734,7 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -742,6 +749,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
     host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
@@ -754,6 +762,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         Some(folder_grant_resolver),
         office_converter,
         host_tool_broker,
+        local_voice,
     )
     .await
 }
@@ -791,6 +800,7 @@ async fn bind_inner(
     folder_grant_resolver: Option<Arc<dyn code_execution::ExecFolderGrantResolver>>,
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
     host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
 ) -> Result<Server> {
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
@@ -895,6 +905,9 @@ async fn bind_inner(
     // into the gateway's reuse detection (a spurious full sign-out).
     state.gateway = gateway;
     state.os_policy = os_policy;
+    if let Some(local_voice) = local_voice {
+        state.set_local_voice_runner(local_voice);
+    }
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();

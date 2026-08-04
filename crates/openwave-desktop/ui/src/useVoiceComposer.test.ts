@@ -100,6 +100,24 @@ describe("voice composer", () => {
     expect(draft).toBe("Existing draft spoken words");
   });
 
+  it("checks selected-model readiness before requesting microphone access", async () => {
+    const getUserMedia = vi.fn();
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    const beforeStart = vi.fn(async () => false);
+    const { result } = renderHook(() =>
+      useVoiceComposer(vi.fn(), vi.fn(), undefined, beforeStart),
+    );
+
+    await act(async () => result.current.start());
+
+    expect(beforeStart).toHaveBeenCalledOnce();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(result.current.state).toBe("idle");
+  });
+
   it("rejects an empty or too-short recording before transcription", async () => {
     FakeMediaRecorder.chunk = new Blob([]);
     Object.defineProperty(navigator, "mediaDevices", {

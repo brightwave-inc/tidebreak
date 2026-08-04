@@ -453,16 +453,14 @@ export function Composer({
               label={
                 voice.state === "recording"
                   ? "Stop recording"
-                  : voice.state === "requesting"
-                    ? "Waiting for microphone…"
-                    : voice.state === "transcribing"
+                  : voice.state === "transcribing"
                       ? "Transcribing…"
-                      : "Record voice"
+                      : "Record voice input"
               }
             >
               <Button
                 type="button"
-                variant={voice.state === "recording" ? "secondary" : "ghost"}
+                variant={voice.state === "idle" ? "outline" : "default"}
                 size="icon-8"
                 aria-label={
                   voice.state === "recording"
@@ -475,21 +473,13 @@ export function Composer({
                 }
                 disabled={
                   inputDisabled ||
-                  voice.state === "requesting" ||
                   voice.state === "transcribing"
                 }
                 onClick={
                   voice.state === "recording" ? voice.onStop : voice.onStart
                 }
               >
-                {voice.state === "requesting" ||
-                voice.state === "transcribing" ? (
-                  <LoaderCircle className="animate-spin" size={15} />
-                ) : voice.state === "recording" ? (
-                  <Square size={12} fill="currentColor" strokeWidth={0} />
-                ) : (
-                  <Mic size={15} />
-                )}
+                <Mic size={15} />
               </Button>
             </WithTooltip>
           )}
@@ -548,11 +538,6 @@ export function Composer({
             ? "Agent is responding"
             : "Ready to send"}
       </span>
-      {voiceWorking && (
-        <span className="text-xs text-muted-foreground" role="status">
-          {voice?.state === "transcribing" ? "Transcribing…" : "Listening…"}
-        </span>
-      )}
       {voice?.error && (
         <span className="text-xs text-destructive" role="alert">
           {voice.error}

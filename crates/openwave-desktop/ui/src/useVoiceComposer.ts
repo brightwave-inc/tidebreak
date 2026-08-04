@@ -51,6 +51,7 @@ export function useVoiceComposer(
   transcribe: VoiceTranscriber,
   onTranscript: (transcript: string) => void,
   now: () => number = () => performance.now(),
+  beforeStart: () => Promise<boolean> = async () => true,
 ): VoiceComposer {
   const available =
     typeof navigator !== "undefined" &&
@@ -87,6 +88,7 @@ export function useVoiceComposer(
 
   const start = useCallback(async () => {
     if (!available || recorderRef.current) return;
+    if (!(await beforeStart())) return;
     setError(null);
     setState("requesting");
     try {
@@ -151,7 +153,7 @@ export function useVoiceComposer(
       setState("idle");
       setError(voiceError(caught));
     }
-  }, [available, now, releaseStream]);
+  }, [available, beforeStart, now, releaseStream]);
 
   const stop = useCallback(() => {
     const recorder = recorderRef.current;

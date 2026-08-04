@@ -1110,7 +1110,7 @@ pub async fn get_voice_transcription(
     State(state): State<AppState>,
 ) -> Result<Json<VoiceTranscriptionInfo>, ServerError> {
     Ok(Json(
-        voice_transcription::info(&*state.store, &*state.secrets).await?,
+        voice_transcription::info(&*state.store, &*state.secrets, &*state.local_voice).await?,
     ))
 }
 
@@ -1119,7 +1119,8 @@ pub async fn put_voice_transcription(
     Json(body): Json<VoiceTranscriptionUpdate>,
 ) -> Result<Json<VoiceTranscriptionInfo>, ServerError> {
     Ok(Json(
-        voice_transcription::update(&*state.store, &*state.secrets, body).await?,
+        voice_transcription::update(&*state.store, &*state.secrets, &*state.local_voice, body)
+            .await?,
     ))
 }
 
@@ -1132,9 +1133,23 @@ pub async fn post_voice_transcription(
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ServerError::bad_request("voice recording content type is required"))?;
-    let text = voice_transcription::transcribe(&*state.store, &*state.secrets, content_type, audio)
-        .await?;
+    let text = voice_transcription::transcribe(
+        &*state.store,
+        &*state.secrets,
+        &*state.local_voice,
+        content_type,
+        audio,
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "text": text })))
+}
+
+pub async fn post_voice_transcription_install(
+    State(state): State<AppState>,
+) -> Result<Json<voice_transcription::LocalVoiceInfo>, ServerError> {
+    Ok(Json(
+        voice_transcription::install_local(&*state.local_voice).await?,
+    ))
 }
 
 /// A selectable model in the catalog.
