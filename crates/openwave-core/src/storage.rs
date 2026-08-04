@@ -3630,6 +3630,13 @@ pub trait Store: Send + Sync {
     async fn operation_log_len(&self, _run_id: uuid::Uuid) -> Result<usize> {
         operation_log_storage_unavailable()
     }
+
+    /// How many terminal operation-log bodies remain available for replay.
+    /// Commit markers are excluded so this measures replay retention rather
+    /// than audit/identity cardinality.
+    async fn retained_operation_body_count(&self, _run_id: uuid::Uuid) -> Result<usize> {
+        operation_log_storage_unavailable()
+    }
 }
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.

@@ -270,3 +270,19 @@ pub(in crate::db) async fn len(store: &DbStore, run_id: uuid::Uuid) -> Result<us
         .map_err(store_err)?;
     Ok(count as usize)
 }
+
+/// How many terminal bodies remain retained for replay. Commit markers and
+/// in-flight claims are excluded.
+pub(in crate::db) async fn retained_body_count(
+    store: &DbStore,
+    run_id: uuid::Uuid,
+) -> Result<usize> {
+    let count = entities::operation_log::Entity::find()
+        .filter(operation_log::Column::RunId.eq(run_id))
+        .filter(operation_log::Column::Retained.eq(true))
+        .filter(operation_log::Column::State.ne(STATE_CLAIMED))
+        .count(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(count as usize)
+}

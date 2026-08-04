@@ -2268,6 +2268,10 @@ impl Store for DbStore {
     async fn operation_log_len(&self, run_id: uuid::Uuid) -> Result<usize> {
         ops::operation_log::len(self, run_id).await
     }
+
+    async fn retained_operation_body_count(&self, run_id: uuid::Uuid) -> Result<usize> {
+        ops::operation_log::retained_body_count(self, run_id).await
+    }
 }
 /// The owner of a document's parent scope: its chat's or project's owner, or
 /// `None` for a standalone document. Callers hold the document-scope write

@@ -191,6 +191,15 @@ impl DurableOperationStore {
             .await
             .map_err(backend)
     }
+
+    /// How many terminal bodies remain available for replay. Commit markers do
+    /// not count, keeping replay retention distinct from audit cardinality.
+    pub async fn retained_body_count_op(&self) -> Result<usize, StoreError> {
+        self.store
+            .retained_operation_body_count(self.run_id.as_uuid())
+            .await
+            .map_err(backend)
+    }
 }
 
 /// The synchronous [`OperationStore`] seam the capability host calls, bridged to
@@ -244,6 +253,16 @@ impl OperationStore for DurableOperationStore {
             Ok(len) => len,
             Err(error) => {
                 eprintln!("openwave: durable operation-log length read failed: {error}");
+                0
+            }
+        }
+    }
+
+    fn retained_body_count(&self) -> usize {
+        match block_on(self.retained_body_count_op()) {
+            Ok(count) => count,
+            Err(error) => {
+                eprintln!("openwave: durable retained operation-body count failed: {error}");
                 0
             }
         }
@@ -364,8 +383,11 @@ mod tests {
 
         log.claim_op(op, &request("q")).await.unwrap();
         log.record_op(op, result("done")).await.unwrap();
+        assert_eq!(log.retained_body_count_op().await.unwrap(), 1);
         // Retention (#859) evicts the completed body down to a commit marker.
         log.evict_op(op).await.unwrap();
+        assert_eq!(log.len_op().await.unwrap(), 1);
+        assert_eq!(log.retained_body_count_op().await.unwrap(), 0);
 
         // A re-issue is answered "already recorded, do not re-execute" — an
         // `Evicted` replay, distinctly NOT the after-crash `ClaimedElsewhere`

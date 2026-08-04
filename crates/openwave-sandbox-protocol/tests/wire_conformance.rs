@@ -382,6 +382,12 @@ async fn model_inference_round_trips_then_acknowledges_retention() {
             matches!(store.state(operation), Some(OperationState::Evicted)),
             "the acknowledged replay body was reduced to a commit marker"
         );
+        assert_eq!(store.len(), 1, "the audit/identity marker remains");
+        assert_eq!(
+            store.retained_body_count(),
+            0,
+            "acknowledgement releases the replay body"
+        );
     })
     .await;
 }

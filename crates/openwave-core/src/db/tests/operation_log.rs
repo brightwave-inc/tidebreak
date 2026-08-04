@@ -209,6 +209,7 @@ async fn eviction_leaves_a_marker_that_never_re_executes() {
         .await
         .unwrap();
     store.record_operation(run, op, b"body").await.unwrap();
+    assert_eq!(store.retained_operation_body_count(run).await.unwrap(), 1);
 
     // Eviction keeps the row as a commit marker: state stays terminal, but the
     // body is gone and `retained` is cleared. The row survives — a bare delete
@@ -219,6 +220,7 @@ async fn eviction_leaves_a_marker_that_never_re_executes() {
     assert!(!entry.retained);
     assert!(entry.body.is_none());
     assert_eq!(store.operation_log_len(run).await.unwrap(), 1);
+    assert_eq!(store.retained_operation_body_count(run).await.unwrap(), 0);
 
     // A re-issue of an evicted op is answered "done, do not re-execute" — never
     // a fresh claim, and never a decode-of-empty that would look ambiguous.

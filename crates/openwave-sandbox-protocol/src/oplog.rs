@@ -138,9 +138,17 @@ pub trait OperationStore: Send + Sync {
     /// reference store represents it as [`OperationState::Evicted`].
     fn evict(&self, id: OperationId);
 
-    /// How many operations the log currently retains. Chiefly for tests and,
-    /// later, retention accounting.
+    /// How many operation identities the log knows, including body-evicted
+    /// commit markers. This is audit/identity cardinality, not replay-body
+    /// retention.
     fn len(&self) -> usize;
+
+    /// How many terminal response/error bodies remain available for replay.
+    ///
+    /// The protocol bounds this count by [`MAX_INFLIGHT_REQUESTS`](crate::protocol::MAX_INFLIGHT_REQUESTS):
+    /// a sandbox cannot have consumed-and-unacknowledged responses beyond the
+    /// request lane's in-flight window. Commit markers do not count here.
+    fn retained_body_count(&self) -> usize;
 
     /// Whether the log is empty.
     fn is_empty(&self) -> bool {
@@ -228,6 +236,20 @@ impl OperationStore for InMemoryOperationStore {
 
     fn len(&self) -> usize {
         self.entries.lock().expect("operation log lock").len()
+    }
+
+    fn retained_body_count(&self) -> usize {
+        self.entries
+            .lock()
+            .expect("operation log lock")
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    OperationState::Recorded(_) | OperationState::Failed(_)
+                )
+            })
+            .count()
     }
 }
 
@@ -321,8 +343,10 @@ mod tests {
         let id = OperationId::new();
         store.claim(id, &request("q"));
         store.record(id, result("a")).unwrap();
+        assert_eq!(store.retained_body_count(), 1);
         store.evict(id);
         assert_eq!(store.len(), 1);
+        assert_eq!(store.retained_body_count(), 0);
         assert!(matches!(store.state(id), Some(OperationState::Evicted)));
         assert!(matches!(
             store.claim(id, &request("q")),

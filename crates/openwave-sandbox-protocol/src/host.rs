@@ -334,6 +334,9 @@ mod tests {
         fn len(&self) -> usize {
             0
         }
+        fn retained_body_count(&self) -> usize {
+            0
+        }
     }
 
     struct CountingResponder {
