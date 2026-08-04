@@ -226,6 +226,17 @@ fn control_lane_frames_wire_shapes() {
     roundtrip(&cancel);
     golden(&cancel, &[("/control", json!("cancel"))]);
 
+    let operation_id = OperationId::new();
+    let acknowledge = ControlFrame::Acknowledge { operation_id };
+    roundtrip(&acknowledge);
+    golden(
+        &acknowledge,
+        &[
+            ("/control", json!("acknowledge")),
+            ("/body/operation_id", json!(operation_id.to_string())),
+        ],
+    );
+
     let ping = ControlFrame::Ping { nonce: 9 };
     roundtrip(&ping);
     golden(

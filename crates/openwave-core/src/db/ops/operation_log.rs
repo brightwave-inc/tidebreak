@@ -236,10 +236,9 @@ pub(in crate::db) async fn state(
 /// This deliberately does *not* delete the row: a bare delete is the unsafe
 /// variant, because a re-issue of a deleted identity finds nothing, claims
 /// fresh, and re-executes an effect that already ran. Keeping the marker is what
-/// the schema (`body` nullable, `retained` flag) is shaped for. #859 owns the
-/// retention *policy* — when an entry may be evicted (an acknowledgement/cursor
-/// once the sandbox can no longer re-issue it), and whether very old markers are
-/// ever hard-deleted — layered over this safe primitive. A `Claimed` (still
+/// the schema (`body` nullable, `retained` flag) is shaped for. The
+/// reverse-channel acknowledgement invokes this once the sandbox consumes
+/// the response and can no longer re-issue the identity. A `Claimed` (still
 /// in-flight) entry is left untouched.
 pub(in crate::db) async fn evict(
     store: &DbStore,

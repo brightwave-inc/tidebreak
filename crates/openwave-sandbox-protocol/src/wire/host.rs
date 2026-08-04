@@ -315,6 +315,9 @@ async fn read_loop<R>(
                 });
             }
             WireFrame::Control(ControlFrame::Cancel { operation_id }) => host.cancel(operation_id),
+            WireFrame::Control(ControlFrame::Acknowledge { operation_id }) => {
+                host.acknowledge(operation_id);
+            }
             WireFrame::Control(ControlFrame::Ping { nonce }) => {
                 let _ = outbound
                     .control

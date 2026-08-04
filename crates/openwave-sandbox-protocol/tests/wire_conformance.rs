@@ -18,8 +18,8 @@
 //!   ([`wrong_or_absent_secret_is_refused_and_serves_nothing`]), and a refused
 //!   second connection cannot hijack the live one
 //!   ([`a_refused_second_connection_cannot_hijack_the_live_one`]);
-//! - a model-inference reverse call round-trip (with exactly-once replay) —
-//!   [`model_inference_round_trips_and_replays_exactly_once`];
+//! - a model-inference reverse call round-trip with response acknowledgement —
+//!   [`model_inference_round_trips_then_acknowledges_retention`];
 //! - event-stream delivery and resume-by-sequence — [`event_stream_delivers_then_resumes_by_sequence`];
 //! - control-lane cancel preempting a saturated request lane —
 //!   [`control_lane_cancel_preempts_a_saturated_request_lane`].
@@ -46,7 +46,7 @@ use tokio::{
 
 use openwave_sandbox_protocol::{
     ids::{EventCursor, OperationId, RunId, Sequence},
-    oplog::{InMemoryOperationStore, OperationStore},
+    oplog::{InMemoryOperationStore, OperationState, OperationStore},
     protocol::{AttachRequest, ErrorCode, Response, PROTOCOL_VERSION},
     reverse::{
         Capability, CapabilityResponder, GrantSet, ModelInferenceParams, ModelInferenceResult,
@@ -340,10 +340,10 @@ async fn a_refused_second_connection_cannot_hijack_the_live_one() {
     .await;
 }
 
-/// A model-inference reverse call round-trips over the socket, and re-issuing the
-/// same operation identity replays the recorded answer without re-executing.
+/// A model-inference reverse call round-trips over the socket, then the
+/// sandbox's acknowledgement releases its replay body from the operation log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_inference_round_trips_and_replays_exactly_once() {
+async fn model_inference_round_trips_then_acknowledges_retention() {
     bounded(async {
         let run = SandboxRun::new([Capability::ModelInference], expected_secret());
         let addr = spawn_sandbox(run.clone()).await;
@@ -364,20 +364,24 @@ async fn model_inference_round_trips_and_replays_exactly_once() {
         }
         assert_eq!(executions.load(Ordering::SeqCst), 1);
 
-        // Re-issue the same operation identity: the host replays the recorded
-        // outcome from its operation log and does not execute the model again.
-        match run.call(operation, infer("forecast")).await {
-            ReverseOutcome::Settled(Response::Ok(result)) => {
-                assert_eq!(completion(&result), "echo:forecast");
+        // The acknowledgement rides behind the response on the reserved control
+        // lane. Wait for it to be processed, then prove the full replay body was
+        // reduced to an in-memory commit marker.
+        for _ in 0..100 {
+            if matches!(store.state(operation), Some(OperationState::Evicted)) {
+                break;
             }
-            other => panic!("expected a recorded replay, got {other:?}"),
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(
             executions.load(Ordering::SeqCst),
             1,
-            "a replay must not execute the model again"
+            "acknowledgement must not execute the model again"
         );
-        assert_eq!(store.len(), 1, "one distinct operation was recorded");
+        assert!(
+            matches!(store.state(operation), Some(OperationState::Evicted)),
+            "the acknowledged replay body was reduced to a commit marker"
+        );
     })
     .await;
 }

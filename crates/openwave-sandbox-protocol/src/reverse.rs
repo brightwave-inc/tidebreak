@@ -10,9 +10,9 @@
 //! Two lanes multiplex over one connection. The **request lane**
 //! ([`RequestFrame`]) carries reverse requests and their responses and is
 //! subject to backpressure. The **control lane** ([`ControlFrame`]) carries
-//! cancellation and liveness and is deliberately *separate*, so a cancel or a
-//! heartbeat is never stuck behind the request backlog it is trying to relieve
-//! — the gap the reverse-RPC spike flagged for this step to close.
+//! cancellation, response acknowledgement, and liveness and is deliberately
+//! *separate*, so none is stuck behind the request backlog it is trying to
+//! relieve — the gap the reverse-RPC spike flagged for this step to close.
 
 use std::collections::BTreeSet;
 
@@ -132,10 +132,10 @@ pub enum RequestFrame {
 /// A unit of the **reserved control lane**, distinct from the request lane so
 /// it is never subject to request backpressure.
 ///
-/// Cancellation flows sandbox -> host; liveness flows in both directions, and
-/// the host's keepalive proves that an attached run is still owned. A
-/// conforming transport MUST carry this lane independently of [`RequestFrame`]
-/// (a separate stream, queue, or priority), so a [`ControlFrame::Cancel`] can
+/// Cancellation and acknowledgement flow sandbox -> host; liveness flows in
+/// both directions, and the host's keepalive proves that an attached run is
+/// still owned. A conforming transport MUST carry this lane independently of
+/// [`RequestFrame`] (a separate stream, queue, or priority), so control work can
 /// preempt a saturated request backlog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -148,6 +148,9 @@ pub enum RequestFrame {
 pub enum ControlFrame {
     /// Cancel an in-flight reverse operation by its durable identity.
     Cancel { operation_id: OperationId },
+    /// The sandbox consumed the terminal response and will never re-issue this
+    /// operation identity. The host may evict the replay body to a commit marker.
+    Acknowledge { operation_id: OperationId },
     /// Liveness probe.
     Ping { nonce: u64 },
     /// Liveness response.

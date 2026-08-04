@@ -174,9 +174,9 @@ impl DurableOperationStore {
         Ok(Some(state))
     }
 
-    /// Evict a terminal entry's body down to a commit marker once it can no
-    /// longer be re-issued; a later re-issue then replays as `Evicted`, never
-    /// re-executing. #859 owns the retention policy over this safe primitive.
+    /// Evict a terminal entry's body down to a commit marker after the sandbox
+    /// acknowledges consuming its response; a later invalid re-issue then
+    /// resolves as `Evicted`, never re-executing.
     pub async fn evict_op(&self, id: OperationId) -> Result<(), StoreError> {
         self.store
             .evict_operation(self.run_id.as_uuid(), id.as_uuid())

@@ -188,6 +188,13 @@ impl CapabilityHost {
         }
     }
 
+    /// Acknowledge that the sandbox consumed a terminal response and will never
+    /// re-issue its operation identity. Retention may now discard the replay
+    /// body while the durable store keeps a commit marker.
+    pub fn acknowledge(&self, operation_id: OperationId) {
+        self.shared.store.evict(operation_id);
+    }
+
     /// The capabilities this run may request, for the attach advertisement.
     #[must_use]
     pub fn granted_capabilities(&self) -> Vec<Capability> {

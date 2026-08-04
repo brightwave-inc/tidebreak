@@ -28,13 +28,11 @@
 //!
 //! # What this slice ships, and what it defers
 //!
-//! This slice ships the protocol contract, the reference backend, and the
-//! conformance suite. It backs the reverse-RPC operation log with an
-//! **in-memory** [`OperationStore`](oplog::OperationStore); the crash-safe
-//! durable operation log (#858) and its retention/eviction policy (#859) are
-//! correctness-critical designs that get their own focused review and are
-//! tracked as follow-ups (see [`oplog`]). The
-//! [`OperationStore`](oplog::OperationStore) trait is the seam they plug into.
+//! This crate ships the protocol contract, reference backend, and conformance
+//! suite. The reference backend uses an in-memory [`OperationStore`], while the
+//! server supplies the crash-safe durable implementation. Reverse responses are
+//! retained for replay until the sandbox acknowledges consuming them; the host
+//! then reduces durable entries to commit markers (see [`oplog`]).
 //!
 //! # Scope of this crate: the types, not the byte transport
 //!

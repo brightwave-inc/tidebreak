@@ -317,7 +317,15 @@ impl SandboxRun {
         self.mark_activity();
 
         match rx.await {
-            Ok(response) => ReverseOutcome::Settled(response),
+            Ok(response) => {
+                let _ = conn
+                    .control
+                    .send(WireFrame::Control(ControlFrame::Acknowledge {
+                        operation_id,
+                    }))
+                    .await;
+                ReverseOutcome::Settled(response)
+            }
             Err(_) => ReverseOutcome::Disconnected,
         }
     }
@@ -551,7 +559,11 @@ where
             }
             // The sandbox originates cancels and requests; it never receives
             // them. Pong is liveness only. Ignore rather than trust peer input.
-            WireFrame::Control(ControlFrame::Pong { .. } | ControlFrame::Cancel { .. })
+            WireFrame::Control(
+                ControlFrame::Pong { .. }
+                | ControlFrame::Cancel { .. }
+                | ControlFrame::Acknowledge { .. },
+            )
             | WireFrame::Request(RequestFrame::Request(_))
             | WireFrame::Attach(_)
             | WireFrame::Handshake(_)
