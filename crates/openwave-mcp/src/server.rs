@@ -332,10 +332,7 @@ impl McpServer {
                 params.name
             )));
         }
-        let spec = tool.spec();
-        if let Some(mismatch) =
-            openwave_core::tool::schema_mismatch(&spec.input_schema, &params.arguments)
-        {
+        if let Some(mismatch) = self.tools.schema_mismatch(&params.name, &params.arguments) {
             return Err(RpcError::invalid_params(format!(
                 "arguments for {} do not satisfy its schema: {mismatch}",
                 params.name

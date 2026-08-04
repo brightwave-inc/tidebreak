@@ -119,20 +119,51 @@ pub struct ToolRegistry {
 }
 
 #[derive(Clone)]
+struct RegisteredSpec {
+    spec: ToolSpec,
+    validator: Option<jsonschema::Validator>,
+}
+
+impl RegisteredSpec {
+    fn new(spec: ToolSpec) -> Self {
+        // ToolSpec schemas are draft 2020-12, including schemars-generated
+        // schemas whose compact provider form deliberately omits `$schema`.
+        // Invalid tool-authored schemas fail open: they are registration bugs,
+        // and refusing every call would make an existing tool unusable.
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&spec.input_schema)
+            .ok();
+        Self { spec, validator }
+    }
+
+    fn mismatch(&self, arguments: &Value) -> Option<String> {
+        self.validator
+            .as_ref()?
+            .validate(arguments)
+            .err()
+            .map(|error| error.to_string())
+    }
+}
+
+#[derive(Clone)]
 enum RegisteredTool {
-    Server(Arc<dyn Tool>),
+    Server {
+        tool: Arc<dyn Tool>,
+        registered: RegisteredSpec,
+    },
     Client {
-        spec: ToolSpec,
+        registered: RegisteredSpec,
         validate_arguments: Option<fn(&Value) -> bool>,
         class: ApprovalClass,
     },
     ForegroundClient {
-        spec: ToolSpec,
+        registered: RegisteredSpec,
         validate_arguments: fn(&Value) -> bool,
         class: ApprovalClass,
     },
     ForegroundOrchestration {
-        spec: ToolSpec,
+        registered: RegisteredSpec,
         kind: ForegroundOrchestrationKind,
         class: ApprovalClass,
     },
@@ -153,8 +184,14 @@ impl ToolRegistry {
 
     /// Register a tool under its advertised name (replacing any existing one).
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools
-            .insert(tool.spec().name, RegisteredTool::Server(Arc::from(tool)));
+        let registered = RegisteredSpec::new(tool.spec());
+        self.tools.insert(
+            registered.spec.name.clone(),
+            RegisteredTool::Server {
+                tool: Arc::from(tool),
+                registered,
+            },
+        );
     }
 
     /// Register a client-owned tool contract with no server-side executor.
@@ -166,7 +203,7 @@ impl ToolRegistry {
         self.tools.insert(
             spec.name.clone(),
             RegisteredTool::Client {
-                spec,
+                registered: RegisteredSpec::new(spec),
                 validate_arguments: None,
                 class,
             },
@@ -183,7 +220,7 @@ impl ToolRegistry {
         self.tools.insert(
             spec.name.clone(),
             RegisteredTool::Client {
-                spec,
+                registered: RegisteredSpec::new(spec),
                 validate_arguments: Some(validate_arguments),
                 class,
             },
@@ -201,7 +238,7 @@ impl ToolRegistry {
         self.tools.insert(
             spec.name.clone(),
             RegisteredTool::ForegroundClient {
-                spec,
+                registered: RegisteredSpec::new(spec),
                 validate_arguments,
                 class,
             },
@@ -240,7 +277,7 @@ impl ToolRegistry {
             self.tools.insert(
                 spec.name.clone(),
                 RegisteredTool::ForegroundOrchestration {
-                    spec,
+                    registered: RegisteredSpec::new(spec),
                     kind,
                     class: ApprovalClass::Sensitive,
                 },
@@ -259,7 +296,7 @@ impl ToolRegistry {
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         match self.tools.get(name) {
-            Some(RegisteredTool::Server(tool)) => Some(tool.as_ref()),
+            Some(RegisteredTool::Server { tool, .. }) => Some(tool.as_ref()),
             Some(RegisteredTool::Client { .. })
             | Some(RegisteredTool::ForegroundClient { .. })
             | Some(RegisteredTool::ForegroundOrchestration { .. })
@@ -281,7 +318,7 @@ impl ToolRegistry {
     #[must_use]
     pub fn server_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
         match self.tools.get(name)? {
-            RegisteredTool::Server(tool) => Some(tool.clone()),
+            RegisteredTool::Server { tool, .. } => Some(tool.clone()),
             RegisteredTool::Client { .. }
             | RegisteredTool::ForegroundClient { .. }
             | RegisteredTool::ForegroundOrchestration { .. } => None,
@@ -292,7 +329,7 @@ impl ToolRegistry {
     #[must_use]
     pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {
         Some(match self.tools.get(name)? {
-            RegisteredTool::Server(_) => ToolCallExecution::Server,
+            RegisteredTool::Server { .. } => ToolCallExecution::Server,
             RegisteredTool::Client { .. } | RegisteredTool::ForegroundClient { .. } => {
                 ToolCallExecution::Client
             }
@@ -333,12 +370,12 @@ impl ToolRegistry {
         self.tools
             .values()
             .filter_map(|tool| match tool {
-                RegisteredTool::Server(tool)
+                RegisteredTool::Server { tool, .. }
                     if read_only && tool.approval_class() != ApprovalClass::ReadOnly =>
                 {
                     None
                 }
-                RegisteredTool::Server(tool) => Some(tool.spec()),
+                RegisteredTool::Server { registered, .. } => Some(registered.spec.clone()),
                 RegisteredTool::Client { class, .. }
                 | RegisteredTool::ForegroundClient { class, .. }
                 | RegisteredTool::ForegroundOrchestration { class, .. }
@@ -346,23 +383,25 @@ impl ToolRegistry {
                 {
                     None
                 }
-                RegisteredTool::Client { spec, .. } => Some(spec.clone()),
+                RegisteredTool::Client { registered, .. } => Some(registered.spec.clone()),
                 // The plan continuation exists only where a plan can be
                 // proposed: outside plan mode the tool would park a turn on a
                 // decision whose accept is meaningless.
-                RegisteredTool::ForegroundClient { spec, .. }
-                    if !read_only && spec.name == crate::EXIT_PLAN_MODE_TOOL =>
+                RegisteredTool::ForegroundClient { registered, .. }
+                    if !read_only && registered.spec.name == crate::EXIT_PLAN_MODE_TOOL =>
                 {
                     None
                 }
-                RegisteredTool::ForegroundClient { spec, .. } if allow_agent_orchestration => {
-                    Some(spec.clone())
-                }
-                RegisteredTool::ForegroundClient { .. } => None,
-                RegisteredTool::ForegroundOrchestration { spec, .. }
+                RegisteredTool::ForegroundClient { registered, .. }
                     if allow_agent_orchestration =>
                 {
-                    Some(spec.clone())
+                    Some(registered.spec.clone())
+                }
+                RegisteredTool::ForegroundClient { .. } => None,
+                RegisteredTool::ForegroundOrchestration { registered, .. }
+                    if allow_agent_orchestration =>
+                {
+                    Some(registered.spec.clone())
                 }
                 RegisteredTool::ForegroundOrchestration { .. } => None,
             })
@@ -378,10 +417,39 @@ impl ToolRegistry {
     #[must_use]
     pub fn registered_class(&self, name: &str) -> Option<ApprovalClass> {
         match self.tools.get(name)? {
-            RegisteredTool::Server(tool) => Some(tool.approval_class()),
+            RegisteredTool::Server { tool, .. } => Some(tool.approval_class()),
             RegisteredTool::Client { class, .. }
             | RegisteredTool::ForegroundClient { class, .. }
             | RegisteredTool::ForegroundOrchestration { class, .. } => Some(*class),
+        }
+    }
+
+    /// Validate arguments against the exact schema stored at registration.
+    ///
+    /// A returned string names the first failing instance path and constraint.
+    /// `None` means either that the arguments conform or that the tool supplied
+    /// an invalid schema, which remains a fail-open registration bug.
+    #[must_use]
+    pub fn schema_mismatch(&self, name: &str, arguments: &Value) -> Option<String> {
+        let registered = match self.tools.get(name)? {
+            RegisteredTool::Server { registered, .. }
+            | RegisteredTool::Client { registered, .. }
+            | RegisteredTool::ForegroundClient { registered, .. }
+            | RegisteredTool::ForegroundOrchestration { registered, .. } => registered,
+        };
+        registered.mismatch(arguments)
+    }
+
+    #[cfg(test)]
+    fn schema_is_compiled(&self, name: &str) -> bool {
+        match self.tools.get(name) {
+            Some(RegisteredTool::Server { registered, .. })
+            | Some(RegisteredTool::Client { registered, .. })
+            | Some(RegisteredTool::ForegroundClient { registered, .. })
+            | Some(RegisteredTool::ForegroundOrchestration { registered, .. }) => {
+                registered.validator.is_some()
+            }
+            None => false,
         }
     }
 
@@ -400,7 +468,7 @@ impl ToolRegistry {
             Some(RegisteredTool::ForegroundClient {
                 validate_arguments, ..
             }) => validate_arguments(arguments),
-            Some(RegisteredTool::Server(_))
+            Some(RegisteredTool::Server { .. })
             | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => false,
         }
@@ -3069,7 +3137,7 @@ impl Agent {
         // server's advertised contract was decorative. Hold every call to the
         // schema the model was shown, at the same refusal point, so the model
         // can re-emit the call instead of debugging a tool it never reached.
-        if let Some(mismatch) = crate::tool::schema_mismatch(&spec.input_schema, &arguments) {
+        if let Some(mismatch) = self.tools.schema_mismatch(&call.name, &arguments) {
             return ToolOutput::failed(
                 ToolErrorCategory::InvalidArguments,
                 format!(
@@ -7141,6 +7209,43 @@ mod tests {
             self.ran.fetch_add(1, Ordering::SeqCst);
             Ok(ToolOutput::text("counted"))
         }
+    }
+
+    #[test]
+    fn registry_compiles_draft_2020_12_schemas_once_for_every_tool_surface() {
+        let spec = ToolSpec {
+            name: "client_schema".into(),
+            description: "a schema-validated client tool".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minContains": 1,
+                        "contains": {"const": "required"}
+                    }
+                },
+                "required": ["labels"]
+            }),
+        };
+        let mut registry = ToolRegistry::new().with(Box::new(StrictCountingTool {
+            ran: Arc::new(AtomicUsize::new(0)),
+        }));
+        registry.register_client(spec, ApprovalClass::ReadOnly);
+
+        assert!(registry.schema_is_compiled("strict_counter"));
+        assert!(registry.schema_is_compiled("client_schema"));
+        assert_eq!(
+            registry.schema_mismatch(
+                "client_schema",
+                &serde_json::json!({"labels": ["other", "required"]})
+            ),
+            None
+        );
+        assert!(registry
+            .schema_mismatch("client_schema", &serde_json::json!({"labels": ["other"]}))
+            .is_some());
     }
 
     #[tokio::test]
