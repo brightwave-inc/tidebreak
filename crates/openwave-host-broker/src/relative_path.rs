@@ -87,7 +87,12 @@ impl RelativePath {
     }
 }
 
-fn portable_filename(value: &str) -> bool {
+/// Whether one path segment names exactly the file it spells on Windows.
+///
+/// Shared with the host-root policy, which applies the same rule to the
+/// components of a canonical root path, so one list of reserved names governs
+/// both the agent-facing protocol and the folders the user connects.
+pub(crate) fn portable_filename(value: &str) -> bool {
     if value.ends_with(['.', ' '])
         || value.chars().any(|character| {
             character <= '\u{1f}' || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
@@ -108,7 +113,7 @@ fn matches_device_number(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|suffix| {
         matches!(
             suffix,
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
         )
     })
 }
@@ -176,6 +181,8 @@ mod tests {
             "CON",
             "aux.txt",
             "LPT9.log",
+            "COM0",
+            "lpt0.log",
             "CONIN$",
             "conout$.txt",
             "CLOCK$",
