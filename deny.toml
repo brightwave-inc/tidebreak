@@ -1,0 +1,28 @@
+# Supply-chain advisory policy for `cargo deny check advisories`.
+#
+# Scope is deliberately narrow: this is the RustSec advisory gate, not a
+# license or dependency-ban policy. Only the `advisories` check is wired into
+# CI (`.github/workflows/ci.yml`), so the other sections cargo-deny supports
+# are intentionally absent.
+
+[advisories]
+# Security advisories and unsound APIs always fail. These are the findings we
+# would act on the day they appear.
+version = 2
+
+# Unmaintained crates we pull in directly are ours to replace; unmaintained
+# crates that arrive through someone else's dependency tree are not actionable
+# here and would otherwise make the lane permanently red. Today those are the
+# GTK3 bindings behind Tauri's Linux backend, the `unic-*` family, and
+# `proc-macro-error*` — all transitive, none with a fix we control.
+unmaintained = "workspace"
+
+# Yanked versions are reported as a warning rather than a hard failure: a crate
+# can be yanked at any moment for reasons unrelated to us, and the fix is a
+# lockfile bump that Dependabot already drives.
+yanked = "warn"
+
+# Advisories consciously accepted, each with the reason it is safe to carry.
+# Keep this list short and dated; an entry that outlives its justification is
+# worse than no gate at all.
+ignore = []
