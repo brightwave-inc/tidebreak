@@ -1,9 +1,11 @@
 import { useNavigate } from "@tanstack/react-router";
-import { Ellipsis, Pencil, Trash2 } from "lucide-react";
+import { Bug, Download, Ellipsis, Pencil, Trash2 } from "lucide-react";
 
 import type { Chat } from "./api";
 import { useApp } from "./AppContext";
+import { chatDebugDeps, copyChatDebug, saveChatDebug } from "./ChatDebugBundle";
 import { useChatListStore } from "./ChatListStore";
+import { hasNativeHost } from "./host";
 import { useTypewriterOnce } from "./useTypewriterOnce";
 import { Input } from "@/components/ui/input";
 import {
@@ -106,6 +108,25 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
             <Pencil />
             Rename
           </DropdownMenuItem>
+          {/* Diagnostics need the native host to read the journal, so they are
+              absent in a browser build rather than shown and broken. */}
+          {hasNativeHost() && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() => void copyChatDebug(chat.id, chatDebugDeps())}
+              >
+                <Bug />
+                Copy debug info
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => void saveChatDebug(chat.id, chatDebugDeps())}
+              >
+                <Download />
+                Save debug bundle…
+              </DropdownMenuItem>
+            </>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onSelect={() => deleteChat(chat)}>
             <Trash2 />

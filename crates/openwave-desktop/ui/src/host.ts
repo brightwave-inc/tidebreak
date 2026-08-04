@@ -184,3 +184,21 @@ export function onPairingChanged(handler: () => void): () => void {
     void subscription.then((unlisten) => unlisten());
   };
 }
+
+/**
+ * Render this chat's diagnostic bundle for the clipboard. Built natively from
+ * the event journal, not from what is on screen, and bounded so a chat with a
+ * huge tool result cannot stall the clipboard write. See
+ * `crates/openwave-desktop/src/chat_debug.rs`.
+ */
+export function copyChatDebugBundle(chatId: string): Promise<string> {
+  return invoke("copy_chat_debug_bundle", { request: { chatId } });
+}
+
+/**
+ * Write the complete, untruncated bundle to a file the reader picks. Resolves
+ * `false` when the save dialog was dismissed.
+ */
+export function saveChatDebugBundle(chatId: string): Promise<boolean> {
+  return invoke("save_chat_debug_bundle", { request: { chatId } });
+}
