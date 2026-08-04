@@ -788,10 +788,8 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     // agent loop reads as "discard this step's partial output";
                     // reporting a stop instead would commit the fragment — and
                     // any tool call inside it — as a finished answer.
-                    StopOutcome::Interrupted(message) => {
-                        events.push(ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(message),
-                        });
+                    StopOutcome::Interrupted(error) => {
+                        events.push(ProviderEvent::Failed { error });
                         return events;
                     }
                 };
@@ -848,7 +846,7 @@ enum StopOutcome {
     /// A stop the agent may commit as this step's outcome.
     Reason(StopReason),
     /// A stop that invalidates everything streamed before it.
-    Interrupted(&'static str),
+    Interrupted(ProviderErrorInfo),
 }
 
 fn map_stop_reason(reason: &str) -> StopOutcome {
@@ -860,19 +858,22 @@ fn map_stop_reason(reason: &str) -> StopOutcome {
         // The conversation outgrew the model's context window while the
         // response was streaming. The 400 that reports the same overflow
         // before a stream starts becomes `PromptTooLong` and drives the agent
-        // loop's context-reduction climb; that climb runs before the request
-        // goes out, so a mid-stream overflow cannot rejoin it without
-        // re-emitting text the client has already seen. Interrupting is the
-        // honest end for this stream: the fragment is discarded and the turn
-        // fails visibly instead of committing truncated prose as a success.
-        "model_context_window_exceeded" => StopOutcome::Interrupted(
-            "anthropic: the model's context window was exceeded mid-response",
-        ),
+        // loop's context-reduction climb. Preserve that classification so the
+        // agent can discard this candidate and restart the same step against a
+        // tighter transcript instead of spending a turn-level retry on the
+        // same oversized request.
+        "model_context_window_exceeded" => {
+            StopOutcome::Interrupted(ProviderErrorInfo::from_error(&AgentError::PromptTooLong(
+                "anthropic: the model's context window was exceeded mid-response".into(),
+            )))
+        }
         // The provider suspended the turn for a long-running server-side tool
         // and expects the paused response replayed back to resume it. Nothing
         // here drives that continuation, so the paused fragment is incomplete
         // by construction and must not read as a finished answer.
-        "pause_turn" => StopOutcome::Interrupted("anthropic: the provider paused the turn"),
+        "pause_turn" => StopOutcome::Interrupted(ProviderErrorInfo::provider(
+            "anthropic: the provider paused the turn",
+        )),
         // "end_turn" and anything we don't yet model fall back to a clean end.
         _ => StopOutcome::Reason(StopReason::EndTurn),
     }
@@ -1261,9 +1262,9 @@ mod tests {
                     ..Usage::default()
                 }),
                 ProviderEvent::Failed {
-                    error: ProviderErrorInfo::provider(
-                        "anthropic: the model's context window was exceeded mid-response",
-                    ),
+                    error: ProviderErrorInfo::from_error(&AgentError::PromptTooLong(
+                        "anthropic: the model's context window was exceeded mid-response".into(),
+                    )),
                 },
             ]
         );
