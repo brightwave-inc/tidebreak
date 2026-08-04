@@ -374,6 +374,42 @@ jobs:
       - name: desktop tests
         run: cargo test -p openwave-desktop --locked
 
+  windows-check:
+    name: Windows cargo check
+    needs: changes
+    # A native runner keeps the Windows SDK and MSVC available for native
+    # dependencies such as ring and SQLite. Keep the default PR gate fast; add
+    # `full-ci` for pre-merge validation, while main and scheduled/manual runs
+    # always check every crate that currently contains Windows-gated code.
+    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Check Windows-gated crates
+        run: >-
+          cargo check --target x86_64-pc-windows-msvc
+          -p openwave-core
+          -p openwave-code-execution
+          -p openwave-host-broker
+          -p openwave-server
+          -p openwave-desktop
+          --locked
+
   test:
     name: test
     needs: changes
