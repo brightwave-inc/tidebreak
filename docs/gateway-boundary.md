@@ -61,7 +61,11 @@ is that **the link never writes anything**:
 
 - The shell validates the link strictly and *registers* it as a pending
   pairing: an in-memory slot on the server runtime. Nothing durable exists,
-  and the named gateway is not even probed.
+  and the named gateway is not even probed. The base URL must be `https`
+  unless its host is loopback (`localhost`, `127.0.0.1`, `::1`), which is
+  the developer-deployment exception — the pairing spends an OAuth code and
+  stores the tokens it buys, so cleartext to anywhere but this machine would
+  hand the whole exchange to whoever is on the path.
 - The sign-in gate presents the pending pairing full-window. The consent is
   the sign-in: only an OAuth flow the user completes against that gateway
   commits the provision, inside the exchange's finish, before the session is

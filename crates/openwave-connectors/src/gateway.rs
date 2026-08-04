@@ -50,6 +50,26 @@ fn gateway_error(context: &str, detail: impl std::fmt::Display) -> AgentError {
     AgentError::config(format!("model-gateway {context}: {detail}"))
 }
 
+/// Whether a URL's host is the local machine.
+///
+/// Cleartext `http` is only tolerated for a gateway running beside the app —
+/// a developer deployment on `localhost`. Everything else carries an OAuth
+/// authorization code and opaque tokens, so it must be `https`; a provision
+/// link parked on a webpage would otherwise be able to point the whole
+/// exchange at an attacker-readable origin. `localhost` counts because the
+/// resolver is required to map it to a loopback address; other names do not,
+/// since what they resolve to is not knowable here.
+pub(crate) fn is_loopback_url(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
 /// How this client identifies itself to the gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayAuthConfig {
@@ -77,6 +97,12 @@ impl GatewayAuthConfig {
             return Err(gateway_error(
                 "configuration",
                 "base URL must use http or https",
+            ));
+        }
+        if base_url.scheme() == "http" && !is_loopback_url(&base_url) {
+            return Err(gateway_error(
+                "configuration",
+                "base URL must use https unless the gateway is on loopback",
             ));
         }
         if !base_url.username().is_empty() || base_url.password().is_some() {
@@ -1160,8 +1186,26 @@ mod tests {
     #[test]
     fn config_rejects_invalid_base_urls() {
         assert!(GatewayAuthConfig::new("http://127.0.0.1:28081").is_ok());
+        assert!(GatewayAuthConfig::new("http://localhost:28081").is_ok());
+        assert!(GatewayAuthConfig::new("http://[::1]:28081").is_ok());
         assert!(GatewayAuthConfig::new("https://gateway.example").is_ok());
         for url in ["ftp://x", "not a url", "http://user:pw@host"] {
+            assert!(GatewayAuthConfig::new(url).is_err(), "{url}");
+        }
+    }
+
+    /// Cleartext to anything but this machine would put the OAuth code and the
+    /// tokens it buys on the wire in the clear, and a provision link naming
+    /// the origin is reachable by any webpage.
+    #[test]
+    fn config_requires_https_off_loopback() {
+        for url in [
+            "http://gateway.example",
+            "http://gateway.example:8080/base",
+            // Not loopback: a public address, and a name that merely looks local.
+            "http://10.0.0.5:28081",
+            "http://localhost.attacker.example",
+        ] {
             assert!(GatewayAuthConfig::new(url).is_err(), "{url}");
         }
     }
