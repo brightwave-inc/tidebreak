@@ -104,14 +104,14 @@ pub struct AppState {
     /// prefetched MCP views and stored local-app revisions alike.
     pub(crate) view_frames: Arc<ViewFrameTokens>,
     /// The signed-in model-gateway session handle (sign-in, model sync,
-    /// per-request tokens). The production assembly in `bind_inner` replaces
-    /// this with the resolver's instance — refresh rotation is serialized
-    /// per instance, so routes and resolver must share one.
+    /// per-request tokens). Always the same instance `mcp` dispatches
+    /// through — see [`Self::with_gateway_runtime`] for why the process
+    /// must hold exactly one.
     pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
-    /// The OS-managed policy reader for managed-mode resolution. Constructed
-    /// as the source that asserts nothing, so directly assembled state (tests,
-    /// custom hosts) reads nothing from the host OS; the production
-    /// assembly in `bind_inner` replaces this with the platform's reader via
+    /// The OS-managed policy reader for managed-mode resolution. Directly
+    /// assembled state (tests, custom hosts) gets the source that asserts
+    /// nothing, so it reads nothing from the host OS; the production
+    /// assembly in `bind_inner` injects the platform's reader via
     /// `managed_policy::platform_source`.
     pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// Wakes the durable turn worker after acceptance or cancellation commits.
@@ -195,6 +195,53 @@ impl AppState {
         agent_config: AgentConfig,
         client_executor_id: Uuid,
     ) -> Result<Self> {
+        // Hermetic default wiring: the policy source that asserts nothing and
+        // one gateway runtime built over these same inputs. The sharing
+        // invariant lives in `with_gateway_runtime`; this only picks inputs.
+        let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+            Arc::new(crate::managed_policy::NoOsPolicy);
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            os_policy.clone(),
+        );
+        Self::with_gateway_runtime(
+            config,
+            store,
+            resolver,
+            secrets,
+            tools,
+            agent_config,
+            client_executor_id,
+            gateway,
+            os_policy,
+        )
+    }
+
+    /// Assemble state around the one process-wide gateway runtime and the OS
+    /// policy source it was built from.
+    ///
+    /// Every holder that reaches the gateway — the provider resolver, the
+    /// `/gateway` routes (`state.gateway`), and MCP dispatch (`state.mcp`) —
+    /// must share this single instance. Attestation contexts live in a
+    /// per-instance in-memory registry, so a second instance mints a chat's
+    /// inference tokens and its MCP call bearers in *different* attestation
+    /// contexts and the gateway refuses every attested `tools/call` (#1441).
+    /// Refresh rotation is likewise serialized per instance; two instances
+    /// over the same keychain entry can race a stale refresh token into the
+    /// gateway's reuse detection (a spurious full sign-out).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_gateway_runtime(
+        config: Config,
+        store: Arc<dyn Store>,
+        resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn SecretProvider>,
+        tools: Arc<ToolRegistry>,
+        agent_config: AgentConfig,
+        client_executor_id: Uuid,
+        gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    ) -> Result<Self> {
         if client_executor_id.is_nil() {
             return Err(AgentError::config("client executor id must not be nil"));
         }
@@ -217,13 +264,6 @@ impl AppState {
         };
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
-        let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
-            Arc::new(crate::managed_policy::NoOsPolicy);
-        let gateway = crate::gateway_runtime::GatewayRuntime::new(
-            store.clone(),
-            secrets.clone(),
-            os_policy.clone(),
-        );
         let mcp = Arc::new(McpRuntime::new(
             tools.clone(),
             store.clone(),

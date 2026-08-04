@@ -886,25 +886,30 @@ async fn bind_inner(
         config.data_dir.clone(),
     );
     let tools = Arc::new(tools);
-    let mut state = match client_executor_id {
-        Some(client_executor_id) => AppState::new_with_client_executor_id(
-            config,
-            store,
-            resolver,
-            secrets,
-            tools,
-            agent_config,
-            client_executor_id,
-        )?,
-        None => AppState::new(config, store, resolver, secrets, tools, agent_config),
-    };
+    // The resolver, the /gateway routes, and MCP dispatch must share ONE
+    // runtime, so it is injected at assembly rather than patched in after:
+    // attestation contexts live in a per-instance registry (a second
+    // instance splits a chat's inference tokens and MCP call bearers across
+    // two contexts, and the gateway refuses every attested tools/call —
+    // #1441), and refresh rotation is serialized per GatewayConnection
+    // instance (two instances over the same keychain entry can race a stale
+    // refresh token into the gateway's reuse detection, a spurious full
+    // sign-out).
+    let mut state = AppState::with_gateway_runtime(
+        config,
+        store,
+        resolver,
+        secrets,
+        tools,
+        agent_config,
+        client_executor_id.unwrap_or_else(Uuid::new_v4),
+        gateway,
+        os_policy,
+    )?;
+    // Without a restart-stable native executor identity, durable
+    // root-attachment mutations stay off — matching `AppState::new`.
+    state.root_attachment_routes_enabled = client_executor_id.is_some();
     state.blobs = blobs;
-    // The resolver and the /gateway routes must share ONE runtime: refresh
-    // rotation is serialized per GatewayConnection instance, and two
-    // instances over the same keychain entry can race a stale refresh token
-    // into the gateway's reuse detection (a spurious full sign-out).
-    state.gateway = gateway;
-    state.os_policy = os_policy;
     if let Some(local_voice) = local_voice {
         state.set_local_voice_runner(local_voice);
     }
