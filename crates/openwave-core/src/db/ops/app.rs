@@ -10,7 +10,7 @@
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait,
+    QuerySelect, RelationTrait, Set, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
@@ -291,6 +291,21 @@ pub(in crate::db) async fn delete_app_grant(store: &DbStore, app_id: AppId) -> R
         .await
         .map_err(store_err)?;
     Ok(deleted.rows_affected > 0)
+}
+
+pub(in crate::db) async fn list_live_app_grants(store: &DbStore) -> Result<Vec<AppGrant>> {
+    entities::app_grant::Entity::find()
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            entities::app_grant::Relation::App.def(),
+        )
+        .filter(entities::app::Column::DeletedAt.is_null())
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(grant_from_model)
+        .collect()
 }
 
 fn grant_from_model(model: entities::app_grant::Model) -> Result<AppGrant> {

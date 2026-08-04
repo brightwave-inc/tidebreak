@@ -454,6 +454,96 @@ async fn managed_profiles_refuse_rest_upserts_but_allow_delete() {
     assert!(state.store.list_connected_apps().await.unwrap().is_empty());
 }
 
+/// A local app with one `rest_api` binding, created straight through the
+/// store so grant tests don't route through the authoring surface.
+fn bound_app(name: &str, connected: ConnectedAppId) -> CreateApp {
+    CreateApp {
+        id: AppId::new(),
+        revision: NewAppRevision {
+            id: AppRevisionId::new(),
+            manifest: AppManifest {
+                name: name.into(),
+                bindings: vec![AppBinding::Operations(AppOperationsBinding {
+                    app: connected,
+                    operation_ids: vec!["listIssues".into()],
+                })],
+            },
+            byte_len: 1,
+            sha256: [0; 32],
+            turn_id: None,
+            producing_run_id: None,
+            chat_id: None,
+            created_at: chrono::Utc::now(),
+        },
+    }
+}
+
+async fn consent(router: &Router, bearer: &str, app_id: AppId) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/apps/{app_id}/grant"))
+                .header("authorization", bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// The listing counts the local apps whose live grant binds each record —
+/// 0 before any consent, the granted count after, minus apps deleted from
+/// the library — and projects the count only: no local-app name or id ever
+/// reaches this surface.
+#[tokio::test]
+async fn the_listing_counts_local_apps_bound_to_each_record() {
+    let (router, bearer, state, _dir) = connected_apps_test_app().await;
+    let connected = ConnectedAppId::new();
+    let put = put_rest(
+        &router,
+        &bearer,
+        connected,
+        upsert_body("https://api.example.com/v2", json!("none")),
+    )
+    .await;
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // No grants yet: the count is zero, not absent.
+    let listing: serde_json::Value =
+        serde_json::from_str(&raw_body(get_listing(&router, &bearer).await).await).unwrap();
+    assert_eq!(rest_entry(&listing)["used_by_app_count"], json!(0));
+
+    let first = bound_app("Issues board fixture", connected);
+    let second = bound_app("Issues digest fixture", connected);
+    let (first_id, second_id) = (first.id, second.id);
+    state.store.create_app(&first).await.unwrap();
+    state.store.create_app(&second).await.unwrap();
+    consent(&router, &bearer, first_id).await;
+    consent(&router, &bearer, second_id).await;
+
+    let body = raw_body(get_listing(&router, &bearer).await).await;
+    assert!(
+        !body.contains("fixture") && !body.contains(&first_id.to_string()),
+        "the listing must carry a count only, never local-app names or ids: {body}"
+    );
+    let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rest_entry(&listing)["used_by_app_count"], json!(2));
+
+    // A grant of a library-deleted app can no longer be exercised, so it
+    // stops counting without an explicit revocation.
+    assert!(state
+        .store
+        .delete_app(second_id, chrono::Utc::now())
+        .await
+        .unwrap());
+    let listing: serde_json::Value =
+        serde_json::from_str(&raw_body(get_listing(&router, &bearer).await).await).unwrap();
+    assert_eq!(rest_entry(&listing)["used_by_app_count"], json!(1));
+}
+
 /// Editing a record's base URL through the settings route moves its
 /// fingerprint, so an app grant pinned to the old definition reads ungranted
 /// on the very next check — the same invalidation the invoke gate applies.

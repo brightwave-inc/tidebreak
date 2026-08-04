@@ -360,46 +360,48 @@ describe("McpPanel", () => {
     expect(screen.getByText(/DOCS_TOKEN/)).toBeInTheDocument();
   });
 
-  it("is read-only on a managed profile, keeping mounts and their reasons visible", async () => {
-    const client = api({
-      servers: [
-        {
-          ...healthy.servers[0],
-          name: "legacy_docs",
-          health: "disabled",
-          tool_count: 0,
-          diagnostic:
-            "Disabled by managed policy. Gateway-managed MCP endpoints remain available.",
-        },
-        {
-          name: "tools",
-          command: null,
-          args: [],
-          env: [],
-          env_from: [],
-          cwd: null,
-          url: null,
-          bearer_token_env: null,
-          gateway_endpoint: "tools",
-          request_timeout_ms: 60_000,
-          enabled: true,
-          health: "healthy",
-          tool_count: 3,
-          diagnostic: null,
-        },
-      ],
-    });
+  it("managed: compact endpoint rows only — no editor, headings, or tool counts", async () => {
+    const client = api(
+      {
+        servers: [
+          {
+            ...healthy.servers[0],
+            name: "legacy_docs",
+            health: "disabled",
+            tool_count: 0,
+            diagnostic:
+              "Disabled by managed policy. Gateway-managed MCP endpoints remain available.",
+          },
+          gatewayMount("example-security-tools"),
+        ],
+      },
+      {
+        getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+        getGatewayApps: vi.fn().mockResolvedValue(incidentApps),
+      },
+    );
     render(<McpPanel client={client} managed />);
 
-    // The gateway mount and its health stay visible; the locked manual server
-    // stays listed with the server's own reason rather than disappearing.
-    expect(await screen.findByText("Healthy")).toBeInTheDocument();
+    // One row per endpoint: mount toggle, health chip, the apps it serves,
+    // and a reconnect action — the whole transport story in one line.
+    await screen.findByRole("switch", { name: "Mount example-security-tools" });
+    const row = mountRow("example-security-tools");
+    expect(within(row).getByText("Healthy")).toBeInTheDocument();
     expect(
-      screen.getAllByText("3 tools available to new turns.").length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByText(/Disabled by managed policy/)).toBeInTheDocument();
+      within(row).getByText(/serves: Incident API/),
+    ).toBeInTheDocument();
+    expect(
+      within(row).getByRole("button", { name: /Reconnect/ }),
+    ).toBeInTheDocument();
 
-    // Nothing manual is editable: no fields, and no way to add or save one.
+    // Tool availability and the locked manual server belong to the app
+    // entries on the Connected apps page, not this view — and nothing here
+    // is a heading, a per-endpoint card, or an editor.
+    expect(
+      screen.queryByText(/available to new turns/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+    expect(screen.queryByText("legacy_docs")).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Add server" }),

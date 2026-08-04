@@ -604,7 +604,13 @@ gateway_endpoint: string | null,
  * the apps surface: the entry then renders without org-app names
  * rather than erroring.
  */
-gateway_apps: Array<string>, } | { "kind": "rest_api", 
+gateway_apps: Array<string>, 
+/**
+ * How many local mini-apps hold a live grant binding this record —
+ * a count only, never app names or ids, the renderer-safety posture
+ * of this surface. Grants of library-deleted apps do not count.
+ */
+used_by_app_count: number, } | { "kind": "rest_api", 
 /**
  * The record id app bindings name.
  */
@@ -623,7 +629,13 @@ document_sha256: string, credential_status: RestCredentialStatus,
  * one is referenced. The placement (and a custom header *name*) is
  * configuration; the value never appears on this surface.
  */
-placement: CredentialPlacement | null, updated_at: string, };
+placement: CredentialPlacement | null, updated_at: string, 
+/**
+ * How many local mini-apps hold a live grant binding this record —
+ * a count only, never app names or ids, the renderer-safety posture
+ * of this surface. Grants of library-deleted apps do not count.
+ */
+used_by_app_count: number, };
 
 /**
  * The renderer's listing of every configured connected app, across kinds.

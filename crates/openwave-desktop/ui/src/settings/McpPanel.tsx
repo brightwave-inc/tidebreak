@@ -4,6 +4,7 @@ import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import type {
   ApiClient,
   GatewayApps,
+  McpHealth,
   McpServerDefinition,
   McpServerInfo,
 } from "../api";
@@ -47,6 +48,43 @@ function emptyServer(index: number): McpServerInfo {
 }
 
 type Transport = "stdio" | "http" | "gateway";
+
+/**
+ * The one place connection state is spelled: a coloured dot and a short
+ * verdict. App entries and endpoint rows share it, so "healthy" can never
+ * read two different ways on the same page.
+ */
+export function McpHealthChip({ health }: { health: McpHealth }) {
+  const dot =
+    health === "healthy"
+      ? "text-emerald-600 dark:text-emerald-400"
+      : health === "degraded"
+        ? "text-destructive"
+        : "text-muted-foreground";
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+      <span aria-hidden className={dot}>
+        ●
+      </span>
+      {chipLabel(health)}
+    </span>
+  );
+}
+
+function chipLabel(health: McpHealth): string {
+  switch (health) {
+    case "healthy":
+      return "Healthy";
+    case "degraded":
+      return "Needs attention";
+    case "reconnecting":
+      return "Reconnecting";
+    case "disabled":
+      return "Disabled";
+    case "initializing":
+      return "Connecting…";
+  }
+}
 
 function transportOf(server: McpServerInfo): Transport {
   if (server.gateway_endpoint !== null) return "gateway";
@@ -378,20 +416,135 @@ export function McpPanel({
   );
 
   if (managed) {
+    // The compact transport view behind the Advanced disclosure: one row per
+    // gateway endpoint — mount toggle, health chip, the apps it serves, a
+    // reconnect action, and the diagnostic inline when unhealthy. No inner
+    // headings, no per-endpoint cards, and no tool counts: tools belong to
+    // the app entries above. Manual servers a profile carried in from before
+    // it was managed are app entries too (never started, with the policy
+    // diagnostic), so this view is endpoints only.
     return (
-      <McpKindSection
-        description="Tool servers provided by your organization's model gateway."
-        busy={loading || working}
-      >
-        {endpointsSection}
-        {loading ? (
-          <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
-        ) : (
-          <ManagedServerList servers={servers} />
+      <div className="flex flex-col gap-3" aria-busy={loading || working}>
+        {!signedIn && (
+          <p className="text-muted-foreground text-xs">
+            Sign in to the Model Gateway to mount or unmount endpoints. The
+            configured mounts stay listed meanwhile.
+          </p>
         )}
-        {fallbackListError}
+        {appsFailed && (
+          <p className="text-muted-foreground text-xs">
+            Couldn't read your entitlements from the gateway; these are the
+            configured mounts.
+          </p>
+        )}
+        {listError !== null && (
+          <div className="flex items-center justify-between gap-4">
+            <SettingsError>
+              Couldn't read the MCP server list: {listError}
+            </SettingsError>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={working}
+              onClick={() => {
+                setError(null);
+                setRefreshNonce((nonce) => nonce + 1);
+              }}
+            >
+              <RefreshCw size={14} />
+              Retry
+            </Button>
+          </div>
+        )}
+        {loading ? (
+          <p className="text-sm text-muted-foreground">Loading endpoints…</p>
+        ) : endpointSlugs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No gateway endpoints are granted to your teams.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {endpointSlugs.map((slug) => {
+              const mounted = servers.find(
+                (server) => server.gateway_endpoint === slug,
+              );
+              const serves =
+                apps?.apps
+                  .filter(
+                    (app) =>
+                      app.enabled && app.mcp_endpoint_slugs.includes(slug),
+                  )
+                  .map((app) => app.name) ?? [];
+              const revoked =
+                apps?.supported === true &&
+                !entitledSlugs.has(slug) &&
+                mounted !== undefined;
+              return (
+                <li
+                  key={slug}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm"
+                >
+                  <code className="font-medium">{slug}</code>
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    mounted
+                    <Switch
+                      aria-label={`Mount ${slug}`}
+                      checked={mounted !== undefined}
+                      disabled={!signedIn || working || !serversKnown}
+                      onCheckedChange={(checked) =>
+                        void setMounted(slug, checked)
+                      }
+                    />
+                  </span>
+                  {mounted && <McpHealthChip health={mounted.health} />}
+                  {serves.length > 0 && (
+                    <span className="text-xs text-muted-foreground">
+                      serves: {serves.join(", ")}
+                    </span>
+                  )}
+                  {mounted &&
+                    mounted.health !== "initializing" &&
+                    mounted.health !== "disabled" && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={working}
+                        onClick={() => void reconnect(mounted.name)}
+                      >
+                        <RefreshCw size={14} />
+                        {reconnecting === mounted.name
+                          ? "Reconnecting…"
+                          : "Reconnect"}
+                      </Button>
+                    )}
+                  {!serversKnown && (
+                    <span className="text-xs text-muted-foreground">
+                      Mount state unknown.
+                    </span>
+                  )}
+                  {revoked && (
+                    <span className="text-xs text-muted-foreground">
+                      No longer granted to your teams. Switch off to unmount
+                      it.
+                    </span>
+                  )}
+                  {mounted &&
+                    mounted.health !== "healthy" &&
+                    mounted.health !== "initializing" &&
+                    mounted.health !== "reconnecting" &&
+                    mounted.diagnostic !== null && (
+                      <span className="text-xs text-destructive">
+                        {mounted.diagnostic}
+                      </span>
+                    )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
         {error && <SettingsError>{error}</SettingsError>}
-      </McpKindSection>
+      </div>
     );
   }
 
@@ -703,11 +856,10 @@ export function McpPanel({
           )}
 
           <p className="text-sm leading-relaxed text-muted-foreground">
-            MCP tools are always sensitive and keep OpenWave’s existing approval
-            boundary. Child environments start empty. Environment values are
-            held in the OS credential store and never come back to this window;
-            do not enter secrets in the executable, arguments, working
-            directory, or a server URL, which are ordinary settings.
+            Child environments start empty. Environment values are held in the
+            OS credential store and never come back to this window; do not
+            enter secrets in the executable, arguments, working directory, or
+            a server URL, which are ordinary settings.
           </p>
         </>
       )}
@@ -909,63 +1061,6 @@ function GatewayEndpoints({
         </ul>
       )}
     </SettingsSection>
-  );
-}
-
-/**
- * The managed read-only view: what is mounted and whether it is working.
- *
- * Manual servers a profile carried in from before it was managed stay listed
- * with the server's own diagnostic explaining that policy turned them off —
- * a row that vanished would look like data loss, and one that looked editable
- * would be a write the server refuses.
- */
-function ManagedServerList({ servers }: { servers: McpServerInfo[] }) {
-  return (
-    <>
-      {servers.length === 0 && (
-        <SettingsSection>
-          <p className="text-sm text-muted-foreground">
-            No MCP servers are mounted. Any endpoints your teams are granted
-            appear under Gateway endpoints above.
-          </p>
-        </SettingsSection>
-      )}
-      {/* Keyed by name, unlike the editable list: nothing renames a server
-          here, and the identity is what the reader sees. */}
-      {servers.map((server, index) => (
-        <SettingsSection
-          key={server.name || index}
-          title={server.name || `Server ${index + 1}`}
-        >
-          <SettingsStatus
-            tone={healthTone(server.health)}
-            label={healthLabel(server.health)}
-            description={
-              server.health === "healthy"
-                ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
-                : server.diagnostic ?? "This server is not connected."
-            }
-          />
-          {transportOf(server) === "gateway" ? (
-            <p className="text-sm text-muted-foreground">
-              Managed by the Model Gateway (endpoint{" "}
-              <code>{server.gateway_endpoint}</code>). Mount or unmount it under
-              Gateway endpoints above.
-            </p>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Configured before this device was managed. It is kept on file but
-              never started, and cannot be edited here.
-            </p>
-          )}
-        </SettingsSection>
-      ))}
-      <p className="text-sm leading-relaxed text-muted-foreground">
-        MCP tools are always sensitive and keep OpenWave&rsquo;s existing
-        approval boundary.
-      </p>
-    </>
   );
 }
 

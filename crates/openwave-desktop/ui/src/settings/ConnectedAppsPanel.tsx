@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import type {
   ApiClient,
   ConnectedAppInfo,
@@ -8,14 +15,14 @@ import type {
   RestCredentialUpdate,
 } from "../api";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { McpPanel } from "./McpPanel";
+import { McpHealthChip, McpPanel } from "./McpPanel";
 import {
   SettingsError,
   SettingsField,
   SettingsPanel,
   SettingsSection,
-  SettingsStatus,
 } from "./primitives";
 
 type RestEntry = Extract<ConnectedAppInfo, { kind: "rest_api" }>;
@@ -91,37 +98,56 @@ function mcpTitle(entry: McpEntry): string {
     : entry.name;
 }
 
-/** One renderer-safe status sentence per entry; diagnostics already are one. */
-function mcpStatus(entry: McpEntry): string {
-  switch (entry.health) {
-    case "healthy":
-      return `${entry.tool_count} tool${entry.tool_count === 1 ? "" : "s"} available to new turns.`;
-    case "initializing":
-    case "reconnecting":
-      return "Connecting…";
-    case "disabled":
-      return entry.diagnostic ?? "Disabled.";
-    default:
-      return entry.diagnostic ?? "Needs attention. See Advanced below.";
-  }
+/** The one line naming how many local mini-apps bind an entry. */
+function usedByLabel(count: number): string {
+  return `Used by ${count} local app${count === 1 ? "" : "s"}`;
 }
 
 /**
- * One MCP-backed app entry: the app name first, a status line, and a
- * collapsed accordion enumerating the mounted tool names. Names only — never
- * remote-authored tool descriptions — the same renderer-safety posture as
- * the consent sheet.
+ * One MCP-backed app entry: the app name and its health chip on one line, a
+ * collapsed accordion enumerating the mounted tool names, and the count of
+ * local apps bound to it. Names only — never remote-authored tool
+ * descriptions — the same renderer-safety posture as the consent sheet.
+ *
+ * Tool availability lives here and nowhere else on the page; connection
+ * state is the chip, detailed (for gateway endpoints on a managed profile)
+ * on the endpoint's Advanced row. A record with no such row — any entry on
+ * an unmanaged profile, or a pre-managed manual server — carries its own
+ * diagnostic inline instead.
  */
-function McpAppCard({ entry }: { entry: McpEntry }) {
+function McpAppEntry({
+  entry,
+  managed,
+  busy,
+  reconnecting,
+  onReconnect,
+}: {
+  entry: McpEntry;
+  managed: boolean;
+  busy: boolean;
+  reconnecting: string | null;
+  onReconnect: (name: string) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const detailInAdvanced = managed && entry.gateway_endpoint !== null;
+  const unhealthy =
+    entry.health !== "healthy" &&
+    entry.health !== "initializing" &&
+    entry.health !== "reconnecting";
   return (
-    <div className="flex flex-col gap-1 rounded-md border px-3 py-2">
-      <p className="text-sm font-bold">{mcpTitle(entry)}</p>
-      <p className="text-xs text-muted-foreground">
-        {entry.gateway_endpoint !== null &&
-          "Via your organization's gateway · "}
-        {mcpStatus(entry)}
-      </p>
+    <li className="flex flex-col gap-1 rounded-md border px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <p className="text-sm font-bold">{mcpTitle(entry)}</p>
+        <McpHealthChip health={entry.health} />
+        {entry.gateway_endpoint !== null && (
+          <span className="text-xs text-muted-foreground">
+            · via your organization's gateway
+          </span>
+        )}
+      </div>
+      {!detailInAdvanced && unhealthy && entry.diagnostic !== null && (
+        <p className="text-xs text-muted-foreground">{entry.diagnostic}</p>
+      )}
       {entry.tools.length > 0 && (
         <>
           <button
@@ -144,23 +170,39 @@ function McpAppCard({ entry }: { entry: McpEntry }) {
           )}
         </>
       )}
-    </div>
+      {entry.used_by_app_count > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {usedByLabel(entry.used_by_app_count)}
+        </p>
+      )}
+      {/* No endpoint indirection on an unmanaged profile, so the reconnect
+          action rides the entry itself. */}
+      {!managed &&
+        entry.health !== "initializing" &&
+        entry.health !== "disabled" && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="self-start"
+            disabled={busy}
+            onClick={() => onReconnect(entry.name)}
+          >
+            <RefreshCw size={14} />
+            {reconnecting === entry.name ? "Reconnecting…" : "Reconnect"}
+          </Button>
+        )}
+    </li>
   );
 }
 
 /**
- * The demoted transport machinery: gateway endpoint mounts, per-server
- * health, and (on unmanaged profiles) the manual MCP server editor — the
- * whole `McpPanel`, unchanged, behind a disclosure. Everything it could do
- * it still does; it just no longer leads the page.
+ * The transport machinery, managed profiles only: `McpPanel`'s compact
+ * endpoint rows behind a disclosure, collapsed by default. Unmanaged
+ * profiles have no gateway indirection, so they get no Advanced section —
+ * the editor below the apps list is the whole transport surface.
  */
-function AdvancedSection({
-  client,
-  managed,
-}: {
-  client: ApiClient;
-  managed: boolean;
-}) {
+function AdvancedSection({ client }: { client: ApiClient }) {
   const [open, setOpen] = useState(false);
   return (
     <section className="flex flex-col gap-6">
@@ -173,18 +215,19 @@ function AdvancedSection({
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         Advanced: transport &amp; endpoints
       </button>
-      {open && <McpPanel client={client} managed={managed} />}
+      {open && <McpPanel client={client} managed />}
     </section>
   );
 }
 
 /**
- * The Connected apps page, app-first: the primary list is the apps this
- * profile can reach — org-app names for gateway-backed MCP records, record
- * names for local ones, REST entries beside them — each with a names-only
- * tool accordion. The transport machinery (endpoint mounts, the manual MCP
- * server editor absorbed from the retired MCP page) is demoted to an
- * Advanced disclosure below; nothing is removed, only de-emphasized.
+ * The Connected apps page, app-first and once-only: every fact renders
+ * exactly once, at the altitude of the thing it describes. The Apps list
+ * owns identity, health chip, tool names, and the bound-app count; on a
+ * managed profile the endpoint transport collapses to compact rows behind
+ * an Advanced disclosure, while an unmanaged profile has no Advanced at
+ * all — the manual MCP editor below the list is its whole transport
+ * surface. The approval boundary is stated once, as the page footer.
  */
 export function ConnectedAppsPanel({
   client,
@@ -204,6 +247,7 @@ export function ConnectedAppsPanel({
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -284,6 +328,26 @@ export function ConnectedAppsPanel({
     }
   }
 
+  /** Reconnect one local server from its app entry, then re-read the
+   * listing so the entry's chip reflects the outcome. */
+  async function reconnectEntry(name: string) {
+    setReconnecting(name);
+    setListError(null);
+    try {
+      await client.reconnectMcpServer(name);
+    } catch (err) {
+      setListError(errorMessage(err));
+    }
+    try {
+      const info = await client.listConnectedApps();
+      setApps(info.apps);
+    } catch {
+      // Keep the last-known entries; the reconnect error (if any) stands.
+    } finally {
+      setReconnecting(null);
+    }
+  }
+
   async function remove(entry: RestEntry) {
     setDeleting(entry.id);
     try {
@@ -298,7 +362,7 @@ export function ConnectedAppsPanel({
   }
 
   const restRow = (entry: RestEntry) => (
-    <div
+    <li
       key={entry.id}
       className="flex items-center justify-between gap-4 rounded-md border px-3 py-2"
     >
@@ -308,6 +372,11 @@ export function ConnectedAppsPanel({
           {entry.base_url} · {entry.operation_count} operation
           {entry.operation_count === 1 ? "" : "s"} · {credentialLabel(entry)}
         </p>
+        {entry.used_by_app_count > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {usedByLabel(entry.used_by_app_count)}
+          </p>
+        )}
       </div>
       {!managed && (
         <div className="flex gap-2">
@@ -333,7 +402,7 @@ export function ConnectedAppsPanel({
           </Button>
         </div>
       )}
-    </div>
+    </li>
   );
 
   const editor = draft !== null && (
@@ -452,65 +521,94 @@ export function ConnectedAppsPanel({
     </SettingsSection>
   );
 
+  const busy = saving || deleting !== null || reconnecting !== null;
+
   return (
     <SettingsPanel
       title="Connected apps"
       description="The apps this profile can reach — through your organization's gateway, local MCP servers, and REST APIs — bound by local apps with your consent."
-      busy={loading || saving || deleting !== null}
+      busy={loading || busy}
     >
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading connected apps…</p>
       ) : (
         <>
-          <SettingsSection
-            title="Apps"
-            description="Each entry is one connected app. Expand it to see the tools it makes available."
-          >
-            {managed && (
-              <SettingsStatus
-                tone="disabled"
-                label="Managed by your organization"
-                description="REST connected apps are managed by your organization's gateway; there is nothing to configure here."
-              />
-            )}
-            {apps.length === 0 ? (
+          <section className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <h2 className="text-lg font-semibold">Apps</h2>
               <p className="text-sm text-muted-foreground">
-                No apps connected. Add a REST API here, or configure MCP
-                servers under Advanced below.
+                Each entry is one connected app. Expand it to see the tools it
+                makes available.
               </p>
-            ) : (
-              apps.map((entry) =>
-                entry.kind === "mcp_server" ? (
-                  <McpAppCard key={entry.id} entry={entry} />
-                ) : (
-                  restRow(entry)
-                ),
-              )
-            )}
-            {!managed && draft === null && (
-              <div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={deleting !== null}
-                  onClick={() => {
-                    setFormError(null);
-                    setDraft(draftFor(null));
-                  }}
+              {managed && (
+                <p className="text-sm text-muted-foreground">
+                  REST connected apps are managed by your organization's
+                  gateway; there is nothing to configure here.
+                </p>
+              )}
+            </div>
+            <Card className="gap-4 border bg-transparent p-4">
+              {apps.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {managed
+                    ? "No apps connected."
+                    : "No apps connected. Add a REST API here, or configure MCP servers in the editor below."}
+                </p>
+              ) : (
+                <ul
+                  aria-label="Connected apps"
+                  className="flex flex-col gap-2"
                 >
-                  <Plus size={14} /> Add REST API
-                </Button>
-              </div>
-            )}
-          </SettingsSection>
+                  {apps.map((entry) =>
+                    entry.kind === "mcp_server" ? (
+                      <McpAppEntry
+                        key={entry.id}
+                        entry={entry}
+                        managed={managed}
+                        busy={busy}
+                        reconnecting={reconnecting}
+                        onReconnect={(name) => void reconnectEntry(name)}
+                      />
+                    ) : (
+                      restRow(entry)
+                    ),
+                  )}
+                </ul>
+              )}
+              {!managed && draft === null && (
+                <div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setFormError(null);
+                      setDraft(draftFor(null));
+                    }}
+                  >
+                    <Plus size={14} /> Add REST API
+                  </Button>
+                </div>
+              )}
+            </Card>
+          </section>
 
           {!managed && editor}
         </>
       )}
 
-      <AdvancedSection client={client} managed={managed} />
+      {managed ? (
+        <AdvancedSection client={client} />
+      ) : (
+        <McpPanel client={client} managed={false} />
+      )}
 
       {listError && <SettingsError>{listError}</SettingsError>}
+
+      <p className="text-sm text-muted-foreground">
+        MCP tools are always sensitive and keep OpenWave's existing approval
+        boundary.
+      </p>
     </SettingsPanel>
   );
 }
