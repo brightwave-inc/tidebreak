@@ -13,6 +13,7 @@ import type {
   ConnectedAppInfo,
   CredentialPlacement,
   RestCredentialUpdate,
+  SpecPreviewInfo,
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -30,6 +31,11 @@ type McpEntry = Extract<ConnectedAppInfo, { kind: "mcp_server" }>;
 
 type CredentialMode = "none" | "bearer" | "header";
 
+/** Where the OpenAPI document comes from: fetched by the server from a URL
+ * (the primary path — real vendor documents are too large to hand-trim), or
+ * pasted inline. */
+type DocumentSource = "url" | "paste";
+
 /** The create/edit draft for one REST connected app. */
 type Draft = {
   /** Record id the save targets; minted fresh for a create. */
@@ -38,7 +44,15 @@ type Draft = {
   existing: RestEntry | null;
   name: string;
   baseUrl: string;
+  source: DocumentSource;
+  documentUrl: string;
   document: string;
+  /** What the last preview enumerated, pinned by its document hash. Cleared
+   * whenever the source it came from changes, so a stale selection can never
+   * outlive the document it was made against. */
+  preview: SpecPreviewInfo | null;
+  /** Selected operationIds; the saved catalog is exactly this set. */
+  selected: string[];
   mode: CredentialMode;
   headerName: string;
   /** The credential value. Never prefilled: an untouched (empty) value on an
@@ -54,13 +68,28 @@ function draftFor(existing: RestEntry | null): Draft {
     existing,
     name: existing?.name ?? "",
     baseUrl: existing?.base_url ?? "",
+    source: "url",
+    documentUrl: "",
     document: "",
+    preview: null,
+    selected: [],
     mode:
       placement === null ? "none" : placement === "bearer" ? "bearer" : "header",
     headerName:
       placement !== null && placement !== "bearer" ? placement.header : "",
     value: "",
   };
+}
+
+/** The server refuses a catalog over 256 operations, so a larger preview
+ * starts unselected and the user picks; at or under the bound, everything
+ * starts selected — the same whole-document outcome as before. */
+const MAX_SELECTABLE_OPERATIONS = 256;
+
+function defaultSelection(preview: SpecPreviewInfo): string[] {
+  return preview.operations.length <= MAX_SELECTABLE_OPERATIONS
+    ? preview.operations.map((operation) => operation.operation_id)
+    : [];
 }
 
 function samePlacement(
@@ -197,6 +226,127 @@ function McpAppEntry({
 }
 
 /**
+ * The operation picker over one previewed document: a filter, select
+ * all/none over the filtered view, and one checkbox per listable operation.
+ * The muted counts keep the picker honest about what the preview could not
+ * list and where it was cut.
+ */
+function OperationPicker({
+  preview,
+  selected,
+  disabled,
+  onChange,
+}: {
+  preview: SpecPreviewInfo;
+  selected: string[];
+  disabled: boolean;
+  onChange: (selected: string[]) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const shown =
+    needle === ""
+      ? preview.operations
+      : preview.operations.filter(
+          (operation) =>
+            operation.operation_id.toLowerCase().includes(needle) ||
+            operation.path.toLowerCase().includes(needle) ||
+            (operation.summary ?? "").toLowerCase().includes(needle),
+        );
+  const chosen = new Set(selected);
+  const notes = [
+    `${selected.length} of ${preview.operations.length} selected`,
+    ...(preview.unlistable > 0
+      ? [`${preview.unlistable} unselectable (no usable operationId)`]
+      : []),
+    ...(preview.truncated ? ["list truncated"] : []),
+  ];
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          className="max-w-60"
+          value={filter}
+          disabled={disabled}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="Filter operations"
+          aria-label="Filter operations"
+          onChange={(event) => setFilter(event.target.value)}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          onClick={() =>
+            onChange([
+              ...new Set([
+                ...selected,
+                ...shown.map((operation) => operation.operation_id),
+              ]),
+            ])
+          }
+        >
+          Select shown
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={disabled || selected.length === 0}
+          onClick={() => onChange([])}
+        >
+          Clear
+        </Button>
+      </div>
+      <ul
+        aria-label="Operations"
+        className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded-md border p-2"
+      >
+        {shown.map((operation) => (
+          <li key={operation.operation_id}>
+            <label className="flex items-start gap-2 text-xs">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={chosen.has(operation.operation_id)}
+                disabled={disabled}
+                onChange={(event) =>
+                  onChange(
+                    event.target.checked
+                      ? [...selected, operation.operation_id]
+                      : selected.filter(
+                          (id) => id !== operation.operation_id,
+                        ),
+                  )
+                }
+              />
+              <span className="min-w-0">
+                <code className="font-medium">
+                  {operation.method.toUpperCase()} {operation.path}
+                </code>
+                {operation.summary !== null && (
+                  <span className="block truncate text-muted-foreground">
+                    {operation.summary}
+                  </span>
+                )}
+              </span>
+            </label>
+          </li>
+        ))}
+        {shown.length === 0 && (
+          <li className="text-xs text-muted-foreground">
+            No operations match the filter.
+          </li>
+        )}
+      </ul>
+      <p className="text-xs text-muted-foreground">{notes.join(" · ")}</p>
+    </div>
+  );
+}
+
+/**
  * The transport machinery, managed profiles only: `McpPanel`'s compact
  * endpoint rows behind a disclosure, collapsed by default. Unmanaged
  * profiles have no gateway indirection, so they get no Advanced section —
@@ -246,6 +396,7 @@ export function ConnectedAppsPanel({
   const [draft, setDraft] = useState<Draft | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
 
@@ -273,16 +424,88 @@ export function ConnectedAppsPanel({
     setDraft((current) => (current === null ? null : { ...current, ...change }));
   }
 
+  /** Enumerate the draft's document (URL or pasted) into the picker. */
+  async function loadOperations() {
+    if (draft === null) return;
+    const source =
+      draft.source === "url"
+        ? { url: draft.documentUrl.trim() }
+        : { document: draft.document };
+    if (draft.source === "url" && draft.documentUrl.trim() === "") {
+      setFormError("Enter the OpenAPI document URL to fetch.");
+      return;
+    }
+    if (draft.source === "paste" && draft.document.trim() === "") {
+      setFormError("Paste the OpenAPI document first.");
+      return;
+    }
+    setPreviewing(true);
+    setFormError(null);
+    try {
+      const preview = await client.previewRestSpec(source);
+      update({ preview, selected: defaultSelection(preview) });
+    } catch (err) {
+      setFormError(errorMessage(err));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
   async function save() {
     if (draft === null) return;
     const name = draft.name.trim();
     const baseUrl = draft.baseUrl.trim();
     const document = draft.document.trim();
-    if (name === "" || baseUrl === "" || document === "") {
-      setFormError(
-        "Name, base URL, and the OpenAPI document are all required.",
-      );
+    if (name === "" || baseUrl === "") {
+      setFormError("Name and base URL are required.");
       return;
+    }
+    let documentFields: {
+      openapi_document?: string;
+      openapi_document_url?: string;
+      document_sha256?: string;
+      operation_ids?: string[];
+    };
+    if (draft.source === "url") {
+      // A URL save always rides the preview's hash pin: what the picker
+      // showed is exactly what the server will ingest, or it refuses.
+      if (draft.documentUrl.trim() === "") {
+        setFormError("Enter the OpenAPI document URL.");
+        return;
+      }
+      if (draft.preview === null) {
+        setFormError("Fetch the document's operations before saving.");
+        return;
+      }
+      if (draft.selected.length === 0) {
+        setFormError("Select at least one operation.");
+        return;
+      }
+      documentFields = {
+        openapi_document_url: draft.documentUrl.trim(),
+        document_sha256: draft.preview.document_sha256,
+        operation_ids: draft.selected,
+      };
+    } else {
+      if (document === "") {
+        setFormError("Paste the OpenAPI document.");
+        return;
+      }
+      if (draft.preview !== null && draft.selected.length === 0) {
+        setFormError("Select at least one operation.");
+        return;
+      }
+      documentFields = {
+        openapi_document: document,
+        // A pasted document only carries a selection when one was made; the
+        // pin then guards against the textarea changing after the preview.
+        ...(draft.preview !== null
+          ? {
+              document_sha256: draft.preview.document_sha256,
+              operation_ids: draft.selected,
+            }
+          : {}),
+      };
     }
     let credential: RestCredentialUpdate;
     if (draft.mode === "none") {
@@ -315,7 +538,7 @@ export function ConnectedAppsPanel({
       const result = await client.putRestConnectedApp(draft.id, {
         name,
         base_url: baseUrl,
-        openapi_document: document,
+        ...documentFields,
         credential,
       });
       setApps(result.apps);
@@ -432,22 +655,107 @@ export function ConnectedAppsPanel({
           onChange={(event) => update({ baseUrl: event.target.value })}
         />
       </SettingsField>
-      <SettingsField
-        label="OpenAPI document"
-        hint={
-          draft.existing === null
-            ? "Paste the JSON OpenAPI 3.x document. Only the declared operations are kept, never the document itself."
-            : "The raw document is not stored, so paste it again to save changes."
-        }
-      >
-        <textarea
-          className="min-h-40 w-full rounded-md border bg-transparent p-2 font-mono text-xs"
-          value={draft.document}
-          disabled={saving}
-          spellCheck={false}
-          onChange={(event) => update({ document: event.target.value })}
+      <div className="flex flex-col gap-1.5">
+        <p className="font-bold">OpenAPI document</p>
+        <p className="text-sm text-muted-foreground">
+          {draft.existing === null
+            ? "Only the selected operations are kept, never the document itself."
+            : "The raw document is not stored, so provide it again to save changes."}
+        </p>
+        <div
+          className="flex gap-4"
+          role="radiogroup"
+          aria-label="Document source"
+        >
+          {(
+            [
+              ["url", "Fetch from URL"],
+              ["paste", "Paste document"],
+            ] as const
+          ).map(([source, label]) => (
+            <label key={source} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="document-source"
+                checked={draft.source === source}
+                disabled={saving || previewing}
+                onChange={() =>
+                  // Switching sources invalidates any preview: the selection
+                  // must never outlive the document it was made against.
+                  update({ source, preview: null, selected: [] })
+                }
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </div>
+      {draft.source === "url" ? (
+        <SettingsField
+          label="Document URL"
+          hint="https only; JSON OpenAPI 3.x. The server fetches it — the document never rides the form."
+        >
+          <div className="flex gap-2">
+            <Input
+              value={draft.documentUrl}
+              disabled={saving || previewing}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="https://api.example.com/openapi.json"
+              onChange={(event) =>
+                update({
+                  documentUrl: event.target.value,
+                  preview: null,
+                  selected: [],
+                })
+              }
+            />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={saving || previewing}
+              onClick={() => void loadOperations()}
+            >
+              {previewing ? "Fetching…" : "Fetch operations"}
+            </Button>
+          </div>
+        </SettingsField>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <textarea
+            className="min-h-40 w-full rounded-md border bg-transparent p-2 font-mono text-xs"
+            value={draft.document}
+            disabled={saving || previewing}
+            spellCheck={false}
+            aria-label="OpenAPI document"
+            onChange={(event) =>
+              update({
+                document: event.target.value,
+                preview: null,
+                selected: [],
+              })
+            }
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="self-start"
+            disabled={saving || previewing}
+            onClick={() => void loadOperations()}
+          >
+            {previewing ? "Loading…" : "Select operations…"}
+          </Button>
+        </div>
+      )}
+      {draft.preview !== null && (
+        <OperationPicker
+          preview={draft.preview}
+          selected={draft.selected}
+          disabled={saving || previewing}
+          onChange={(selected) => update({ selected })}
         />
-      </SettingsField>
+      )}
       <fieldset className="flex flex-col gap-1.5">
         <legend className="font-bold">Credential</legend>
         <div className="flex gap-4" role="radiogroup" aria-label="Credential">
@@ -521,7 +829,7 @@ export function ConnectedAppsPanel({
     </SettingsSection>
   );
 
-  const busy = saving || deleting !== null || reconnecting !== null;
+  const busy = saving || previewing || deleting !== null || reconnecting !== null;
 
   return (
     <SettingsPanel
