@@ -63,12 +63,22 @@ use uuid::Uuid;
 use crate::durable_oplog::DurableOperationStore;
 use crate::resolver::ProviderResolver;
 use crate::sandbox_admission::{evaluate_detached_admission, DetachedPreconditions};
+use crate::sandbox_docker::DEFAULT_IDLE_TIMEOUT_SECS;
 use crate::scoped_model_token::{GatewayScopedTokenIssuer, ScopedModelTokenIssuer};
 
 /// The provider attribution stamped on reverse operations from a local
 /// container. Untrusted attribution rendered on consent prompts, never a claim
 /// the container makes about itself.
 const CONTAINER_PROVENANCE_PROVIDER: &str = "local-container";
+/// The image's configured idle timeout and the host cadence that must remain
+/// comfortably below it. Kept together so the safety margin is reviewable and
+/// testable instead of existing only in matching comments across crates.
+const SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+const _: () = assert!(
+    SANDBOX_KEEPALIVE_INTERVAL.as_secs() * 2 < DEFAULT_IDLE_TIMEOUT_SECS,
+    "two missed keepalive intervals must still leave time before idle expiry"
+);
 
 /// Tunables for driving one sandbox-resident container run.
 #[derive(Debug, Clone, Copy)]
@@ -891,6 +901,7 @@ impl SandboxContainerRunner {
                 };
             }
         };
+        conn.start_keepalives(SANDBOX_KEEPALIVE_INTERVAL);
         // Deliver the run init on every attach; the sandbox keeps the first
         // and ignores redeliveries, so a reattach is idempotent.
         conn.send_init(init.clone()).await;
