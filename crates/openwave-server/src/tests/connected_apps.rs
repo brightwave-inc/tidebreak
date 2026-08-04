@@ -411,6 +411,101 @@ async fn a_refused_upsert_persists_nothing() {
     );
 }
 
+/// The spec-acquisition contract across preview and upsert: a vendor
+/// document broken outside the selection previews tolerantly and ingests
+/// exactly the selection, and the hash pin refuses a document that no longer
+/// matches what was previewed.
+#[tokio::test]
+async fn selection_and_hash_pin_govern_the_upsert() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let id = ConnectedAppId::new();
+
+    // `listIssues` is fine; the sibling operation has no operationId, so the
+    // whole-document ingest refuses this spec.
+    let vendor_spec = json!({
+        "openapi": "3.0.3",
+        "info": { "title": "Issues", "version": "1" },
+        "paths": {
+            "/issues": { "get": { "operationId": "listIssues" } },
+            "/broken": { "get": { "summary": "no operationId" } }
+        }
+    })
+    .to_string();
+    let pin = crate::openapi_catalog::sha256_hex(vendor_spec.as_bytes());
+
+    // Preview lists the selectable operation and stays honest about the one
+    // it cannot list.
+    let preview = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connected-apps/rest/spec-preview")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "source": { "document": vendor_spec } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::OK);
+    let preview: serde_json::Value = serde_json::from_str(&raw_body(preview).await).unwrap();
+    assert_eq!(preview["document_sha256"], json!(pin));
+    assert_eq!(
+        preview["operations"][0]["operation_id"],
+        json!("listIssues")
+    );
+    assert_eq!(preview["unlistable"], json!(1));
+
+    let body = |operation_ids: serde_json::Value, sha: &str| {
+        json!({
+            "name": "issues",
+            "base_url": "https://api.example.com",
+            "openapi_document": vendor_spec,
+            "document_sha256": sha,
+            "operation_ids": operation_ids,
+            "credential": "none",
+        })
+        .to_string()
+    };
+
+    // Whole-document ingest still refuses the broken sibling.
+    let unselected = json!({
+        "name": "issues",
+        "base_url": "https://api.example.com",
+        "openapi_document": vendor_spec,
+        "credential": "none",
+    })
+    .to_string();
+    let refused = put_rest(&router, &bearer, id, unselected).await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    // A stale pin refuses before anything ingests or persists.
+    let stale = put_rest(
+        &router,
+        &bearer,
+        id,
+        body(json!(["listIssues"]), &"0".repeat(64)),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    // The selection ingests to exactly itself under the correct pin.
+    let accepted = put_rest(&router, &bearer, id, body(json!(["listIssues"]), &pin)).await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let listing: serde_json::Value = serde_json::from_str(&raw_body(accepted).await).unwrap();
+    let entry = listing["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "rest_api")
+        .expect("the record is listed");
+    assert_eq!(entry["operation_count"], json!(1));
+    assert_eq!(entry["document_sha256"], json!(pin));
+}
+
 /// The managed posture: `rest_api` upserts are refused wholesale with the
 /// stable `managed_profile` kind — local credential entry is what the
 /// lockdown closes — while DELETE stays available, because removing a local

@@ -562,11 +562,32 @@ fn serialize_body(
 /// and configuration that cannot mean anything should be corrected, not
 /// silently rewritten.
 pub(crate) fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
-    let refuse = |reason| Err(RestExecuteError::InadmissibleBaseUrl { reason });
-    if base_url.len() > MAX_REST_BASE_URL_BYTES {
+    admit_https_url(base_url, UrlQueryPolicy::Refuse).map_err(|refusal| match refusal {
+        UrlAdmissionRefusal::Reason(reason) => RestExecuteError::InadmissibleBaseUrl { reason },
+        UrlAdmissionRefusal::DeniedAddress => RestExecuteError::DeniedAddress,
+    })
+}
+
+/// Whether an admitted URL may carry a query. A *base* URL with a query is
+/// configuration that cannot mean anything; a document URL legitimately needs
+/// one (`?format=json`, versioned exports).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UrlQueryPolicy {
+    Refuse,
+    Allow,
+}
+
+enum UrlAdmissionRefusal {
+    Reason(&'static str),
+    DeniedAddress,
+}
+
+fn admit_https_url(url: &str, query: UrlQueryPolicy) -> Result<Url, UrlAdmissionRefusal> {
+    let refuse = |reason| Err(UrlAdmissionRefusal::Reason(reason));
+    if url.len() > MAX_REST_BASE_URL_BYTES {
         return refuse("URL exceeds the byte limit");
     }
-    let Ok(parsed) = Url::parse(base_url) else {
+    let Ok(parsed) = Url::parse(url) else {
         return refuse("URL is not valid");
     };
     if parsed.scheme() != "https" {
@@ -578,7 +599,7 @@ pub(crate) fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
     if parsed.fragment().is_some() {
         return refuse("URL must not carry a fragment");
     }
-    if parsed.query().is_some() {
+    if query == UrlQueryPolicy::Refuse && parsed.query().is_some() {
         return refuse("URL must not carry a query");
     }
     match parsed.host_str() {
@@ -597,7 +618,7 @@ pub(crate) fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
         match literal.parse::<IpAddr>() {
             Ok(address) => {
                 if admit_fetch_address(address).is_err() {
-                    return Err(RestExecuteError::DeniedAddress);
+                    return Err(UrlAdmissionRefusal::DeniedAddress);
                 }
             }
             Err(_) => return refuse("URL host is not a name or address"),
@@ -936,6 +957,159 @@ impl RestHostResolver for TokioRestHostResolver {
         }
         Ok(addresses)
     }
+}
+
+/// Most redirect hops a spec fetch will follow.
+pub const MAX_SPEC_FETCH_REDIRECTS: usize = 5;
+
+/// Whole-fetch wall-time budget across every redirect hop.
+pub const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why a config-time OpenAPI document fetch was refused or failed.
+///
+/// Closed and renderer-safe, the same posture as [`RestExecuteError`]: no
+/// variant echoes response bytes, and transport text is kept URL-free.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SpecFetchError {
+    #[error("document URL is inadmissible: {reason}")]
+    InadmissibleUrl { reason: &'static str },
+    #[error("document URL resolves into a denied network range")]
+    DeniedAddress,
+    #[error("document URL's host did not resolve")]
+    UnresolvableHost,
+    #[error("fetch followed more than {MAX_SPEC_FETCH_REDIRECTS} redirects")]
+    TooManyRedirects,
+    #[error("a redirect carried no usable location")]
+    MalformedRedirect,
+    #[error("the server answered HTTP {status}")]
+    HttpStatus { status: u16 },
+    #[error(
+        "fetched document exceeds {} bytes",
+        crate::openapi_catalog::MAX_OPENAPI_DOCUMENT_BYTES
+    )]
+    DocumentTooLarge,
+    #[error("fetch exceeded its time budget")]
+    Timeout,
+    #[error("fetch transport failed: {0}")]
+    Transport(String),
+}
+
+/// Fetch an OpenAPI document from an operator-supplied URL, at configuration
+/// time, with the executor's egress hygiene: https-only admission, fresh
+/// per-hop resolution vetted against the denied-network list, a pinned
+/// no-proxy client, and a bounded body.
+///
+/// Unlike operation execution, redirects are followed — vendors move and
+/// version their published documents — but explicitly, one admitted hop at a
+/// time, so every `Location` gets the same vetting as the original URL and no
+/// credential is ever attached to any hop.
+pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchError> {
+    let started = std::time::Instant::now();
+    let mut current = url.to_string();
+    for _ in 0..=MAX_SPEC_FETCH_REDIRECTS {
+        let admitted =
+            admit_https_url(&current, UrlQueryPolicy::Allow).map_err(|refusal| match refusal {
+                UrlAdmissionRefusal::Reason(reason) => SpecFetchError::InadmissibleUrl { reason },
+                UrlAdmissionRefusal::DeniedAddress => SpecFetchError::DeniedAddress,
+            })?;
+        let remaining = SPEC_FETCH_TIMEOUT
+            .checked_sub(started.elapsed())
+            .ok_or(SpecFetchError::Timeout)?;
+
+        // Same vetting shape as operation execution: every fresh answer for a
+        // domain host must clear the denied-network list, and the connection
+        // is pinned to exactly those answers. An IP-literal host was vetted
+        // by the admission above.
+        let addresses = match admitted.domain() {
+            Some(domain) => {
+                let resolved = TokioRestHostResolver
+                    .resolve(domain)
+                    .await
+                    .map_err(|_| SpecFetchError::UnresolvableHost)?;
+                if resolved.is_empty() {
+                    return Err(SpecFetchError::UnresolvableHost);
+                }
+                if resolved
+                    .iter()
+                    .any(|address| admit_fetch_address(*address).is_err())
+                {
+                    return Err(SpecFetchError::DeniedAddress);
+                }
+                resolved
+            }
+            None => Vec::new(),
+        };
+
+        let mut builder = reqwest::Client::builder()
+            // Load-bearing for the same reason as the operation transport: a
+            // discovered proxy would dial the proxy, not the vetted address.
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(true)
+            .user_agent(REST_EXECUTOR_USER_AGENT)
+            .connect_timeout(remaining.min(Duration::from_secs(10)))
+            .timeout(remaining);
+        if let Some(domain) = admitted.domain() {
+            let port = admitted.port_or_known_default().unwrap_or(443);
+            let pinned: Vec<std::net::SocketAddr> = addresses
+                .iter()
+                .map(|address| std::net::SocketAddr::new(*address, port))
+                .collect();
+            builder = builder.resolve_to_addrs(domain, &pinned);
+        }
+        let client = builder.build().map_err(spec_transport_failure)?;
+        let response = client
+            .get(admitted.clone())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(spec_transport_failure)?;
+
+        let status = response.status();
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| admitted.join(location).ok())
+                .ok_or(SpecFetchError::MalformedRedirect)?;
+            current = location.to_string();
+            continue;
+        }
+        if !status.is_success() {
+            return Err(SpecFetchError::HttpStatus {
+                status: status.as_u16(),
+            });
+        }
+
+        let cap = crate::openapi_catalog::MAX_OPENAPI_DOCUMENT_BYTES;
+        if response
+            .content_length()
+            .is_some_and(|length| length > cap as u64)
+        {
+            return Err(SpecFetchError::DocumentTooLarge);
+        }
+        use futures::StreamExt;
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(spec_transport_failure)?;
+            if body.len().saturating_add(chunk.len()) > cap {
+                return Err(SpecFetchError::DocumentTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok(body);
+    }
+    Err(SpecFetchError::TooManyRedirects)
+}
+
+/// Map a spec-fetch transport failure, URL-stripped, timeout told apart.
+fn spec_transport_failure(error: reqwest::Error) -> SpecFetchError {
+    if error.is_timeout() {
+        return SpecFetchError::Timeout;
+    }
+    SpecFetchError::Transport(error.without_url().to_string())
 }
 
 #[cfg(test)]
