@@ -166,23 +166,6 @@ fn remove_null_schema_defaults(schema: &mut Value) {
     }
 }
 
-/// Check parsed tool-call arguments against the advertised schema, returning
-/// the mismatch to echo back to the model.
-///
-/// `None` means the call may proceed — either because the arguments conform
-/// or because the schema itself does not compile. A schema that is not a
-/// schema is the tool's bug, not the model's: refusing every call against it
-/// would brick the tool, and dispatch never had a contract to enforce there
-/// in the first place.
-#[must_use]
-pub fn schema_mismatch(input_schema: &Value, arguments: &Value) -> Option<String> {
-    let validator = jsonschema::validator_for(input_schema).ok()?;
-    validator
-        .validate(arguments)
-        .err()
-        .map(|error| error.to_string())
-}
-
 /// What to do with a property the schema does not require, when converting to
 /// the strict schema subset providers enforce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,32 +773,6 @@ mod tests {
         // `Option` reliably does. A hand-written tool schema cannot promise
         // that, so the conversion is refused rather than quietly performed.
         assert!(strict_json_schema(&schema, OptionalProperties::Reject).is_none());
-    }
-
-    #[test]
-    fn schema_mismatch_names_the_violation_and_fails_open_on_a_non_schema() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-            "additionalProperties": false
-        });
-        assert_eq!(
-            schema_mismatch(&schema, &serde_json::json!({"path": "x"})),
-            None
-        );
-        assert!(schema_mismatch(&schema, &serde_json::json!({"path": 42}))
-            .is_some_and(|mismatch| mismatch.contains("string")),);
-        assert!(schema_mismatch(&schema, &serde_json::json!({})).is_some());
-        // A schema that is not a schema is the tool's bug, not the model's:
-        // there is no contract to hold the call to, so the call proceeds.
-        assert_eq!(
-            schema_mismatch(
-                &serde_json::json!({"type": "nonsense"}),
-                &serde_json::json!({})
-            ),
-            None
-        );
     }
 
     #[test]
