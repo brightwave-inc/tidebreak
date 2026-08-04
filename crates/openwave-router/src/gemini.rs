@@ -1049,13 +1049,13 @@ mod tests {
     use openwave_core::provider::ChatMessage;
     use openwave_core::tool::{Tool, ToolSpec};
     use openwave_core::{
-        ask_user_questions_tool_spec, exit_plan_mode_tool_spec, import_connected_file_tool_spec,
-        list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
-        request_folder_access_tool_spec, sandbox_folder_access_proposal_tool_spec,
-        sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
-        spawn_sandbox_agent_tool_spec, wait_for_agents_tool_spec, web_extract_tool_spec,
-        web_search_tool_spec, write_output_to_connected_folder_tool_spec, ListDir, ReadFile,
-        WriteFile,
+        ask_user_questions_tool_spec, create_app_tool_spec, exit_plan_mode_tool_spec,
+        import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
+        read_connected_file_tool_spec, request_folder_access_tool_spec,
+        sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
+        sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec, wait_for_agents_tool_spec,
+        web_extract_tool_spec, web_search_tool_spec, write_output_to_connected_folder_tool_spec,
+        ListDir, ReadFile, WriteFile,
     };
 
     fn request(messages: Vec<ChatMessage>) -> ChatRequest {
@@ -1121,6 +1121,7 @@ mod tests {
             write_output_to_connected_folder_tool_spec(),
             exit_plan_mode_tool_spec(),
             ask_user_questions_tool_spec(),
+            create_app_tool_spec(),
             ReadFile.spec(),
             ListDir.spec(),
             WriteFile.spec(),

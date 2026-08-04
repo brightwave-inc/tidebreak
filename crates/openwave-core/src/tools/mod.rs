@@ -17,5 +17,11 @@ pub use list_dir::ListDir;
 pub use read_file::ReadFile;
 pub use write_file::WriteFile;
 
+/// Model-facing contract for the built-in local-app publisher.
+#[must_use]
+pub fn create_app_tool_spec() -> crate::ToolSpec {
+    definitions::create_app()
+}
+
 #[cfg(test)]
 mod tests;
