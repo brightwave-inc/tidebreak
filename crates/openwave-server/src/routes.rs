@@ -533,7 +533,7 @@ pub struct Settings {
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
 /// `POST /chats` seeds. A `None` field has no recorded choice and keeps the
-/// hard default (configured model, `ask`, no network).
+/// hard default (configured model, `ask`, open network).
 ///
 /// The permission mode is reported clamped to any managed ceiling, so what a
 /// picker displays is what creation will actually seed.
@@ -1489,7 +1489,7 @@ pub struct CreateChat {
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
     /// Code-execution network access for this conversation workspace.
-    /// Omitted seeds the sticky default, else no network.
+    /// Omitted seeds the sticky default, else open public-internet access.
     #[serde(default)]
     pub network_policy: Option<openwave_core::NetworkPolicy>,
 }
@@ -1561,7 +1561,7 @@ async fn read_sticky_chat_defaults(state: &AppState) -> Result<StickyChatDefault
 /// reader's last explicit choice at these same routes — so a new chat starts
 /// the way the reader configured the previous one instead of resetting to the
 /// hard defaults. A brand-new install has no sticky state and keeps today's
-/// defaults (`ask`, network off, configured model).
+/// defaults (`ask`, open network, configured model).
 pub async fn create_chat(
     State(state): State<AppState>,
     store: ScopedStore,
@@ -1628,7 +1628,8 @@ pub async fn create_chat(
                 .await?
                 .unwrap_or_default();
             // Stored values were normalized at write; a stale one that no
-            // longer passes falls back to no network rather than failing.
+            // longer passes falls back to the product default rather than
+            // failing the create.
             if crate::code_execution::normalize_network_policy(&mut sticky).is_err() {
                 sticky = openwave_core::NetworkPolicy::default();
             }

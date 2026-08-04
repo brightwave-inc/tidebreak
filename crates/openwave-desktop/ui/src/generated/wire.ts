@@ -1188,10 +1188,10 @@ resolved_key: string | null, };
 /**
  * Network access granted to commands in one conversation workspace.
  *
- * The policy is provider-neutral and deny-by-default. Providers compile it to
- * their strongest available enforcement mechanism; the local native adapter
- * exposes only one loopback broker port and applies the destination decision
- * outside the sandbox.
+ * The policy is provider-neutral. Providers compile it to their strongest
+ * available enforcement mechanism; the local native adapter exposes only one
+ * loopback broker port and applies the destination decision outside the
+ * sandbox. Open access still excludes local, private, and link-local targets.
  */
 export type NetworkPolicy = { "mode": "off" } | { "mode": "package_managers" } | { "mode": "allowed_hosts", allowed_hosts: Array<string>, package_managers: boolean, } | { "mode": "open" };
 
@@ -1580,7 +1580,7 @@ level_title: string | null, action: RendererToolName, approval: ToolApprovalKind
 /**
  * The reader's last explicit per-chat choices — what an unspecified field of
  * `POST /chats` seeds. A `None` field has no recorded choice and keeps the
- * hard default (configured model, `ask`, no network).
+ * hard default (configured model, `ask`, open network).
  *
  * The permission mode is reported clamped to any managed ceiling, so what a
  * picker displays is what creation will actually seed.

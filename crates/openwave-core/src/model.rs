@@ -1150,15 +1150,14 @@ impl PermissionMode {
 
 /// Network access granted to commands in one conversation workspace.
 ///
-/// The policy is provider-neutral and deny-by-default. Providers compile it to
-/// their strongest available enforcement mechanism; the local native adapter
-/// exposes only one loopback broker port and applies the destination decision
-/// outside the sandbox.
+/// The policy is provider-neutral. Providers compile it to their strongest
+/// available enforcement mechanism; the local native adapter exposes only one
+/// loopback broker port and applies the destination decision outside the
+/// sandbox. Open access still excludes local, private, and link-local targets.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum NetworkPolicy {
     /// Deny every outbound connection.
-    #[default]
     Off,
     /// Permit only the fixed package-registry destination class.
     PackageManagers,
@@ -1171,6 +1170,7 @@ pub enum NetworkPolicy {
     },
     /// Permit public-internet destinations. Local, private, and link-local
     /// addresses remain unreachable through the local broker.
+    #[default]
     Open,
 }
 

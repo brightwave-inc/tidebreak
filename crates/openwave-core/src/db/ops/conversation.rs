@@ -199,12 +199,14 @@ where
             Some(mode) => Set(Some(mode.as_str().to_owned())),
             None => sea_orm::ActiveValue::NotSet,
         },
-        network_policy: match &chat.network_policy {
-            crate::NetworkPolicy::Off => sea_orm::ActiveValue::NotSet,
-            policy => Set(serde_json::to_string(policy).map_err(|error| {
+        // Always persist the creation-time choice explicitly. The column's
+        // historical off default remains untouched so existing databases and
+        // rows are not migrated when the product default changes.
+        network_policy: Set(
+            serde_json::to_string(&chat.network_policy).map_err(|error| {
                 AgentError::Store(format!("could not encode chat network policy: {error}"))
-            })?),
-        },
+            })?,
+        ),
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
         // The local owner rides the column default (which also keeps this
