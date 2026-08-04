@@ -582,7 +582,14 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
         .unwrap();
     assert_eq!(initial.status(), StatusCode::OK);
     let initial: serde_json::Value = json_body(initial).await;
-    assert_eq!(initial["provider"], "local");
+    // The untouched default selects Local only where its sandbox exists, so
+    // the truthful initial read differs by host: "local" on a supporting
+    // platform, null elsewhere.
+    if openwave_code_execution::LocalExecutionProvider::availability().is_ok() {
+        assert_eq!(initial["provider"], "local");
+    } else {
+        assert!(initial["provider"].is_null());
+    }
     assert_eq!(
         initial["timeout_ms"],
         crate::code_execution::DEFAULT_TIMEOUT_MS
