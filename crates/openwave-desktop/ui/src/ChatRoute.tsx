@@ -74,6 +74,7 @@ import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
 import { useChatFolderAttachments } from "./useChatFolderAttachments";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
+import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
 
 let msgSeq = 0;
 
@@ -288,9 +289,18 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     composerDraftActions.setDraft(chatId, next);
   }
 
-  const voice = useVoiceComposer((audio) => client.transcribeVoice(audio), (transcript) => {
-    setComposerDraft(appendTranscript(draftRef.current, transcript));
-  });
+  const voice = useVoiceComposer(
+    (audio) => client.transcribeVoice(audio),
+    (transcript) => setComposerDraft(appendTranscript(draftRef.current, transcript)),
+    undefined,
+    async () => {
+      const info = await useVoiceInputStore.getState().load(client);
+      if (voiceSelectionReady(info)) return true;
+      const path: string = "/settings/voice-transcription";
+      await navigate({ to: path });
+      return false;
+    },
+  );
 
   function setComposerFiles(
     update: (current: readonly ImportedDocument[]) => ImportedDocument[],

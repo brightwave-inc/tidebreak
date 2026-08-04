@@ -288,6 +288,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            cmake \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -378,7 +379,7 @@ jobs:
       - name: Install headless system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mold
+          sudo apt-get install -y --no-install-recommends cmake mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}

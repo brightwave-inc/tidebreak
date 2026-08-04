@@ -46,12 +46,17 @@ export async function renderWithRouter(
     path: "web-search",
     component: () => <>{ui}</>,
   });
+  const voiceSettingsRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: "voice-transcription",
+    component: () => <>{ui}</>,
+  });
 
   const router = createRouter({
     routeTree: rootRoute.addChildren([
       homeRoute,
       chatRoute,
-      settingsRoute.addChildren([webSearchSettingsRoute]),
+      settingsRoute.addChildren([webSearchSettingsRoute, voiceSettingsRoute]),
     ]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });

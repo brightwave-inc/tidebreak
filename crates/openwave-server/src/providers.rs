@@ -324,7 +324,7 @@ impl ProviderCredential {
     }
 
     /// The raw service-account key file, if this credential carries one.
-    fn as_service_account(&self) -> Option<&str> {
+    pub(crate) fn as_service_account(&self) -> Option<&str> {
         match self {
             Self::ServiceAccount { json } => Some(json),
             Self::ApiKey { .. } | Self::Oauth {} => None,

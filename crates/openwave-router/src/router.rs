@@ -72,6 +72,13 @@ impl VertexRoute {
             credential_fingerprint,
         }
     }
+
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+    pub fn location(&self) -> &str {
+        &self.location
+    }
 }
 
 impl std::fmt::Debug for VertexRoute {

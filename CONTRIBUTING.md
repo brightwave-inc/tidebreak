@@ -15,6 +15,8 @@ design before large changes.
 
 ## Development
 
+Desktop builds require CMake to compile the pinned whisper.cpp local voice engine (`brew install cmake` on macOS; install the `cmake` package on Linux).
+
 ```sh
 # Run the desktop app: installs the UI dependencies, then opens the window.
 # Arguments are forwarded to `cargo tauri dev`.

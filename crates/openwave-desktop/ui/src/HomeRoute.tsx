@@ -38,6 +38,7 @@ import { WelcomeState } from "./WelcomeState";
 import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
+import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
 
 const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
@@ -56,10 +57,21 @@ export function HomeRoute() {
   const draft = useComposerDraft(HOME_DRAFT_KEY);
   const setDraft = (text: string) =>
     composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
-  const voice = useVoiceComposer((audio) => client.transcribeVoice(audio), (transcript) => {
-    const current = useComposerDrafts.getState().drafts[HOME_DRAFT_KEY] ?? "";
-    setDraft(appendTranscript(current, transcript));
-  });
+  const voice = useVoiceComposer(
+    (audio) => client.transcribeVoice(audio),
+    (transcript) => {
+      const current = useComposerDrafts.getState().drafts[HOME_DRAFT_KEY] ?? "";
+      setDraft(appendTranscript(current, transcript));
+    },
+    undefined,
+    async () => {
+      const info = await useVoiceInputStore.getState().load(client);
+      if (voiceSelectionReady(info)) return true;
+      const path: string = "/settings/voice-transcription";
+      await navigate({ to: path });
+      return false;
+    },
+  );
   const [error, setError] = useState<string | null>(null);
   const newChat = useNewChatSettings();
   // What the pickers show and the created chat will get: this visit's picks

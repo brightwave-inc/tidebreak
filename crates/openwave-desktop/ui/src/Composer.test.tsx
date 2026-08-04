@@ -157,9 +157,25 @@ describe("Composer", () => {
     );
 
     expect(markup).toContain('placeholder="Transcribing…"');
-    expect(markup).toContain("Transcribing…");
+    expect(markup).toContain('placeholder="Transcribing…"');
     expect(markup).toContain('aria-label="Transcribing voice recording"');
+    expect(markup).toContain("lucide-mic");
+    expect(markup).not.toContain("lucide-loader-circle");
     expect(markup).not.toContain('<textarea disabled=""');
+  });
+
+  it("keeps the mic active while requesting and disables it only while transcribing", () => {
+    const requesting = renderToStaticMarkup(
+      <Composer activeTurnId={null} busy={false} cancelError={null} cancelPending={false} disabled={false} draft="" voice={{ available: true, state: "requesting", error: null, onStart: vi.fn(), onStop: vi.fn() }} onDraftChange={vi.fn()} onSend={noop} onSteer={noop} onStop={noop} resetKey="chat-1" steerError={null} steerPending={false} steerStatus={null} />,
+    );
+    const transcribing = renderToStaticMarkup(
+      <Composer activeTurnId={null} busy={false} cancelError={null} cancelPending={false} disabled={false} draft="" voice={{ available: true, state: "transcribing", error: null, onStart: vi.fn(), onStop: vi.fn() }} onDraftChange={vi.fn()} onSend={noop} onSteer={noop} onStop={noop} resetKey="chat-1" steerError={null} steerPending={false} steerStatus={null} />,
+    );
+    expect(requesting).toContain('aria-label="Waiting for microphone permission"');
+    expect(requesting).not.toContain('aria-label="Waiting for microphone permission" disabled=""');
+    expect(requesting).toContain("lucide-mic");
+    expect(transcribing).toContain('aria-label="Transcribing voice recording" disabled=""');
+    expect(transcribing).toContain("lucide-mic");
   });
 
   it("keeps one action slot and presents the stop control during a turn", () => {

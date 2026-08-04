@@ -160,6 +160,52 @@ impl GeminiProvider {
             }
         }
     }
+
+    pub async fn transcribe_audio(
+        &self,
+        model: &str,
+        content_type: &str,
+        audio_base64: &str,
+    ) -> Result<String> {
+        let endpoint = self
+            .endpoint(model)?
+            .replace(":streamGenerateContent?alt=sse", ":generateContent");
+        let body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": "Transcribe this audio verbatim. Return only the transcript text."},
+                    {"inlineData": {"mimeType": content_type, "data": audio_base64}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0}
+        });
+        let request = self
+            .client
+            .post(endpoint)
+            .header("content-type", "application/json")
+            .json(&body);
+        let request = match &self.auth {
+            GeminiAuth::ApiKey(api_key) => request.header("x-goog-api-key", api_key),
+            GeminiAuth::Bearer(source) => request.bearer_auth(source.bearer_token().await?),
+        };
+        let response = request.send().await.map_err(|_| {
+            AgentError::Provider("gemini audio transcription request failed".into())
+        })?;
+        if !response.status().is_success() {
+            return Err(AgentError::Provider(format!(
+                "gemini audio transcription returned {}",
+                response.status().as_u16()
+            )));
+        }
+        let body: Value = response.json().await.map_err(|_| {
+            AgentError::Provider("gemini returned an invalid audio transcription response".into())
+        })?;
+        body.pointer("/candidates/0/content/parts/0/text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| AgentError::Provider("gemini returned no audio transcript".into()))
+    }
 }
 
 fn requires_global_vertex(model: &str) -> bool {
