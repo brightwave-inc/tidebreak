@@ -1235,9 +1235,12 @@ async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
     );
     assert_eq!(
         snapshot.get("terminal_text"),
-        Some(&serde_json::json!(format!(
-            "Sandbox task failed (sandbox_transport_failed): {raw_detail}"
-        )))
+        Some(&serde_json::json!(
+            "Sandbox task failed (sandbox_transport_failed)"
+        ))
     );
     assert!(snapshot.get("last_error_detail").is_none());
+    assert!(!serde_json::to_string(snapshot)
+        .unwrap()
+        .contains(raw_detail));
 }

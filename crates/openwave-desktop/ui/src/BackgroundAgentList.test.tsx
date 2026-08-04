@@ -63,7 +63,7 @@ describe("BackgroundAgentList", () => {
 
   it("shows a terminal failure error", () => {
     const failed = run("run-failed", "call-failed", "failed");
-    failed.terminal_text = "Sandbox task failed (provider_error): request timed out";
+    failed.terminal_text = "Sandbox task failed (provider_error)";
     const markup = renderToStaticMarkup(
       <BackgroundAgentList
         spawns={[{ callId: "call-failed", status: "completed" }]}
@@ -77,7 +77,7 @@ describe("BackgroundAgentList", () => {
     );
 
     expect(markup).toContain("Error:");
-    expect(markup).toContain("request timed out");
+    expect(markup).toContain("Sandbox task failed (provider_error)");
   });
 
   it("shows a skeleton as soon as a spawn is visible but not durable yet", () => {

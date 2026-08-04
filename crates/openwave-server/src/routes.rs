@@ -2406,13 +2406,16 @@ pub async fn list_agent_runs(
     let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
-        let terminal_text = if run.status.is_terminal() {
-            store
+        let terminal_text = match run.status {
+            AgentRunStatus::Completed | AgentRunStatus::Cancelled => store
                 .get_agent_run_result(run.id)
                 .await?
-                .map(|result| result.text)
-        } else {
-            None
+                .map(|result| result.text),
+            AgentRunStatus::Failed => run
+                .last_error_code
+                .as_deref()
+                .map(|code| format!("Sandbox task failed ({code})")),
+            _ => None,
         };
         let activity = if run.tier == AgentRunTier::Background {
             let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
