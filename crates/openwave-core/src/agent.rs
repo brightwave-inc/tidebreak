@@ -8850,11 +8850,16 @@ mod tests {
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2, "the same model step is retried once");
+        let request_tokens = {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2, "the same model step is retried once");
+            [
+                context::estimate_transcript_tokens(&requests[0].messages),
+                context::estimate_transcript_tokens(&requests[1].messages),
+            ]
+        };
         assert!(
-            context::estimate_transcript_tokens(&requests[1].messages)
-                < context::estimate_transcript_tokens(&requests[0].messages),
+            request_tokens[1] < request_tokens[0],
             "the retry uses the next reduction level"
         );
         assert_eq!(
