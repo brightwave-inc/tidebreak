@@ -2170,7 +2170,12 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
         .unwrap();
     migration::Migrator::up(&conn, Some(5)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
-    let chat = sample_chat();
+    // The legacy insert below predates the per-chat network policy, so the
+    // migrated row reads back Off — preserved, not today's new-chat default.
+    let chat = Chat {
+        network_policy: crate::model::NetworkPolicy::Off,
+        ..sample_chat()
+    };
     create_chat_before_agent_run_split(&store, &chat).await;
 
     migration::Migrator::up(&conn, None).await.unwrap();
@@ -2719,7 +2724,12 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
         .unwrap();
     migration::Migrator::up(&conn, Some(12)).await.unwrap();
     let store = DbStore { conn: conn.clone() };
-    let chat = sample_chat();
+    // The legacy insert below predates the per-chat network policy, so the
+    // migrated row reads back Off — preserved, not today's new-chat default.
+    let chat = Chat {
+        network_policy: crate::model::NetworkPolicy::Off,
+        ..sample_chat()
+    };
     create_chat_before_agent_run_split(&store, &chat).await;
 
     migration::Migrator::up(&conn, None).await.unwrap();
