@@ -256,9 +256,30 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   const publish = workflows["publish-sandbox-image.yml"];
   assert.ok(publish);
 
-  // Only version tags and manual dispatch publish; a pull request never can.
-  assert.match(publish, /^on:\n  push:\n    tags: \["v\*"\]\n  workflow_dispatch:/m);
+  // Version tags, main pushes (scoped in-workflow to the image inputs), the
+  // weekly patch-flush schedule, and manual dispatch publish; a pull request
+  // never can.
+  assert.match(
+    publish,
+    /^on:\n  push:\n    tags: \["v\*"\]\n    branches: \[main\]\n  schedule:\n(?:    #.*\n)*    - cron: "43 4 \* \* 4"\n  workflow_dispatch:/m,
+  );
   assert.doesNotMatch(publish, /^\s*pull_request(?:_target)?:/m);
+
+  // A main push publishes only when the image inputs changed; the scope lives
+  // in the resolve job (an `on.push.paths` filter would also gate the tag
+  // trigger).
+  const resolve = workflowJob(publish, "resolve");
+  assert.match(
+    resolve,
+    /crates\/openwave-sandbox-agent\/\*\|scripts\/exec-documents\/\*\|\.github\/workflows\/publish-sandbox-image\.yml/,
+  );
+
+  // Non-release rebuilds mint tags that can never collide with a release tag
+  // (they never start with `v`) and are unique per run; both schemes are
+  // validated before anything builds.
+  assert.match(resolve, /main-\$\(date -u \+%Y%m%d\)-\$\{GITHUB_SHA:0:7\}-r\$\{GITHUB_RUN_NUMBER\}/);
+  assert.match(resolve, /\^main-\[0-9\]\{8\}-\[0-9a-f\]\{7\}-r\[0-9\]\+\$/);
+  assert.match(resolve, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+/);
 
   // The default token with packages:write is the whole credential surface —
   // publishing must not grow a dependency on repository secrets (that set
@@ -286,6 +307,50 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
     /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/openwave-sandbox-agent-documents$/m,
   );
   assert.match(publish, /PUBLISHED_IMAGE_DIGEST/);
+});
+
+test("sandbox images are scanned before push and the pin loop never touches main", () => {
+  const publish = workflows["publish-sandbox-image.yml"];
+  const build = workflowJob(publish, "build");
+  const pin = workflowJob(publish, "pin");
+
+  // The scanner is a checksum-pinned binary release, not a third-party
+  // action, and it runs between build and push on both variants.
+  assert.match(build, /trivy_\$\{TRIVY_VERSION\}_\$\{asset\}\.tar\.gz/);
+  assert.match(build, /sha256sum --check/);
+  assert.match(publish, /^  TRIVY_VERSION: \d+\.\d+\.\d+$/m);
+  const scanIndex = build.indexOf("Scan both variants before push");
+  assert.notEqual(scanIndex, -1);
+  assert.ok(
+    build.indexOf("Build both image variants") < scanIndex &&
+      scanIndex < build.indexOf("Push per-architecture tags"),
+    "the scan must gate the per-arch push",
+  );
+
+  // Policy: the run summary carries the full all-severities report, but the
+  // publish fails only on fixable CRITICAL vulnerabilities or any secret. A
+  // broader gate would drown in LibreOffice CVE noise and be ignored.
+  assert.match(
+    build,
+    /trivy image --timeout 15m --scanners vuln,secret \\\n\s+--format table --output "\$report" "\$image"/,
+  );
+  assert.match(
+    build,
+    /trivy image --timeout 15m --scanners vuln \\\n\s+--severity CRITICAL --ignore-unfixed --exit-code 1 "\$image"/,
+  );
+  assert.match(
+    build,
+    /trivy image --timeout 15m --scanners secret --exit-code 1 "\$image"/,
+  );
+
+  // The pin job proposes a PR from its automation branch with the workflow's
+  // own token; it must never push to main, and the write scopes stay confined
+  // to that job.
+  assert.match(pin, /PIN_BRANCH: automation\/sandbox-image-pin/);
+  assert.match(pin, /git push --force origin "HEAD:refs\/heads\/\$PIN_BRANCH"/);
+  assert.doesNotMatch(pin, /git push[^\n]*(?:origin main|HEAD:main|refs\/heads\/main)/);
+  assert.match(pin, /^    permissions:\n      contents: write\n      pull-requests: write\n      packages: read$/m);
+  assert.equal(publish.match(/contents: write/g)?.length, 1);
 });
 
 test("release builds use the trusted shared main cache scope", () => {
