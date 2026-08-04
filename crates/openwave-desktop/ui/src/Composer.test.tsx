@@ -138,6 +138,12 @@ describe("Composer", () => {
         cancelPending={false}
         disabled={false}
         draft="Existing draft"
+        files={{
+          items: [],
+          attaching: false,
+          onAttach: vi.fn(),
+          onRemove: vi.fn(),
+        }}
         voice={{
           available: true,
           state: "transcribing",
@@ -157,11 +163,17 @@ describe("Composer", () => {
     );
 
     expect(markup).toContain('placeholder="Transcribing…"');
-    expect(markup).toContain('placeholder="Transcribing…"');
     expect(markup).toContain('aria-label="Transcribing voice recording"');
     expect(markup).toContain("lucide-mic");
     expect(markup).not.toContain("lucide-loader-circle");
     expect(markup).not.toContain('<textarea disabled=""');
+    // The mic belongs with send, not with the attachment controls.
+    expect(markup.indexOf("lucide-mic")).toBeLessThan(
+      markup.indexOf('aria-label="Send message"'),
+    );
+    expect(markup.indexOf("lucide-paperclip")).toBeLessThan(
+      markup.indexOf("lucide-mic"),
+    );
   });
 
   it("keeps the mic active while requesting and disables it only while transcribing", () => {

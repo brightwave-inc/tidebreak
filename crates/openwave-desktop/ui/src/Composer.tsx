@@ -381,7 +381,10 @@ export function Composer({
       )}
       <textarea
         ref={textareaRef}
-        className="w-full resize-none border-none bg-transparent px-1 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-0"
+        className={cn(
+          "w-full resize-none border-none bg-transparent px-1 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-0",
+          voiceWorking && "placeholder:italic",
+        )}
         value={draft}
         placeholder={
           voice?.state === "requesting" || voice?.state === "recording"
@@ -448,6 +451,11 @@ export function Composer({
             </WithTooltip>
           )}
           {modelMenu}
+        </div>
+        <div className="flex items-center gap-2">
+          {/* The mic sits immediately before send: both act on the draft, so
+              they belong in the same cluster, apart from the attachment and
+              model controls that only set the turn up. */}
           {voice?.available && (
             <WithTooltip
               label={
@@ -462,6 +470,11 @@ export function Composer({
                 type="button"
                 variant={voice.state === "idle" ? "outline" : "default"}
                 size="icon-8"
+                className={cn(
+                  "shrink-0",
+                  voice.state !== "idle" &&
+                    "bg-foreground text-background hover:bg-foreground/90",
+                )}
                 aria-label={
                   voice.state === "recording"
                     ? "Stop voice recording"
@@ -483,8 +496,6 @@ export function Composer({
               </Button>
             </WithTooltip>
           )}
-        </div>
-        <div className="flex items-center gap-2">
           {active ? (
             <>
               {(hasDraft || steerPending) && (
