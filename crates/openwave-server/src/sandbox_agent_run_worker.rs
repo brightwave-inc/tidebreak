@@ -529,8 +529,11 @@ impl SandboxAgentRunWorker {
                 chat.reasoning_effort,
             )?;
         } else {
-            agent_config.model = model;
-            agent_config.reasoning_effort = chat.reasoning_effort;
+            crate::providers::apply_free_form_model(
+                &mut agent_config,
+                model,
+                chat.reasoning_effort,
+            )?;
         }
         let request = sandbox_request(
             &agent_config,

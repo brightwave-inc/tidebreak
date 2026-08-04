@@ -736,8 +736,11 @@ impl TurnWorker {
             if let Some(policy) = model_policy.as_ref() {
                 crate::providers::apply_model_policy(&mut config, policy, chat.reasoning_effort)?;
             } else {
-                config.model = turn.model.clone();
-                config.reasoning_effort = chat.reasoning_effort;
+                crate::providers::apply_free_form_model(
+                    &mut config,
+                    turn.model.clone(),
+                    chat.reasoning_effort,
+                )?;
             }
             config.utility_model = utility_model.clone();
             config.max_steps = remaining_steps;

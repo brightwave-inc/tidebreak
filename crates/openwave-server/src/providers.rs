@@ -561,6 +561,47 @@ pub fn apply_model_policy(
     Ok(())
 }
 
+/// Resolve a selection against the curated registry alone — no store reads and
+/// no legacy free-form fallback.
+///
+/// A selection key names its provider outright; a bare id resolves only when
+/// exactly one curated row answers to it, so an ambiguous name is left to the
+/// caller rather than routed by guesswork.
+pub fn curated_model_policy(value: &str) -> Option<ResolvedModelPolicy> {
+    if let Some((provider, id)) = model_registry::parse_selection_key(value) {
+        return model_registry::find_for(provider, id).map(ResolvedModelPolicy::curated);
+    }
+    let mut owners = model_registry::models_named(value);
+    let spec = owners.next()?;
+    owners
+        .next()
+        .is_none()
+        .then(|| ResolvedModelPolicy::curated(spec))
+}
+
+/// Configure a turn whose selection did not resolve through the host registry.
+///
+/// Embedders that inject a provider keep their free-form model contract, but a
+/// model the registry already owns still runs under its own policy: without the
+/// provider hint the router may serve it from any OpenAI-compatible route, and
+/// without the policy's reasoning flags a stored effort is shaped into a request
+/// the endpoint never agreed to take. An id nothing in the registry claims keeps
+/// the raw model, and its effort stays off the wire the way it already does —
+/// every adapter sends the parameter only for a config that claims a reasoning
+/// model, which no unregistered selection ever sets on its own.
+pub fn apply_free_form_model(
+    config: &mut AgentConfig,
+    model: String,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Result<()> {
+    if let Some(policy) = curated_model_policy(&model) {
+        return apply_model_policy(config, &policy, reasoning_effort);
+    }
+    config.model = model;
+    config.reasoning_effort = reasoning_effort;
+    Ok(())
+}
+
 /// Public catalog row plus current provider readiness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogModel {
@@ -1616,6 +1657,48 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// Repro: a chat pinned to `openai::gpt-5.6-sol` reached the
+    /// OpenAI-compatible `/v1/chat/completions` route with `reasoning_effort`
+    /// attached and the vendor refused the request. The free-form turn path
+    /// assigned the raw model and effort without applying the registry policy,
+    /// so the request carried no provider hint and the router was free to serve
+    /// a model the registry already owns from any OpenAI-compatible route.
+    #[test]
+    fn a_registered_model_keeps_its_policy_on_the_free_form_path() {
+        let mut config = AgentConfig::default();
+        apply_free_form_model(
+            &mut config,
+            "openai::gpt-5.6-sol".into(),
+            Some(ReasoningEffort::Max),
+        )
+        .unwrap();
+        assert_eq!(config.provider, Some(ProviderId::new("openai")));
+        assert_eq!(config.model, "gpt-5.6-sol");
+        assert!(config.reasoning_model);
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Max));
+
+        // A bare curated id resolves the same way, and the effort is clamped to
+        // what that generation actually takes.
+        let mut config = AgentConfig::default();
+        apply_free_form_model(&mut config, "gpt-5.5".into(), Some(ReasoningEffort::Max)).unwrap();
+        assert_eq!(config.provider, Some(ProviderId::new("openai")));
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::XHigh));
+
+        // An id the registry does not claim keeps the free-form contract, and
+        // its effort stays off the wire because nothing declared the model a
+        // reasoning model.
+        let mut config = AgentConfig::default();
+        apply_free_form_model(
+            &mut config,
+            "local-model".into(),
+            Some(ReasoningEffort::High),
+        )
+        .unwrap();
+        assert_eq!(config.provider, None);
+        assert_eq!(config.model, "local-model");
+        assert!(!config.reasoning_model);
     }
 
     #[test]
