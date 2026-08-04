@@ -24,9 +24,13 @@ run-name: >-
 #   2. Merging that PR touches crates/openwave-sandbox-agent/e2b/, which
 #      triggers this workflow.
 #   3. This workflow builds the template under the new alias and publishes it.
-#   4. Its `pin` job opens a PR bumping `E2B_TEMPLATE` in e2b.rs to that alias.
-#      That pin moves last on purpose: pointing the client at an alias that is
-#      not published yet drops every E2B user to the fallback.
+#   4. Its `pin` job opens a PR bumping `E2B_TEMPLATE` in e2b.rs to the
+#      *template ID* the alias resolves to. The ID rather than the alias:
+#      E2B resolves a custom template's alias only inside the owning team, so
+#      an alias pin works from the OpenWave account and 404s from every other
+#      one (verified 2026-08-04). The pin moves last on purpose: pointing the
+#      client at a template that is not published yet drops every E2B user to
+#      the fallback.
 #
 # Idempotence is the whole design. The alias is version-suffixed, so a run
 # whose alias is already published is a no-op — re-runs, README edits, and
@@ -98,6 +102,9 @@ jobs:
       cpu_count: ${{ steps.definition.outputs.cpu_count }}
       memory_mb: ${{ steps.definition.outputs.memory_mb }}
       publish: ${{ steps.state.outputs.publish }}
+      # The template ID the alias already resolves to, when it does. Empty on
+      # a 404; the publish job's own verification supplies it in that case.
+      template_id: ${{ steps.state.outputs.template_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -188,9 +195,11 @@ jobs:
             "$E2B_API_BASE/templates/aliases/$ALIAS")"
 
           publish=false
+          template_id=""
           case "$status" in
             200)
               public="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1])).get("public")).lower())' "$body")"
+              template_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("templateID", ""))' "$body")"
               if [[ "$public" == "true" ]]; then
                 if [[ "$FORCE_REBUILD" == "true" ]]; then
                   echo "::notice::$ALIAS is already public; rebuilding because force_rebuild was requested."
@@ -222,6 +231,7 @@ jobs:
               ;;
           esac
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "template_id=$template_id" >> "$GITHUB_OUTPUT"
 
   publish:
     name: build and publish the template
@@ -236,6 +246,7 @@ jobs:
       contents: read
     outputs:
       published: ${{ steps.verify.outputs.published }}
+      template_id: ${{ steps.verify.outputs.template_id }}
     env:
       ALIAS: ${{ needs.resolve.outputs.alias }}
       E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
@@ -270,7 +281,8 @@ jobs:
             --memory-mb "$MEMORY_MB"
 
       # Makes the template public, which is the entire point: a published
-      # template is creatable by alias from any E2B account, so a user who has
+      # template is creatable from any E2B account — by its template ID; the
+      # alias only resolves inside the OpenWave team — so a user who has
       # pasted nothing but their own API key gets the documents image.
       - name: Publish the template
         working-directory: ${{ env.TEMPLATE_DIR }}
@@ -304,11 +316,14 @@ jobs:
               sys.exit(f"the alias resolves but is not public: {alias}")
           print(f"published template {alias['templateID']}")
           EOF
+          template_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["templateID"])' "$body")"
           echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "template_id=$template_id" >> "$GITHUB_OUTPUT"
           {
             echo "## Published E2B template"
             echo
             echo "- Alias: \`$ALIAS\`"
+            echo "- Template ID: \`$template_id\`"
             echo "- Public: yes"
             echo
             echo "Cross-account resolution is not proven here — see"
@@ -338,6 +353,9 @@ jobs:
       pull-requests: write
     env:
       ALIAS: ${{ needs.resolve.outputs.alias }}
+      # From whichever job actually resolved the alias: `publish` when this
+      # run built the template, `resolve` when it was already public.
+      TEMPLATE_ID: ${{ needs.publish.outputs.template_id || needs.resolve.outputs.template_id }}
       PIN_BRANCH: automation/e2b-template-pin
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -345,8 +363,12 @@ jobs:
         with:
           ref: main
 
-      - name: Point the client at the published alias
+      - name: Point the client at the published template
         run: |
+          if [[ -z "$TEMPLATE_ID" ]]; then
+            echo "No template ID reached the pin job; refusing to guess." >&2
+            exit 1
+          fi
           python3 - <<'EOF'
           import os
           import re
@@ -354,6 +376,7 @@ jobs:
 
           directory = os.environ["TEMPLATE_DIR"]
           alias = os.environ["ALIAS"]
+          template_id = os.environ["TEMPLATE_ID"]
 
           # The client's doc comment names the exact image the alias was built
           # from. That ref lives in the template Dockerfile, which the image
@@ -381,7 +404,12 @@ jobs:
           pins = {
               rf'(?m)^(/// `{re.escape(repository)}:)[^`\n]*(`)$': tag,
               r'(?m)^(/// \(`)sha256:[0-9a-f]{64}(`\),)$': digest,
-              r'(?m)^(const E2B_TEMPLATE: &str = ")[^"\n]*(";)$': alias,
+              # The alias sits alone on its doc-comment line exactly so this
+              # rewrite has one unambiguous target.
+              r'(?m)^(/// `)[a-z0-9][a-z0-9._-]*(`)$': alias,
+              # The constant carries the template ID — the only form E2B
+              # resolves from outside the OpenWave team.
+              r'(?m)^(const E2B_TEMPLATE: &str = ")[^"\n]*(";)$': template_id,
           }
           for pattern, value in pins.items():
               source, replaced = re.subn(
@@ -412,14 +440,17 @@ jobs:
           cat > "$body_file" <<EOF
           Automated follow-up from an E2B template publish: \`$ALIAS\` is now built and
           public on E2B, so \`E2B_TEMPLATE\` in
-          \`crates/openwave-code-execution/src/e2b.rs\` can point at it. Until this
-          lands, E2B sandboxes still resolve the previous alias.
+          \`crates/openwave-code-execution/src/e2b.rs\` can point at it — by its
+          template ID \`$TEMPLATE_ID\`, because E2B resolves a custom template's
+          alias only inside the owning team. Until this lands, E2B sandboxes still
+          resolve the previous pin.
 
           The doc comment above the constant is refreshed from
           \`crates/openwave-sandbox-agent/e2b/e2b.Dockerfile\`, so the image tag and
           digest it names stay the ones the template was actually built from.
 
           - Alias: \`$ALIAS\`
+          - Template ID: \`$TEMPLATE_ID\`
           - Publish run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
 
           This PR was opened with the workflow's own GITHUB_TOKEN, and GitHub does not

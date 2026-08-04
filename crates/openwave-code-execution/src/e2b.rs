@@ -33,19 +33,25 @@ const E2B_SANDBOX_BASE: &str = "https://sandbox.e2b.app";
 /// The published OpenWave documents template every sandbox is created from.
 ///
 /// E2B provisions from account-registered *templates*, not arbitrary OCI refs,
-/// so the image reaches E2B as a template published from the OpenWave account —
-/// public, and therefore usable by any E2B account by alias, exactly like E2B's
-/// own `code-interpreter-v1`. A user who pastes an API key gets the documents
-/// image with no template setup of their own.
+/// so the image reaches E2B as a template published from the OpenWave account.
+/// Publishing makes it creatable from any E2B account — but only by this
+/// opaque template *ID*. E2B resolves a custom template's human alias inside
+/// the owning team alone; only E2B's own base templates, like
+/// `code-interpreter-v1`, resolve by alias from any account (verified against
+/// api.e2b.app, 2026-08-04). Pinning the alias here is what silently dropped
+/// every account but OpenWave's own to the fallback image.
 ///
-/// The alias carries the image version so the pin is visible in one place. It
-/// is currently built from
+/// The ID is what the published, version-suffixed alias — kept on its own
+/// line so the publish workflow can rewrite both together —
+/// `openwave-documents-v0-26-0`
+/// resolves to. It is currently built from
 /// `ghcr.io/brightwave-inc/openwave-sandbox-agent-documents:v0.26.0`
 /// (`sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2`),
 /// the same ref recorded in `crates/openwave-sandbox-agent/e2b/e2b.Dockerfile`.
-/// Publishing a new image version means publishing a new alias and moving this
-/// constant with it — that directory's README has the procedure.
-const E2B_TEMPLATE: &str = "openwave-documents-v0-26-0";
+/// Publishing a new image version publishes a new alias with a new ID, and the
+/// publish workflow's pin PR moves this constant with it — that directory's
+/// README has the procedure.
+const E2B_TEMPLATE: &str = "yarxjy39quzg6wm78u1a";
 
 /// E2B's own public code-interpreter template, used only when the OpenWave
 /// template cannot be resolved. Degraded but working: document skills fall back
@@ -1538,8 +1544,9 @@ mod tests {
         let create = state.create_body.lock().unwrap().clone().unwrap();
         // Spelled out rather than compared to the constant: reverting the
         // default to E2B's public template silently costs every document run
-        // an in-sandbox dependency install.
-        assert_eq!(create["templateID"], "openwave-documents-v0-26-0");
+        // an in-sandbox dependency install, and moving it back to the human
+        // alias breaks every account but the one that published the template.
+        assert_eq!(create["templateID"], "yarxjy39quzg6wm78u1a");
         assert_eq!(create["metadata"]["openwave_workspace_id"], "workspace-1");
         assert_eq!(create["secure"], true);
         assert_eq!(create["allow_internet_access"], true);
