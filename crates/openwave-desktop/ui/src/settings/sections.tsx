@@ -2,6 +2,7 @@ import type { ComponentType, FunctionComponent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   Blocks,
+  Bot,
   Cpu,
   Globe,
   KeyRound,
@@ -17,6 +18,7 @@ import { useApp } from "@/AppContext";
 import { useManagedPolicy } from "@/managedPolicy";
 import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
+import { AgentsPanel } from "./AgentsPanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
@@ -91,6 +93,11 @@ function CodeExecutionSection() {
   return <CodeExecutionPanel client={client} />;
 }
 
+function AgentsSection() {
+  const { client } = useApp();
+  return <AgentsPanel client={client} />;
+}
+
 function ConnectedAppsSection() {
   const { client } = useApp();
   const { managed } = useManagedPolicy();
@@ -155,6 +162,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     unmanagedHidden: true,
   },
   { path: "models", label: "Models", icon: Cpu, Component: ModelsSection },
+  { path: "agents", label: "Agents", icon: Bot, Component: AgentsSection },
   {
     path: "voice-transcription",
     label: "Voice input",

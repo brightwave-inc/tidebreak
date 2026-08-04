@@ -73,6 +73,7 @@ async fn delegated_sandbox(
             model_steps: 1,
             usage: Usage::default(),
         },
+        max_active_background_agents: AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         execution_location: crate::AgentRunExecutionLocation::InProcess,
     };
     let child = match store

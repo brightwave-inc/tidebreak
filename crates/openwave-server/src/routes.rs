@@ -54,6 +54,8 @@ use crate::web_search::{
     WebSearchCredentialsInfo,
 };
 
+pub(crate) const MAX_ACTIVE_BACKGROUND_AGENTS_SETTING: &str = "agents.max_active_background_agents";
+
 mod app_grant;
 mod app_invoke;
 mod app_library;
@@ -529,6 +531,8 @@ pub struct Settings {
     /// exist yet can show what `POST /chats` will seed.
     #[serde(default)]
     pub chat_defaults: StickyChatDefaults,
+    /// Maximum nonterminal spawned agents allowed in one chat.
+    pub max_active_background_agents: u32,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -556,6 +560,8 @@ pub struct StickyChatDefaults {
 pub struct SettingsUpdate {
     #[serde(default, deserialize_with = "double_option")]
     pub model: Option<Option<String>>,
+    #[serde(default)]
+    pub max_active_background_agents: Option<u32>,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
@@ -574,6 +580,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
         chat_defaults: read_sticky_chat_defaults(&state).await?,
+        max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
     }))
 }
 
@@ -601,11 +608,38 @@ pub async fn put_settings(
             model_roles::write_selection(&*state.store, ModelRole::Chat, Some(&model)).await?;
         }
     }
+    if let Some(limit) = body.max_active_background_agents {
+        if limit == 0 || limit > AgentRun::MAX_CONCURRENCY_LIMIT {
+            return Err(ServerError::bad_request(format!(
+                "max_active_background_agents must be in 1..={}",
+                AgentRun::MAX_CONCURRENCY_LIMIT
+            )));
+        }
+        state
+            .store
+            .set_setting(
+                MAX_ACTIVE_BACKGROUND_AGENTS_SETTING,
+                &serde_json::json!(limit),
+            )
+            .await?;
+    }
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
         chat_defaults: read_sticky_chat_defaults(&state).await?,
+        max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
     }))
+}
+
+pub(crate) async fn read_max_active_background_agents(
+    store: &dyn Store,
+) -> openwave_core::Result<u32> {
+    Ok(store
+        .get_setting(MAX_ACTIVE_BACKGROUND_AGENTS_SETTING)
+        .await?
+        .and_then(|value| serde_json::from_value::<u32>(value).ok())
+        .filter(|limit| *limit > 0 && *limit <= AgentRun::MAX_CONCURRENCY_LIMIT)
+        .unwrap_or(AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS))
 }
 
 /// `GET /web-search` — read host-owned web-search selection and readiness.

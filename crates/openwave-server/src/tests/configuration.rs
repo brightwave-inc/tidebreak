@@ -60,6 +60,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(response.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(response).await;
     assert!(settings["model"].is_null());
+    assert_eq!(settings["max_active_background_agents"], 5);
 
     // PUT a model, and it comes back.
     let response = router
@@ -71,7 +72,11 @@ async fn settings_default_then_update_roundtrips() {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"model": "claude-x"}).to_string(),
+                    serde_json::json!({
+                        "model": "claude-x",
+                        "max_active_background_agents": 7
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -80,6 +85,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(response.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
+    assert_eq!(settings["max_active_background_agents"], 7);
 
     // GET reflects the update.
     let response = router
@@ -94,6 +100,7 @@ async fn settings_default_then_update_roundtrips() {
         .unwrap();
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
+    assert_eq!(settings["max_active_background_agents"], 7);
 }
 
 async fn put_mcp_servers(

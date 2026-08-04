@@ -416,7 +416,7 @@ async fn sandbox_spawn_checkpoint_never_retrofits_a_separately_accepted_child() 
             "accepted by an older boundary",
             lease_token,
             running.steer_revision,
-            AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+            AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
             Utc::now(),
         )
         .await

@@ -2180,7 +2180,14 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
 
     migration::Migrator::up(&conn, None).await.unwrap();
 
-    assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
+    // The historical database column default remains off; changing the
+    // product default for newly created chats must not rewrite legacy rows.
+    let mut expected_chat = chat.clone();
+    expected_chat.network_policy = NetworkPolicy::Off;
+    assert_eq!(
+        store.get_chat(chat.id).await.unwrap().as_ref(),
+        Some(&expected_chat)
+    );
     let document = sample_document(None);
     store.create_document(&document).await.unwrap();
     let stored = store.get_document(document.id).await.unwrap().unwrap();
@@ -2735,7 +2742,12 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
     migration::Migrator::up(&conn, None).await.unwrap();
 
     // The conversation survives, and it can now own outputs.
-    assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
+    let mut expected_chat = chat.clone();
+    expected_chat.network_policy = NetworkPolicy::Off;
+    assert_eq!(
+        store.get_chat(chat.id).await.unwrap().as_ref(),
+        Some(&expected_chat)
+    );
     assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
     let request = crate::deliverable::CreateOutput {
         id: crate::id::OutputId::new(),

@@ -1066,8 +1066,7 @@ mod tests {
             false,
         );
 
-        // Re-pinned when #1491 made Open the default network policy for new
-        // chats: the representative prompt's network guidance moved with it.
+        // Re-pinned for the Open network default and parallel sibling spawn contract.
         assert_eq!(
             identity(&prompt),
             "foreground-v2:sha256:28043f7e84f2ef827100574ba635f534c04ad969f9e8e9b2cf534fd91ff7d664"

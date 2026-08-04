@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentEvent,
-    AgentRunCancellationReason, AgentRunId, AgentRunInboxStatus, AgentRunResultPayload,
+    AgentRun, AgentRunCancellationReason, AgentRunId, AgentRunInboxStatus, AgentRunResultPayload,
     AgentRunStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
     ApplyTurnSteerOutcome, AssistantCitationInput, BeginRootAttachmentChange,
@@ -438,6 +438,7 @@ fn postgres_spawn_checkpoint_request(
                 cache_creation_input_tokens: 1,
             },
         },
+        max_active_background_agents: AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
     }
 }
