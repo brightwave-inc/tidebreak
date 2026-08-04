@@ -197,7 +197,6 @@ type MessageListProps = {
   onLoadBackgroundAgentActivity?: (
     runId: string,
   ) => Promise<AgentActivityHistoryEntry[]>;
-  onViewBackgroundAgentOutput?: () => void;
   onOpenBackgroundAgent?: (runId: string) => void;
   busy: boolean;
   /** The live turn's stream has gone quiet — see [useStreamStalled]. */
@@ -267,7 +266,6 @@ export function MessageList({
   onRetryBackgroundAgentRuns = () => undefined,
   onCancelBackgroundAgentRun = async () => undefined,
   onLoadBackgroundAgentActivity = async () => [],
-  onViewBackgroundAgentOutput,
   onOpenBackgroundAgent,
   busy,
   streamStalled = false,
@@ -319,7 +317,6 @@ export function MessageList({
       retry: onRetryBackgroundAgentRuns,
       cancel: onCancelBackgroundAgentRun,
       loadActivity: onLoadBackgroundAgentActivity,
-      viewOutput: onViewBackgroundAgentOutput,
       open: onOpenBackgroundAgent,
     },
     retry,
@@ -537,7 +534,6 @@ export function groupMessageItems(
     retry: () => void;
     cancel: (runId: string) => Promise<void>;
     loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
-    viewOutput?: () => void;
     open?: (runId: string) => void;
   } = {
     runs: [],
@@ -652,12 +648,24 @@ export function groupMessageItems(
             onRetry={backgroundAgents.retry}
             onCancel={backgroundAgents.cancel}
             onLoadActivity={backgroundAgents.loadActivity}
-            onViewOutput={backgroundAgents.viewOutput}
             onOpen={backgroundAgents.open}
           />,
         ),
       );
     }
+
+    // The agent list below already names the delegation and every agent in it.
+    // Leaving the spawn and wait calls on the rail as well stacks a second
+    // summary of the same thing above it ("Waited for background agents and
+    // delegated N tasks"), so the phase line covers everything except them.
+    const railActivities =
+      spawns.length > 0
+        ? activities.filter(
+            (entry) =>
+              entry.name !== "spawn_sandbox_agent" &&
+              entry.name !== "wait_for_agents",
+          )
+        : activities;
 
     // The rail and every card inside carry their own boundary, so this one is
     // only a backstop for the phase's own frame.
@@ -666,7 +674,7 @@ export function groupMessageItems(
         key={`tool-activity-group-${groupIndex}`}
         fallback={<ToolActivityUnavailable />}
       >
-        <ToolActivityGroup activities={activities} groupIndex={groupIndex}>
+        <ToolActivityGroup activities={railActivities} groupIndex={groupIndex}>
           {children.length > 0 ? children : undefined}
         </ToolActivityGroup>
       </ErrorBoundary>,

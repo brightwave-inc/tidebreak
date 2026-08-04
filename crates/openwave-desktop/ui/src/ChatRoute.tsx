@@ -636,7 +636,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onSelectPrompt={setComposerDraft}
             onSend={onSend}
             onRetryTurn={retryTurn}
-            onViewOutput={() => openPanel({ type: "outputs" })}
             onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
           />
         </TranscriptVisibilityProvider>
