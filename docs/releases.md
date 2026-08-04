@@ -66,9 +66,15 @@ without asking authors to classify a PR twice:
 | `revert`   | Reverted Changes            |
 | Any `!`    | Breaking Changes            |
 
-Documentation and other maintenance-only types remain excluded. In the rendered
+Documentation and other maintenance-only types carry no `release-note:*` label
+and appear in a trailing **Maintenance** section instead — listed, not dropped,
+because a maintenance change can still matter to someone updating (a schema
+baseline rebuild, a toolchain requirement). Every merged PR is accounted for in
+the notes. In the rendered
 notes, the section heading supplies the type, so the draft formatter removes the
-redundant Conventional Commit prefix from each PR title. When a category has
+redundant Conventional Commit prefix from each PR title. Maintenance entries
+keep their full prefixes: that section mixes types, so the prefix is the
+information. When a category has
 multiple user-facing changes with the same scope, the formatter groups them
 under a third-level heading: for example, multiple `feat(desktop)` changes are
 rendered under **New Features**, then **Desktop**. A singleton scope is kept
@@ -96,9 +102,11 @@ The release-draft workflow keeps exactly one draft GitHub Release up to date:
    the next tag. The draft formatter then groups repeated scoped Conventional
    Commit titles beneath scope subheadings and keeps other entries compact at
    the end of their section. Breaking changes are always shown first.
-3. Maintenance-only PRs are omitted. The largest release effect among included
-   PRs chooses the proposed version; the category labels do not independently
-   change the version.
+3. Maintenance-only PRs land in the trailing **Maintenance** section, so every
+   merged PR is accounted for in the notes. The largest release effect among
+   all PRs chooses the proposed version; the category labels do not
+   independently change the version, and a maintenance-only release proposes a
+   patch bump.
 
 The first release has no previous published release to use as a comparison
 baseline, so Release Drafter intentionally leaves that draft as a manual

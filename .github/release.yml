@@ -1,9 +1,6 @@
 # GitHub's native "Generate release notes" button uses this configuration.
 # Keep these categories aligned with release-drafter.yml.
 changelog:
-  exclude:
-    labels:
-      - "semver:none"
   categories:
     - title: "Breaking Changes"
       labels:
@@ -23,6 +20,12 @@ changelog:
     - title: "Reverted Changes"
       labels:
         - "release-note:revert"
+    # Maintenance changes are listed, not dropped: a refactor can rebuild the
+    # local database or change build requirements, and a reader of the notes
+    # must be able to account for every merged PR.
+    - title: "Maintenance"
+      labels:
+        - "semver:none"
     - title: "Other Changes"
       labels:
         - "*"
