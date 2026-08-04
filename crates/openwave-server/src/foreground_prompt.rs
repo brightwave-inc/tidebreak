@@ -166,7 +166,7 @@ pub(crate) fn compose_for_surface(
         }
         if has("exec") {
             lines.push(
-                "- When the user needs a file they can preview or save, produce it in `output/` so it becomes a user-visible output instead of leaving it only in scratch.",
+                "- When the user needs a file they can preview or save, produce it in `output/` from an `exec` command so it becomes a user-visible output; `write_file` cannot write there.",
             );
         }
         push_section(&mut prompt, PRIVATE_SCRATCH_HEADING, &lines);
@@ -1066,10 +1066,11 @@ mod tests {
             false,
         );
 
-        // Re-pinned for the Open network default and parallel sibling spawn contract.
+        // Re-pinned for the reserved `output/` directory: outputs are produced
+        // by `exec`, never by `write_file`.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:28043f7e84f2ef827100574ba635f534c04ad969f9e8e9b2cf534fd91ff7d664"
+            "foreground-v2:sha256:0a38ffd0ca7c82c4b4079090dfb5bc03d13b3b39da9807332a6ddfb2c6bac853"
         );
     }
 }

@@ -30,6 +30,21 @@ pub(super) fn relative_path(rel: &str) -> std::result::Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+/// Whether a scratch-relative path names the published-output directory or
+/// anything inside it.
+///
+/// `output/` is not ordinary scratch: its bytes become durable, versioned
+/// outputs when an exec call's post-command scan publishes them, attributed to
+/// that call and its turn. A write that lands there without publishing anything
+/// leaves bytes for the next unrelated exec scan to publish under its own
+/// identity, so the directory is reserved from the intermediate-write API
+/// rather than allowed to misattribute a revision.
+pub(super) fn is_published_output_path(path: &Path) -> bool {
+    path.components()
+        .find(|component| !matches!(component, Component::CurDir))
+        .is_some_and(|component| component.as_os_str() == crate::EXEC_OUTPUT_DIRECTORY)
+}
+
 /// The last segment of a scratch-relative path, for a card row's name.
 ///
 /// A row leads with the file rather than the path so a column of results stays

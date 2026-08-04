@@ -14,7 +14,8 @@ pub(super) const WRITE_FILE: &str = "write_file";
 pub(super) fn read_file() -> ToolSpec {
     ToolSpec::for_args::<read_file_tool::Arguments>(
         READ_FILE,
-        "Read a UTF-8 text file, relative to the private scratch directory.",
+        "Read a UTF-8 text file, relative to the private scratch directory. Files under \
+         output/ are readable here, but only exec can write them.",
     )
 }
 
@@ -29,7 +30,10 @@ pub(super) fn write_file() -> ToolSpec {
     ToolSpec::for_args::<write_file_tool::Arguments>(
         WRITE_FILE,
         "Write a UTF-8 text file into private scratch, creating parent directories. \
-         Overwrites an existing file.",
+         Overwrites an existing file. Scratch files are intermediate work, not \
+         user-visible outputs: output/ is reserved and a write there is refused, \
+         because a user-visible output is published by saving it into output/ from \
+         an exec command.",
     )
 }
 
