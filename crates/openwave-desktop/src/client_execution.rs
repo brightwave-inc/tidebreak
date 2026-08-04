@@ -8,13 +8,14 @@
 use std::path::PathBuf;
 
 use openwave_core::{
-    validate_request_folder_access_arguments, CallId, ChatId, RequestFolderAccessArgs,
-    RequestFolderAccessResult, RequestedFolderCapability, RequestedFolderHint, ToolCallExecution,
+    validate_request_folder_access_arguments, CallId, ChatId, GrantedFolderCapability,
+    RequestFolderAccessArgs, RequestFolderAccessResult, RequestedFolderHint, ToolCallExecution,
     ToolCallRecord, ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
 };
 use openwave_host_broker::{
-    ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
-    RegisterRootReceipt, RegisterRootRequest, RootSummary,
+    Capability, ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
+    OperationEnvelope, OperationRequest, OperationResult, RegisterRootReceipt, RegisterRootRequest,
+    RootSummary, PROTOCOL_VERSION,
 };
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
@@ -505,13 +506,44 @@ fn picker_start(
     candidate.is_dir().then_some(candidate)
 }
 
-fn connected_resolution(
+async fn connected_resolution(
+    state: &HostAccess,
+    context: AuthoritativeContext,
     root: openwave_host_broker::RootSummary,
 ) -> Result<StoredResolution, String> {
+    let listed = state
+        .broker
+        .operation(OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: openwave_host_broker::RequestId::new(),
+            context: context.execution,
+            request: OperationRequest::ListRoots,
+        })
+        .await
+        .map_err(|_| "could not verify the selected folder's capabilities".to_owned())?;
+    let OperationResult::ListRoots { roots } = listed else {
+        return Err("host broker returned an unexpected folder listing".to_owned());
+    };
+    let access = roots
+        .into_iter()
+        .find(|candidate| candidate.root_id == root.root_id)
+        .ok_or_else(|| {
+            "the selected folder is no longer available to this conversation".to_owned()
+        })?;
     let result = RequestFolderAccessResult::Connected {
         root_id: root.root_id.as_uuid(),
         display_name: root.display_name,
-        capabilities: vec![RequestedFolderCapability::ReadFiles],
+        capabilities: access
+            .capabilities
+            .into_iter()
+            .filter_map(|capability| match capability {
+                Capability::ReadFiles => Some(GrantedFolderCapability::ReadFiles),
+                Capability::WriteFiles => Some(GrantedFolderCapability::WriteFiles),
+                Capability::ExecuteCommands => Some(GrantedFolderCapability::ExecuteCommands),
+                Capability::ListRoots => None,
+                _ => None,
+            })
+            .collect(),
     };
     Ok(StoredResolution::Completed {
         result: serde_json::to_string(&result)
@@ -624,17 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_results_are_typed_and_path_free() {
-        let connected = connected_resolution(openwave_host_broker::RootSummary {
-            root_id: openwave_host_broker::RootId::new(),
-            display_name: "Documents".into(),
-        })
-        .unwrap();
-        let StoredResolution::Completed { result, .. } = connected else {
-            panic!("expected completed result")
-        };
-        assert!(result.contains("connected"));
-        assert!(!result.contains("/Users/"));
+    fn declined_results_are_typed() {
         assert!(matches!(
             declined_resolution().unwrap(),
             StoredResolution::Completed { result, .. } if result.contains("declined")

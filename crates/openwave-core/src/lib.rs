@@ -109,13 +109,13 @@ pub use client_tools::{
     validate_list_connected_folders_arguments, validate_list_folder_arguments,
     validate_read_connected_file_arguments, validate_request_folder_access_arguments,
     validate_write_output_to_connected_folder_arguments,
-    write_output_to_connected_folder_tool_spec, ImportConnectedFileArgs, ImportConnectedFileResult,
-    ListConnectedFoldersArgs, ListFolderArgs, OutputWriteMode, ReadConnectedFileArgs,
-    RequestFolderAccessArgs, RequestFolderAccessResult, RequestedFolderCapability,
-    RequestedFolderHint, WriteOutputToConnectedFolderArgs, WriteOutputToConnectedFolderProposal,
-    IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
-    MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_FOLDER_ACCESS_REASON_CHARS, READ_CONNECTED_FILE_TOOL,
-    REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    write_output_to_connected_folder_tool_spec, GrantedFolderCapability, ImportConnectedFileArgs,
+    ImportConnectedFileResult, ListConnectedFoldersArgs, ListFolderArgs, OutputWriteMode,
+    ReadConnectedFileArgs, RequestFolderAccessArgs, RequestFolderAccessResult,
+    RequestedFolderCapability, RequestedFolderHint, WriteOutputToConnectedFolderArgs,
+    WriteOutputToConnectedFolderProposal, IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL,
+    LIST_FOLDER_TOOL, MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_FOLDER_ACCESS_REASON_CHARS,
+    READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
