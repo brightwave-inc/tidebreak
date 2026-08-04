@@ -616,7 +616,7 @@ fn gemini_contents(
                     }
                     parts.push(json!({
                         "functionResponse": {
-                            "id": tool_use_id,
+                            "call_id": tool_use_id,
                             "name": name,
                             "response": response,
                         },
@@ -962,6 +962,12 @@ mod tests {
         );
         assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
         assert!(body.get("temperature").is_none());
+        for unsupported in ["temperature", "topP", "topK", "candidateCount"] {
+            assert!(body["generationConfig"].get(unsupported).is_none());
+        }
+        assert!(body["generationConfig"]["thinkingConfig"]
+            .get("thinkingBudget")
+            .is_none());
         assert!(body["generationConfig"].get("max_tokens").is_none());
     }
 
@@ -1059,9 +1065,10 @@ mod tests {
         assert!(contents[0]["parts"][1].get("thoughtSignature").is_none());
         let responses = contents[1]["parts"].as_array().unwrap();
         assert_eq!(responses.len(), 2);
-        assert_eq!(responses[0]["functionResponse"]["id"], "call_one");
+        assert_eq!(responses[0]["functionResponse"]["call_id"], "call_one");
         assert_eq!(responses[0]["functionResponse"]["name"], "read_file");
-        assert_eq!(responses[1]["functionResponse"]["id"], "call_two");
+        assert_eq!(responses[1]["functionResponse"]["call_id"], "call_two");
+        assert!(responses[0]["functionResponse"].get("id").is_none());
     }
 
     // ── Image blocks ───────────────────────────────────────────────
