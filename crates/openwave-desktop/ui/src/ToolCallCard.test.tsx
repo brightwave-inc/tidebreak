@@ -21,6 +21,7 @@ const preview = {
   command: "cargo",
   args: ["test", "--workspace"],
   cwd: "checkout",
+  files: [],
 };
 
 describe("toolCallPresentation", () => {

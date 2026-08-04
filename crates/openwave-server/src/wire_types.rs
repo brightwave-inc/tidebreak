@@ -569,6 +569,7 @@ mod tests {
                 command: "git".into(),
                 args: vec!["status".into()],
                 cwd: ".".into(),
+                files: vec!["documents/report.pdf".into()],
             }),
             can_approve: true,
             can_remember: true,

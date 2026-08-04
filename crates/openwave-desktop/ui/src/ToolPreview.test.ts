@@ -9,6 +9,7 @@ describe("toolPreviewPresentation", () => {
         command: "cargo",
         args: ["test", "--workspace"],
         cwd: ".",
+        files: [],
       }),
     ).toMatchObject({
       headline: "cargo test --workspace",
@@ -23,8 +24,23 @@ describe("toolPreviewPresentation", () => {
         command: "ls",
         args: [],
         cwd: "checkout/crates",
+        files: [],
       }).detail,
     ).toBe("ls\n# working directory: checkout/crates");
+  });
+
+  it("names the files the command is being handed", () => {
+    // Which documents a command can read is part of the action under review:
+    // the same script over an expense sheet is not the same consent.
+    expect(
+      toolPreviewPresentation({
+        tool: "exec",
+        command: "python3",
+        args: ["analyze.py"],
+        cwd: ".",
+        files: ["documents/salaries.csv", "documents/q3.xlsx"],
+      }).detail,
+    ).toBe("python3 analyze.py\n# staged files: documents/salaries.csv, documents/q3.xlsx");
   });
 
   it("quotes an argument whose boundaries would otherwise be invisible", () => {
@@ -37,6 +53,7 @@ describe("toolPreviewPresentation", () => {
         command: "python3",
         args: ["-c", "print('two words')", "", "a;rm -rf /"],
         cwd: ".",
+        files: [],
       }).headline,
     ).toBe(`python3 -c 'print('\\''two words'\\'')' '' 'a;rm -rf /'`);
   });

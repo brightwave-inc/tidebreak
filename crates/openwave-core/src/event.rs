@@ -322,6 +322,7 @@ mod tests {
                     command: "git".into(),
                     args: vec!["status".into()],
                     cwd: ".".into(),
+                    files: vec!["documents/report.pdf".into()],
                 }),
             },
             AgentEvent::ApprovalDecided {
@@ -349,6 +350,7 @@ mod tests {
                     command: "git".into(),
                     args: vec!["status".into()],
                     cwd: ".".into(),
+                    files: vec!["documents/report.pdf".into()],
                 }),
                 result: Some(crate::preview::ToolResultPreview::Exec {
                     exit_code: Some(0),
@@ -502,5 +504,30 @@ mod tests {
                 preview: None,
             }
         );
+    }
+
+    /// Exec previews written before the staging list joined the projection have
+    /// no `files` key. They must read back as "staged nothing" — the narrow
+    /// reading — rather than failing the row and taking a chat's history with
+    /// it.
+    #[test]
+    fn exec_previews_written_without_a_staging_list_still_load() {
+        let legacy = serde_json::json!({
+            "type": "approval_required",
+            "call_id": id(2),
+            "tool_name": "exec",
+            "class": "sensitive",
+            "kind": "exec_may_run_networked_command",
+            "preview": { "tool": "exec", "command": "git", "args": ["status"], "cwd": "." },
+        });
+        let loaded: AgentEvent = serde_json::from_value(legacy).expect("legacy row deserializes");
+        let AgentEvent::ApprovalRequired {
+            preview: Some(crate::preview::ToolActionPreview::Exec { files, .. }),
+            ..
+        } = loaded
+        else {
+            panic!("the row is an exec approval with a preview");
+        };
+        assert!(files.is_empty());
     }
 }

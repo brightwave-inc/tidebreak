@@ -41,7 +41,10 @@
       "args": [
         "status"
       ],
-      "cwd": "."
+      "cwd": ".",
+      "files": [
+        "documents/report.pdf"
+      ]
     }
   },
   {
@@ -69,7 +72,10 @@
       "args": [
         "status"
       ],
-      "cwd": "."
+      "cwd": ".",
+      "files": [
+        "documents/report.pdf"
+      ]
     },
     "result": {
       "tool": "exec",

@@ -67,6 +67,9 @@ export function toolPreviewPresentation(
   const detail = [
     headline,
     preview.cwd !== "." && `# working directory: ${preview.cwd}`,
+    // What the command is handed is part of what it will do, so the card that
+    // asks for consent says which files it can read.
+    preview.files.length > 0 && `# staged files: ${preview.files.join(", ")}`,
     result?.timedOut && "# stopped at the time limit",
     result && !result.timedOut && result.exitCode === null && "# killed by a signal",
     result?.exitCode !== null &&

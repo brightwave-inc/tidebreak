@@ -2259,18 +2259,23 @@ export function parseToolActionPreview(
     return { tool: "web_extract", url };
   }
   if (value.tool !== "exec") return null;
-  const { command, args, cwd } = value;
+  const { command, args, cwd, files } = value;
+  // `files` joined the projection after previews were already being stored, so
+  // an absent list reads as staging nothing rather than dropping the card.
+  const staged = files === undefined ? [] : files;
   if (
     typeof command !== "string" ||
     command.length === 0 ||
     !Array.isArray(args) ||
     !args.every((arg): arg is string => typeof arg === "string") ||
     typeof cwd !== "string" ||
-    cwd.length === 0
+    cwd.length === 0 ||
+    !Array.isArray(staged) ||
+    !staged.every((file): file is string => typeof file === "string")
   ) {
     return null;
   }
-  return { tool: "exec", command, args, cwd };
+  return { tool: "exec", command, args, cwd, files: staged };
 }
 
 /**

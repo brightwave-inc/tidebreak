@@ -159,6 +159,7 @@ describe("approval card interactions", () => {
           command: "python3",
           args: ["-c", "import pptx"],
           cwd: ".",
+          files: [],
         },
         canRemember: false,
         grantRungs: [],
@@ -181,6 +182,7 @@ describe("approval card interactions", () => {
           command: "cargo",
           args: ["test"],
           cwd: ".",
+          files: [],
         },
         grantRungs: [
           "exact_action",
@@ -234,7 +236,7 @@ describe("approval card interactions", () => {
     render(
       card({
         onDecide,
-        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: "." },
+        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: ".", files: [] },
       }),
     );
 
@@ -331,6 +333,7 @@ describe("approval card interactions", () => {
           command: "cargo",
           args: ["test", "--workspace"],
           cwd: "checkout",
+          files: [],
         },
       }),
     );
@@ -358,6 +361,7 @@ describe("activity phases", () => {
     command: "cargo",
     args: ["build"],
     cwd: ".",
+    files: [],
   };
 
   function list(messages: ChatMessage[]) {
@@ -510,6 +514,7 @@ describe("card order", () => {
       command: "cargo",
       args: ["build"],
       cwd: ".",
+      files: [],
     };
     const { container } = render(
       <MessageList
@@ -558,6 +563,7 @@ describe("command output", () => {
     command: "cargo",
     args: ["build"],
     cwd: ".",
+    files: [],
   };
   const ran = {
     tool: "exec" as const,
@@ -841,6 +847,7 @@ describe("actionable tool results", () => {
               command: "python3",
               args: ["build_deck.py"],
               cwd: ".",
+              files: [],
             },
             result: {
               tool: "exec",

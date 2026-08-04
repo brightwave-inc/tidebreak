@@ -53,6 +53,22 @@ pub enum ToolActionPreview {
         /// Working directory relative to the chat's private scratch, never a
         /// host path.
         cwd: String,
+        /// Scratch-relative files and directories staged into the sandbox
+        /// before the command runs, empty when the model staged none.
+        ///
+        /// Part of the action, not incidental setup: this list is what the
+        /// command can read, so a person approving `python3 analyze.py` is
+        /// entitled to see which of their files it is being handed. Omitting
+        /// it also made two calls that stage different documents project
+        /// identically, which is what `describes_exactly` promises they do
+        /// not.
+        ///
+        /// `default` because grants and approval rows retained before the
+        /// field existed carry no staging list; they read back as staging
+        /// nothing, which is narrower than what they were given for and so
+        /// sends a call that stages anything back to the person.
+        #[serde(default)]
+        files: Vec<String>,
     },
     /// A search of this conversation's own sources. The query is the whole
     /// action, and it is what the excerpts returned will be chosen to match.
@@ -100,7 +116,13 @@ impl ToolActionPreview {
                 let command = clamp(arguments.get("command")?.as_str()?, MAX_ACTION_FIELD_CHARS)?;
                 let args = clamped_list(arguments.get("args"));
                 let cwd = clamped_field(arguments.get("cwd")).unwrap_or_else(|| ".".into());
-                Some(Self::Exec { command, args, cwd })
+                let files = clamped_list(arguments.get("files"));
+                Some(Self::Exec {
+                    command,
+                    args,
+                    cwd,
+                    files,
+                })
             }
             // Approving a search without seeing its query is not consent to
             // anything in particular, and for `web_search` that query is the
@@ -161,6 +183,11 @@ impl ToolActionPreview {
                     // preview shows.
                     && list_survives_clamp(arguments.get("args"))
                     && field_survives_clamp(arguments.get("cwd"))
+                    // The staging list is part of the action for the same
+                    // reason the argument vector is: it decides what the
+                    // command can read. A dropped or elided entry would let a
+                    // grant given for one set of documents cover another.
+                    && list_survives_clamp(arguments.get("files"))
             }
             // A search's action is its query, so a grant may name that query.
             // `k` is not part of it: it bounds how many passages come back and
@@ -943,6 +970,7 @@ mod tests {
                 command: "python3".into(),
                 args: vec!["-c".into(), "print(1)".into()],
                 cwd: ".".into(),
+                files: Vec::new(),
             })
         );
     }
@@ -1324,7 +1352,9 @@ mod tests {
     fn exec_action_bounds_the_card_a_model_can_paint() {
         let long = "a".repeat(MAX_ACTION_FIELD_CHARS * 2);
         let many: Vec<_> = (0..MAX_ACTION_ARGS * 2).map(|i| i.to_string()).collect();
-        let Some(ToolActionPreview::Exec { command, args, cwd }) = ToolActionPreview::build(
+        let Some(ToolActionPreview::Exec {
+            command, args, cwd, ..
+        }) = ToolActionPreview::build(
             "exec",
             &serde_json::json!({
                 "command": long,
@@ -1332,7 +1362,8 @@ mod tests {
                 // Control characters could otherwise forge card structure.
                 "cwd": "scratch\n\u{1b}[31mapproved",
             }),
-        ) else {
+        )
+        else {
             panic!("exec projects an action");
         };
         assert_eq!(command.chars().count(), MAX_ACTION_FIELD_CHARS);

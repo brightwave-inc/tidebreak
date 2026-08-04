@@ -30,6 +30,9 @@ export const PENDING_APPROVAL = {
     ],
     "command": "git",
     "cwd": ".",
+    "files": [
+      "documents/report.pdf"
+    ],
     "tool": "exec"
   },
   "turn_id": "00000000-0000-0000-0000-000000000002"
