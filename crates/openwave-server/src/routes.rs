@@ -67,6 +67,7 @@ mod document;
 pub(crate) mod image_attachment;
 mod inbox;
 mod plans;
+mod plugins;
 mod root_attachment;
 mod user_questions;
 pub use app_grant::*;
@@ -79,6 +80,7 @@ pub use document::*;
 pub use image_attachment::*;
 pub use inbox::*;
 pub use plans::*;
+pub use plugins::*;
 pub use root_attachment::*;
 pub use user_questions::*;
 

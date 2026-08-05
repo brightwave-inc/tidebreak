@@ -2623,3 +2623,174 @@ async fn a_superseded_gateway_session_never_reads_usable() {
     .await
     .unwrap());
 }
+
+/// A router whose state carries a code-execution provider loaded from the
+/// repository's own bundled skills and plugins, over `store`.
+///
+/// The catalog routes are only interesting against a real load: what they
+/// project is exactly what staging and prompt composition read.
+fn plugin_app(store: Arc<dyn Store>, data_dir: &std::path::Path) -> (Router, Arc<str>) {
+    let secrets = Arc::new(MemSecrets::default());
+    let mut state = AppState::new(
+        Config::desktop(data_dir),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    state.code_execution = Some(Arc::new(
+        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            store,
+            secrets,
+            data_dir.join("scratch"),
+        )
+        .with_skills(Some(root.join("skills")))
+        .with_plugins(Some(root.join("plugins"))),
+    ));
+    let token = state.token.clone();
+    (app(state), token)
+}
+
+async fn get_plugins(router: &Router, bearer: &str) -> serde_json::Value {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/plugins")
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
+}
+
+async fn put_plugins_enabled(
+    router: &Router,
+    bearer: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/plugins/enabled")
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Contract: the catalog reports host-derived badges and enable state,
+/// toggles are a merge patch that survives a restart, and a disabled bundle
+/// gates its members without erasing their own flags — so re-enabling it
+/// restores the member choices that were in place.
+#[tokio::test]
+async fn the_plugin_catalog_reports_badges_and_persists_toggles() {
+    let (dir, store) = temp_db_store("plugins.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (router, token) = plugin_app(store.clone(), dir.path());
+    let bearer = format!("Bearer {token}");
+
+    let catalog = get_plugins(&router, &bearer).await;
+    let documents = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "documents")
+        .expect("the bundled document plugin is listed")
+        .clone();
+    assert_eq!(documents["enabled"], true);
+    // Its members declare pinned Python deps and LibreOffice, so the badges
+    // are derived rather than absent — no manifest states any of this.
+    assert_eq!(
+        documents["capabilities"],
+        serde_json::json!(["write-files", "network", "host-install"])
+    );
+
+    // Turn the bundle off and one member off, in one merge patch.
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "plugins": {"documents": false},
+            "skills": {"pdf-documents": false}
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A second server over the same store sees both, so the state is durable
+    // rather than process-local.
+    let (reloaded, token) = plugin_app(store.clone(), dir.path());
+    let bearer = format!("Bearer {token}");
+    let catalog = get_plugins(&reloaded, &bearer).await;
+    let documents = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "documents")
+        .unwrap()
+        .clone();
+    assert_eq!(documents["enabled"], false);
+    let member = |name: &str| {
+        documents["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["name"] == name)
+            .unwrap()["enabled"]
+            .clone()
+    };
+    // The bundle's gate did not rewrite the members: one is off because the
+    // patch said so, the others are untouched.
+    assert_eq!(member("pdf-documents"), serde_json::json!(false));
+    assert_eq!(member("word-documents"), serde_json::json!(true));
+
+    // Re-enabling the bundle brings back exactly those choices.
+    let restored = put_plugins_enabled(
+        &reloaded,
+        &bearer,
+        serde_json::json!({"plugins": {"documents": true}}),
+    )
+    .await;
+    assert_eq!(restored.status(), StatusCode::OK);
+    let catalog: serde_json::Value = json_body(restored).await;
+    let documents = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "documents")
+        .unwrap()
+        .clone();
+    assert_eq!(documents["enabled"], true);
+    assert_eq!(
+        documents["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["name"] == "pdf-documents")
+            .unwrap()["enabled"],
+        false
+    );
+
+    // A name that is not a slug is refused rather than recorded.
+    let refused = put_plugins_enabled(
+        &reloaded,
+        &bearer,
+        serde_json::json!({"skills": {"Not A Slug": false}}),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+}

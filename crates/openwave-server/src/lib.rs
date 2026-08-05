@@ -45,6 +45,7 @@ mod model_roles;
 /// app stores and the governed REST executor validates against.
 pub mod openapi_catalog;
 mod pairing;
+mod plugin_state;
 mod principal;
 mod provider;
 mod providers;
@@ -323,6 +324,13 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
         )
         .route("/connected-apps", get(routes::get_connected_apps))
+        // The installed skill/plugin catalog and its enable flags.
+        .route("/plugins", get(routes::get_plugins))
+        .route(
+            "/plugins/enabled",
+            axum::routing::put(routes::put_plugins_enabled)
+                .layer(DefaultBodyLimit::max(routes::MAX_PLUGIN_ENABLE_BODY_BYTES)),
+        )
         .route(
             "/connected-apps/rest/{id}",
             axum::routing::put(routes::put_rest_connected_app)
@@ -932,6 +940,9 @@ async fn bind_inner(
     // root-attachment mutations stay off — matching `AppState::new`.
     state.root_attachment_routes_enabled = client_executor_id.is_some();
     state.blobs = blobs;
+    // The plugin management routes list what the provider actually loaded, so
+    // they read the same instance staging and prompt composition use.
+    state.code_execution = Some(code_execution.clone());
     // The bus is built with the app state, after the exec provider it belongs
     // to; handing it over here is what lets a first-run image pull reach the
     // chat that is waiting on it.

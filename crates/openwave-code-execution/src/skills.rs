@@ -67,7 +67,8 @@ impl HostDep {
 /// Origin is host-derived from the load path, never from manifest content, so
 /// a user package cannot claim to be built-in. The prompt catalog uses it to
 /// attribute user-authored entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillOrigin {
     /// Shipped with the application from a trusted resource directory.
     Builtin,

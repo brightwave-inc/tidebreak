@@ -1412,6 +1412,93 @@ export type PermissionMode = "plan" | "ask" | "auto" | "allow";
 export type PlanDecisionChoice = "accept" | "reject";
 
 /**
+ * What a plugin can actually do, from a closed vocabulary.
+ *
+ * A badge is **derived by the host from the plugin's contents** and is never
+ * read from a manifest: there is no `capabilities` key, and the parser's
+ * closed key set rejects one outright, so a bundle cannot understate what it
+ * carries or claim reach it does not have. This is the same honesty invariant
+ * the model registry enforces on modality flags.
+ *
+ * Badges have two consumers. A UI shows them on a plugin's detail view, and
+ * the permission layer keys install/enable confirmation on the heavier ones —
+ * which is what keeps day-to-day skill invocation prompt-free.
+ */
+export type PluginCapability = "write-files" | "network" | "host-install" | "live-control" | "mcp";
+
+/**
+ * Everything this installation has, in the state it is in.
+ */
+export type PluginCatalog = { 
+/**
+ * Bundles in load order (by slug), each with its members.
+ */
+plugins: Array<PluginInfo>, 
+/**
+ * Skills no bundle claims — user-authored packages land here.
+ */
+skills: Array<PluginSkillInfo>, };
+
+/**
+ * What kind of work a plugin bundles, from a closed vocabulary.
+ *
+ * Closed on purpose, like [`crate::HostDep`]: an unknown value rejects the
+ * manifest instead of parsing into a string no grouping or badge can act on.
+ */
+export type PluginCategory = "documents" | "data" | "visualization" | "other";
+
+/**
+ * Body of `PUT /plugins/enabled`. Absent names are left alone.
+ */
+export type PluginEnableUpdate = { 
+/**
+ * Bundle flags to set, by slug.
+ */
+plugins: { [key in string]: boolean }, 
+/**
+ * Skill flags to set, by slug. Setting one inside a disabled bundle is
+ * allowed and remembered; it takes effect when the bundle comes back.
+ */
+skills: { [key in string]: boolean }, };
+
+/**
+ * One bundle, as a management surface renders it.
+ */
+export type PluginInfo = { 
+/**
+ * The slug the toggle route addresses it by.
+ */
+name: string, display_name: string, description: string, category: PluginCategory, 
+/**
+ * What the bundle can do, derived by the host from what it contains.
+ * Never self-declared: a manifest has no key for this.
+ */
+capabilities: Array<PluginCapability>, 
+/**
+ * Whether the bundle is on. Off gates every member regardless of the
+ * member's own flag, which the member entries still report unchanged.
+ */
+enabled: boolean, 
+/**
+ * Member skills in manifest order.
+ */
+skills: Array<PluginSkillInfo>, };
+
+/**
+ * One skill, inside a bundle or standing alone.
+ */
+export type PluginSkillInfo = { name: string, description: string, 
+/**
+ * Where the package was loaded from; host-derived, never claimed.
+ */
+origin: SkillOrigin, 
+/**
+ * The skill's *own* flag, independent of any owning bundle's — so a UI
+ * can show the member choices that come back when a bundle is re-enabled.
+ */
+enabled: boolean, };
+
+/**
  * An optional grouping of chats that share project context and a document
  * corpus. A chat may belong to a project or stand alone — unlike some designs
  * that make a project mandatory, OpenWave keeps loose, projectless chats.
@@ -1712,6 +1799,15 @@ max_active_background_agents: number, };
  * Renderer-safe progress of the current sign-in attempt.
  */
 export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
+
+/**
+ * Which source a validated skill package was loaded from.
+ *
+ * Origin is host-derived from the load path, never from manifest content, so
+ * a user package cannot claim to be built-in. The prompt catalog uses it to
+ * attribute user-authored entries.
+ */
+export type SkillOrigin = "builtin" | "user";
 
 /**
  * What a document declares, for the configuration form's operation picker.

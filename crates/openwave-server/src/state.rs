@@ -187,6 +187,14 @@ pub struct AppState {
     /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
     pub approvals: Arc<ApprovalBroker>,
     pub(crate) local_voice: Arc<dyn LocalVoiceRunner>,
+    /// The configured code-execution provider, when this embedding has one.
+    ///
+    /// Installed after assembly, like the blob store: the provider is built
+    /// before the state that carries its event bus. Only the plugin
+    /// management routes read it — they list what is installed, which is the
+    /// provider's own load — so an embedding without one (tests, headless)
+    /// simply has nothing to manage.
+    pub(crate) code_execution: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
 }
 
 impl AppState {
@@ -331,6 +339,7 @@ impl AppState {
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new(store)),
             local_voice: Arc::new(UnavailableLocalVoiceRunner),
+            code_execution: None,
         })
     }
 

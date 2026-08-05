@@ -607,7 +607,10 @@ impl TurnWorker {
                 // to be staged now — waiting for the first exec to stage it
                 // loses that race and the read fails with not-found.
                 provider.stage_turn_workspace(chat.id).await;
-                (provider.skill_catalog(), provider.plugin_catalog())
+                (
+                    provider.skill_catalog().await,
+                    provider.plugin_catalog().await,
+                )
             }
             None => (Vec::new(), Vec::new()),
         };
