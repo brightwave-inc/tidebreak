@@ -9,7 +9,6 @@ import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import { useAgentRuns } from "./useAgentRuns";
 import { PanelBreadcrumb } from "@/components/PanelHeader";
 import { PanelFrame } from "@/panel/PanelFrame";
-import type { PanelPosition } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,11 +27,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 export function BackgroundAgentPanel({
   chatId,
   runId,
-  position,
 }: {
   chatId: string;
   runId: string;
-  position: PanelPosition;
 }) {
   const { client } = useApp();
   const { openPanel } = usePanelNav();
@@ -77,7 +74,6 @@ export function BackgroundAgentPanel({
 
   return (
     <PanelFrame
-      position={position}
       breadcrumb={<PanelBreadcrumb firstPart="Agent" />}
       headerRightSlot={stopButton}
       showBorder

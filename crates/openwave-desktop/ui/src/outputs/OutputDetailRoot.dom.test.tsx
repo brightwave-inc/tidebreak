@@ -96,8 +96,8 @@ function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis
 
 async function openOutput(apis: OutputDetailApis, id = outputId) {
   return renderWithRouter(
-    <OutputDetailRoot chatId="chat-1" outputId={id} position="left" apis={apis} />,
-    { initialUrl: `/c/chat-1?left=outputs.${id}&right=chat` },
+    <OutputDetailRoot chatId="chat-1" outputId={id} apis={apis} />,
+    { initialUrl: `/c/chat-1?tabs=outputs.${id}` },
   );
 }
 
@@ -124,7 +124,7 @@ describe("OutputDetailRoot", () => {
 
     await user.click(screen.getByRole("button", { name: "Outputs" }));
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "outputs", right: "chat" }),
+      expect(router.state.location.search).toEqual({ tabs: "outputs" }),
     );
   });
 

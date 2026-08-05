@@ -112,7 +112,6 @@ async function openPanel(
       <DocumentDetailRoot
         chatId="chat-1"
         documentID="doc-1"
-        position="left"
         download={download}
         canDownload
       />
@@ -129,7 +128,7 @@ async function openFailingPanel(rejection: unknown) {
   };
   const rendered = await renderWithRouter(
     <AppContextProvider value={{ client } as unknown as AppContextValue}>
-      <DocumentDetailRoot chatId="chat-1" documentID="doc-1" position="left" />
+      <DocumentDetailRoot chatId="chat-1" documentID="doc-1" />
     </AppContextProvider>,
     { initialUrl: "/c/chat-1?left=sources.doc-1&right=chat" },
   );
@@ -177,7 +176,6 @@ async function openCitation(
         chatId="chat-1"
         documentID="doc-1"
         citationId={citationId}
-        position="left"
       />
     </AppContextProvider>,
     { initialUrl: `/c/chat-1?left=sources.doc-1.${citationId}&right=chat` },
@@ -212,7 +210,6 @@ async function openCitationThenAnother(
           chatId="chat-1"
           documentID="doc-1"
           citationId={citationId}
-          position="left"
         />
       </AppContextProvider>
     );

@@ -25,7 +25,6 @@ import {
   useNativePickerLatch,
 } from "@/NativePickerLatch";
 import { PanelFrame } from "@/panel/PanelFrame";
-import type { PanelPosition } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
 import { OutputContent } from "./OutputContent";
 import { outputTypeLabel } from "./outputFormat";
@@ -80,12 +79,10 @@ function producedByLabel(revision: OutputRevisionInfo): string {
 export function OutputDetailRoot({
   chatId,
   outputId,
-  position,
   apis = defaultApis,
 }: {
   chatId: string;
   outputId: string;
-  position: PanelPosition;
   apis?: OutputDetailApis;
 }) {
   const { openPanel } = usePanelNav();
@@ -221,7 +218,6 @@ export function OutputDetailRoot({
 
   return (
     <PanelFrame
-      position={position}
       showBorder
       breadcrumb={
         <PanelBreadcrumb

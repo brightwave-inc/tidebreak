@@ -341,7 +341,7 @@ describe("app shell", () => {
     expect(await screen.findByTestId("transcript")).toBeInTheDocument();
   });
 
-  it("arranges panels beside the conversation from the sidebar", async () => {
+  it("opens panels as tabs beside the conversation, from the sidebar", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
@@ -351,17 +351,25 @@ describe("app shell", () => {
     expect(await screen.findByTestId("folders")).toBeInTheDocument();
     // The conversation stays mounted beside it rather than being replaced.
     expect(screen.getByTestId("transcript")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
-    );
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
 
-    // The Library entry reaches the app catalog without leaving the chat.
+    // The Library entry reaches the app catalog without closing what is open:
+    // it joins the strip and comes forward.
     await user.click(screen.getByRole("button", { name: "Apps" }));
 
     expect(await screen.findByTestId("apps")).toBeInTheDocument();
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "apps", right: "chat" }),
+      expect(router.state.location.search).toEqual({
+        tabs: "folders,apps",
+        active: "apps",
+      }),
     );
+    expect(screen.queryByTestId("folders")).not.toBeInTheDocument();
+
+    // The tab it displaced is still there to go back to.
+    await user.click(screen.getByRole("tab", { name: "Folders" }));
+    expect(await screen.findByTestId("folders")).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders,apps" }));
   });
 
   it("closes a panel back to the conversation alone", async () => {
@@ -378,6 +386,15 @@ describe("app shell", () => {
   });
 
   it("restores the arrangement a deep link describes", async () => {
+    await mountApp({ at: "/c/chat-2?tabs=folders,outputs&active=outputs" });
+
+    expect(await screen.findByTestId("outputs")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Folders" })).toBeInTheDocument();
+  });
+
+  // Windows left open across the change, and links shared before it, still
+  // carry the retired pair-of-slots grammar.
+  it("restores a link written in the retired layout grammar", async () => {
     await mountApp({ at: "/c/chat-2?left=outputs&right=chat" });
 
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();

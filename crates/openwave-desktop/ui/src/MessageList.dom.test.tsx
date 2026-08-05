@@ -889,7 +889,7 @@ describe("actionable tool results", () => {
     await user.click(screen.getByRole("button", { name: "Open output deck.pptx" }));
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({
-        right: "outputs.output-1",
+        tabs: "outputs.output-1",
       });
     });
   });
@@ -951,7 +951,7 @@ describe("actionable tool results", () => {
       screen.getByRole("button", { name: "Open app Sentry triage" }),
     );
     await waitFor(() => {
-      expect(router.state.location.search).toMatchObject({ left: "apps.app-1" });
+      expect(router.state.location.search).toMatchObject({ tabs: "apps.app-1" });
     });
   });
 
