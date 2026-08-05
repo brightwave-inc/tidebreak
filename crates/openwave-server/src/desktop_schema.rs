@@ -356,7 +356,9 @@ mod tests {
             .await
             .unwrap();
         legacy.create_chat(&chat()).await.unwrap();
-        drop(legacy);
+        // An explicit close, not a drop: the reset below deletes and rewrites
+        // the SQLite files, which Windows refuses while a handle is open.
+        legacy.close().await.unwrap();
 
         let blob = dir.path().join("blobs").join("keep-me");
         std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
@@ -424,7 +426,9 @@ mod tests {
         let config = Config::desktop(dir.path());
         let first = connect(&config).await.unwrap();
         first.create_chat(&chat()).await.unwrap();
-        drop(first);
+        // An explicit close, not a drop: the epoch reset below deletes the
+        // SQLite files, which Windows refuses while a handle is open.
+        first.close().await.unwrap();
         std::fs::write(
             dir.path().join(MARKER_FILE),
             serde_json::to_vec(&SchemaMarker {

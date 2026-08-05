@@ -383,7 +383,10 @@ jobs:
     # always check every crate that currently contains Windows-gated code.
     if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    # The persistence steps below compile openwave-server's test target, which
+    # is the heaviest codegen this lane pays; leave headroom over the
+    # check-plus-broker baseline.
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -432,6 +435,20 @@ jobs:
       # native host, not a second copy of the workspace suite.
       - name: Host broker Windows tests
         run: cargo test -p openwave-host-broker --locked
+      # Boot-critical persistence, proven on the OS that ships it: the desktop
+      # profile's SQLite open/migrate lifecycle (openwave-server's
+      # desktop_schema module, including the Windows MoveFileExW marker swap)
+      # and a Credential Manager set/get/delete round trip through the keyring
+      # crate's windows-native backend. Targeted filters on two crates — not a
+      # second copy of the workspace suite.
+      - name: SQLite profile open and migrations
+        run: cargo test -p openwave-server --lib desktop_schema --locked
+      # `-- --ignored` runs the native round trip alone, so the process-global
+      # in-memory keyring mock installed by the ordinary unit test never
+      # activates and the test reaches the real Credential Manager available
+      # under the hosted runner session.
+      - name: Credential Manager round trip
+        run: cargo test -p openwave-core --lib keychain --locked -- --ignored
 
   test:
     name: test

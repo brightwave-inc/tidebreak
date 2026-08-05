@@ -112,6 +112,16 @@ impl DbStore {
             .map_err(store_err)?;
         Ok(Self { conn })
     }
+
+    /// Close the connection pool, releasing every database file handle before
+    /// returning. Dropping the store closes connections asynchronously, which
+    /// is fine at process exit — but a caller that deletes or replaces the
+    /// SQLite files next (restart simulations, the pre-v1 reset lifecycle)
+    /// must close explicitly: Windows refuses to delete a file another handle
+    /// still has open or memory-mapped.
+    pub async fn close(self) -> Result<()> {
+        self.conn.close().await.map_err(store_err)
+    }
 }
 
 impl DbStore {
