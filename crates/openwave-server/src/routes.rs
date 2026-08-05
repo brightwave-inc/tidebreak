@@ -2250,7 +2250,7 @@ pub struct SubmittedOutputSnapshot {
 ///
 /// Adding a durable tool does not automatically expose it to a renderer: it
 /// must be deliberately admitted here with a safe label.
-#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityKind {
     Exec,
@@ -2311,7 +2311,7 @@ fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> 
 /// admits the three terminal outcomes so a settled step can be shown in an
 /// ordered timeline. It carries no failure detail: a failed step is only
 /// "failed", never why.
-#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityOutcome {
     Waiting,
@@ -2323,16 +2323,25 @@ pub enum AgentActivityOutcome {
 
 /// One renderer-safe entry in a background run's ordered activity history.
 ///
-/// Built from durable sandbox tool calls, but it carries only the fixed
-/// [`AgentActivityKind`] vocabulary, a coarse lifecycle, and a timestamp. Tool
-/// arguments, queries, results, folder and file identities, host paths,
-/// provider identities, executor leases, and raw diagnostics all remain
-/// server-side, exactly as they do for the live `activity` projection.
-#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+/// Built on read from durable sandbox tool calls and their immutable receipts.
+/// `detail` admits bounded model-authored command/argument/query text, which may
+/// repeat anything the child already saw and is not covered by the host-field
+/// non-disclosure guarantee. The only host-derived values are the numeric exit
+/// code parsed from a receipt's first line and the delegated file's leaf name.
+/// Stored result text, full broker paths and root identities, provider
+/// identities, executor leases, and diagnostics are never copied directly.
+///
+/// No separate activity-history shape is persisted. The optional field keeps
+/// the wire additive for older clients and lets calls without derivable detail
+/// retain the original `{kind, outcome, at}` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct AgentActivityHistoryItem {
     pub kind: AgentActivityKind,
     pub outcome: AgentActivityOutcome,
     pub at: chrono::DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<openwave_core::AgentActivityDetail>,
 }
 
 /// Project a background run's durable sandbox tool calls into an ordered,
@@ -2341,14 +2350,26 @@ pub struct AgentActivityHistoryItem {
 /// The store returns calls in durable creation order, so the projection keeps
 /// that order. Tool names outside the admitted vocabulary are executor data,
 /// not a renderer contract, and are skipped rather than leaked as raw labels.
-fn sandbox_activity_history(calls: &[SandboxToolCall]) -> Vec<AgentActivityHistoryItem> {
+/// `delegated_file` is the run's one admission-delegated file identity, when it
+/// had one; only its base name may reach a `read_delegated_file` entry. The
+/// receipt map contains only terminal exec receipts, used solely to recover the
+/// typed exit code from their first line.
+fn sandbox_activity_history(
+    calls: &[SandboxToolCall],
+    delegated_file: Option<&str>,
+    receipts: &std::collections::HashMap<CallId, openwave_core::SandboxToolCallReceipt>,
+) -> Vec<AgentActivityHistoryItem> {
     calls
         .iter()
-        .filter_map(sandbox_activity_history_item)
+        .filter_map(|call| sandbox_activity_history_item(call, delegated_file, receipts))
         .collect()
 }
 
-fn sandbox_activity_history_item(call: &SandboxToolCall) -> Option<AgentActivityHistoryItem> {
+fn sandbox_activity_history_item(
+    call: &SandboxToolCall,
+    delegated_file: Option<&str>,
+    receipts: &std::collections::HashMap<CallId, openwave_core::SandboxToolCallReceipt>,
+) -> Option<AgentActivityHistoryItem> {
     let kind = match call.name.as_str() {
         openwave_core::SANDBOX_EXEC_TOOL => AgentActivityKind::Exec,
         "web_search" => AgentActivityKind::WebSearch,
@@ -2380,7 +2401,26 @@ fn sandbox_activity_history_item(call: &SandboxToolCall) -> Option<AgentActivity
         // state is executor data, not a renderer contract.
         _ => return None,
     };
-    Some(AgentActivityHistoryItem { kind, outcome, at })
+    // The delegated read is argument-free, so its headline comes from the
+    // admission rather than from model-authored arguments. Every other detail
+    // is a bounded projection of the durable call and optional receipt.
+    let detail = match call.name.as_str() {
+        openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => {
+            delegated_file.and_then(openwave_core::AgentActivityDetail::delegated_file)
+        }
+        _ => openwave_core::AgentActivityDetail::build(&call.name, &call.arguments).map(|detail| {
+            match receipts.get(&call.id) {
+                Some(receipt) => detail.with_exec_result(&receipt.result),
+                None => detail,
+            }
+        }),
+    };
+    Some(AgentActivityHistoryItem {
+        kind,
+        outcome,
+        at,
+        detail,
+    })
 }
 
 fn foreground_activity(
@@ -2479,10 +2519,14 @@ pub async fn list_agent_runs(
 /// This is the durable companion to the live `activity` field on a run
 /// snapshot: where that field names only the single current checkpoint, this
 /// returns every admitted step in order, each with a coarse terminal outcome
-/// and timestamp. It keeps the same posture — no tool arguments, queries,
-/// results, identities, leases, or diagnostics cross the boundary. A missing,
-/// wrong-chat, or foreground run returns `404` rather than revealing whether an
-/// unrelated run identifier exists.
+/// and timestamp. Each entry may add a bounded typed headline — the command and
+/// exit status a settled exec recorded, the query a web search asked, or the
+/// base name of the run's one delegated file. Command, argument, and query text
+/// is model-authored and may repeat information the child already saw; the
+/// boundary guarantee is narrower: stored results and host-only fields are not
+/// copied directly, apart from the typed exit code and admitted leaf name. A
+/// missing, wrong-chat, or foreground run returns `404` rather than revealing
+/// whether an unrelated run identifier exists.
 pub async fn list_agent_run_activity(
     store: ScopedStore,
     Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
@@ -2498,7 +2542,37 @@ pub async fn list_agent_run_activity(
         )));
     };
     let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
-    Ok(Json(sandbox_activity_history(&calls)))
+    // The run's one delegated file identity is needed only for its argument-free
+    // read call. A missing admission leaves that entry in the original
+    // detail-free shape rather than dropping the history.
+    let delegated_file = if calls
+        .iter()
+        .any(|call| call.name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL)
+    {
+        store
+            .get_sandbox_agent_admission(run.id)
+            .await?
+            .and_then(|admission| admission.resource)
+            .map(|resource| resource.relative_path)
+    } else {
+        None
+    };
+    // Exit status lives on the immutable receipts, not the call rows. A
+    // missing receipt — a live step, or a call settled before receipts were
+    // kept — leaves the detail without an exit code rather than failing.
+    let mut receipts = std::collections::HashMap::new();
+    for call in &calls {
+        if call.name == openwave_core::SANDBOX_EXEC_TOOL && call.status.is_terminal() {
+            if let Some(receipt) = store.get_sandbox_tool_call_receipt(call.id).await? {
+                receipts.insert(call.id, receipt);
+            }
+        }
+    }
+    Ok(Json(sandbox_activity_history(
+        &calls,
+        delegated_file.as_deref(),
+        &receipts,
+    )))
 }
 
 /// One line of live progress a background run published, as the renderer sees
@@ -2506,10 +2580,10 @@ pub async fn list_agent_run_activity(
 ///
 /// The text is the run's own bounded narration — the same class of prose the
 /// terminal `terminal_text` already carries, published while the run is still
-/// working instead of only at the end. It is not a tool trace: tool arguments,
-/// queries, results, folder and file identities, host paths, provider
-/// identities, executor leases, and raw diagnostics stay server-side, exactly as
-/// they do for the activity projections.
+/// working instead of only at the end. It is model-authored and may repeat
+/// information the run already saw. Stored tool records and host-owned fields
+/// are not copied directly into it. Typed activity headlines are projected
+/// separately.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct AgentRunProgressLine {
     /// Monotonic per-run ordering. Pass the page's `next_sequence` back as

@@ -215,7 +215,7 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
 }
 
 #[tokio::test]
-async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted_files() {
+async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files() {
     let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -233,28 +233,28 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted
         run.id
     );
 
-    let checkpoint = SandboxToolCallRequest {
+    let exec = SandboxToolCallRequest {
         id: CallId::new(),
         agent_run_id: run.id,
         chat_id: chat.id,
-        provider_id: "provider-call-identity".into(),
-        name: "web_search".into(),
+        provider_id: "private-exec-provider-identity".into(),
+        name: openwave_core::SANDBOX_EXEC_TOOL.into(),
         arguments: serde_json::json!({
-            "query": "private query that must not reach the renderer",
-            "api_key": "secret-value"
+            "command": "python3",
+            "args": ["report.py", "--format", "md"]
         }),
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &checkpoint)
+            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &exec)
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
     ));
-    let executor_lease = uuid::Uuid::new_v4();
+    let exec_lease = uuid::Uuid::new_v4();
     assert!(matches!(
         store
-            .claim_sandbox_tool_call(checkpoint.id, executor_lease, chrono::Duration::minutes(5))
+            .claim_sandbox_tool_call(exec.id, exec_lease, chrono::Duration::minutes(5))
             .await
             .unwrap(),
         openwave_core::ClaimSandboxToolCallOutcome::Claimed(_)
@@ -262,10 +262,12 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted
     assert!(matches!(
         store
             .resolve_sandbox_tool_call(
-                checkpoint.id,
-                executor_lease,
-                &ToolCallResolution::Completed {
-                    result: "private result that must not reach the renderer".into(),
+                exec.id,
+                exec_lease,
+                &ToolCallResolution::Failed {
+                    result: "exit: 17\nduration_ms: 42\n\nstderr:\nprivate output".into(),
+                    error_code: "exec_command_failed".into(),
+                    error_detail: Some("private executor detail".into()),
                 },
             )
             .await
@@ -273,12 +275,64 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted
         openwave_core::ResolveSandboxToolCallOutcome::Resolved
     ));
 
-    // Resolving the checkpoint hands the run back for continuation; take it and
-    // submit a file, which is what a produced result is.
-    let continuation_lease = uuid::Uuid::new_v4();
+    // Continue through a second checkpoint so the endpoint also proves durable
+    // ordering and the query-only search projection.
+    let search_worker_lease = uuid::Uuid::new_v4();
     assert_eq!(
         store
-            .claim_agent_run(continuation_lease, chrono::Duration::minutes(5), 4, 4)
+            .claim_agent_run(search_worker_lease, chrono::Duration::minutes(5), 4, 4)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    let search = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: run.id,
+        chat_id: chat.id,
+        provider_id: "private-search-provider-identity".into(),
+        name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+        arguments: serde_json::json!({
+            "query": "OpenWave release notes",
+            "api_key": "secret-value"
+        }),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(run.id, search_worker_lease, &search)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Parked { .. }
+    ));
+    let search_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(search.id, search_lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        openwave_core::ClaimSandboxToolCallOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        store
+            .resolve_sandbox_tool_call(
+                search.id,
+                search_lease,
+                &ToolCallResolution::Completed {
+                    result: "private search result".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveSandboxToolCallOutcome::Resolved
+    ));
+
+    // Resolving the second checkpoint hands the run back for completion; submit
+    // a file, which remains the run's durable produced result.
+    let completion_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(completion_lease, chrono::Duration::minutes(5), 4, 4)
             .await
             .unwrap()
             .unwrap()
@@ -306,7 +360,7 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted
     store
         .submit_agent_run_submission(
             run.id,
-            continuation_lease,
+            completion_lease,
             &[openwave_core::AgentRunSubmittedOutput {
                 output_id: submitted,
                 filename: "Q3 revenue.md".into(),
@@ -363,25 +417,59 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let history: Vec<serde_json::Value> = json_body(response).await;
-    assert_eq!(history.len(), 1);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].get("kind"), Some(&serde_json::json!("exec")));
     assert_eq!(
-        history[0].get("kind"),
+        history[0].get("outcome"),
+        Some(&serde_json::json!("failed"))
+    );
+    assert_eq!(
+        history[0].get("detail"),
+        Some(&serde_json::json!({
+            "kind": "exec",
+            "command": "python3",
+            "args": ["report.py", "--format", "md"],
+            "exit_code": 17,
+        }))
+    );
+    assert_eq!(
+        history[1].get("kind"),
         Some(&serde_json::json!("web_search"))
     );
     assert_eq!(
-        history[0].get("outcome"),
+        history[1].get("outcome"),
         Some(&serde_json::json!("completed"))
     );
-    assert!(history[0].get("at").is_some_and(|at| at.is_string()));
+    assert_eq!(
+        history[1].get("detail"),
+        Some(&serde_json::json!({
+            "kind": "search",
+            "query": "OpenWave release notes",
+        }))
+    );
+    assert!(history
+        .iter()
+        .all(|entry| entry.get("at").is_some_and(|at| at.is_string())));
+
+    // The field is additive: an entry serialized before typed detail existed
+    // still deserializes with no detail.
+    let mut old_entry = history[0].clone();
+    old_entry.as_object_mut().unwrap().remove("detail");
+    let old_entry: crate::routes::AgentActivityHistoryItem =
+        serde_json::from_value(old_entry).expect("the old history shape still deserializes");
+    assert_eq!(old_entry.detail, None);
 
     let encoded = serde_json::to_string(&history).unwrap();
     for forbidden in [
-        "private query that must not reach the renderer",
-        "private result that must not reach the renderer",
+        "private output",
+        "private executor detail",
+        "private search result",
         "secret-value",
-        "provider-call-identity",
+        "private-exec-provider-identity",
+        "private-search-provider-identity",
         "arguments",
         "lease_token",
+        "duration_ms",
         "result",
     ] {
         assert!(!encoded.contains(forbidden), "history leaked {forbidden}");
@@ -754,6 +842,39 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
         "private delegated task",
     ] {
         assert!(!encoded.contains(forbidden), "receipt leaked {forbidden}");
+    }
+
+    // Activity names only the delegated file's bounded leaf name. The broker
+    // root and parent path remain native-only even though the durable admission
+    // retains both for authorization.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/chats/{}/agent-runs/{}/activity",
+                    chat.id, child.id
+                ))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: Vec<serde_json::Value> = json_body(response).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0]["detail"],
+        serde_json::json!({"kind": "file", "name": "private-summary.md"})
+    );
+    let encoded = serde_json::to_string(&history).unwrap();
+    for forbidden in [
+        resource.relative_path.as_str(),
+        &root_id.to_string(),
+        "private-read-provider-id",
+        "private delegated task",
+    ] {
+        assert!(!encoded.contains(forbidden), "activity leaked {forbidden}");
     }
 }
 

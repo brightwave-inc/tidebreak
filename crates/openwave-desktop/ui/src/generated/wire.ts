@@ -9,15 +9,37 @@
 // which a type can express. See docs/wire-types.md.
 
 /**
+ * A bounded headline for one background-agent activity step.
+ *
+ * This is deliberately smaller than [`ToolActionPreview`]. The command,
+ * arguments, and query are model-authored text: they are bounded for safe
+ * single-line presentation, but may repeat any information the background
+ * agent already saw and are therefore outside the host-field non-disclosure
+ * guarantee. The projection never copies stored result text or host-only
+ * broker identity directly. Its only host-derived values are a typed numeric
+ * exit code and the leaf name of the canonically admitted delegated file.
+ *
+ * Command and search fields use the foreground approval-card projection so
+ * both surfaces share the same sanitization.
+ */
+export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, exit_code?: number, } | { "kind": "search", query: string, } | { "kind": "file", name: string, };
+
+/**
  * One renderer-safe entry in a background run's ordered activity history.
  *
- * Built from durable sandbox tool calls, but it carries only the fixed
- * [`AgentActivityKind`] vocabulary, a coarse lifecycle, and a timestamp. Tool
- * arguments, queries, results, folder and file identities, host paths,
- * provider identities, executor leases, and raw diagnostics all remain
- * server-side, exactly as they do for the live `activity` projection.
+ * Built on read from durable sandbox tool calls and their immutable receipts.
+ * `detail` admits bounded model-authored command/argument/query text, which may
+ * repeat anything the child already saw and is not covered by the host-field
+ * non-disclosure guarantee. The only host-derived values are the numeric exit
+ * code parsed from a receipt's first line and the delegated file's leaf name.
+ * Stored result text, full broker paths and root identities, provider
+ * identities, executor leases, and diagnostics are never copied directly.
+ *
+ * No separate activity-history shape is persisted. The optional field keeps
+ * the wire additive for older clients and lets calls without derivable detail
+ * retain the original `{kind, outcome, at}` shape.
  */
-export type AgentActivityHistoryItem = { kind: AgentActivityKind, outcome: AgentActivityOutcome, at: string, };
+export type AgentActivityHistoryItem = { kind: AgentActivityKind, outcome: AgentActivityOutcome, at: string, detail?: AgentActivityDetail, };
 
 /**
  * Fixed, renderer-safe names for supported live work.
@@ -77,10 +99,10 @@ export type AgentRunId = string;
  *
  * The text is the run's own bounded narration — the same class of prose the
  * terminal `terminal_text` already carries, published while the run is still
- * working instead of only at the end. It is not a tool trace: tool arguments,
- * queries, results, folder and file identities, host paths, provider
- * identities, executor leases, and raw diagnostics stay server-side, exactly as
- * they do for the activity projections.
+ * working instead of only at the end. It is model-authored and may repeat
+ * information the run already saw. Stored tool records and host-owned fields
+ * are not copied directly into it. Typed activity headlines are projected
+ * separately.
  */
 export type AgentRunProgressLine = { 
 /**

@@ -31,8 +31,8 @@ use openwave_core::{
     DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord,
     ImageRef, JournaledTurnOutcome, NetworkPolicy, OwnerId, PermissionMode, Project, ProjectId,
     ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
-    SandboxToolCall, SequencedEvent, Store, ToolApproval, ToolCallRecord, TurnId, TurnRun,
-    TurnSteerId,
+    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
+    ToolApproval, ToolCallRecord, TurnId, TurnRun, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -291,6 +291,22 @@ impl ScopedStore {
         self.store
             .list_sandbox_tool_calls_for_agent_run(agent_run_id)
             .await
+    }
+
+    /// [`Store::get_sandbox_agent_admission`].
+    pub async fn get_sandbox_agent_admission(
+        &self,
+        agent_run_id: AgentRunId,
+    ) -> Result<Option<SandboxAgentAdmission>> {
+        self.store.get_sandbox_agent_admission(agent_run_id).await
+    }
+
+    /// [`Store::get_sandbox_tool_call_receipt`].
+    pub async fn get_sandbox_tool_call_receipt(
+        &self,
+        call_id: CallId,
+    ) -> Result<Option<SandboxToolCallReceipt>> {
+        self.store.get_sandbox_tool_call_receipt(call_id).await
     }
 
     /// [`Store::list_pending_client_tool_calls`].
