@@ -156,7 +156,7 @@ describe("createMcpAppBridge", () => {
     fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: 512.4 } });
     expect(onHeight).toHaveBeenLastCalledWith(513);
     fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: 20 } });
-    expect(onHeight).toHaveBeenLastCalledWith(160);
+    expect(onHeight).toHaveBeenLastCalledWith(40);
     fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: 99999 } });
     expect(onHeight).toHaveBeenLastCalledWith(800);
     fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: {} });

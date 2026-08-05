@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AppWindow, ShieldCheck } from "lucide-react";
+import { AppWindow } from "lucide-react";
 import { useApp } from "./AppContext";
 import { createMcpAppBridge, type McpAppBridge } from "./McpAppBridge";
 import { useTheme } from "./theme";
@@ -24,7 +24,7 @@ type ViewState =
   | { kind: "unavailable" }
   | { kind: "ready"; url: string };
 
-const DEFAULT_FRAME_HEIGHT = 384;
+const DEFAULT_FRAME_HEIGHT = 96;
 
 export function McpAppCard({
   server,
@@ -110,15 +110,15 @@ export function McpAppCard({
       className="bg-background max-w-prose overflow-hidden rounded-lg border"
       aria-label={`App view from MCP server ${server}`}
     >
-      <div className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5">
-        <span className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs font-medium">
-          <AppWindow className="size-3.5 shrink-0" aria-hidden="true" />
-          <span className="truncate">App view · {server}</span>
-        </span>
-        <span className="text-muted-foreground flex items-center gap-1 text-xs">
-          <ShieldCheck className="size-3.5 shrink-0" aria-hidden="true" />
-          Sandboxed
-        </span>
+      {/* The one host-drawn provenance mark: embedded documents must stay
+          visually attributable to their server, but the label costs one slim
+          row — the sandbox itself is the iframe attribute, not this text. */}
+      <div
+        className="text-muted-foreground flex w-full min-w-0 items-center gap-1.5 px-2.5 py-1 text-xs font-medium"
+        title={`App view from ${server} · sandboxed`}
+      >
+        <AppWindow className="size-3.5 shrink-0" aria-hidden="true" />
+        <span className="truncate">{server}</span>
       </div>
       <div className="border-t">
         {state.kind === "loading" && (

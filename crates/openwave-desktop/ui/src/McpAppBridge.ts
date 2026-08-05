@@ -50,7 +50,7 @@ export type AppOperationInvoker = (
   body: unknown,
 ) => Promise<AppRestInvokeResult>;
 
-const MIN_FRAME_HEIGHT = 160;
+const MIN_FRAME_HEIGHT = 40;
 const MAX_FRAME_HEIGHT = 800;
 
 export type McpAppBridge = {

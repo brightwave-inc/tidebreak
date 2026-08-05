@@ -46,7 +46,8 @@ describe("McpAppCard", () => {
     );
     expect(frame).toHaveAttribute("sandbox", "allow-scripts");
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
-    expect(screen.getByText("Sandboxed")).toBeInTheDocument();
+    // The slim provenance row keeps embedded documents attributable.
+    expect(screen.getByText("gateway")).toBeInTheDocument();
   });
 
   it("degrades to a reconnect hint when no frame can be minted", async () => {
