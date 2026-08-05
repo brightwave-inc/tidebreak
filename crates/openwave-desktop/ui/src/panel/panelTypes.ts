@@ -1,11 +1,9 @@
 /**
- * The workspace is a pair of slots either side of the conversation, and a panel
- * is whatever is in one of them. Chat is a panel like any other rather than the
- * frame the others hang off — that is what lets a chat with a project and a
- * chat without one share a single layout.
+ * The workspace is the conversation and, beside it, a region of open panels.
+ * The conversation is always there — it is the frame, not a panel — and
+ * everything else opens as a tab in the region to its right.
  */
 export type PanelContent =
-  | { type: "chat" }
   /**
    * `citationId` is where in the document to open: the citation it names
    * carries the cited span and page. It only means anything alongside the
@@ -30,45 +28,39 @@ export type PanelContent =
 
 export type PanelType = PanelContent["type"];
 
-export type PanelPosition = "left" | "right";
+/**
+ * The open panels, which one is showing, and whether the region has taken the
+ * whole window. No tabs is the bare URL: the conversation alone.
+ */
+export type LayoutState = {
+  tabs: PanelContent[];
+  activeIndex: number;
+  fullscreen: boolean;
+};
+
+export const EMPTY_LAYOUT: LayoutState = { tabs: [], activeIndex: 0, fullscreen: false };
 
 /**
- * Either the conversation alone, or two slots with the conversation possibly
- * squeezed out between them. `single` is the bare URL with no search params, so
- * the common case leaves no trail.
+ * What makes two panels the same tab.
+ *
+ * A library and the item drilled into from it are one panel showing something
+ * else, not two — the Apps list and an app's detail share a tab, and clicking
+ * Folders again lands on the tab already open. Documents and agent runs are
+ * addressed by identity instead, so two documents are two tabs while
+ * re-opening one at a different citation moves within the tab it already has.
  */
-export type LayoutState =
-  | { mode: "single"; panel: PanelContent }
-  | {
-      mode: "split";
-      left: PanelContent;
-      right: PanelContent;
-      fullscreen?: PanelPosition;
-    };
-
-export function areSamePanelType(a: PanelContent, b: PanelContent): boolean {
-  return a.type === b.type;
+export function panelKey(panel: PanelContent): string {
+  switch (panel.type) {
+    case "document":
+      return `document:${panel.documentId}`;
+    case "agent":
+      return `agent:${panel.runId}`;
+    default:
+      return panel.type;
+  }
 }
 
-/**
- * Navigation panels are lists you pick from; content panels are the thing you
- * picked. Navigation settles on the left, content on the right, and closing a
- * panel returns whatever is left to its own side rather than leaving it
- * stranded where the other panel happened to put it.
- */
-export function isContentPanel(panel: PanelContent): boolean {
-  switch (panel.type) {
-    case "chat":
-    case "folders":
-    case "apps":
-    case "plugins":
-      return false;
-    case "outputs":
-      // The outputs list is navigation; a single opened output is the thing
-      // you picked, and reads on the content side like a document does.
-      return panel.outputId !== undefined;
-    case "document":
-    case "agent":
-      return true;
-  }
+/** The panel currently showing in the region, or `null` when nothing is open. */
+export function activePanel(layout: LayoutState): PanelContent | null {
+  return layout.tabs[layout.activeIndex] ?? null;
 }

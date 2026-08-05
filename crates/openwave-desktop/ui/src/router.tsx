@@ -27,17 +27,30 @@ const rootRoute = createRootRoute({ component: AppShell });
  */
 type ChatSearch = PanelSearch & { focus?: string };
 
+/**
+ * The layout params, kept as strings for the panel parser to make sense of.
+ * `left` and `right` are the retired grammar, read so an older link or an
+ * already-open window still restores; the router rewrites them to `tabs` the
+ * first time the layout changes.
+ */
+function panelSearchFrom(search: Record<string, unknown>): PanelSearch {
+  const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+  return {
+    tabs: text(search.tabs),
+    active: text(search.active),
+    fullscreen: text(search.fullscreen),
+    left: text(search.left),
+    right: text(search.right),
+  };
+}
+
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   // Home hosts panels the way a conversation does — the Apps library opens
   // beside the composer — so it reads the same layout params. Which panel
   // types home actually accepts is decided by HomeRoute, not the URL parser.
-  validateSearch: (search: Record<string, unknown>): PanelSearch => ({
-    left: typeof search.left === "string" ? search.left : undefined,
-    right: typeof search.right === "string" ? search.right : undefined,
-    fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): PanelSearch => panelSearchFrom(search),
   component: HomeRoute,
 });
 
@@ -85,9 +98,7 @@ const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/c/$chatId",
   validateSearch: (search: Record<string, unknown>): ChatSearch => ({
-    left: typeof search.left === "string" ? search.left : undefined,
-    right: typeof search.right === "string" ? search.right : undefined,
-    fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+    ...panelSearchFrom(search),
     // Where a deep link is pointing: the parked call to reveal once the
     // transcript is up. It rides beside the layout params because it is
     // addressing state like they are, and it is dropped from the URL as soon

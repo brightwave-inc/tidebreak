@@ -29,7 +29,7 @@ import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings"
 import { AppsPanel } from "./apps/AppsPanel";
 import { PluginsPanel } from "./plugins/PluginsPanel";
 import { PanelLayout } from "./panel/PanelLayout";
-import type { LayoutState, PanelContent } from "./panel/panelTypes";
+import { EMPTY_LAYOUT, type LayoutState, type PanelContent } from "./panel/panelTypes";
 import { useLayoutState } from "./panel/usePanelNav";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
@@ -274,17 +274,10 @@ export function HomeRoute() {
   // does not have.
   const layout = homeLayout(useLayoutState());
 
-  function renderPanel(
-    panel: PanelContent,
-    position: "left" | "right" | "chat",
-  ) {
-    if (panel.type === "apps" && position !== "chat") {
-      return <AppsPanel panel={panel} position={position} />;
-    }
-    if (panel.type === "plugins" && position !== "chat") {
-      return <PluginsPanel panel={panel} position={position} />;
-    }
-    return homeContent();
+  function renderPanel(panel: PanelContent) {
+    if (panel.type === "apps") return <AppsPanel panel={panel} />;
+    if (panel.type === "plugins") return <PluginsPanel panel={panel} />;
+    return null;
   }
 
   function homeContent() {
@@ -388,23 +381,27 @@ export function HomeRoute() {
   return (
     <RouteFrame sidebar={<HomeSidebar />}>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <PanelLayout layout={layout} renderPanel={renderPanel} />
+        <PanelLayout
+          layout={layout}
+          renderChat={() => homeContent()}
+          renderPanel={renderPanel}
+        />
       </div>
     </RouteFrame>
   );
 }
 
 /**
- * The layouts home is willing to host: itself alone, or itself beside one of
- * the install-wide libraries. A URL naming any conversation-scoped panel is a
- * stale or hand-edited link; it lands on plain home rather than an empty panel.
+ * The tabs home is willing to host: only the install-wide libraries. A URL
+ * naming any conversation-scoped panel is a stale or hand-edited link, and
+ * that tab is dropped rather than opened onto content this route cannot fetch.
  */
 function homeLayout(layout: LayoutState): LayoutState {
-  if (layout.mode === "single") return { mode: "single", panel: { type: "chat" } };
   const supported = (panel: PanelContent) =>
-    panel.type === "chat" || panel.type === "apps" || panel.type === "plugins";
-  if (!supported(layout.left) || !supported(layout.right)) {
-    return { mode: "single", panel: { type: "chat" } };
-  }
-  return layout;
+    panel.type === "apps" || panel.type === "plugins";
+  const active = layout.tabs[layout.activeIndex];
+  const tabs = layout.tabs.filter(supported);
+  if (tabs.length === 0) return EMPTY_LAYOUT;
+  const activeIndex = active && supported(active) ? tabs.indexOf(active) : 0;
+  return { ...layout, tabs, activeIndex: Math.max(activeIndex, 0) };
 }

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   encodePanelSegment,
-  isValidLayout,
   layoutFromSearch,
   parsePanelSegment,
   searchFromLayout,
@@ -10,27 +9,26 @@ import {
 
 describe("panel URLs", () => {
   it("reads navigation panels and addressed document viewers", () => {
-    expect(parsePanelSegment("chat")).toEqual({ type: "chat" });
     expect(parsePanelSegment("outputs")).toEqual({ type: "outputs" });
     expect(parsePanelSegment("folders")).toEqual({ type: "folders" });
-    expect(parsePanelSegment("apps")).toEqual({ type: "apps" });
     expect(parsePanelSegment("apps.app-1")).toEqual({ type: "apps", appId: "app-1" });
-    expect(parsePanelSegment("plugins")).toEqual({ type: "plugins" });
     expect(parsePanelSegment("plugins.documents")).toEqual({
       type: "plugins",
       pluginId: "documents",
     });
     expect(parsePanelSegment("agent.run-1")).toEqual({ type: "agent", runId: "run-1" });
     expect(parsePanelSegment("agent")).toBeNull();
-    expect(parsePanelSegment("document.doc-1")).toEqual({
-      type: "document",
-      documentId: "doc-1",
-    });
     expect(parsePanelSegment("document.doc-1.cite-1")).toEqual({
       type: "document",
       documentId: "doc-1",
       citationId: "cite-1",
     });
+  });
+
+  // The conversation holds its own region now; a URL still naming it as a
+  // panel is describing a tab that does not exist.
+  it("no longer reads the conversation as a panel", () => {
+    expect(parsePanelSegment("chat")).toBeNull();
   });
 
   it("keeps historical source detail links but retires the bare catalog", () => {
@@ -51,13 +49,12 @@ describe("panel URLs", () => {
 
   it("round-trips every current panel shape", () => {
     for (const panel of [
-      { type: "chat" },
       { type: "document", documentId: "doc-1" },
       { type: "document", documentId: "doc-1", citationId: "cite-1" },
       { type: "outputs" },
       { type: "outputs", outputId: "output-1" },
       { type: "folders" },
-      { type: "plugins" },
+      { type: "apps" },
       { type: "plugins", pluginId: "documents" },
       { type: "agent", runId: "run-1" },
     ] as const) {
@@ -67,50 +64,88 @@ describe("panel URLs", () => {
 });
 
 describe("layout URLs", () => {
-  const single = { mode: "single", panel: { type: "chat" } } as const;
+  const alone = { tabs: [], activeIndex: 0, fullscreen: false };
 
   it("uses a bare URL for the conversation alone", () => {
-    expect(layoutFromSearch({})).toEqual(single);
-    expect(searchFromLayout(single)).toEqual({
+    expect(layoutFromSearch({})).toEqual(alone);
+    expect(searchFromLayout(alone)).toEqual({
+      tabs: undefined,
+      active: undefined,
+      fullscreen: undefined,
       left: undefined,
       right: undefined,
-      fullscreen: undefined,
     });
   });
 
-  it("fills the unnamed side with the conversation", () => {
-    expect(layoutFromSearch({ right: "document.doc-1" })).toEqual({
-      mode: "split",
-      left: { type: "chat" },
-      right: { type: "document", documentId: "doc-1" },
-      fullscreen: undefined,
-    });
-  });
-
-  it("falls back rather than opening a stale bare sources panel", () => {
-    expect(layoutFromSearch({ left: "sources" })).toEqual(single);
-    expect(layoutFromSearch({ left: "chat", right: "chat" })).toEqual(single);
-  });
-
-  it("round-trips a split document layout", () => {
+  it("round-trips a strip of tabs with one of them showing", () => {
     const layout = {
-      mode: "split",
-      left: { type: "chat" },
-      right: { type: "document", documentId: "doc-1" },
-      fullscreen: "right",
-    } as const;
+      tabs: [
+        { type: "folders" as const },
+        { type: "document" as const, documentId: "doc-1", citationId: "cite-2" },
+      ],
+      activeIndex: 1,
+      fullscreen: true,
+    };
+
+    expect(searchFromLayout(layout)).toMatchObject({
+      tabs: "folders,document.doc-1.cite-2",
+      active: "document.doc-1.cite-2",
+      fullscreen: "1",
+    });
     expect(layoutFromSearch(searchFromLayout(layout))).toEqual(layout);
   });
 
-  it("refuses two document viewers in one layout", () => {
+  it("falls back to the first tab when nothing usable is named active", () => {
+    expect(layoutFromSearch({ tabs: "folders,outputs", active: "apps" }).activeIndex).toBe(0);
+    expect(layoutFromSearch({ tabs: "folders,outputs" }).activeIndex).toBe(0);
+  });
+
+  it("drops segments that address nothing, and the conversation with them", () => {
+    expect(layoutFromSearch({ tabs: "chat,folders,nonsense" })).toEqual({
+      tabs: [{ type: "folders" }],
+      activeIndex: 0,
+      fullscreen: false,
+    });
+    expect(layoutFromSearch({ tabs: "chat" })).toEqual(alone);
+  });
+
+  it("reads one tab per panel however often the URL names it", () => {
+    // Both segments address the same document, which is one tab open at one
+    // of the two places in it.
+    expect(layoutFromSearch({ tabs: "document.doc-1,document.doc-1.cite-2" }).tabs).toEqual([
+      { type: "document", documentId: "doc-1" },
+    ]);
+  });
+
+  it("restores a link written in the retired pair-of-slots grammar", () => {
+    expect(layoutFromSearch({ left: "folders", right: "document.doc-1" })).toEqual({
+      tabs: [{ type: "folders" }, { type: "document", documentId: "doc-1" }],
+      activeIndex: 0,
+      fullscreen: false,
+    });
+    // The conversation used to fill the slot it was not sharing.
+    expect(layoutFromSearch({ left: "chat", right: "outputs.out-9" })).toEqual({
+      tabs: [{ type: "outputs", outputId: "out-9" }],
+      activeIndex: 0,
+      fullscreen: false,
+    });
+    expect(layoutFromSearch({ left: "chat", right: "chat" })).toEqual(alone);
+  });
+
+  it("carries a legacy expanded panel over, but not an expanded conversation", () => {
     expect(
-      isValidLayout(
-        { type: "document", documentId: "a" },
-        { type: "document", documentId: "b" },
-      ),
-    ).toBe(false);
+      layoutFromSearch({ left: "chat", right: "document.doc-1", fullscreen: "right" }),
+    ).toMatchObject({ fullscreen: true });
     expect(
-      isValidLayout({ type: "document", documentId: "a" }, { type: "chat" }),
-    ).toBe(true);
+      layoutFromSearch({ left: "chat", right: "document.doc-1", fullscreen: "left" }),
+    ).toMatchObject({ fullscreen: false });
+  });
+
+  it("clears the retired params whenever it writes a layout", () => {
+    expect(searchFromLayout(layoutFromSearch({ left: "folders" }))).toMatchObject({
+      tabs: "folders",
+      left: undefined,
+      right: undefined,
+    });
   });
 });

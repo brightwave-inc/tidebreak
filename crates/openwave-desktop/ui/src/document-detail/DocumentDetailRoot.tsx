@@ -16,7 +16,6 @@ import {
 import { exportLibraryDocument } from "@/documents";
 import { hasNativeHost } from "@/host";
 import { PanelFrame } from "@/panel/PanelFrame";
-import type { PanelPosition } from "@/panel/panelTypes";
 import { useCitationPlacement } from "./citationPlacement";
 import {
   DocumentDetailActions,
@@ -26,7 +25,6 @@ import {
 type Props = {
   chatId: string;
   documentID: string;
-  position: PanelPosition;
   /**
    * The citation this panel was opened from, as the third part of its address.
    * It names a place inside the document: the passage to highlight, and the
@@ -45,7 +43,6 @@ type Props = {
 export function DocumentDetailRoot({
   chatId,
   documentID,
-  position,
   citationId,
   download = exportLibraryDocument,
   canDownload = hasNativeHost(),
@@ -158,7 +155,6 @@ export function DocumentDetailRoot({
 
   return (
     <PanelFrame
-      position={position}
       showBorder
       breadcrumb={
         <DocumentDetailBreadcrumb

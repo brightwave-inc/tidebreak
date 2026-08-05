@@ -3,70 +3,67 @@ import { Panel, PanelGroup, type ImperativePanelGroupHandle } from "react-resiza
 
 import { cn } from "@/lib/utils";
 import { PanelDragHandle } from "./PanelDragHandle";
-import type { LayoutState, PanelContent } from "./panelTypes";
+import { PanelTabs } from "./PanelTabs";
+import { activePanel, type LayoutState, type PanelContent } from "./panelTypes";
+import { usePanelNav } from "./usePanelNav";
 
 const MIN_PANEL_SIZE = 25;
 const MAX_PANEL_SIZE = 75;
 
 /**
- * Three slots — left, conversation, right — of which any may be empty.
+ * Two regions: the conversation, and the panels open beside it.
+ *
+ * The conversation is always mounted and never displaced — a panel expanded
+ * over it only takes the width, because its pollers for pending approvals and
+ * questions have to keep running behind it.
  *
  * Sizes are driven imperatively rather than through `defaultSize`, because the
- * arrangement is a function of the URL and the panels have to follow it even
- * when the reader has since dragged them somewhere else. Panels take a dynamic
- * `minSize` of zero while hidden instead of being `collapsible`, so a drag can
- * never squeeze one out of existence — only closing it can.
+ * arrangement is a function of the URL and the regions have to follow it even
+ * when the reader has since dragged them somewhere else. A hidden region takes
+ * a dynamic `minSize` of zero instead of being `collapsible`, so a drag can
+ * never squeeze one out of existence — only closing the tabs can.
  *
- * The whole arrangement is applied in one `setLayout` rather than resizing each
- * panel in turn: sequential resizes are each clamped by the others' current
- * bounds, so an intermediate step can be rejected and leave the group somewhere
- * nobody asked for.
+ * The whole arrangement is applied in one `setLayout` rather than resizing
+ * each region in turn: sequential resizes are each clamped by the other's
+ * current bounds, so an intermediate step can be rejected and leave the group
+ * somewhere nobody asked for.
  */
 export function PanelLayout({
   layout,
+  renderChat,
   renderPanel,
 }: {
   layout: LayoutState;
   /**
-   * `visible` is false for a slot that has been sized out of the arrangement.
-   * The conversation is rendered either way — its pollers for pending approvals
-   * and questions have to keep running while a panel is expanded over it — so
-   * the body is told rather than unmounted.
+   * `visible` is false while a panel is expanded over the conversation. The
+   * conversation is rendered either way, so the body is told rather than
+   * unmounted.
    */
-  renderPanel: (
-    panel: PanelContent,
-    position: "left" | "right" | "chat",
-    visible: boolean,
-  ) => ReactNode;
+  renderChat: (visible: boolean) => ReactNode;
+  /** Only the tab showing is rendered; the rest are addresses, not mounts. */
+  renderPanel: (panel: PanelContent) => ReactNode;
 }) {
   const groupRef = useRef<ImperativePanelGroupHandle>(null);
   const [dragging, setDragging] = useState(false);
+  const { focusTab, closeTab } = usePanelNav();
 
-  const isSplit = layout.mode === "split";
-  const fullscreen = isSplit ? layout.fullscreen : undefined;
-  const leftPanel = isSplit && layout.left.type !== "chat" ? layout.left : null;
-  const rightPanel = isSplit && layout.right.type !== "chat" ? layout.right : null;
-  const bothOpen = Boolean(leftPanel && rightPanel);
+  const hasTabs = layout.tabs.length > 0;
+  const fullscreen = hasTabs && layout.fullscreen;
+  const panel = activePanel(layout);
 
   useEffect(() => {
     const group = groupRef.current;
-    // Before the group has registered its panels there is no layout to replace,
-    // and handing it one is rejected outright. The panels' own defaults already
-    // describe the arrangement at that point.
+    // Before the group has registered its regions there is no layout to
+    // replace, and handing it one is rejected outright. The regions' own
+    // defaults already describe the arrangement at that point.
     if (!group || group.getLayout().length === 0) return;
-    group.setLayout(
-      panelSizes({ isSplit, fullscreen, hasLeft: Boolean(leftPanel), hasRight: Boolean(rightPanel) }),
-    );
-  }, [isSplit, fullscreen, leftPanel, rightPanel]);
+    group.setLayout(panelSizes({ hasTabs, fullscreen }));
+  }, [hasTabs, fullscreen]);
 
-  const initialSizesRef = useRef(
-    panelSizes({ isSplit, fullscreen, hasLeft: Boolean(leftPanel), hasRight: Boolean(rightPanel) }),
-  );
+  const initialSizesRef = useRef(panelSizes({ hasTabs, fullscreen }));
   const initialSizes = initialSizesRef.current;
 
-  const showLeft = isSplit && Boolean(leftPanel);
-  const showChat = !isSplit || (!fullscreen && !bothOpen);
-  const showRight = isSplit && Boolean(rightPanel);
+  const showChat = !fullscreen;
 
   return (
     <PanelGroup
@@ -82,63 +79,55 @@ export function PanelLayout({
     >
       <Panel
         order={1}
-        minSize={showLeft && !fullscreen ? MIN_PANEL_SIZE : 0}
-        maxSize={showLeft && !fullscreen ? MAX_PANEL_SIZE : 100}
+        minSize={showChat ? (hasTabs ? MIN_PANEL_SIZE : 100) : 0}
+        maxSize={showChat ? (hasTabs ? MAX_PANEL_SIZE : 100) : 0}
         defaultSize={initialSizes[0]}
         className="panel-animated"
       >
-        {showLeft && leftPanel && renderPanel(leftPanel, "left", true)}
+        {renderChat(showChat)}
       </Panel>
 
-      <PanelDragHandle disabled={!showLeft || (!bothOpen && !showChat)} onDragging={setDragging} />
+      <PanelDragHandle disabled={!hasTabs || Boolean(fullscreen)} onDragging={setDragging} />
 
       <Panel
         order={2}
-        minSize={showChat ? MIN_PANEL_SIZE : 0}
-        maxSize={showChat ? 100 : 0}
+        minSize={hasTabs && !fullscreen ? MIN_PANEL_SIZE : 0}
+        maxSize={hasTabs ? 100 : 0}
         defaultSize={initialSizes[1]}
         className="panel-animated"
       >
-        {renderPanel({ type: "chat" }, "chat", showChat)}
-      </Panel>
-
-      <PanelDragHandle disabled={!showRight || bothOpen || !showChat} onDragging={setDragging} />
-
-      <Panel
-        order={3}
-        minSize={showRight && !fullscreen ? MIN_PANEL_SIZE : 0}
-        maxSize={showRight && !fullscreen ? MAX_PANEL_SIZE : 100}
-        defaultSize={initialSizes[2]}
-        className="panel-animated"
-      >
-        {showRight && rightPanel && renderPanel(rightPanel, "right", true)}
+        {panel && (
+          <div className="flex h-full w-full min-w-0 flex-col overflow-clip">
+            <div className="shrink-0 px-1 pt-1">
+              <PanelTabs
+                tabs={layout.tabs}
+                activeIndex={layout.activeIndex}
+                onSelect={focusTab}
+                onClose={closeTab}
+              />
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col">{renderPanel(panel)}</div>
+          </div>
+        )}
       </Panel>
     </PanelGroup>
   );
 }
 
 /**
- * The share each slot takes, as `[left, chat, right]`.
+ * The share each region takes, as `[chat, panels]`.
  *
- * Two panels open leaves the conversation nothing: half a panel each is
- * readable, three columns is not.
+ * Nothing open leaves the conversation the window; anything open splits it,
+ * and an expanded panel takes all of it.
  */
 export function panelSizes({
-  isSplit,
+  hasTabs,
   fullscreen,
-  hasLeft,
-  hasRight,
 }: {
-  isSplit: boolean;
-  fullscreen?: "left" | "right";
-  hasLeft: boolean;
-  hasRight: boolean;
-}): [number, number, number] {
-  if (!isSplit) return [0, 100, 0];
-  if (fullscreen === "left") return [100, 0, 0];
-  if (fullscreen === "right") return [0, 0, 100];
-  if (hasLeft && hasRight) return [50, 0, 50];
-  if (hasLeft) return [50, 50, 0];
-  if (hasRight) return [0, 50, 50];
-  return [0, 100, 0];
+  hasTabs: boolean;
+  fullscreen?: boolean;
+}): [number, number] {
+  if (!hasTabs) return [100, 0];
+  if (fullscreen) return [0, 100];
+  return [50, 50];
 }

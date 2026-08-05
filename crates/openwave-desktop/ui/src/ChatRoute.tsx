@@ -541,110 +541,108 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     );
   }
 
-  function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
-    if (panel.type === "chat") {
-      // Only the levels the selected model accepts are offerable, and a model
-      // that accepts none gets no selector at all.
-      const efforts =
-        modelForSelection(models, chat!.model)?.reasoning_efforts ?? [];
-      return (
-        <TranscriptVisibilityProvider value={visible}>
-          <ChatView
-            client={client}
-            chat={chat!}
-            hydrated={hydrated}
-            nativeHost={nativeHost}
-            deletingChat={deletingChatId !== null}
-            draftRef={draftRef}
-            attachError={attachError}
-            files={{
-              items: files,
-              attaching,
-              onAttach: hasNativeHost() ? onAttach : undefined,
-              onRemove: (documentId) =>
-                setComposerFiles((current) =>
-                  current.filter((file) => file.documentId !== documentId),
-                ),
-            }}
-            folders={{
-              items: folders.items,
-              working: folders.working,
-              error: folders.error,
-              onAttach: nativeHost ? folders.attach : undefined,
-              onRemove: folders.remove,
-            }}
-            voice={{
-              available: voice.available,
-              state: voice.state,
-              error: voice.error,
-              onStart: () => void voice.start(),
-              onStop: voice.stop,
-            }}
-            nativeDropTarget={
-              <DocumentDropTarget
-                chatId={chatId}
-                onAttached={adoptAttached}
-                onError={(error) => setAttachError(friendlyAttachError(error))}
-              />
-            }
-            composerImages={{
-              items: images.attachments,
-              error: images.error,
-              unsupportedModel: textOnlyModelLabel(models, chat!.model),
-              onAttachFiles: (selected) => {
-                if (
-                  images.attachments.length + files.length + selected.length >
-                  MAX_IMAGE_ATTACHMENTS
-                ) {
-                  setAttachError(
-                    `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
-                  );
-                  return;
-                }
-                images.attachFiles(selected);
-              },
-              onRemove: images.remove,
-              onRetry: images.retry,
-            }}
-            composerModelMenu={
-              <ModelMenu
-                models={models}
-                value={chat!.model}
-                defaultKey={defaultModelKey}
-                disabled={deletingChatId !== null}
-                onChange={onModelChange}
-              />
-            }
-            composerPermissionMenu={
-              <PermissionModeMenu
-                value={chat!.permission_mode}
-                disabled={deletingChatId !== null}
-                onChange={onPermissionModeChange}
-              />
-            }
-            composerReasoning={{
-              levels: efforts,
-              value: chat!.reasoning_effort,
-              disabled: deletingChatId !== null,
-              onChange: onReasoningEffortChange,
-            }}
-            composerNetwork={{
-              value: chat!.network_policy,
-              disabled: deletingChatId !== null,
-              onChange: onNetworkPolicyChange,
-            }}
-            onDraftChange={setComposerDraft}
-            onSelectPrompt={setComposerDraft}
-            onSend={onSend}
-            onRetryTurn={retryTurn}
-            onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
-            onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
-          />
-        </TranscriptVisibilityProvider>
-      );
-    }
+  function renderChat(visible: boolean) {
+    // Only the levels the selected model accepts are offerable, and a model
+    // that accepts none gets no selector at all.
+    const efforts = modelForSelection(models, chat!.model)?.reasoning_efforts ?? [];
+    return (
+      <TranscriptVisibilityProvider value={visible}>
+        <ChatView
+          client={client}
+          chat={chat!}
+          hydrated={hydrated}
+          nativeHost={nativeHost}
+          deletingChat={deletingChatId !== null}
+          draftRef={draftRef}
+          attachError={attachError}
+          files={{
+            items: files,
+            attaching,
+            onAttach: hasNativeHost() ? onAttach : undefined,
+            onRemove: (documentId) =>
+              setComposerFiles((current) =>
+                current.filter((file) => file.documentId !== documentId),
+              ),
+          }}
+          folders={{
+            items: folders.items,
+            working: folders.working,
+            error: folders.error,
+            onAttach: nativeHost ? folders.attach : undefined,
+            onRemove: folders.remove,
+          }}
+          voice={{
+            available: voice.available,
+            state: voice.state,
+            error: voice.error,
+            onStart: () => void voice.start(),
+            onStop: voice.stop,
+          }}
+          nativeDropTarget={
+            <DocumentDropTarget
+              chatId={chatId}
+              onAttached={adoptAttached}
+              onError={(error) => setAttachError(friendlyAttachError(error))}
+            />
+          }
+          composerImages={{
+            items: images.attachments,
+            error: images.error,
+            unsupportedModel: textOnlyModelLabel(models, chat!.model),
+            onAttachFiles: (selected) => {
+              if (
+                images.attachments.length + files.length + selected.length >
+                MAX_IMAGE_ATTACHMENTS
+              ) {
+                setAttachError(
+                  `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+                );
+                return;
+              }
+              images.attachFiles(selected);
+            },
+            onRemove: images.remove,
+            onRetry: images.retry,
+          }}
+          composerModelMenu={
+            <ModelMenu
+              models={models}
+              value={chat!.model}
+              defaultKey={defaultModelKey}
+              disabled={deletingChatId !== null}
+              onChange={onModelChange}
+            />
+          }
+          composerPermissionMenu={
+            <PermissionModeMenu
+              value={chat!.permission_mode}
+              disabled={deletingChatId !== null}
+              onChange={onPermissionModeChange}
+            />
+          }
+          composerReasoning={{
+            levels: efforts,
+            value: chat!.reasoning_effort,
+            disabled: deletingChatId !== null,
+            onChange: onReasoningEffortChange,
+          }}
+          composerNetwork={{
+            value: chat!.network_policy,
+            disabled: deletingChatId !== null,
+            onChange: onNetworkPolicyChange,
+          }}
+          onDraftChange={setComposerDraft}
+          onSelectPrompt={setComposerDraft}
+          onSend={onSend}
+          onRetryTurn={retryTurn}
+          onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
+          onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
+        />
+      </TranscriptVisibilityProvider>
+    );
+  }
 
-    const side = position === "right" ? "right" : "left";
+  function renderPanel(panel: PanelContent) {
     switch (panel.type) {
       case "document":
         return (
@@ -652,19 +650,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             chatId={chatId}
             documentID={panel.documentId}
             citationId={panel.citationId}
-            position={side}
           />
         );
       case "outputs":
         // An output id turns the list into the reader for that one output.
         return panel.outputId ? (
-          <OutputDetailRoot
-            chatId={chatId}
-            outputId={panel.outputId}
-            position={side}
-          />
+          <OutputDetailRoot chatId={chatId} outputId={panel.outputId} />
         ) : (
-          <PanelFrame position={side} spaceBetween>
+          <PanelFrame spaceBetween>
             <OutputsView
               chatId={chatId}
               onOpen={(outputId) => openPanel({ type: "outputs", outputId })}
@@ -673,22 +666,16 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         );
       case "folders":
         return (
-          <PanelFrame position={side} spaceBetween>
+          <PanelFrame spaceBetween>
             <FoldersView chat={chat!} />
           </PanelFrame>
         );
       case "apps":
-        return <AppsPanel panel={panel} position={side} />;
+        return <AppsPanel panel={panel} />;
       case "plugins":
-        return <PluginsPanel panel={panel} position={side} />;
+        return <PluginsPanel panel={panel} />;
       case "agent":
-        return (
-          <BackgroundAgentPanel
-            chatId={chatId}
-            runId={panel.runId}
-            position={side}
-          />
-        );
+        return <BackgroundAgentPanel chatId={chatId} runId={panel.runId} />;
     }
   }
 
@@ -701,7 +688,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       {/* Citations live in the transcript but open into the panel beside it,
           so the way there is provided above both slots. */}
       <SourceNavProvider value={sourceNav}>
-        <PanelLayout layout={layout} renderPanel={renderPanel} />
+        <PanelLayout layout={layout} renderChat={renderChat} renderPanel={renderPanel} />
       </SourceNavProvider>
     </div>
     </RouteFrame>

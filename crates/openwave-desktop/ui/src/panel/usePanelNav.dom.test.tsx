@@ -10,22 +10,23 @@ import { usePanelNav } from "./usePanelNav";
 afterEach(cleanup);
 
 function Harness() {
-  const { openPanel, closePanel, toggleFullscreen } = usePanelNav();
+  const { layout, openPanel, closeTab, closeAllPanels, toggleFullscreen } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   return (
     <div>
       <button onClick={() => openPanel({ type: "folders" })}>open folders</button>
       <button onClick={() => openPanel({ type: "outputs" })}>open outputs</button>
+      <button onClick={() => openPanel({ type: "apps", appId: "app-1" })}>open app</button>
       <button
-        onClick={() =>
-          sourceNav.openCitation({ documentId: "doc-2", citationId: "cite-1" })
-        }
+        onClick={() => sourceNav.openCitation({ documentId: "doc-2", citationId: "cite-1" })}
       >
         open citation
       </button>
-      <button onClick={() => closePanel("left")}>close left</button>
-      <button onClick={() => closePanel("right")}>close right</button>
-      <button onClick={() => toggleFullscreen("left")}>fullscreen left</button>
+      <button onClick={() => closeTab()}>close active</button>
+      <button onClick={() => closeTab({ type: "folders" })}>close folders</button>
+      <button onClick={() => closeAllPanels()}>close all</button>
+      <button onClick={() => toggleFullscreen()}>fullscreen</button>
+      <output>{`${layout.tabs.length}:${layout.activeIndex}`}</output>
     </div>
   );
 }
@@ -35,92 +36,109 @@ async function mount(initialUrl: string) {
 }
 
 describe("usePanelNav", () => {
-  it("opens a navigation panel on the left, leaving the conversation beside it", async () => {
+  it("appends each newly opened panel and shows it", async () => {
     const user = userEvent.setup();
     const { router } = await mount("/c/chat-1");
 
     await user.click(screen.getByText("open folders"));
-
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
-    );
-  });
-
-  it("replaces a panel that belongs on the same side", async () => {
-    const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?left=folders&right=chat");
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
 
     await user.click(screen.getByText("open outputs"));
-
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "outputs", right: "chat" }),
+      expect(router.state.location.search).toEqual({
+        tabs: "folders,outputs",
+        active: "outputs",
+      }),
     );
   });
 
-  // A citation is clicked in the transcript, which in a split layout is one of
-  // the two slots. The document has to arrive beside it: replacing the
-  // conversation with the source it cites takes away the thing being read.
-  it("opens a citation beside the conversation rather than over it", async () => {
+  it("brings an open panel forward rather than opening it twice", async () => {
     const user = userEvent.setup();
-    // Another source is already open, and the conversation is fullscreen — the
-    // reader is reading it, and the citation they clicked is in it.
-    const { router } = await mount(
-      "/c/chat-1?left=chat&right=document.doc-1&fullscreen=left",
+    const { router } = await mount("/c/chat-1?tabs=folders,outputs&active=outputs");
+
+    await user.click(screen.getByText("open folders"));
+
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders,outputs" }),
     );
+  });
+
+  // A library and the item drilled into from it are one panel showing
+  // something else, so opening the detail moves the tab rather than adding one.
+  it("updates the tab in place when the panel it holds is addressed again", async () => {
+    const user = userEvent.setup();
+    const { router } = await mount("/c/chat-1?tabs=apps");
+
+    await user.click(screen.getByText("open app"));
+
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "apps.app-1" }));
+  });
+
+  it("opens a citation beside the conversation, keeping what was already open", async () => {
+    const user = userEvent.setup();
+    const { router } = await mount("/c/chat-1?tabs=document.doc-1");
 
     await user.click(screen.getByText("open citation"));
 
     await waitFor(() =>
       expect(router.state.location.search).toEqual({
-        left: "chat",
-        right: "document.doc-2.cite-1",
+        tabs: "document.doc-1,document.doc-2.cite-1",
+        active: "document.doc-2.cite-1",
       }),
     );
   });
 
-  it("collapses to the bare URL when the survivor is the conversation", async () => {
+  it("hands focus to the neighbour on the left when the open tab closes", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?left=folders&right=chat");
+    const { router } = await mount("/c/chat-1?tabs=folders,outputs&active=outputs");
 
-    await user.click(screen.getByText("close left"));
+    await user.click(screen.getByText("close active"));
+
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+  });
+
+  it("keeps showing the same panel when a tab beside it closes", async () => {
+    const user = userEvent.setup();
+    const { router } = await mount("/c/chat-1?tabs=folders,outputs&active=outputs");
+
+    await user.click(screen.getByText("close folders"));
+
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "outputs" }));
+  });
+
+  it("returns to the conversation alone when the last tab closes", async () => {
+    const user = userEvent.setup();
+    const { router } = await mount("/c/chat-1?tabs=folders");
+
+    await user.click(screen.getByText("close active"));
 
     await waitFor(() => expect(router.state.location.search).toEqual({}));
   });
 
-  it("returns the survivor to its own side rather than leaving it stranded", async () => {
+  it("closes every panel at once", async () => {
     const user = userEvent.setup();
-    // Folders sits on the right here, which is not where a navigation panel
-    // belongs; closing the other slot should move it home.
-    const { router } = await mount("/c/chat-1?left=outputs&right=folders");
+    const { router } = await mount("/c/chat-1?tabs=folders,outputs&fullscreen=1");
 
-    await user.click(screen.getByText("close left"));
+    await user.click(screen.getByText("close all"));
 
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
-    );
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
   });
 
-  it("toggles fullscreen on and back off", async () => {
+  it("toggles fullscreen on and back off, and not at all with nothing open", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?left=folders&right=chat");
+    const { router } = await mount("/c/chat-1?tabs=folders");
 
-    await user.click(screen.getByText("fullscreen left"));
+    await user.click(screen.getByText("fullscreen"));
     await waitFor(() =>
-      expect(router.state.location.search).toMatchObject({ fullscreen: "left" }),
+      expect(router.state.location.search).toEqual({ tabs: "folders", fullscreen: "1" }),
     );
 
-    await user.click(screen.getByText("fullscreen left"));
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({ left: "folders", right: "chat" }),
-    );
-  });
+    await user.click(screen.getByText("fullscreen"));
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
 
-  it("does nothing on a conversation with no panels open", async () => {
-    const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1");
-
-    await user.click(screen.getByText("fullscreen left"));
-
+    await user.click(screen.getByText("close active"));
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    await user.click(screen.getByText("fullscreen"));
     expect(router.state.location.search).toEqual({});
   });
 });

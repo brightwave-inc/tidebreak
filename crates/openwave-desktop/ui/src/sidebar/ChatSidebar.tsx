@@ -41,10 +41,7 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
     (state) => state.chatIdsWithPendingPrompts,
   );
 
-  const openPanelTypes: Set<PanelType> =
-    layout.mode === "split"
-      ? new Set([layout.left.type, layout.right.type])
-      : new Set<PanelType>(["chat"]);
+  const openPanelTypes: Set<PanelType> = new Set(layout.tabs.map((tab) => tab.type));
 
   // The recent list carries per-row markers, but a chat past its cut can still
   // park a turn on a question. The way back doubles as where that is reported.

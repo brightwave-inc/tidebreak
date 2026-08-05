@@ -1,9 +1,4 @@
-import {
-  areSamePanelType,
-  type LayoutState,
-  type PanelContent,
-  type PanelPosition,
-} from "./panelTypes";
+import { EMPTY_LAYOUT, panelKey, type LayoutState, type PanelContent } from "./panelTypes";
 
 /**
  * Panels are addressed by the URL, so a layout can be restored, gone back to,
@@ -13,7 +8,6 @@ import {
  * The grammar is `{type}` or `{type}.{id}`, with one document panel taking a
  * second identifier:
  *
- *   chat
  *   document.{documentId}
  *   document.{documentId}.{citationId}
  *   outputs
@@ -29,6 +23,9 @@ import {
  * panel and nothing else. Output navigation carries the durable opaque output
  * identity rather than a display filename. A source identifier is followed by
  * the citation to open it at, when the reader arrived from one.
+ *
+ * The conversation has no segment: it is beside the region rather than in it,
+ * so it is not something the URL has to say.
  */
 export function parsePanelSegment(segment: string): PanelContent | null {
   const separator = segment.indexOf(".");
@@ -36,8 +33,6 @@ export function parsePanelSegment(segment: string): PanelContent | null {
   const id = separator === -1 ? "" : segment.slice(separator + 1);
 
   switch (type) {
-    case "chat":
-      return id ? null : { type: "chat" };
     case "folders":
       return id ? null : { type: "folders" };
     case "document":
@@ -75,8 +70,6 @@ function parseDocumentTarget(id: string): PanelContent | null {
 
 export function encodePanelSegment(panel: PanelContent): string {
   switch (panel.type) {
-    case "chat":
-      return "chat";
     case "folders":
       return "folders";
     case "document":
@@ -94,51 +87,96 @@ export function encodePanelSegment(panel: PanelContent): string {
   }
 }
 
-export function parseFullscreenParam(value: string | undefined): PanelPosition | undefined {
-  return value === "left" || value === "right" ? value : undefined;
-}
-
-/** The same panel on both sides is not a layout anyone asked for. */
-export function isValidLayout(left: PanelContent, right: PanelContent): boolean {
-  return !areSamePanelType(left, right);
-}
-
 export type PanelSearch = {
+  /** The open tabs, in strip order, as a comma-separated list of segments. */
+  tabs?: string;
+  /** The segment of the tab showing; absent means the first one. */
+  active?: string;
+  /** `"1"` when the region has taken the whole window. */
+  fullscreen?: string;
+  /**
+   * The retired pair-of-slots grammar. Read on the way in so older links and
+   * already-open windows still land somewhere; never written back out.
+   */
   left?: string;
   right?: string;
-  fullscreen?: string;
 };
 
+const TAB_SEPARATOR = ",";
+
 /**
- * Read a layout out of the URL, falling back to the conversation alone whenever
- * the search params do not describe a usable one. A hand-edited or stale URL
- * should land the reader somewhere sensible rather than on an error.
+ * Read a layout out of the URL, falling back to the conversation alone
+ * whenever the search params do not describe a usable one. A hand-edited or
+ * stale URL should land the reader somewhere sensible rather than on an error.
  */
 export function layoutFromSearch(search: PanelSearch): LayoutState {
-  const single: LayoutState = { mode: "single", panel: { type: "chat" } };
-  if (!search.left && !search.right) return single;
+  const segments =
+    search.tabs !== undefined
+      ? search.tabs.split(TAB_SEPARATOR)
+      : // The old grammar named one panel per side; left came first on screen,
+        // so it comes first in the strip. `chat` was a slot filler and parses
+        // as nothing, which is what drops it here.
+        [search.left, search.right].filter((value): value is string => Boolean(value));
 
-  const left = search.left ? parsePanelSegment(search.left) : { type: "chat" as const };
-  const right = search.right ? parsePanelSegment(search.right) : { type: "chat" as const };
-  if (!left || !right || !isValidLayout(left, right)) return single;
-  if (left.type === "chat" && right.type === "chat") return single;
+  const tabs: PanelContent[] = [];
+  const seen = new Set<string>();
+  for (const segment of segments) {
+    const panel = parsePanelSegment(segment.trim());
+    if (!panel) continue;
+    const key = panelKey(panel);
+    // A URL naming the same panel twice describes one tab, not two.
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tabs.push(panel);
+  }
+  if (tabs.length === 0) return EMPTY_LAYOUT;
 
   return {
-    mode: "split",
-    left,
-    right,
-    fullscreen: parseFullscreenParam(search.fullscreen),
+    tabs,
+    activeIndex: activeIndexFromSearch(search, tabs),
+    fullscreen: isFullscreenParam(search),
   };
 }
 
-/** The inverse of {@link layoutFromSearch}: `single` clears the params entirely. */
-export function searchFromLayout(layout: LayoutState): PanelSearch {
-  if (layout.mode === "single") {
-    return { left: undefined, right: undefined, fullscreen: undefined };
+function activeIndexFromSearch(search: PanelSearch, tabs: PanelContent[]): number {
+  const named = search.active ? parsePanelSegment(search.active) : null;
+  if (named) {
+    const index = tabs.findIndex((tab) => panelKey(tab) === panelKey(named));
+    if (index !== -1) return index;
   }
+  // In a legacy link the expanded side is the one the reader was looking at.
+  if (search.tabs === undefined && search.fullscreen === "right" && tabs.length > 1) {
+    return tabs.length - 1;
+  }
+  return 0;
+}
+
+function isFullscreenParam(search: PanelSearch): boolean {
+  if (search.tabs !== undefined) return search.fullscreen === "1";
+  // The old grammar named the expanded side. Only a side that actually held a
+  // panel survives as fullscreen — an expanded conversation is now just the
+  // conversation with nothing beside it.
+  const expanded = search.fullscreen === "left" ? search.left : search.right;
+  if (search.fullscreen !== "left" && search.fullscreen !== "right") return false;
+  return Boolean(expanded && parsePanelSegment(expanded));
+}
+
+/**
+ * The inverse of {@link layoutFromSearch}. No tabs clears the params entirely,
+ * and the retired slot params are always cleared, so a legacy URL is rewritten
+ * the first time the layout changes.
+ */
+export function searchFromLayout(layout: LayoutState): PanelSearch {
+  const cleared = { left: undefined, right: undefined };
+  if (layout.tabs.length === 0) {
+    return { ...cleared, tabs: undefined, active: undefined, fullscreen: undefined };
+  }
+  const active = layout.tabs[layout.activeIndex];
   return {
-    left: encodePanelSegment(layout.left),
-    right: encodePanelSegment(layout.right),
-    fullscreen: layout.fullscreen,
+    ...cleared,
+    tabs: layout.tabs.map(encodePanelSegment).join(TAB_SEPARATOR),
+    // The first tab is the default, so naming it would only lengthen the URL.
+    active: layout.activeIndex > 0 && active ? encodePanelSegment(active) : undefined,
+    fullscreen: layout.fullscreen ? "1" : undefined,
   };
 }

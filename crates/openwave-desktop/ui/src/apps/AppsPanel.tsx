@@ -16,17 +16,15 @@ import { appsApisFromClient } from "./appsApis";
  */
 export function AppsPanel({
   panel,
-  position,
 }: {
   panel: Extract<PanelContent, { type: "apps" }>;
-  position: "left" | "right";
 }) {
   const { client } = useApp();
   const { openPanel } = usePanelNav();
   const apis = useMemo(() => appsApisFromClient(client), [client]);
 
   return (
-    <PanelFrame position={position} spaceBetween>
+    <PanelFrame spaceBetween>
       {panel.appId ? (
         <AppDetailView
           appId={panel.appId}

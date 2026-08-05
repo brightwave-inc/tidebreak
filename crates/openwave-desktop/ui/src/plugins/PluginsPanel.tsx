@@ -16,10 +16,8 @@ import { usePluginCatalog } from "./usePluginCatalog";
  */
 export function PluginsPanel({
   panel,
-  position,
 }: {
   panel: Extract<PanelContent, { type: "plugins" }>;
-  position: "left" | "right";
 }) {
   const { client } = useApp();
   const { openPanel } = usePanelNav();
@@ -27,7 +25,7 @@ export function PluginsPanel({
   const state = usePluginCatalog(apis);
 
   return (
-    <PanelFrame position={position} spaceBetween>
+    <PanelFrame spaceBetween>
       {panel.pluginId ? (
         <PluginDetailView
           pluginId={panel.pluginId}
