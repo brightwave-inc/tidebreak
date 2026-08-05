@@ -1,0 +1,94 @@
+{
+  "body": {
+    "input": [
+      {
+        "content": [
+          {
+            "text": "Use the tool.",
+            "type": "input_text"
+          }
+        ],
+        "role": "system"
+      },
+      {
+        "content": [
+          {
+            "text": "Search for the retry policy.",
+            "type": "input_text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "max_output_tokens": 2048,
+    "model": "gpt-5.6-sol",
+    "store": false,
+    "stream": true,
+    "tool_choice": {
+      "name": "search_documents",
+      "type": "function"
+    },
+    "tools": [
+      {
+        "description": "Search the attached documents.",
+        "name": "search_documents",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "filters": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "field": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "field"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "query": {
+              "description": "What to look for.",
+              "type": "string"
+            },
+            "scope": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "project",
+                    "chat"
+                  ],
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "strict": false,
+        "type": "function"
+      }
+    ]
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/responses",
+  "query": null
+}

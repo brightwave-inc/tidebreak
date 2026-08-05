@@ -1,0 +1,86 @@
+{
+  "body": {
+    "max_tokens": 2048,
+    "messages": [
+      {
+        "content": "Use the tool.",
+        "role": "system"
+      },
+      {
+        "content": "Search for the retry policy.",
+        "role": "user"
+      }
+    ],
+    "model": "gpt-5.6-sol",
+    "stream": true,
+    "tool_choice": {
+      "function": {
+        "name": "search_documents"
+      },
+      "type": "function"
+    },
+    "tools": [
+      {
+        "function": {
+          "description": "Search the attached documents.",
+          "name": "search_documents",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "filters": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "field": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "field"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "query": {
+                "description": "What to look for.",
+                "type": "string"
+              },
+              "scope": {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "project",
+                      "chat"
+                    ],
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/chat/completions",
+  "query": null
+}

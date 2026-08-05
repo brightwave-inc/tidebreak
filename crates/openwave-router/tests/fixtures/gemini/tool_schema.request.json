@@ -1,0 +1,93 @@
+{
+  "body": {
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Search for the retry policy."
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 2048
+    },
+    "systemInstruction": {
+      "parts": [
+        {
+          "text": "Use the tool."
+        }
+      ]
+    },
+    "toolConfig": {
+      "functionCallingConfig": {
+        "allowedFunctionNames": [
+          "search_documents"
+        ],
+        "mode": "ANY"
+      }
+    },
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "description": "Search the attached documents.",
+            "name": "search_documents",
+            "parameters": {
+              "properties": {
+                "filters": {
+                  "items": {
+                    "properties": {
+                      "field": {
+                        "type": "STRING"
+                      }
+                    },
+                    "required": [
+                      "field"
+                    ],
+                    "type": "OBJECT"
+                  },
+                  "type": "ARRAY"
+                },
+                "query": {
+                  "description": "What to look for.",
+                  "type": "STRING"
+                },
+                "scope": {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "project",
+                        "chat"
+                      ],
+                      "type": "STRING"
+                    },
+                    "limit": {
+                      "type": "INTEGER"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "OBJECT"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "OBJECT"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "headers": {
+    "content-type": "application/json",
+    "x-goog-api-key": "<redacted>"
+  },
+  "method": "POST",
+  "path": "/v1beta/models/gemini-3.6-flash:streamGenerateContent",
+  "query": "alt=sse"
+}

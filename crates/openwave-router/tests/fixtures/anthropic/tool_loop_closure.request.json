@@ -1,0 +1,108 @@
+{
+  "body": {
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "Read both configs.",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "Reading both.",
+            "type": "text"
+          },
+          {
+            "id": "call_1",
+            "input": {
+              "path": "a.toml"
+            },
+            "name": "read_file",
+            "type": "tool_use"
+          },
+          {
+            "id": "call_2",
+            "input": {
+              "path": "b.toml"
+            },
+            "name": "read_file",
+            "type": "tool_use"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": [
+          {
+            "content": "retries = 3",
+            "is_error": false,
+            "tool_use_id": "call_1",
+            "type": "tool_result"
+          },
+          {
+            "cache_control": {
+              "type": "ephemeral"
+            },
+            "content": "no such file",
+            "is_error": true,
+            "tool_use_id": "call_2",
+            "type": "tool_result"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high"
+    },
+    "stream": true,
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "text": "Use the tools.",
+        "type": "text"
+      }
+    ],
+    "thinking": {
+      "display": "summarized",
+      "type": "adaptive"
+    },
+    "tools": [
+      {
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "description": "Read a file from the workspace.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "name": "read_file"
+      }
+    ]
+  },
+  "headers": {
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "x-api-key": "<redacted>"
+  },
+  "method": "POST",
+  "path": "/v1/messages",
+  "query": null
+}

@@ -1,0 +1,55 @@
+{
+  "body": {
+    "max_completion_tokens": 1024,
+    "messages": [
+      {
+        "content": "Summarize the incident.",
+        "role": "user"
+      }
+    ],
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "response_format": {
+      "json_schema": {
+        "name": "incident_summary",
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "affected": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "headline": {
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "low",
+                "high"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "affected",
+            "headline",
+            "severity"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "json_schema"
+    },
+    "stream": true
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/chat/completions",
+  "query": null
+}

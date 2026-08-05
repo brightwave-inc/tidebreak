@@ -1,0 +1,25 @@
+{
+  "body": {
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "content": "You are a careful assistant.",
+        "role": "system"
+      },
+      {
+        "content": "What changed in this file?",
+        "role": "user"
+      }
+    ],
+    "model": "gpt-5.6-sol",
+    "stream": true,
+    "temperature": 0.20000000298023224
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/chat/completions",
+  "query": null
+}

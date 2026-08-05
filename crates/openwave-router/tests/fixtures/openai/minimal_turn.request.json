@@ -1,0 +1,36 @@
+{
+  "body": {
+    "input": [
+      {
+        "content": [
+          {
+            "text": "You are a careful assistant.",
+            "type": "input_text"
+          }
+        ],
+        "role": "system"
+      },
+      {
+        "content": [
+          {
+            "text": "What changed in this file?",
+            "type": "input_text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "max_output_tokens": 1024,
+    "model": "gpt-5.6-sol",
+    "store": false,
+    "stream": true,
+    "temperature": 0.20000000298023224
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/responses",
+  "query": null
+}

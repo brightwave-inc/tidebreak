@@ -1,0 +1,54 @@
+{
+  "body": {
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Summarize the incident."
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 1024,
+      "responseMimeType": "application/json",
+      "responseSchema": {
+        "properties": {
+          "affected": {
+            "items": {
+              "type": "STRING"
+            },
+            "type": "ARRAY"
+          },
+          "headline": {
+            "type": "STRING"
+          },
+          "severity": {
+            "enum": [
+              "low",
+              "high"
+            ],
+            "type": "STRING"
+          }
+        },
+        "required": [
+          "affected",
+          "headline",
+          "severity"
+        ],
+        "type": "OBJECT"
+      },
+      "thinkingConfig": {
+        "thinkingLevel": "high"
+      }
+    }
+  },
+  "headers": {
+    "content-type": "application/json",
+    "x-goog-api-key": "<redacted>"
+  },
+  "method": "POST",
+  "path": "/v1beta/models/gemini-3.6-flash:streamGenerateContent",
+  "query": "alt=sse"
+}
