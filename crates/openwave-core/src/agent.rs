@@ -763,6 +763,10 @@ pub struct SandboxAgentSpawnRequest {
     pub task: String,
     /// Canonical closed arguments emitted by the provider.
     pub arguments: Value,
+    /// Whether this spawn already parked on the approval gate and carries a
+    /// durable pending tool-call row the checkpoint must finalize rather than
+    /// insert. Set only by [`Agent::gate_sandbox_spawn`].
+    pub approval_gated: bool,
 }
 
 impl SandboxAgentSpawnRequest {
@@ -1053,6 +1057,17 @@ enum CallIsolation {
     SandboxSpawn,
     /// Leaves the loop as an ordered child-wait checkpoint.
     AgentWait,
+}
+
+/// What the approval gate decided about one delegation.
+enum SandboxSpawnGate {
+    /// The spawn may proceed. The request records whether a durable pending
+    /// tool-call row is waiting for the checkpoint to finalize.
+    Admit(SandboxAgentSpawnRequest),
+    /// The spawn will not happen. Its durable row is already terminal and its
+    /// `ToolCallCompleted` event has been published; this is what the model
+    /// reads.
+    Declined(ToolOutput),
 }
 
 /// How one client call's model-facing arguments map onto the canonical durable
@@ -1354,19 +1369,36 @@ impl Agent {
             self.persist(chat.id, turn_id, Role::User, user_input)
                 .await?;
         }
-        if let Some(request) = self.pending_sandbox_spawns.first().cloned() {
+        if !self.pending_sandbox_spawns.is_empty() {
             let Some(steer_revision) = self.pending_sandbox_spawn_steer_revision else {
                 return Err(AgentError::Store(
                     "pending sandbox spawns require a durably claimed turn".into(),
                 ));
             };
-            return Ok(AgentTurnOutcome::SandboxAgentSpawn {
-                request,
-                remaining_requests: self.pending_sandbox_spawns[1..].to_vec(),
-                usage: Usage::default(),
-                steer_revision,
-                model_steps: 0,
-            });
+            // Every spawn from the batch passes the gate, not just the first
+            // one the step yielded: the model can name several delegations in
+            // one step, and a card for one of them is not consent for the rest.
+            // A refused spawn is answered in place and the batch moves on.
+            for index in 0..self.pending_sandbox_spawns.len() {
+                let request = self.pending_sandbox_spawns[index].clone();
+                match self
+                    .gate_sandbox_spawn(chat, turn_id, &request, events)
+                    .await?
+                {
+                    SandboxSpawnGate::Admit(request) => {
+                        return Ok(AgentTurnOutcome::SandboxAgentSpawn {
+                            request,
+                            remaining_requests: self.pending_sandbox_spawns[index + 1..].to_vec(),
+                            usage: Usage::default(),
+                            steer_revision,
+                            model_steps: 0,
+                        });
+                    }
+                    // Answered durably and published; the transcript rebuild
+                    // below picks the refusal up as this call's result.
+                    SandboxSpawnGate::Declined(_) => {}
+                }
+            }
         }
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
@@ -2111,29 +2143,64 @@ impl Agent {
                         CallIsolation::SandboxSpawn => {
                             match self.sandbox_checkpoint(call, generation_steer_revision) {
                                 Ok((request, steer_revision)) => {
-                                    let remaining_requests = calls
-                                        .iter()
-                                        .enumerate()
-                                        .skip(index + 1)
-                                        .filter(|(sibling, _)| {
-                                            matches!(
-                                                isolations[*sibling],
-                                                Some(CallIsolation::SandboxSpawn)
-                                            )
-                                        })
-                                        .filter_map(|(_, sibling)| {
-                                            self.sandbox_checkpoint(sibling, Some(steer_revision))
-                                                .ok()
-                                                .map(|(request, _)| request)
-                                        })
-                                        .collect();
-                                    return Ok(AgentTurnOutcome::SandboxAgentSpawn {
-                                        request,
-                                        remaining_requests,
-                                        usage: total_usage,
-                                        steer_revision,
-                                        model_steps: steps_used,
-                                    });
+                                    // Every spawn the step named, in model
+                                    // order. Each one passes the gate on its
+                                    // own: a card about one delegation is not
+                                    // consent for the others, and the first
+                                    // that clears it leaves the loop carrying
+                                    // the rest.
+                                    let mut queued = vec![(index, request)];
+                                    for (sibling, sibling_call) in
+                                        calls.iter().enumerate().skip(index + 1)
+                                    {
+                                        if !matches!(
+                                            isolations[sibling],
+                                            Some(CallIsolation::SandboxSpawn)
+                                        ) {
+                                            continue;
+                                        }
+                                        match self
+                                            .sandbox_checkpoint(sibling_call, Some(steer_revision))
+                                        {
+                                            Ok((request, _)) => queued.push((sibling, request)),
+                                            Err(reason) => {
+                                                outputs[sibling] = Some(self.decline_call(
+                                                    sibling_call,
+                                                    events,
+                                                    reason.into(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    let mut admitted = None;
+                                    for (position, (slot, request)) in queued.iter().enumerate() {
+                                        match self
+                                            .gate_sandbox_spawn(chat, turn_id, request, events)
+                                            .await?
+                                        {
+                                            SandboxSpawnGate::Admit(request) => {
+                                                admitted = Some((position, request));
+                                                break;
+                                            }
+                                            // Refused before any child existed,
+                                            // and already answered durably.
+                                            SandboxSpawnGate::Declined(output) => {
+                                                outputs[*slot] = Some(output);
+                                            }
+                                        }
+                                    }
+                                    if let Some((position, request)) = admitted {
+                                        return Ok(AgentTurnOutcome::SandboxAgentSpawn {
+                                            request,
+                                            remaining_requests: queued[position + 1..]
+                                                .iter()
+                                                .map(|(_, request)| request.clone())
+                                                .collect(),
+                                            usage: total_usage,
+                                            steer_revision,
+                                            model_steps: steps_used,
+                                        });
+                                    }
                                 }
                                 Err(reason) => {
                                     outputs[index] =
@@ -2589,6 +2656,7 @@ impl Agent {
                 child_run_id: AgentRunId::sandbox_for_spawn_call(call.call_id),
                 task,
                 arguments,
+                approval_gated: false,
             },
             steer_revision,
         ))
@@ -3402,6 +3470,250 @@ impl Agent {
             content: self.tool_result_for_model(&output.content, call_id),
             ..output.clone()
         }
+    }
+
+    /// Decide whether one delegation may create a child, before it does.
+    ///
+    /// A background run's own tool calls are advanced by the sandbox worker
+    /// under its own lease and never re-enter this chat's gate, so the spawn is
+    /// the only point at which the reader can be asked. It is asked once, for
+    /// the whole run: nobody is watching a background run, and a mid-run card
+    /// would stall it against its own deadline.
+    ///
+    /// A spawn's tool call is normally written already completed, in the same
+    /// transaction that admits the child, which leaves the approval broker
+    /// nothing to park on. A gated spawn therefore first accepts an ordinary
+    /// pending server row and parks on that, exactly like any other Sensitive
+    /// call; [`crate::Store::checkpoint_sandbox_spawn`] finalizes that same row
+    /// when it admits the child, strictly after the decision has committed.
+    ///
+    /// An interrupted decision leaves the row pending, which
+    /// [`Self::resume_pending_server_calls`] abandons on the next attempt. That
+    /// is the fail-closed direction: no child is admitted by a decision nobody
+    /// finished making.
+    async fn gate_sandbox_spawn(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        request: &SandboxAgentSpawnRequest,
+        events: &EventSink<'_>,
+    ) -> Result<SandboxSpawnGate> {
+        const KIND: ToolApprovalKind = ToolApprovalKind::DelegateMayRunBackgroundAgent;
+        let mode = chat.permission_mode.unwrap_or(PermissionMode::Ask);
+        // `Allow` is the chat saying it will not be asked. A standing grant is
+        // the reader having already answered this exact question here, which is
+        // what keeps repeat delegation in one conversation from re-prompting.
+        // Either way the spawn takes the ordinary ungated path and no durable
+        // pending row is created.
+        if matches!(mode, PermissionMode::Allow)
+            || self.standing_grants.covers(
+                chat.id,
+                chat.project_id,
+                crate::SPAWN_SANDBOX_AGENT_TOOL,
+                KIND,
+                &request.arguments,
+            )
+        {
+            return Ok(SandboxSpawnGate::Admit(request.clone()));
+        }
+        let call = PendingCall {
+            call_id: request.call_id,
+            provider_id: request.provider_id.clone(),
+            name: crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+            args: serde_json::to_string(&request.arguments)?,
+        };
+        // What the reader is deciding. The task says what the child is told to
+        // do; the network policy says what it can do with what it learns, and
+        // is the part that is actually being consented to — the run's workspace
+        // is keyed by its own id and carries no folder grants, staged host
+        // paths, or chat attachments.
+        let preview = Some(ToolActionPreview::DelegateAgent {
+            task: request.task.clone(),
+            network: chat.network_policy.clone(),
+        });
+        if let Some(committed) = self.accept_server_call(chat.id, turn_id, &call).await? {
+            // An earlier attempt already answered this exact call. Replay what
+            // it committed rather than asking a second time.
+            return Ok(SandboxSpawnGate::Declined(
+                self.settle_gated_spawn(chat.id, turn_id, &call, events, preview, committed)
+                    .await?,
+            ));
+        }
+        macro_rules! refuse {
+            ($output:expr) => {
+                return Ok(SandboxSpawnGate::Declined(
+                    self.settle_gated_spawn(chat.id, turn_id, &call, events, preview, $output)
+                        .await?,
+                ))
+            };
+        }
+        if self.durable_steer_lease.is_some() && events.flush().await.is_err() {
+            refuse!(ToolOutput::error("approval event journal is unavailable"));
+        }
+        let journal = match (self.durable_steer_lease, events.proposed_ordinal()) {
+            (Some(lease_token), Ok(Some(event_ordinal))) => Some(ApprovalJournalIdentity {
+                lease_token,
+                event_ordinal,
+            }),
+            (None, Ok(None)) => None,
+            _ => refuse!(ToolOutput::error(
+                "approval event journal identity is invalid"
+            )),
+        };
+        let registering = self.approvals.register(
+            ApprovalRequest {
+                call_id: request.call_id,
+                chat_id: chat.id,
+                turn_id,
+                tool_name: crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                class: ApprovalClass::Sensitive,
+                kind: KIND,
+                preview: preview.clone(),
+                // A judge deciding a whole unattended run is not the same
+                // question as a judge deciding one call, so delegation is never
+                // handed to it.
+                auto_judge: false,
+            },
+            journal,
+        );
+        let registration = match future::select(registering, self.cancel.cancelled()).await {
+            Either::Left((registration, _)) if !self.cancel.is_cancelled() => registration,
+            Either::Left(_) | Either::Right(((), _)) => {
+                refuse!(ToolOutput::failed(
+                    ToolErrorCategory::UserCancelled,
+                    "turn cancelled while registering delegation approval",
+                ));
+            }
+        };
+        let required = AgentEvent::ApprovalRequired {
+            auto_judging: false,
+            call_id: request.call_id,
+            tool_name: crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+            class: ApprovalClass::Sensitive,
+            kind: KIND,
+            grant_scopes: GrantScope::mintable_ladder_for(
+                KIND,
+                crate::SPAWN_SANDBOX_AGENT_TOOL,
+                &request.arguments,
+            ),
+            preview: preview.clone(),
+        };
+        let authorized_by_standing_grant = matches!(
+            registration.publication,
+            ApprovalRequiredPublication::StandingGrant
+        );
+        match registration.publication {
+            ApprovalRequiredPublication::Ordinary => events.send(required),
+            ApprovalRequiredPublication::Committed {
+                event_ordinal,
+                event,
+            } => {
+                if events
+                    .send_committed_proposed(event_ordinal, event)
+                    .is_err()
+                {
+                    refuse!(ToolOutput::error(
+                        "approval event publication is unavailable"
+                    ));
+                }
+            }
+            ApprovalRequiredPublication::Recovered {
+                event_ordinal,
+                event,
+            } => {
+                if events
+                    .send_recovered_proposed(event_ordinal, event)
+                    .is_err()
+                {
+                    refuse!(ToolOutput::error("approval event recovery is unavailable"));
+                }
+            }
+            ApprovalRequiredPublication::None | ApprovalRequiredPublication::StandingGrant => {}
+        }
+        let decision = match future::select(registration.decision, self.cancel.cancelled()).await {
+            Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
+            Either::Left(_) | Either::Right(((), _)) => {
+                if !authorized_by_standing_grant {
+                    events.send(AgentEvent::ApprovalDecided {
+                        call_id: request.call_id,
+                        approved: false,
+                    });
+                }
+                refuse!(ToolOutput::failed(
+                    ToolErrorCategory::UserCancelled,
+                    "turn cancelled while awaiting delegation approval",
+                ));
+            }
+        };
+        let approved = matches!(decision, ApprovalDecision::Approve);
+        if !authorized_by_standing_grant {
+            events.send(AgentEvent::ApprovalDecided {
+                call_id: request.call_id,
+                approved,
+            });
+        }
+        if let ApprovalDecision::Reject { reason } = decision {
+            refuse!(ToolOutput::failed(ToolErrorCategory::UserDeclined, reason));
+        }
+        // A cancel landing concurrently with the approval must not admit a
+        // child that will keep running after the turn has stopped.
+        if self.cancel.is_cancelled() {
+            refuse!(ToolOutput::failed(
+                ToolErrorCategory::UserCancelled,
+                "turn cancelled after delegation approval",
+            ));
+        }
+        Ok(SandboxSpawnGate::Admit(SandboxAgentSpawnRequest {
+            approval_gated: true,
+            ..request.clone()
+        }))
+    }
+
+    /// Close a delegation that will not happen: resolve its durable pending row
+    /// and publish the result the model reads.
+    async fn settle_gated_spawn(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        call: &PendingCall,
+        events: &EventSink<'_>,
+        preview: Option<ToolActionPreview>,
+        output: ToolOutput,
+    ) -> Result<ToolOutput> {
+        let resolution = if output.is_error {
+            ToolCallResolution::Failed {
+                result: output.content.clone(),
+                error_code: output
+                    .error_category
+                    .unwrap_or(ToolErrorCategory::ToolFailed)
+                    .as_str()
+                    .into(),
+                error_detail: None,
+            }
+        } else {
+            ToolCallResolution::Completed {
+                result: output.content.clone(),
+            }
+        };
+        let outcome = self
+            .resolve_server_call_retry(chat_id, turn_id, call.call_id, &resolution, None)
+            .await?;
+        if !matches!(
+            outcome,
+            ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
+        ) {
+            return Err(AgentError::Store(format!(
+                "refused delegation {} could not be resolved: {outcome:?}",
+                call.call_id
+            )));
+        }
+        events.send(AgentEvent::ToolCallCompleted {
+            call_id: call.call_id,
+            output: self.tool_output_for_event(&output, call.call_id),
+            action: preview,
+            result: None,
+        });
+        Ok(output)
     }
 
     /// Resume persisted server calls accepted by an earlier attempt before
@@ -5492,7 +5804,10 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
-            permission_mode: None,
+            // Consent is not what this test is about: the chat has already
+            // said it will not be asked, so the checkpoint shape is what
+            // shows through.
+            permission_mode: Some(PermissionMode::Allow),
             network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
@@ -5651,7 +5966,7 @@ mod tests {
             title: None,
             model: None,
             reasoning_effort: None,
-            permission_mode: None,
+            permission_mode: Some(PermissionMode::Allow),
             network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
@@ -5698,6 +6013,135 @@ mod tests {
         assert_eq!(request.task, "research A");
         assert_eq!(remaining_requests.len(), 1);
         assert_eq!(remaining_requests[0].task, "research B");
+    }
+
+    /// A background run's own calls never come back to this chat's gate, so
+    /// the spawn is the only moment consent can be asked for. A chat that
+    /// would park a foreground call parks the delegation too, and a refusal
+    /// leaves no checkpoint for the worker to admit a child from.
+    #[tokio::test]
+    async fn a_refused_delegation_never_reaches_a_spawn_checkpoint() {
+        let (outcome, events) = drive_gated_delegation(Arc::new(RefuseGate)).await;
+        assert!(
+            !matches!(outcome, AgentTurnOutcome::SandboxAgentSpawn { .. }),
+            "a refused delegation must not yield a spawn checkpoint: {outcome:?}"
+        );
+        // The card names the policy the child would inherit, because egress is
+        // what the reader is deciding.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ApprovalRequired { kind, preview, .. }
+                    if *kind == ToolApprovalKind::DelegateMayRunBackgroundAgent
+                        && matches!(
+                            preview,
+                            Some(ToolActionPreview::DelegateAgent { task, network })
+                                if task == "research A"
+                                    && *network == crate::NetworkPolicy::Open
+                        )
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCallCompleted { output, .. } if output.is_error
+            )),
+            "the model is told the delegation was refused: {events:?}"
+        );
+    }
+
+    /// An approved delegation is admitted through the ordinary spawn
+    /// checkpoint, carrying the flag that tells it to finalize the row the
+    /// approval parked on rather than insert a second one.
+    #[tokio::test]
+    async fn an_approved_delegation_checkpoints_against_its_own_parked_call() {
+        let (outcome, _events) = drive_gated_delegation(Arc::new(crate::AutoApproveGate)).await;
+        let AgentTurnOutcome::SandboxAgentSpawn { request, .. } = outcome else {
+            panic!("an approved delegation should produce a checkpoint: {outcome:?}");
+        };
+        assert_eq!(request.task, "research A");
+        assert!(request.approval_gated);
+    }
+
+    /// Drive one delegation in a chat that asks before it acts, with the
+    /// claimed-turn sink drained concurrently so the gate's journal flush is
+    /// acknowledged the way the worker acknowledges it.
+    async fn drive_gated_delegation(
+        gate: Arc<dyn ApprovalGate>,
+    ) -> (AgentTurnOutcome, Vec<AgentEvent>) {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("gate.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: crate::NetworkPolicy::Open,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "delegate")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        store
+            .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_foreground_agent_orchestration();
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                sibling_call: false,
+                name: crate::SPAWN_SANDBOX_AGENT_TOOL,
+                arguments: r#"{"task":"research A"}"#,
+            }),
+            Arc::new(registry),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 1,
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token)
+        .with_approvals(gate)
+        .with_foreground_agent_orchestration();
+        let (tx, mut rx) = unbounded();
+        let chat_for_turn = chat.clone();
+        let handle = tokio::spawn(async move {
+            agent
+                .run_claimed_turn(&chat_for_turn, turn_id, MessageId::new(), 1, &tx)
+                .await
+        });
+        let mut events = Vec::new();
+        while let Some(emission) = rx.next().await {
+            match emission {
+                ClaimedAgentEvent::Pending { event, .. } => events.push(event),
+                ClaimedAgentEvent::Committed { event, .. }
+                | ClaimedAgentEvent::Recovered { event, .. } => events.push(event.event),
+                ClaimedAgentEvent::Flush(acknowledge) => {
+                    let _ = acknowledge.send(());
+                }
+            }
+        }
+        (handle.await.unwrap().unwrap(), events)
     }
 
     #[tokio::test]

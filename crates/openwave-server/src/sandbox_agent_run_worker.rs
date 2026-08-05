@@ -3073,6 +3073,7 @@ mod tests {
                             "relative_path": "reports/summary.md"
                         }
                     }),
+                    approval_gated: false,
                     result: serde_json::to_string(&openwave_core::SpawnSandboxAgentResult {
                         agent_id: child_id,
                     })

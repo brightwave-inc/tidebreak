@@ -248,6 +248,9 @@ export function approvalAsk(
   if (preview?.tool === "write_file") {
     return { title: "Write this file?", summaryLine: summary };
   }
+  if (preview?.tool === "delegate_agent") {
+    return { title: "Start this background agent?", summaryLine: summary };
+  }
   return { title: summary, summaryLine: null };
 }
 
@@ -411,7 +414,9 @@ function spokenAction(preview: ToolActionPreview): string {
         ? preview.url
         : preview.tool === "write_file"
           ? preview.path
-          : preview.query;
+          : preview.tool === "delegate_agent"
+            ? preview.task
+            : preview.query;
   return bounded(spoken);
 }
 

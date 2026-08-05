@@ -1448,6 +1448,11 @@ pub struct SandboxSpawnCheckpointRequest {
     /// Host-resolved execution location for the child admitted by this atomic
     /// checkpoint. Existing callers use the in-process default.
     pub execution_location: AgentRunExecutionLocation,
+    /// Whether the spawn parked on the approval gate first, so a pending
+    /// server tool-call row already exists for `call_id` and must be finalized
+    /// rather than inserted. The row's approval must read approved: admission
+    /// happens strictly after the decision commits.
+    pub approval_gated: bool,
 }
 
 /// Immutable final text submitted by one exact sandbox worker lease.

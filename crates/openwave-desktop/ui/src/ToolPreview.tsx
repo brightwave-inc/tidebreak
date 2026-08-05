@@ -1,4 +1,5 @@
-import type { ExecResultPreview, ToolActionPreview } from "./api";
+import type { ExecResultPreview, NetworkPolicy, ToolActionPreview } from "./api";
+import { networkPolicyLabel } from "./NetworkPolicyDialog";
 
 /**
  * Presentation of a tool's own preview of the action it is about to take.
@@ -58,6 +59,18 @@ export function toolPreviewPresentation(
       detail: `${headline}\n# fetched from the public web`,
     };
   }
+  if (preview.tool === "delegate_agent") {
+    // The task leads because it is what the run will do, but the network
+    // policy is the part being consented to: the run's workspace is its own,
+    // so what it can reach is the only way anything leaves the box.
+    const headline = preview.task;
+    const detail = [
+      headline,
+      `# network: ${networkPolicyLabel(preview.network)}${networkHosts(preview.network)}`,
+      "# runs unattended in its own workspace; its own calls are not asked about",
+    ].join("\n");
+    return { headline, detail };
+  }
   const headline = [preview.command, ...preview.args]
     .map(quoteArgument)
     .join(" ");
@@ -95,6 +108,16 @@ function publishedWindow(
   if (from) return `# published on or after ${from}`;
   if (to) return `# published on or before ${to}`;
   return null;
+}
+
+/**
+ * The hosts a custom policy names, so the card says which destinations the
+ * delegated run can reach rather than only that the list exists.
+ */
+function networkHosts(policy: NetworkPolicy): string {
+  if (policy.mode !== "allowed_hosts") return "";
+  const hosts = policy.allowed_hosts.join(", ");
+  return hosts.length > 0 ? ` (${hosts})` : "";
 }
 
 /**

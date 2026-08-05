@@ -940,6 +940,9 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         // `Unsupported`: rejectable-only, never silently approvable.
         Some("unsupported") => match ToolApprovalKind::for_tool_name(&model.name) {
             ToolApprovalKind::WorkspaceMayModifyFiles => ToolApprovalKind::WorkspaceMayModifyFiles,
+            ToolApprovalKind::DelegateMayRunBackgroundAgent => {
+                ToolApprovalKind::DelegateMayRunBackgroundAgent
+            }
             _ => ToolApprovalKind::Unsupported,
         },
         _ => {

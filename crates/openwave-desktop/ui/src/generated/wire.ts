@@ -1796,7 +1796,15 @@ end_published_at: string | null, } | { "tool": "web_extract", url: string, } | {
 /**
  * Workspace-relative destination path, never a host path.
  */
-path: string, };
+path: string, } | { "tool": "delegate_agent", 
+/**
+ * The child's self-contained task, as the model wrote it.
+ */
+task: string, 
+/**
+ * The network policy the child inherits from this chat.
+ */
+network: NetworkPolicy, };
 
 /**
  * Closed immutable consent semantics stored with each approval request.
@@ -1806,7 +1814,7 @@ path: string, };
  * arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "delegate_may_run_background_agent" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.

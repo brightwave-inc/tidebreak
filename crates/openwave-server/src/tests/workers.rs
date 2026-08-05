@@ -1,5 +1,20 @@
 use super::*;
 
+/// Put a chat in `Allow` so a delegation runs without an approval card.
+async fn allow_delegation(store: &dyn Store, chat: ChatId) {
+    store
+        .update_chat_metadata(
+            chat,
+            None,
+            None,
+            None,
+            Some(Some(openwave_core::PermissionMode::Allow)),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_model_is_used_for_the_turn() {
     let recorder = RecordingProvider::default();
@@ -197,6 +212,9 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
     let router = app(state);
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
+    // Delegation is a Sensitive action, so anything short of `Allow` would park
+    // this turn on an approval card nobody is here to answer.
+    allow_delegation(store.as_ref(), chat.id).await;
 
     assert_eq!(
         send_message(&router, &bearer, chat.id, "delegate this").await,
@@ -536,6 +554,7 @@ async fn sandbox_container_routing_preserves_in_process_task_and_deadline_shape(
     let router = app(state);
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
+    allow_delegation(store.as_ref(), chat.id).await;
     assert_eq!(
         send_message(&router, &bearer, chat.id, "delegate this").await,
         StatusCode::ACCEPTED

@@ -67,6 +67,7 @@ async fn delegated_sandbox(
             "task": "read the delegated report",
             "resource": resource,
         }),
+        approval_gated: false,
         result: serde_json::to_string(&SpawnSandboxAgentResult { agent_id: child_id }).unwrap(),
         event_ordinal: 2,
         progress: TurnCheckpointProgress {

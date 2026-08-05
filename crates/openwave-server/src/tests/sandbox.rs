@@ -471,6 +471,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
                     "task": "private delegated task",
                     "resource": resource,
                 }),
+                approval_gated: false,
                 result: serde_json::to_string(&openwave_core::SpawnSandboxAgentResult {
                     agent_id: child_id,
                 })

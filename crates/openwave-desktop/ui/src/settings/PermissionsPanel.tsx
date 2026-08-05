@@ -23,6 +23,7 @@ const TOOL_LABELS: Partial<Record<RendererToolName, string>> = {
   web_search: "Web search",
   web_extract: "Web pages",
   write_file: "Workspace files",
+  spawn_sandbox_agent: "Background agents",
 };
 
 export function toolGrantLabel(action: RendererToolName): string {
@@ -74,6 +75,12 @@ export function grantScopeLabel(
       if (scope.tool === "write_file") {
         return scope.path;
       }
+      // Delegation is only ever granted for the whole tool — a model-authored
+      // task would never match a second time — so this is named for totality
+      // rather than because a mint stores it.
+      if (scope.tool === "delegate_agent") {
+        return scope.task;
+      }
       return `“${scope.query}”`;
     }
     case "any_args_for":
@@ -92,6 +99,8 @@ export function grantScopeLabel(
           return "Every web search";
         case "web_extract":
           return "Every web page";
+        case "spawn_sandbox_agent":
+          return "Every background agent";
         default:
           return `Every ${toolGrantLabel(action)} call`;
       }

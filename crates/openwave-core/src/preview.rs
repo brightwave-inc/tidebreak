@@ -99,6 +99,25 @@ pub enum ToolActionPreview {
         /// Workspace-relative destination path, never a host path.
         path: String,
     },
+    /// A delegation to a background agent: an unattended run whose own calls
+    /// never come back for approval.
+    ///
+    /// Two things make up the action, and the second is the one being decided.
+    /// The task is what the child is told to do; the network policy is what it
+    /// can do with what it learns, because that policy is inherited from this
+    /// chat and is the only way anything leaves the box. The run's workspace is
+    /// keyed by its own id and holds no folder grants, staged host paths, or
+    /// chat attachments, so there is no file surface to name here.
+    ///
+    /// Unlike the other variants this one is not derivable from the call's
+    /// arguments alone — the policy is chat state — so it is built where the
+    /// spawn is gated rather than by [`ToolActionPreview::build`].
+    DelegateAgent {
+        /// The child's self-contained task, as the model wrote it.
+        task: String,
+        /// The network policy the child inherits from this chat.
+        network: crate::model::NetworkPolicy,
+    },
 }
 
 impl ToolActionPreview {
