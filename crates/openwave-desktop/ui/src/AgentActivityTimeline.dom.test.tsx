@@ -69,13 +69,17 @@ describe("AgentActivityTimeline", () => {
     expect(screen.queryByRole("list")).toBeNull();
   });
 
-  it("distinguishes a failed command by its own headline and exit status", () => {
+  it("gives a failed command an open card with its headline and exit status", () => {
     render(<AgentActivityTimeline state={state} active={false} expanded />);
 
     const commandRow = within(screen.getByRole("list")).getAllByRole(
       "listitem",
     )[1]!;
-    expect(commandRow.querySelector(".font-mono")?.textContent).toBe(
+    const card = within(commandRow).getByRole("button", {
+      name: /pip install matplotlib/,
+    });
+    expect(card.getAttribute("aria-expanded")).toBe("true");
+    expect(card.querySelector(".font-mono")?.textContent).toBe(
       "pip install matplotlib",
     );
     expect(within(commandRow).getByText("Exit 1")).toBeTruthy();
