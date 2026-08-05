@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { ChevronRight } from "lucide-react";
 
 import type { AgentActivityHistoryEntry } from "./api";
-import {
-  agentActivityHistoryLabel,
-  getAgentActivityOutcomeDotClass,
-} from "./AgentRunDisplay";
+import { agentActivityHistoryLabel } from "./AgentRunDisplay";
+import { ToolIcon } from "./ToolIcon";
+import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export type AgentActivityState = {
@@ -56,8 +57,43 @@ export function useAgentRunActivity(
   return activity;
 }
 
-/** The ordered timeline itself: one dot, phrase, and time per recorded step. */
-export function AgentActivityTimeline({ state }: { state: AgentActivityState }) {
+export type AgentActivitySummary = {
+  toolCalls: number;
+  failed: number;
+};
+
+export function summarizeAgentActivity(
+  items: readonly AgentActivityHistoryEntry[],
+): AgentActivitySummary {
+  return {
+    toolCalls: items.length,
+    failed: items.filter((entry) => entry.outcome === "failed").length,
+  };
+}
+
+/**
+ * The ordered timeline itself: the same collapsible rail foreground tool calls
+ * use, reduced to the renderer-safe label, outcome, and time the history owns.
+ */
+export function AgentActivityTimeline({
+  state,
+  active,
+  activeLabel,
+  expanded: controlledExpanded,
+  onExpandedChange,
+}: {
+  state: AgentActivityState;
+  active: boolean;
+  activeLabel?: string;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+}) {
+  const contentId = useId();
+  const [expandedPreference, setExpandedPreference] = useState<boolean | null>(
+    null,
+  );
+  const expanded = controlledExpanded ?? expandedPreference ?? active;
+
   if (state.error) {
     return (
       <p className="text-xs text-muted-foreground" role="status">
@@ -74,27 +110,103 @@ export function AgentActivityTimeline({ state }: { state: AgentActivityState }) 
       </p>
     );
   }
+
+  const summary = summarizeAgentActivity(state.items);
+  const latest = state.items[state.items.length - 1]!;
+  const triggerLabel = active
+    ? (activeLabel ?? agentActivityHistoryLabel(latest))
+    : agentActivitySummaryLabel(summary);
+
   return (
-    <ol className="flex flex-col gap-2 border-l-2 border-border py-0.5 pl-3" role="list">
-      {state.items.map((entry, index) => (
-        <li key={`${entry.at}:${index}`} className="flex items-center gap-2 text-xs">
-          <span
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              getAgentActivityOutcomeDotClass(entry.outcome),
-            )}
-            aria-hidden="true"
-          />
-          <span className="min-w-0 flex-1 truncate text-foreground">
-            {agentActivityHistoryLabel(entry)}
-          </span>
-          <time className="shrink-0 text-muted-foreground" dateTime={entry.at}>
-            {formatActivityTime(entry.at)}
-          </time>
-        </li>
-      ))}
-    </ol>
+    <div className="flex flex-col gap-0.5">
+      <Button
+        type="button"
+        variant="link"
+        className="h-auto w-fit gap-1.5 px-0 py-0.5 text-xs text-muted-foreground"
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        onClick={() => {
+          const next = !expanded;
+          if (onExpandedChange) onExpandedChange(next);
+          else setExpandedPreference(next);
+        }}
+      >
+        <ChevronRight
+          className={cn("size-3 transition-transform", expanded && "rotate-90")}
+          aria-hidden="true"
+        />
+        <span>{triggerLabel}</span>
+      </Button>
+      {expanded && (
+        <ol
+          id={contentId}
+          className="relative ml-1.5 flex flex-col gap-3 border-l-2 border-border py-1 pl-4 text-sm"
+          role="list"
+        >
+          {state.items.map((entry, index) => {
+            const tone = activityOutcomeTone(entry.outcome);
+            return (
+              <li
+                key={`${entry.at}:${index}`}
+                className="flex min-w-0 items-center gap-1.5"
+              >
+                <div
+                  className="absolute -left-px -translate-x-1/2 bg-background py-0.5 text-muted-foreground [&_svg]:size-4"
+                  aria-hidden="true"
+                >
+                  <ToolIcon name={entry.kind} />
+                </div>
+                <ToolStatusIcon
+                  tone={tone}
+                  className={cn(
+                    "size-4 shrink-0",
+                    tone === "failed" && "text-critical",
+                  )}
+                />
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate font-medium text-foreground",
+                    tone === "running" && "animate-pulse",
+                  )}
+                >
+                  {agentActivityHistoryLabel(entry)}
+                </span>
+                <time
+                  className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground"
+                  dateTime={entry.at}
+                >
+                  {formatActivityTime(entry.at)}
+                </time>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </div>
   );
+}
+
+function agentActivitySummaryLabel(summary: AgentActivitySummary): string {
+  const toolCalls = `${summary.toolCalls} tool ${summary.toolCalls === 1 ? "call" : "calls"}`;
+  const failures = summary.failed > 0 ? ` · ${summary.failed} failed` : "";
+  return `Ran ${toolCalls}${failures}`;
+}
+
+function activityOutcomeTone(
+  outcome: AgentActivityHistoryEntry["outcome"],
+): ToolTone {
+  switch (outcome) {
+    case "waiting":
+      return "waiting_approval";
+    case "running":
+      return "running";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+  }
 }
 
 function formatActivityTime(at: string): string {
