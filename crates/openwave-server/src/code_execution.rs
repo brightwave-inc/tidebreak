@@ -2346,7 +2346,8 @@ async fn prepare_execution_directories(
 }
 
 /// Stage the validated skills (built-in and user-authored) into
-/// `.openwave/skills/<name>/`.
+/// `.openwave/skills/<name>/`: the manifest, plus any helper files the package
+/// carries under `scripts/`.
 ///
 /// Each destination is resolved a component at a time for the same reason the
 /// helper install is: `.openwave/` is writable by local exec, so a planted
@@ -2376,6 +2377,33 @@ async fn install_skills(
             .map_err(|_| {
                 CodeExecutionError::Sandbox(format!("skill '{name}' could not be installed"))
             })?;
+        if skill.scripts.is_empty() {
+            continue;
+        }
+        let scripts = resolve_scratch_directory(
+            host_dir,
+            &format!(
+                "{}/{name}/{}",
+                openwave_code_execution::SKILLS_DIR,
+                openwave_code_execution::SKILL_SCRIPTS_DIR
+            ),
+            true,
+        )
+        .await
+        .ok_or_else(|| {
+            CodeExecutionError::Sandbox(format!("skill '{name}' scripts directory is unavailable"))
+        })?;
+        for script in &skill.scripts {
+            scripts
+                .write_file(&script.name, &script.content)
+                .await
+                .map_err(|_| {
+                    CodeExecutionError::Sandbox(format!(
+                        "skill '{name}' script '{}' could not be installed",
+                        script.name
+                    ))
+                })?;
+        }
     }
     Ok(())
 }
@@ -2927,6 +2955,7 @@ mod tests {
                 origin: openwave_code_execution::SkillOrigin::Builtin,
             },
             manifest: "---\nname: pdf-documents\n---\nbody".into(),
+            scripts: Vec::new(),
         };
         prepare_execution_directories(
             workspace.path(),
@@ -2956,9 +2985,9 @@ mod tests {
     }
 
     /// Turn-start staging pins the contract the prompt catalog relies on:
-    /// every advertised skill's `SKILL.md` is readable in the chat's private
-    /// scratch — the directory the `read_file` surface resolves against —
-    /// before any exec has run.
+    /// every advertised skill's `SKILL.md` — and the helper files it tells the
+    /// model to run — is readable in the chat's private scratch, the directory
+    /// the `read_file` surface resolves against, before any exec has run.
     #[tokio::test]
     async fn turn_start_staging_makes_skills_readable_before_any_exec() {
         let (store, _database) = test_store().await;
@@ -2977,6 +3006,9 @@ mod tests {
             manifest,
         )
         .unwrap();
+        let scripts_dir = skill_dir.join(openwave_code_execution::SKILL_SCRIPTS_DIR);
+        std::fs::create_dir(&scripts_dir).unwrap();
+        std::fs::write(scripts_dir.join("build_deck.py"), "print('deck')\n").unwrap();
 
         let provider = ConfiguredCodeExecutionProvider::new(
             store.clone(),
@@ -2996,6 +3028,17 @@ mod tests {
             .join("presentations")
             .join(openwave_code_execution::SKILL_MANIFEST_FILE);
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), manifest);
+        let staged_script = scratch_root
+            .path()
+            .join(chat_id.to_string())
+            .join(openwave_code_execution::SKILLS_DIR)
+            .join("presentations")
+            .join(openwave_code_execution::SKILL_SCRIPTS_DIR)
+            .join("build_deck.py");
+        assert_eq!(
+            std::fs::read_to_string(&staged_script).unwrap(),
+            "print('deck')\n"
+        );
 
         // Idempotent: the first exec re-prepares the same tree.
         provider.stage_turn_workspace(chat_id).await;
@@ -3172,6 +3215,7 @@ mod tests {
                 origin: openwave_code_execution::SkillOrigin::Builtin,
             },
             manifest: "---\nname: pdf-documents\n---\nbody".into(),
+            scripts: Vec::new(),
         };
         let skills = std::slice::from_ref(&skill);
 
