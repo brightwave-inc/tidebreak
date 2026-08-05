@@ -1217,18 +1217,69 @@ impl ConfiguredCodeExecutionProvider {
         self
     }
 
-    /// The built-in skills merged with a fresh read of the user skills
+    /// Every installed skill, before the install's enable flags apply: the
+    /// built-in packages merged with a fresh read of the user skills
     /// directory. Built-ins were validated once at configuration; user
-    /// packages go through the same strict loader here, so one staging and
-    /// the catalog derived from it always agree. The read is a handful of
-    /// small files at most.
-    fn current_skills(&self) -> Vec<openwave_code_execution::LoadedSkill> {
+    /// packages go through the same strict loader here. The read is a handful
+    /// of small files at most.
+    ///
+    /// This is what a management surface lists — it has to show a disabled
+    /// component in order to offer turning it back on. Everything the model
+    /// or a sandbox sees goes through [`Self::current_skills`] instead.
+    pub(crate) fn installed_skills(&self) -> Vec<openwave_code_execution::LoadedSkill> {
         openwave_code_execution::merged_skills(&self.skills, self.user_skills_dir.as_deref())
     }
 
+    /// Every installed bundle, before the install's enable flags apply.
+    pub(crate) fn installed_plugins(&self) -> Vec<openwave_code_execution::PluginPackage> {
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.package.clone())
+            .collect()
+    }
+
+    /// The bundle that claims `skill`, if any.
+    fn owning_plugin(&self, skill: &str) -> Option<&str> {
+        self.plugins
+            .iter()
+            .find(|plugin| plugin.package.skills.iter().any(|member| member == skill))
+            .map(|plugin| plugin.package.name.as_str())
+    }
+
+    /// The install's plugin and skill enable flags.
+    pub(crate) async fn enable_state(&self) -> crate::plugin_state::PluginEnableState {
+        crate::plugin_state::read_plugin_enable_state(&*self.store).await
+    }
+
+    /// The skills this install actually runs: installed, minus anything the
+    /// user switched off — either directly or by disabling the bundle that
+    /// claims it.
+    ///
+    /// One filtered read backs both consumers, so a disabled skill is absent
+    /// from the staged workspace *and* from the prompt catalog; the model is
+    /// never told about instructions the sandbox will not have.
+    async fn current_skills(&self) -> Vec<openwave_code_execution::LoadedSkill> {
+        self.enabled_skills(self.installed_skills()).await
+    }
+
+    /// Narrow an installed set to what the install's flags leave on.
+    async fn enabled_skills(
+        &self,
+        installed: Vec<openwave_code_execution::LoadedSkill>,
+    ) -> Vec<openwave_code_execution::LoadedSkill> {
+        let state = self.enable_state().await;
+        installed
+            .into_iter()
+            .filter(|skill| {
+                state.skill_enabled(&skill.package.name, self.owning_plugin(&skill.package.name))
+            })
+            .collect()
+    }
+
     /// The host-derived (name, description) catalog for prompt composition.
-    pub(crate) fn skill_catalog(&self) -> Vec<openwave_code_execution::SkillPackage> {
+    pub(crate) async fn skill_catalog(&self) -> Vec<openwave_code_execution::SkillPackage> {
         self.current_skills()
+            .await
             .into_iter()
             .map(|skill| skill.package)
             .collect()
@@ -1236,9 +1287,11 @@ impl ConfiguredCodeExecutionProvider {
 
     /// The bundles the catalog groups skills under. User skills are claimed by
     /// no plugin and stay standalone.
-    pub(crate) fn plugin_catalog(&self) -> Vec<openwave_code_execution::PluginPackage> {
+    pub(crate) async fn plugin_catalog(&self) -> Vec<openwave_code_execution::PluginPackage> {
+        let state = self.enable_state().await;
         self.plugins
             .iter()
+            .filter(|plugin| state.plugin_enabled(&plugin.package.name))
             .map(|plugin| plugin.package.clone())
             .collect()
     }
@@ -1254,10 +1307,15 @@ impl ConfiguredCodeExecutionProvider {
     /// `execute` re-prepares (with the provider-correct mirroring flag)
     /// before any command runs.
     pub(crate) async fn stage_turn_workspace(&self, chat_id: ChatId) {
-        let skills = self.current_skills();
-        if skills.is_empty() {
+        // A configuration with no skills at all — a headless embedding — has
+        // no workspace to prepare. An install that has *disabled* every skill
+        // is a different case: a workspace may already hold staged copies, and
+        // the pass below is what takes them back out.
+        let installed = self.installed_skills();
+        if installed.is_empty() {
             return;
         }
+        let skills = self.enabled_skills(installed).await;
         // Warm the staged skills' declared host tools while the turn runs:
         // `ensure` is fire-and-forget with the broker's own discipline
         // (serialized installs, remembered failures), so a declaration in a
@@ -1295,7 +1353,7 @@ impl ConfiguredCodeExecutionProvider {
     /// is the truth: only a tool that resolves right now counts, so a prompt
     /// never promises a converter that is mid-download or failed to install.
     pub(crate) async fn office_rendering_available(&self) -> Option<bool> {
-        let declared = self.current_skills().iter().any(|skill| {
+        let declared = self.current_skills().await.iter().any(|skill| {
             skill
                 .package
                 .host_deps
@@ -1871,7 +1929,7 @@ impl ConfiguredCodeExecutionProvider {
         degradation_chat: ChatId,
     ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
         let host_dir = self.scratch_root.join(request.workspace_id.as_str());
-        let skills = self.current_skills();
+        let skills = self.current_skills().await;
         prepare_execution_directories(
             &host_dir,
             kind != CodeExecutionProviderKind::Local,
@@ -2376,7 +2434,8 @@ async fn prepare_execution_directories(
 
 /// Stage the validated skills (built-in and user-authored) into
 /// `.openwave/skills/<name>/`: the manifest, plus any helper files the package
-/// carries under `scripts/`.
+/// carries under `scripts/`. Anything already staged under a name that is not
+/// in `skills` is removed, so the staged tree is exactly the enabled set.
 ///
 /// Each destination is resolved a component at a time for the same reason the
 /// helper install is: `.openwave/` is writable by local exec, so a planted
@@ -2386,6 +2445,33 @@ async fn install_skills(
     skills: &[openwave_code_execution::LoadedSkill],
     host_dir: &std::path::Path,
 ) -> std::result::Result<(), CodeExecutionError> {
+    let root = resolve_scratch_directory(host_dir, openwave_code_execution::SKILLS_DIR, true)
+        .await
+        .ok_or_else(|| {
+            CodeExecutionError::Sandbox("the staged skills directory is unavailable".into())
+        })?;
+    // Staging is the whole set, not an accumulation. A skill the install has
+    // switched off — or one the user deleted — must leave a workspace that
+    // staged it on an earlier turn, or the model could still `read_file`
+    // instructions the catalog no longer advertises. Removal is best effort:
+    // a leftover directory is untidy, but failing the command over it would
+    // take working execution down with it.
+    for entry in root.entries().await.unwrap_or_default() {
+        if skills.iter().any(|skill| skill.package.name == entry.name) {
+            continue;
+        }
+        let removed = match entry.kind {
+            openwave_code_execution::ScratchEntryKind::Directory => {
+                root.remove_dir_all(&entry.name).await
+            }
+            kind => root.remove(&entry.name, kind).await,
+        };
+        if let Err(error) = removed {
+            tracing::warn!(
+                "a skill no longer staged could not be removed from the workspace: {error}"
+            );
+        }
+    }
     for skill in skills {
         let name = &skill.package.name;
         let destination = resolve_scratch_directory(
@@ -3100,6 +3186,7 @@ mod tests {
         assert_eq!(
             provider
                 .skill_catalog()
+                .await
                 .iter()
                 .map(|skill| (skill.name.as_str(), skill.origin))
                 .collect::<Vec<_>>(),
@@ -3118,6 +3205,88 @@ mod tests {
         let bare_chat = ChatId::new();
         bare.stage_turn_workspace(bare_chat).await;
         assert!(!scratch_root.path().join(bare_chat.to_string()).exists());
+    }
+
+    /// Contract: switching a component off has to bite in both places at once
+    /// — the staged workspace and the prompt catalog derived from it. A skill
+    /// the model is still told about but whose `SKILL.md` is gone is the exact
+    /// inconsistency the single filtered read exists to prevent.
+    #[tokio::test]
+    async fn disabling_drops_a_component_from_staging_and_the_catalog() {
+        let (store, _database) = test_store().await;
+        let store = Arc::new(store);
+        let scratch_root = tempfile::tempdir().unwrap();
+        let skills_dir = tempfile::tempdir().unwrap();
+        for name in ["charts", "word-documents"] {
+            let dir = skills_dir.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join(openwave_code_execution::SKILL_MANIFEST_FILE),
+                format!("---\nname: {name}\ndescription: Does {name} work.\n---\nBody.\n"),
+            )
+            .unwrap();
+        }
+        let plugins_dir = tempfile::tempdir().unwrap();
+        let plugin = plugins_dir.path().join("documents");
+        std::fs::create_dir(&plugin).unwrap();
+        std::fs::write(
+            plugin.join(openwave_code_execution::PLUGIN_MANIFEST_FILE),
+            "---\nname: documents\ndisplay-name: Documents\ndescription: Deliverables.\n\
+             category: documents\nskills: [\"word-documents\"]\n---\n",
+        )
+        .unwrap();
+
+        let provider = ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        )
+        .with_skills(Some(skills_dir.path().to_owned()))
+        .with_plugins(Some(plugins_dir.path().to_owned()));
+        let chat_id = ChatId::new();
+        let staged = |name: &str| {
+            scratch_root
+                .path()
+                .join(chat_id.to_string())
+                .join(openwave_code_execution::SKILLS_DIR)
+                .join(name)
+                .join(openwave_code_execution::SKILL_MANIFEST_FILE)
+        };
+
+        provider.stage_turn_workspace(chat_id).await;
+        assert!(staged("charts").exists());
+        assert!(staged("word-documents").exists());
+
+        // Disabling the bundle takes its member out of both; the standalone
+        // skill is untouched, and the bundle leaves the plugin catalog.
+        let mut flags = provider.enable_state().await;
+        flags.set_plugin("documents", false);
+        crate::plugin_state::write_plugin_enable_state(&*store, &flags)
+            .await
+            .unwrap();
+        provider.stage_turn_workspace(chat_id).await;
+        assert!(!staged("word-documents").exists());
+        assert!(staged("charts").exists());
+        assert_eq!(
+            provider
+                .skill_catalog()
+                .await
+                .iter()
+                .map(|skill| skill.name.clone())
+                .collect::<Vec<_>>(),
+            ["charts"]
+        );
+        assert!(provider.plugin_catalog().await.is_empty());
+
+        // Disabling a standalone skill needs no bundle to go through.
+        let mut flags = provider.enable_state().await;
+        flags.set_skill("charts", false);
+        crate::plugin_state::write_plugin_enable_state(&*store, &flags)
+            .await
+            .unwrap();
+        provider.stage_turn_workspace(chat_id).await;
+        assert!(!staged("charts").exists());
+        assert!(provider.skill_catalog().await.is_empty());
     }
 
     /// The declaration-driven host-tool contract: staging a skill that

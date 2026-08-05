@@ -19,11 +19,15 @@
 //! prompt. Membership is validated against the skills that actually loaded, so
 //! a plugin naming a skill that isn't there is skipped whole rather than
 //! advertising a group the catalog cannot render.
+//!
+//! Capability badges follow the same posture from the other direction: they
+//! are derived from what the member skills actually declare, and the closed
+//! key set means a manifest cannot state them at all.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::skills::{is_valid_skill_name, LoadedSkill};
+use crate::skills::{is_valid_skill_name, LoadedSkill, SkillPackage};
 
 /// The manifest file every plugin package is defined by.
 pub const PLUGIN_MANIFEST_FILE: &str = "PLUGIN.md";
@@ -38,7 +42,8 @@ const MAX_MEMBER_SKILLS: usize = 16;
 ///
 /// Closed on purpose, like [`crate::HostDep`]: an unknown value rejects the
 /// manifest instead of parsing into a string no grouping or badge can act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
 pub enum PluginCategory {
     /// Documents authored for reading: text, fixed-layout, slides.
     Documents,
@@ -60,6 +65,87 @@ impl PluginCategory {
             _ => None,
         }
     }
+}
+
+/// What a plugin can actually do, from a closed vocabulary.
+///
+/// A badge is **derived by the host from the plugin's contents** and is never
+/// read from a manifest: there is no `capabilities` key, and the parser's
+/// closed key set rejects one outright, so a bundle cannot understate what it
+/// carries or claim reach it does not have. This is the same honesty invariant
+/// the model registry enforces on modality flags.
+///
+/// Badges have two consumers. A UI shows them on a plugin's detail view, and
+/// the permission layer keys install/enable confirmation on the heavier ones —
+/// which is what keeps day-to-day skill invocation prompt-free.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCapability {
+    /// Produces deliverables in the workspace. Every skill teaches `exec`
+    /// work that saves files, so any bundle with a member carries this.
+    WriteFiles,
+    /// Reaches the network while running. Today that is the sandbox `pip`
+    /// install a declared Python dependency implies.
+    Network,
+    /// Needs a host-managed install outside the sandbox (a declared
+    /// [`crate::HostDep`], e.g. the LibreOffice converter).
+    HostInstall,
+    /// Drives a live surface — a running document, a browser, a device.
+    ///
+    /// No component kind derives this yet: it is reserved for the live-control
+    /// components the plugin format is meant to grow into, and is listed here
+    /// so the vocabulary a UI and the permission layer render against is
+    /// closed and complete from the start rather than widening later.
+    LiveControl,
+    /// Bundles an MCP server, and so whatever that server exposes.
+    ///
+    /// Like [`Self::LiveControl`], nothing derives this yet — plugins bundle
+    /// only skills today. It lands when MCPB-backed components do.
+    Mcp,
+}
+
+/// The badges `plugin` earns from what it actually contains.
+///
+/// `members` is any set of loaded skill packages; only those the plugin
+/// actually claims are considered, so a caller may pass the whole catalog.
+/// The result is deduplicated and sorted, so the same bundle always renders
+/// the same badge row.
+#[must_use]
+pub fn derived_capabilities(
+    plugin: &PluginPackage,
+    members: &[&SkillPackage],
+) -> Vec<PluginCapability> {
+    let members: Vec<&SkillPackage> = members
+        .iter()
+        .copied()
+        .filter(|skill| plugin.skills.contains(&skill.name))
+        .collect();
+    let mut capabilities = BTreeSet::new();
+    if !members.is_empty() {
+        // A skill is instructions for producing a deliverable through `exec`;
+        // one member is enough for the bundle to write files.
+        capabilities.insert(PluginCapability::WriteFiles);
+    }
+    if members.iter().any(|skill| !skill.python_deps.is_empty()) {
+        // Declared Python deps are installed with `pip` inside the sandbox,
+        // which is a network reach under the current install flow.
+        capabilities.insert(PluginCapability::Network);
+    }
+    if members.iter().any(|skill| !skill.host_deps.is_empty()) {
+        capabilities.insert(PluginCapability::HostInstall);
+    }
+    capabilities.into_iter().collect()
 }
 
 /// Host-derived bundle entry parsed from a plugin manifest's frontmatter.
@@ -377,6 +463,7 @@ pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> 
 mod tests {
     use super::*;
     use crate::skills::{load_skills, SkillOrigin, SKILL_MANIFEST_FILE};
+    use crate::HostDep;
 
     const VALID: &str = "---\n\
 name: documents\n\
@@ -523,6 +610,95 @@ router-preamble: Pick by the file the user needs.\n\
             plugins[0].package.skills,
             ["word-documents", "pdf-documents"]
         );
+    }
+
+    /// Contract: a badge row is a function of what the member skills declare,
+    /// and a manifest cannot state one — the closed key set is what enforces
+    /// that, so the rejection is asserted here beside the derivation it
+    /// protects.
+    #[test]
+    fn capabilities_derive_from_member_deps_and_never_from_the_manifest() {
+        let skill = |name: &str, python: &[&str], host: &[HostDep]| SkillPackage {
+            name: name.to_owned(),
+            description: "Does work.".to_owned(),
+            python_deps: python.iter().map(|dep| (*dep).to_owned()).collect(),
+            host_deps: host.to_vec(),
+            origin: SkillOrigin::Builtin,
+        };
+        let plain = skill("plain", &[], &[]);
+        let pip = skill("pip", &["python-docx==1.2.0"], &[]);
+        let hosted = skill("hosted", &[], &[HostDep::LibreOffice]);
+        let both = skill("both", &["python-pptx==1.0.2"], &[HostDep::LibreOffice]);
+        // Not a member of any plugin under test: a caller may pass the whole
+        // catalog, and a non-member must never contribute a badge.
+        let outsider = skill("outsider", &["numpy==2.3.4"], &[HostDep::LibreOffice]);
+
+        for (case, members, expected) in [
+            ("no members", vec![], vec![]),
+            (
+                "instructions only",
+                vec![&plain],
+                vec![PluginCapability::WriteFiles],
+            ),
+            (
+                "python deps imply the pip install's network reach",
+                vec![&pip],
+                vec![PluginCapability::WriteFiles, PluginCapability::Network],
+            ),
+            (
+                "host deps imply a managed install outside the sandbox",
+                vec![&hosted],
+                vec![PluginCapability::WriteFiles, PluginCapability::HostInstall],
+            ),
+            (
+                "one member is enough for each badge",
+                vec![&plain, &both],
+                vec![
+                    PluginCapability::WriteFiles,
+                    PluginCapability::Network,
+                    PluginCapability::HostInstall,
+                ],
+            ),
+        ] {
+            let plugin = PluginPackage {
+                name: "bundle".to_owned(),
+                display_name: "Bundle".to_owned(),
+                description: "A bundle.".to_owned(),
+                category: PluginCategory::Other,
+                skills: members.iter().map(|skill| skill.name.clone()).collect(),
+                router_preamble: None,
+            };
+            let mut passed: Vec<&SkillPackage> = members;
+            passed.push(&outsider);
+            let mut expected = expected;
+            expected.sort_unstable();
+            assert_eq!(
+                derived_capabilities(&plugin, &passed),
+                expected,
+                "{case} should derive exactly these badges"
+            );
+        }
+
+        // `live-control` and `mcp` exist in the vocabulary with no deriving
+        // source yet; nothing a plugin can contain today produces them.
+        let everything = PluginPackage {
+            name: "bundle".to_owned(),
+            display_name: "Bundle".to_owned(),
+            description: "A bundle.".to_owned(),
+            category: PluginCategory::Other,
+            skills: vec!["both".to_owned()],
+            router_preamble: None,
+        };
+        let derived = derived_capabilities(&everything, &[&both]);
+        assert!(!derived.contains(&PluginCapability::LiveControl));
+        assert!(!derived.contains(&PluginCapability::Mcp));
+
+        // A manifest that tries to declare its own badges is rejected whole.
+        assert!(parse_plugin_manifest(
+            "---\nname: a\ndisplay-name: A\ndescription: b\ncategory: other\n\
+             skills: [\"c\"]\ncapabilities: [\"network\"]\n---\n"
+        )
+        .is_err());
     }
 
     /// Contract: every plugin shipped in the repository's `plugins/` tree must
