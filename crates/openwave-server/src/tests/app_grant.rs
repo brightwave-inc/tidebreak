@@ -68,8 +68,10 @@ async fn create_app_bound_to(
 /// executable, arguments, literal environment values, selected environment
 /// names — must never appear in any grant response, asserted on the raw
 /// serialized JSON rather than a parsed projection so nothing can hide in an
-/// unmodeled field. Also pins the 404 for an unknown app and the conflict for
-/// a binding whose server is not configured (nothing coherent to consent to).
+/// unmodeled field. Consent itself now conflicts — tool bindings are retired
+/// (#1332) — and the refusal must be just as leak-free as the projection.
+/// Also pins the 404 for an unknown app and the conflict for a binding whose
+/// server is not configured (nothing coherent to consent to).
 #[tokio::test]
 async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
     let (router, token, store, _dir) = test_app().await;
@@ -108,15 +110,20 @@ async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
     let state = grant_request(&router, &bearer, "GET", app_id).await;
     assert_eq!(state.status(), StatusCode::OK);
     responses.push(("GET", body_string(state).await));
-    let consented = grant_request(&router, &bearer, "POST", app_id).await;
-    assert_eq!(consented.status(), StatusCode::OK);
-    responses.push(("POST", body_string(consented).await));
+    // Tool bindings are retired: there is nothing grantable behind this
+    // manifest, so consent conflicts instead of recording a grant.
+    let refused = grant_request(&router, &bearer, "POST", app_id).await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    responses.push(("POST", body_string(refused).await));
 
+    // The sheet still names the server and its pinned tools, so it can say
+    // what the manifest asked for and why it cannot be granted.
+    assert!(
+        responses[0].1.contains("\"cmd\"") && responses[0].1.contains("mcp__cmd__doit"),
+        "GET: the sheet needs server and tool names: {}",
+        responses[0].1
+    );
     for (method, body) in &responses {
-        assert!(
-            body.contains("\"cmd\"") && body.contains("mcp__cmd__doit"),
-            "{method}: the sheet needs server and tool names: {body}"
-        );
         for leaked in [
             "secret-location",
             "docs-mcp",
@@ -133,8 +140,6 @@ async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
     }
     let before: serde_json::Value = serde_json::from_str(&responses[0].1).unwrap();
     assert_eq!(before["granted"], json!(false));
-    let after: serde_json::Value = serde_json::from_str(&responses[1].1).unwrap();
-    assert_eq!(after["granted"], json!(true));
 
     // An unknown app is 404 on the whole surface.
     let missing = grant_request(&router, &bearer, "GET", AppId::new()).await;
@@ -150,6 +155,107 @@ async fn grant_responses_carry_names_only_never_definitions_or_env_values() {
     .await;
     let refused = grant_request(&router, &bearer, "POST", unbound).await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
+}
+
+/// The `rest_api` side of the same projection contract: consent still grants,
+/// and neither the base URL, the document hash, nor the credential reference
+/// behind the record ever reaches the renderer — the sheet gets the record's
+/// display name and the pinned operation ids, nothing else.
+#[tokio::test]
+async fn rest_grant_responses_grant_and_carry_names_only() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let connected = openwave_core::id::ConnectedAppId::new();
+    let catalog = crate::openapi_catalog::ingest_openapi_document(
+        json!({
+            "openapi": "3.0.3",
+            "info": { "title": "Issues", "version": "1" },
+            "paths": {
+                "/issues": { "get": { "operationId": "listIssues" } }
+            }
+        })
+        .to_string()
+        .as_bytes(),
+        None,
+    )
+    .unwrap();
+    store
+        .replace_connected_apps(
+            openwave_core::connected_app::ConnectedAppKind::RestApi,
+            &[openwave_core::connected_app::ConnectedApp {
+                id: connected,
+                name: "issues".into(),
+                kind: openwave_core::connected_app::ConnectedAppKind::RestApi,
+                definition: json!({
+                    "base_url": "https://internal.example.com/secret-mount/v2",
+                    "catalog": &catalog,
+                    "credential": {
+                        "secret_name": "issues-credential-reference",
+                        "placement": "bearer"
+                    },
+                }),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Grant fixture".into(),
+                    bindings: vec![AppBinding::Operations(
+                        openwave_core::local_app::AppOperationsBinding {
+                            app: connected,
+                            operation_ids: vec!["listIssues".into()],
+                        },
+                    )],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let mut responses = Vec::new();
+    let state = grant_request(&router, &bearer, "GET", app_id).await;
+    assert_eq!(state.status(), StatusCode::OK);
+    responses.push(("GET", body_string(state).await));
+    let consented = grant_request(&router, &bearer, "POST", app_id).await;
+    assert_eq!(consented.status(), StatusCode::OK);
+    responses.push(("POST", body_string(consented).await));
+
+    for (method, body) in &responses {
+        assert!(
+            body.contains("\"issues\"") && body.contains("listIssues"),
+            "{method}: the sheet needs the record and operation names: {body}"
+        );
+        for leaked in [
+            "internal.example.com",
+            "secret-mount",
+            "issues-credential-reference",
+            &catalog.document_sha256,
+        ] {
+            assert!(
+                !body.contains(leaked),
+                "{method}: {leaked:?} must not reach the renderer: {body}"
+            );
+        }
+    }
+    let before: serde_json::Value = serde_json::from_str(&responses[0].1).unwrap();
+    assert_eq!(before["granted"], json!(false));
+    let after: serde_json::Value = serde_json::from_str(&responses[1].1).unwrap();
+    assert_eq!(after["granted"], json!(true));
 }
 
 async fn body_string(response: axum::response::Response) -> String {

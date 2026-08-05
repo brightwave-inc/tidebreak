@@ -17,11 +17,10 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Serialize;
 
-use openwave_core::connected_app::ConnectedAppKind;
 use openwave_core::id::{AppId, ConnectedAppId};
 use openwave_core::local_app::{
-    mounted_tool_under, AppBinding, AppGrant, AppGrantBinding, AppManifest,
-    AppOperationsGrantBinding, AppRecord, AppRevision, AppToolsGrantBinding,
+    AppBinding, AppGrant, AppGrantBinding, AppManifest, AppOperationsGrantBinding, AppRecord,
+    AppRevision,
 };
 
 use crate::connected_apps::{current_app_fingerprints, current_rest_definitions, AppFingerprint};
@@ -115,34 +114,18 @@ pub async fn post_app_grant(
             )));
         };
         match binding {
-            AppBinding::Tools(binding) => {
-                if app_fingerprint.kind != ConnectedAppKind::McpServer {
-                    return Err(ServerError::conflict(format!(
-                        "connected app {:?} is a {} app, so its tools binding cannot \
-                         be granted",
-                        app_fingerprint.name, app_fingerprint.kind
-                    )));
-                }
-                // Nor is there anything coherent when a pinned name is not
-                // under the app's current namespace (the record was renamed
-                // after authoring): the grant would name tools that cannot
-                // exist under this app.
-                if let Some(tool) = binding
-                    .tools
-                    .iter()
-                    .find(|tool| mounted_tool_under(&app_fingerprint.name, tool).is_none())
-                {
-                    return Err(ServerError::conflict(format!(
-                        "tool {tool:?} is not mounted under connected app {:?}, so this \
-                         app cannot be granted",
-                        app_fingerprint.name
-                    )));
-                }
-                bindings.push(AppGrantBinding::Tools(AppToolsGrantBinding {
-                    app: binding.app,
-                    tools: binding.tools.clone(),
-                    fingerprint: app_fingerprint.fingerprint,
-                }));
+            // Mounted-tool bindings are retired: MCP was the only bindable
+            // kind when local apps shipped, and the REST vocabulary has since
+            // replaced it as the app-facing surface (#1332). A manifest still
+            // pinning tools cannot be granted — the failure direction is
+            // "revise the app", never "grant the legacy surface".
+            AppBinding::Tools(_) => {
+                return Err(ServerError::conflict(format!(
+                    "connected app {:?} is bound by mounted MCP tools, which local \
+                     apps no longer support; publish a revision binding a rest_api \
+                     connected app's operations instead",
+                    app_fingerprint.name
+                )));
             }
             AppBinding::Operations(binding) => {
                 // Every pinned operation must exist in the record's current
@@ -242,13 +225,12 @@ async fn current_live_app(
 /// Whether a granted binding covers everything a current-manifest binding
 /// pins, in the same vocabulary. A grant kept under the other vocabulary
 /// covers nothing: consent named tools or operations, never "whatever the
-/// record now speaks".
+/// record now speaks". A tools binding is never covered — the vocabulary is
+/// retired (#1332), so a grant recorded before the retirement reads as
+/// ungranted rather than keeping the legacy surface invokable.
 fn binding_covered(pinned: &AppBinding, granted: &AppGrantBinding) -> bool {
     match (pinned, granted) {
-        (AppBinding::Tools(pinned), AppGrantBinding::Tools(granted)) => pinned
-            .tools
-            .iter()
-            .all(|tool| granted.tools.iter().any(|held| held == tool)),
+        (AppBinding::Tools(_), _) => false,
         (AppBinding::Operations(pinned), AppGrantBinding::Operations(granted)) => pinned
             .operation_ids
             .iter()

@@ -76,9 +76,9 @@ call identity exists; it is only *invocation* that happens outside one.
 ## Invocation and consent
 
 Invocation is new host surface: the first tool execution outside a model turn.
-The route (`POST /apps/{id}/invoke`, renderer bearer) resolves the current
-tool registry snapshot and executes the named tool — mechanically the same
-dispatch a turn performs, minus the turn.
+The route (`POST /apps/{id}/invoke`, renderer bearer) executes the named
+capability through the host's governed dispatch — mechanically the same
+execution a turn performs, minus the turn.
 
 What it deliberately does **not** reuse is the chat approval gate. That gate
 is enforced inside the foreground agent loop, scoped to a chat and its
@@ -88,10 +88,11 @@ standing grant would silently widen. None of that maps onto a profile-scoped
 app driven by a human click. Local apps therefore get their own consent
 object, designed against the same threat:
 
-- An **app grant** records, per app: the granted `(app, tools[])` set — keyed
-  by connected-app record id — and a **fingerprint of each bound app's
-  definition** (namespace, command, args, cwd, selected env names, URL —
-  whatever the transport carries).
+- An **app grant** records, per app: the granted `(app, capabilities[])` set —
+  keyed by connected-app record id — and a **fingerprint of each bound app's
+  definition** (whatever the kind carries: base URL, document hash, and
+  credential reference for `rest_api`; namespace, command, args, cwd,
+  selected env names, URL for the retired `mcp_server` vocabulary).
 - The grant is created by explicit user consent on a sheet that lists every
   binding. It is revocable from the Apps library.
 - Every invoke checks, live: the tool is in the current revision's manifest,
@@ -135,37 +136,35 @@ The frame's opaque origin means an app has no storage of its own. v1 apps are
 stateless: they refetch through their tools on open. A state primitive is a
 deliberate non-goal until something real needs it.
 
-## Acting on gateway-backed servers
+## Tool bindings are retired
 
-Bindings name mounted servers of any transport — local stdio, remote HTTP,
-or gateway endpoints — uniformly. When a binding resolves to a gateway
-endpoint, calls carry the user's per-endpoint `mcp:<slug>` bearer, so the
-gateway authenticates the person: its live entitlement checks apply, its
-audit and content-free usage ledgers attribute the call to that user, and the
-client name rides as `openwave`. Local apps are already governed and
-attributed for gateway-backed bindings with zero gateway-side work.
-
-One boundary follows from the gateway's design rather than ours:
-gateway-attested endpoints refuse session-token calls that lack a
-model-emitted observation, so local apps can act only on Direct endpoints
-today. Promotion (below) is what lifts that, because a promoted app's calls
-are brokered by the gateway itself.
-
-Local stdio and HTTP servers run under whatever authority the user configured
-them with. That is the existing local trust model, unchanged — an app adds no
-authority to a server the user already mounted.
-
-## Beyond MCP bindings
-
-Mounted MCP tools are the first binding vocabulary, not the last. The
-accepted next step ([connected-apps.md](connected-apps.md), tracked by
-#1330) makes MCP servers one *kind* of a broader connected-app record and
-adds a `rest_api` kind — a base URL, an ingested OpenAPI catalog, and a
-secret-store credential — executed through a governed local egress layer.
-App manifests then gain a sibling binding kind, `{ app, operation_ids[] }`,
-with the grant, consent-sheet, and invoke machinery on this page carried
-over unchanged. Until that lands, MCP tools remain the only callable
+Mounted MCP tools were the first binding vocabulary — the only one available
+when local apps shipped — and are no longer bindable (#1332). The
+connected-apps epic ([connected-apps.md](connected-apps.md), #1330) made MCP
+servers one *kind* of connected app and added the `rest_api` kind — a base
+URL, an ingested OpenAPI catalog, and a secret-store credential, executed
+through a governed local egress layer. App manifests bind
+`{ app, operation_ids[] }`, with the grant, consent-sheet, and invoke
+machinery on this page carried over unchanged. That is now the one callable
 surface.
+
+With REST in place, tool bindings had no remaining use their vocabulary
+covered better, and their consentable universe was the wrong shape for apps:
+a manifest could pin tools of *any* mounted transport — local stdio, remote
+HTTP, or gateway endpoints — putting "run a local process on this machine"
+inside the app-grantable world, while gateway-attested endpoints refused
+app-driven session-token calls regardless. The doors now refuse the
+vocabulary end to end: `create_app` refuses to author a `tools` binding, the
+consent route conflicts instead of granting one, and the invoke route
+refuses the tool surface even under a grant recorded before the retirement —
+the failure direction is re-ask, never widen. The grammar still parses
+stored manifests, which read as ungrantable on every surface; full removal
+of the vocabulary (types, wire shapes, the frame bridge's `tools/call` verb)
+is a separate mechanical change.
+
+Mounted MCP servers themselves are unchanged: chats keep their full tool
+surface. The retirement narrows what an *app manifest* may pin, nothing
+else.
 
 ## The authorization gate
 
@@ -183,11 +182,13 @@ where a team-scoped copy is stored, served, and brokered by the gateway under
 each viewer's own entitlements. Three properties keep that door open without
 building anything now:
 
-- **The binding vocabulary maps.** A gateway-endpoint binding translates
-  mechanically to the gateway's manifest vocabulary (endpoint slug, proxied
-  operation set). Promotion walks the bindings and refuses with a precise
-  list when any binding is not gateway-resolvable — an app bound to a local
-  stdio server cannot promote, by construction.
+- **The binding vocabulary maps.** An operation binding against a
+  gateway-hosted API translates mechanically to the gateway's manifest
+  vocabulary (endpoint slug, proxied operation set). Promotion walks the
+  bindings and refuses with a precise list when any binding is not
+  gateway-resolvable — an app bound to a purely local API cannot promote, by
+  construction. (Retiring tool bindings, above, removed the widest class of
+  unpromotable bindings outright.)
 - **Revision identity carries.** Digests, ordinals, and producer provenance
   become the published revision's provenance.
 - **Attestation flips from limitation to benefit.** Once the gateway brokers

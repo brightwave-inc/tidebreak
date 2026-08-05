@@ -1,16 +1,18 @@
 //! `POST /apps/{id}/invoke` — out-of-turn invocation of a local app's pinned
-//! capabilities: mounted MCP tools and declared REST operations.
+//! capabilities: declared REST operations of `rest_api` connected apps.
 //!
 //! The first tool execution outside a model turn: the sandboxed app frame
 //! posts a call to the trusted renderer, the renderer forwards it here on its
-//! bearer, and the server performs the same dispatch a turn would — registry
-//! snapshot and `Tool::execute` for a mounted MCP tool, the governed REST
-//! executor for a declared operation — minus the turn. Enforcement is
-//! entirely server-side and fails closed, in a fixed order: the app must
-//! exist with a current revision, the requested capability must be pinned in
-//! that revision's manifest bindings, and a live app grant must cover the
-//! call — including that every granted connected app's current definition
-//! still matches the fingerprint recorded at consent.
+//! bearer, and the server executes the pinned operation through the governed
+//! REST executor — minus the turn. The `tool` surface still parses (stored
+//! manifests may pin mounted MCP tools) but refuses before dispatch: tool
+//! bindings are retired (#1332), and REST operations are the one invocable
+//! surface. Enforcement is entirely server-side and fails closed, in a fixed
+//! order: the app must exist with a current revision, the requested
+//! capability must be pinned in that revision's manifest bindings, and a live
+//! app grant must cover the call — including that every granted connected
+//! app's current definition still matches the fingerprint recorded at
+//! consent.
 //!
 //! Chat approval gates, permission modes, and plan mode deliberately do not
 //! apply: there is no chat. The app grant is the whole policy.
@@ -386,6 +388,19 @@ async fn require_app_grant(
 ) -> Result<(), AppInvokeError> {
     let consent_required =
         |message: String| AppInvokeError::refused(AppInvokeRefusalKind::ConsentRequired, message);
+    // Mounted-tool bindings are retired (#1332): the consent route no longer
+    // grants them, and a grant recorded before the retirement must not keep
+    // the legacy surface invokable. Refusing here — before the grant is even
+    // read — is what makes the retirement hold for pre-existing grants, and
+    // `consent_required` is deliberate: it routes the user to the sheet,
+    // whose refusal explains what the app must be revised to bind.
+    if let Pinned::Tool(_) = pinned {
+        return Err(consent_required(
+            "mounted MCP tools are no longer invokable from apps; this app must be \
+             revised to bind a rest_api connected app's operations"
+                .into(),
+        ));
+    }
     let Some(grant) = state.store.get_app_grant(app.id).await? else {
         return Err(consent_required(format!(
             "no live app grant covers {}",

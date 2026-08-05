@@ -632,44 +632,20 @@ pub(crate) struct RestRosterApp {
 }
 
 /// The roster text appended to `create_app`'s description: every configured
-/// connected app with the id a manifest binding names — the namespace an
-/// `mcp_server`'s mounted tools carry, or a bounded sample of a `rest_api`
-/// record's operation ids.
+/// `rest_api` connected app with the id a manifest binding names and a
+/// bounded sample of its declared operation ids.
 ///
-/// A server without a live client (disabled, degraded, locked down) stays
-/// listed — authoring a binding against it is legitimate, and the grant and
-/// invoke gates enforce at call time — but its line says so, instead of
-/// promising mounted tool names that do not currently exist.
-fn connected_app_roster(
-    definitions: &[McpServerDefinition],
-    ids: &BTreeMap<String, ConnectedAppId>,
-    servers: &HashMap<String, ManagedServer>,
-    rest: &[RestRosterApp],
-) -> String {
-    if definitions.is_empty() && rest.is_empty() {
-        return "\n\nNo connected apps are configured, so only manifests with an \
-                empty bindings list can be created."
+/// `mcp_server` records are deliberately absent: mounted-tool bindings are
+/// retired (#1332), so listing them would invite the model to author
+/// manifests the door refuses.
+fn connected_app_roster(rest: &[RestRosterApp]) -> String {
+    if rest.is_empty() {
+        return "\n\nNo rest_api connected apps are configured, so only manifests \
+                with an empty bindings list can be created."
             .to_owned();
     }
     let mut roster =
         String::from("\n\nConfigured connected apps (set each binding's `app` to an id):");
-    for definition in definitions {
-        let Some(id) = ids.get(&definition.name) else {
-            continue;
-        };
-        let unavailable = servers
-            .get(&definition.name)
-            .is_none_or(|server| server.client.is_none());
-        roster.push_str(&format!(
-            "\n- {id} — {name}: tools are named `mcp__{name}__{{tool}}`{status}",
-            name = definition.name,
-            status = if unavailable {
-                " (currently unavailable — configured but not connected)"
-            } else {
-                ""
-            }
-        ));
-    }
     for app in rest {
         let mut listed: Vec<&str> = app
             .operation_ids
@@ -1579,7 +1555,7 @@ impl McpRuntime {
         servers: HashMap<String, ManagedServer>,
     ) {
         let rest = self.rest_roster().await;
-        let registry = self.registry_with(&definitions, &ids, &servers, &rest);
+        let registry = self.registry_with(&servers, &rest);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
         state.ids = ids;
@@ -1644,13 +1620,11 @@ impl McpRuntime {
     /// configuration.
     async fn registry_for(&self, state: &RuntimeState) -> ToolRegistry {
         let rest = self.rest_roster().await;
-        self.registry_with(&state.definitions, &state.ids, &state.servers, &rest)
+        self.registry_with(&state.servers, &rest)
     }
 
     fn registry_with(
         &self,
-        definitions: &[McpServerDefinition],
-        ids: &BTreeMap<String, ConnectedAppId>,
         servers: &HashMap<String, ManagedServer>,
         rest: &[RestRosterApp],
     ) -> ToolRegistry {
@@ -1672,7 +1646,7 @@ impl McpRuntime {
         if let Some(inner) = registry.server_tool(CREATE_APP_TOOL) {
             registry.register(Box::new(CreateAppWithRoster {
                 inner,
-                roster: connected_app_roster(definitions, ids, servers, rest),
+                roster: connected_app_roster(rest),
             }));
         }
         registry
@@ -2950,15 +2924,14 @@ mod tests {
             Some("Sign in to the model gateway to reconnect this server.")
         );
 
-        // The degraded mount stays on the create_app roster, but its line
-        // stops promising mounted tool names it does not have.
+        // MCP mounts never reach the create_app roster — tool bindings are
+        // retired (#1332) — so a configured-but-degraded gateway server reads
+        // as "nothing bindable", not as a bindable app with a caveat.
         let state = runtime.state.lock().await;
-        let roster = connected_app_roster(&state.definitions, &state.ids, &state.servers, &[]);
+        assert!(!state.definitions.is_empty());
+        let roster = connected_app_roster(&[]);
         assert!(
-            roster.contains(
-                "tools are named `mcp__tools__{tool}` \
-                 (currently unavailable — configured but not connected)"
-            ),
+            roster.contains("No rest_api connected apps are configured"),
             "{roster}"
         );
     }
@@ -3192,12 +3165,15 @@ mod tests {
         assert_eq!(info.servers[0].tool_count, 1);
         assert!(runtime.snapshot().get("mcp__gateway__lookup").is_some());
 
-        // A connected server's roster line carries no availability caveat.
+        // Even a healthy, connected server contributes nothing bindable to
+        // the create_app roster: tool bindings are retired (#1332).
         {
-            let state = runtime.state.lock().await;
-            let roster = connected_app_roster(&state.definitions, &state.ids, &state.servers, &[]);
-            assert!(roster.contains("tools are named `mcp__gateway__{tool}`"));
-            assert!(!roster.contains("currently unavailable"), "{roster}");
+            let roster = connected_app_roster(&[]);
+            assert!(!roster.contains("mcp__gateway__"), "{roster}");
+            assert!(
+                roster.contains("No rest_api connected apps are configured"),
+                "{roster}"
+            );
         }
 
         // The declared view was prefetched at connect and is served from
