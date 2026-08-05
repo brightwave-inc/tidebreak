@@ -905,6 +905,13 @@ impl TurnWorker {
                     Ok(result) => result,
                     Err(error) => Err(AgentError::msg(format!("agent task stopped: {error}"))),
                 };
+            // The attempt consumed the whole queue: every requeued spawn either
+            // passed the approval gate — and comes back as the outcome's
+            // remaining requests — or was refused and answered durably. Holding
+            // the old list would replay refusals on the next iteration.
+            let had_pending_spawns = !pending_sandbox_spawns.is_empty();
+            pending_sandbox_spawns.clear();
+            pending_sandbox_spawn_steer_revision = None;
             match self.renew_lease(&turn, lease_token).await {
                 LeaseState::Running => {}
                 LeaseState::Cancelling => {
@@ -1466,9 +1473,7 @@ impl TurnWorker {
                     steer_revision,
                     model_steps,
                 }) => {
-                    if (model_steps == 0 && pending_sandbox_spawns.is_empty())
-                        || model_steps > remaining_steps
-                    {
+                    if (model_steps == 0 && !had_pending_spawns) || model_steps > remaining_steps {
                         return Err(AgentError::msg(format!(
                             "turn {} returned an invalid model-step count {model_steps}",
                             turn.id
@@ -1547,6 +1552,7 @@ impl TurnWorker {
                         call_id: request.call_id,
                         provider_id: request.provider_id.clone(),
                         arguments: request.arguments.clone(),
+                        approval_gated: request.approval_gated,
                         result: serde_json::to_string(&openwave_core::SpawnSandboxAgentResult {
                             agent_id: request.child_run_id,
                         })?,
@@ -2843,6 +2849,7 @@ mod committed_event_drain_tests {
             child_run_id: openwave_core::AgentRunId::sandbox_for_spawn_call(call_id),
             task: "Research the error handling options.".into(),
             arguments: serde_json::json!({"task":"Research the error handling options."}),
+            approval_gated: false,
         };
         assert!(sandbox_spawn_checkpoint_is_valid(&tools, &request));
 

@@ -558,6 +558,16 @@ export function toolApprovalPresentation(
       canRemember: false,
     };
   }
+  if (kind === "delegate_may_run_background_agent") {
+    return {
+      summary:
+        "Allow a background agent to work on this on its own, reaching the network under this chat's policy?",
+      canApprove: true,
+      // Consent is for the whole run, so it is worth remembering: a run's own
+      // calls never come back to be asked about individually.
+      canRemember: true,
+    };
+  }
   return {
     summary: "The exact action cannot be safely described.",
     canApprove: false,

@@ -221,7 +221,34 @@ pub(super) fn tool_call_table() -> TableCreateStatement {
                                 .eq(crate::ToolApprovalStatus::Rejected.as_str())
                                 .and(Expr::col(ToolCall::ApprovalReason).is_not_null())
                                 .and(Expr::col(ToolCall::ApprovalDecidedAt).is_not_null())),
-                    )),
+                    ))
+                // A delegation is the one action whose call changes execution
+                // class after it is decided: it parks as a Sensitive server
+                // call and, once approved, is finalized into the completed
+                // orchestration row that admitted the background run. Keeping
+                // the approval on that row is what makes the consent for an
+                // unattended run readable next to the run it authorized.
+                .or(Expr::col(ToolCall::Execution)
+                    .eq(crate::model::ToolCallExecution::Orchestration.as_str())
+                    .and(
+                        Expr::col(ToolCall::Status)
+                            .eq(crate::model::ToolCallStatus::Completed.as_str()),
+                    )
+                    .and(
+                        Expr::col(ToolCall::ApprovalStatus)
+                            .eq(crate::ToolApprovalStatus::Approved.as_str()),
+                    )
+                    .and(
+                        Expr::col(ToolCall::ApprovalClass)
+                            .eq(crate::ApprovalClass::Sensitive.as_str()),
+                    )
+                    .and(
+                        Expr::col(ToolCall::ApprovalKind)
+                            .eq(crate::ToolApprovalKind::DelegateMayRunBackgroundAgent.as_str()),
+                    )
+                    .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                    .and(Expr::col(ToolCall::ApprovalRequestedAt).is_not_null())
+                    .and(Expr::col(ToolCall::ApprovalDecidedAt).is_not_null())),
         )
         .check(
             Expr::col(ToolCall::ApprovalReason)
@@ -327,6 +354,7 @@ pub(super) fn standing_tool_grant_table() -> TableCreateStatement {
             crate::ToolApprovalKind::ExecMayRunNetworkedCommand.standing_grant_key(),
             crate::ToolApprovalKind::WebExtractMayFetchUrl.standing_grant_key(),
             crate::ToolApprovalKind::WorkspaceMayModifyFiles.standing_grant_key(),
+            crate::ToolApprovalKind::DelegateMayRunBackgroundAgent.standing_grant_key(),
         ]))
         // Exactly one of `chat_id` / `project_id` names the level.
         .check(

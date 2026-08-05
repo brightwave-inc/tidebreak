@@ -8,6 +8,7 @@ use crate::agent_tools::{
     parse_canonical_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs, SpawnSandboxAgentResult,
     SPAWN_SANDBOX_AGENT_TOOL,
 };
+use crate::approval::ToolApprovalStatus;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::model::{
@@ -15,6 +16,7 @@ use crate::model::{
     ToolCallRecord, ToolCallStatus, TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::{AdmitSandboxAgentRunOutcome, CheckpointSandboxSpawnOutcome};
+use crate::ApprovalClass;
 use crate::{AgentRunId, ChatId, ToolOutput};
 
 use super::super::super::{entities, store_err, DbStore};
@@ -159,13 +161,19 @@ where
     if request.event_ordinal != next_ordinal {
         return Ok(CheckpointSandboxSpawnOutcome::IdentityConflict);
     }
-    if entities::tool_call::Entity::find_by_id(request.call_id.0)
+    // A gated spawn parked on the approval gate first, which left an ordinary
+    // pending server row for this exact call. That row is finalized here, in
+    // the same transaction that admits the child, so admission is strictly
+    // after the decision committed. An ungated spawn must have no row at all.
+    let existing_call = entities::tool_call::Entity::find_by_id(request.call_id.0)
         .one(conn)
         .await
-        .map_err(store_err)?
-        .is_some()
-    {
-        return Ok(CheckpointSandboxSpawnOutcome::IdentityConflict);
+        .map_err(store_err)?;
+    match &existing_call {
+        Some(existing)
+            if request.approval_gated && gated_call_is_admissible(existing, turn, request) => {}
+        None if !request.approval_gated => {}
+        _ => return Ok(CheckpointSandboxSpawnOutcome::IdentityConflict),
     }
 
     let arguments = canonical_arguments(request)?;
@@ -212,42 +220,61 @@ where
 
     let totals = checked_totals(turn, request.progress)?;
     let created_at = now.max(child.created_at);
-    let history_order = next_tool_history_order_on(conn, ChatId(turn.chat_id)).await?;
-    let call_model = entities::tool_call::ActiveModel {
-        id: Set(request.call_id.0),
-        chat_id: Set(turn.chat_id),
-        turn_id: Set(turn.id),
-        provider_id: Set(request.provider_id.clone()),
-        history_order: Set(history_order),
-        name: Set(SPAWN_SANDBOX_AGENT_TOOL.into()),
-        arguments: Set(request.arguments.clone()),
-        raw_arguments: Set(None),
-        execution: Set(ToolCallExecution::Orchestration.as_str().into()),
-        status: Set(ToolCallStatus::Completed.as_str().into()),
-        result: Set(Some(request.result.clone())),
-        result_preview: Set(None),
-        error_code: Set(None),
-        error_detail: Set(None),
-        approval_status: Set(None),
-        approval_class: Set(None),
-        approval_kind: Set(None),
-        approval_reason: Set(None),
-        approval_requested_at: Set(None),
-        approval_decided_at: Set(None),
-        approval_event_seq: Set(None),
-        approval_grant_source_call_id: Set(None),
-        auto_judge_status: Set(None),
-        client_executor_id: Set(None),
-        client_lease_token: Set(None),
-        client_lease_expires_at: Set(None),
-        turn_lease_token: Set(Some(request.lease_token)),
-        resolution_turn_lease_token: Set(Some(request.lease_token)),
-        created_at: Set(created_at),
-        resolved_at: Set(Some(created_at)),
-    }
-    .insert(conn)
-    .await
-    .map_err(store_err)?;
+    let history_order = match &existing_call {
+        // The gated row already took its place in tool history when it was
+        // accepted; moving it now would reorder the transcript around a card
+        // the reader has already answered.
+        Some(existing) => existing.history_order,
+        None => next_tool_history_order_on(conn, ChatId(turn.chat_id)).await?,
+    };
+    let call_model = match existing_call {
+        Some(existing) => {
+            let mut active: entities::tool_call::ActiveModel = existing.into();
+            active.execution = Set(ToolCallExecution::Orchestration.as_str().into());
+            active.status = Set(ToolCallStatus::Completed.as_str().into());
+            active.result = Set(Some(request.result.clone()));
+            active.turn_lease_token = Set(Some(request.lease_token));
+            active.resolution_turn_lease_token = Set(Some(request.lease_token));
+            active.created_at = Set(created_at);
+            active.resolved_at = Set(Some(created_at));
+            active.update(conn).await.map_err(store_err)?
+        }
+        None => entities::tool_call::ActiveModel {
+            id: Set(request.call_id.0),
+            chat_id: Set(turn.chat_id),
+            turn_id: Set(turn.id),
+            provider_id: Set(request.provider_id.clone()),
+            history_order: Set(history_order),
+            name: Set(SPAWN_SANDBOX_AGENT_TOOL.into()),
+            arguments: Set(request.arguments.clone()),
+            raw_arguments: Set(None),
+            execution: Set(ToolCallExecution::Orchestration.as_str().into()),
+            status: Set(ToolCallStatus::Completed.as_str().into()),
+            result: Set(Some(request.result.clone())),
+            result_preview: Set(None),
+            error_code: Set(None),
+            error_detail: Set(None),
+            approval_status: Set(None),
+            approval_class: Set(None),
+            approval_kind: Set(None),
+            approval_reason: Set(None),
+            approval_requested_at: Set(None),
+            approval_decided_at: Set(None),
+            approval_event_seq: Set(None),
+            approval_grant_source_call_id: Set(None),
+            auto_judge_status: Set(None),
+            client_executor_id: Set(None),
+            client_lease_token: Set(None),
+            client_lease_expires_at: Set(None),
+            turn_lease_token: Set(Some(request.lease_token)),
+            resolution_turn_lease_token: Set(Some(request.lease_token)),
+            created_at: Set(created_at),
+            resolved_at: Set(Some(created_at)),
+        }
+        .insert(conn)
+        .await
+        .map_err(store_err)?,
+    };
     let call = tool_call_from_model(call_model)?;
     let payload = AgentEvent::ToolCallCompleted {
         call_id: request.call_id,
@@ -419,15 +446,26 @@ where
     };
     let stored_event: AgentEvent = serde_json::from_value(event.payload)?;
     let arguments = canonical_arguments(request)?;
+    // A gated spawn's row carries the approval that admitted it; an ungated
+    // one must carry no approval at all.
+    let approval_columns_valid = if request.approval_gated {
+        call_model.approval_status.as_deref() == Some(ToolApprovalStatus::Approved.as_str())
+            && call_model.approval_class.as_deref() == Some(ApprovalClass::Sensitive.as_str())
+            && call_model.approval_kind.is_some()
+            && call_model.approval_requested_at.is_some()
+            && call_model.approval_decided_at.is_some()
+    } else {
+        call_model.approval_status.is_none()
+            && call_model.approval_class.is_none()
+            && call_model.approval_kind.is_none()
+            && call_model.approval_reason.is_none()
+            && call_model.approval_requested_at.is_none()
+            && call_model.approval_decided_at.is_none()
+            && call_model.approval_event_seq.is_none()
+    };
     let raw_call_valid = call_model.error_code.is_none()
         && call_model.error_detail.is_none()
-        && call_model.approval_status.is_none()
-        && call_model.approval_class.is_none()
-        && call_model.approval_kind.is_none()
-        && call_model.approval_reason.is_none()
-        && call_model.approval_requested_at.is_none()
-        && call_model.approval_decided_at.is_none()
-        && call_model.approval_event_seq.is_none()
+        && approval_columns_valid
         && call_model.client_executor_id.is_none()
         && call_model.client_lease_token.is_none()
         && call_model.client_lease_expires_at.is_none();
@@ -490,6 +528,37 @@ where
             event: stored_event,
         },
     }))
+}
+
+/// Whether the row a gated spawn parked on is the one this checkpoint may
+/// finalize.
+///
+/// The approval must read approved, so a child is never admitted alongside a
+/// decision that is still pending or was refused, and the immutable call
+/// identity must be the one the reader was shown — a row whose arguments,
+/// tool, or turn differ describes a different question than the one answered.
+fn gated_call_is_admissible(
+    call: &entities::tool_call::Model,
+    turn: &entities::turn_run::Model,
+    request: &SandboxSpawnCheckpointRequest,
+) -> bool {
+    call.chat_id == turn.chat_id
+        && call.turn_id == turn.id
+        && call.provider_id == request.provider_id
+        && call.name == SPAWN_SANDBOX_AGENT_TOOL
+        && call.arguments == request.arguments
+        && call.raw_arguments.is_none()
+        && call.execution == ToolCallExecution::Server.as_str()
+        && call.status == ToolCallStatus::Pending.as_str()
+        && call.result.is_none()
+        && call.error_code.is_none()
+        && call.error_detail.is_none()
+        && call.approval_status.as_deref() == Some(ToolApprovalStatus::Approved.as_str())
+        && call.approval_class.as_deref() == Some(ApprovalClass::Sensitive.as_str())
+        && call.approval_kind.is_some()
+        && call.client_executor_id.is_none()
+        && call.client_lease_token.is_none()
+        && call.client_lease_expires_at.is_none()
 }
 
 fn validate_request(request: &SandboxSpawnCheckpointRequest) -> Result<()> {

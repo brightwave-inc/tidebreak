@@ -93,6 +93,17 @@ pub enum ToolApprovalKind {
     /// once but not standing-grantable, because "stop asking about workspace
     /// edits here" is exactly what switching the chat to `Auto` says.
     WorkspaceMayModifyFiles,
+    /// A background agent may run commands in its own workspace and reach the
+    /// network under this chat's policy, without any of its own calls coming
+    /// back for approval.
+    ///
+    /// Consent is given once, for the whole run: nobody is watching a
+    /// background run, so a mid-run card would stall it against its own
+    /// deadline. What the reader is deciding is egress — the run's workspace
+    /// is keyed by its own id and carries no folder grants, staged host paths,
+    /// or chat attachments — so the card names the network policy the child
+    /// inherits.
+    DelegateMayRunBackgroundAgent,
     /// A Sensitive action with no presentable consent semantics: rejectable but
     /// not approvable from the renderer.
     Unsupported,
@@ -112,6 +123,7 @@ impl ToolApprovalKind {
             // alone, so a workspace tool missing here parks as an approvable
             // card the renderer presents and then 409s the approval itself.
             "create_app" => Self::WorkspaceMayModifyFiles,
+            crate::SPAWN_SANDBOX_AGENT_TOOL => Self::DelegateMayRunBackgroundAgent,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
         }
@@ -159,6 +171,9 @@ impl ToolApprovalKind {
             // workspace tool the name table does not know recovers as a true
             // `Unsupported` — rejectable-only, never silently approvable.
             Self::WorkspaceMayModifyFiles => "unsupported",
+            // Same closed-constraint fold. `approval_from_model` recovers the
+            // delegation kind from the exact tool name stored beside it.
+            Self::DelegateMayRunBackgroundAgent => "unsupported",
             Self::Unsupported => "unsupported",
         }
     }
@@ -179,6 +194,7 @@ impl ToolApprovalKind {
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
             Self::WorkspaceMayModifyFiles => "workspace_may_modify_files",
+            Self::DelegateMayRunBackgroundAgent => "delegate_may_run_background_agent",
             Self::Unsupported => "unsupported",
         }
     }
@@ -193,6 +209,7 @@ impl ToolApprovalKind {
             "exec_may_run_networked_command" => Some(Self::ExecMayRunNetworkedCommand),
             "external_mcp_may_call_server" => Some(Self::ExternalMcpMayCallServer),
             "workspace_may_modify_files" => Some(Self::WorkspaceMayModifyFiles),
+            "delegate_may_run_background_agent" => Some(Self::DelegateMayRunBackgroundAgent),
             "unsupported" => Some(Self::Unsupported),
             _ => None,
         }
@@ -208,6 +225,7 @@ impl ToolApprovalKind {
                 | Self::ExecMayRunNetworkedCommand
                 | Self::ExternalMcpMayCallServer
                 | Self::WorkspaceMayModifyFiles
+                | Self::DelegateMayRunBackgroundAgent
         )
     }
 
@@ -223,7 +241,8 @@ impl ToolApprovalKind {
     ///
     /// MCP stays out on the same replaceable-executable grounds as standing
     /// grants: consent given to a namespace is not consent to whatever
-    /// Settings later puts behind it.
+    /// Settings later puts behind it. Delegation stays out because the judge
+    /// would be deciding a whole unattended run rather than one call.
     #[must_use]
     pub const fn is_auto_judgeable(self) -> bool {
         matches!(
@@ -720,6 +739,12 @@ impl GrantScope {
         // whole-workspace rung — that consent already exists as `Auto` mode.
         if let ToolActionPreview::WriteFile { path } = &action {
             return place_ladder(path);
+        }
+        // Delegation is consented to as delegation. A task is model-authored
+        // prose, so an exact-action grant would never match a second time and
+        // would only be a rung that looks narrower than it is.
+        if matches!(action, ToolActionPreview::DelegateAgent { .. }) {
+            return vec![Self::WholeTool];
         }
         vec![Self::ExactAction(action), Self::WholeTool]
     }

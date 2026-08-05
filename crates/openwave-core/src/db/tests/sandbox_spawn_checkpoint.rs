@@ -63,6 +63,7 @@ fn request(
         call_id,
         provider_id: format!("provider-{call_id}"),
         arguments: serde_json::json!({"task": task}),
+        approval_gated: false,
         result: serde_json::to_string(&SpawnSandboxAgentResult {
             agent_id: AgentRunId::sandbox_for_spawn_call(call_id),
         })
@@ -140,6 +141,134 @@ async fn detach_conversation_root(
         )
         .await
         .unwrap();
+}
+
+/// Park a spawn on the approval gate the way the agent does: an ordinary
+/// pending server row for the exact call, plus a journaled approval request.
+async fn park_spawn_on_approval(
+    store: &crate::DbStore,
+    chat: &crate::Chat,
+    turn: &crate::TurnRun,
+    lease: uuid::Uuid,
+    request: &SandboxSpawnCheckpointRequest,
+) {
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: request.call_id,
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: request.provider_id.clone(),
+            name: SPAWN_SANDBOX_AGENT_TOOL.into(),
+            arguments: request.arguments.clone(),
+            raw_arguments: None,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: Utc::now(),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    store
+        .request_tool_call_approval_and_append_event(
+            &crate::ApprovalRequest {
+                auto_judge: false,
+                call_id: request.call_id,
+                chat_id: chat.id,
+                turn_id: turn.id,
+                tool_name: SPAWN_SANDBOX_AGENT_TOOL.into(),
+                class: crate::ApprovalClass::Sensitive,
+                kind: crate::ToolApprovalKind::DelegateMayRunBackgroundAgent,
+                preview: None,
+            },
+            lease,
+            2,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+}
+
+/// A background run is admitted by the decision, not beside it.
+///
+/// The spawn's tool call is written already completed in the transaction that
+/// creates the child, so a gated spawn parks on an ordinary pending server row
+/// first and this checkpoint finalizes that row. An undecided row must not
+/// produce a child: an interrupted decision is abandoned on the next attempt,
+/// and nothing may run on the strength of a question nobody answered.
+#[tokio::test]
+async fn a_gated_spawn_admits_its_child_only_once_the_approval_has_committed() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = running_turn(&store, chat.id).await;
+    let mut undecided = request(
+        &turn,
+        lease,
+        CallId::new(),
+        "research one fact",
+        3,
+        progress(),
+    );
+    undecided.approval_gated = true;
+    park_spawn_on_approval(&store, &chat, &turn, lease, &undecided).await;
+
+    assert!(matches!(
+        store
+            .checkpoint_sandbox_spawn(&undecided, Utc::now())
+            .await
+            .unwrap(),
+        Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
+    ));
+    // Only the parent run exists: no child was created beside the open card.
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    let parked = store.list_tool_calls(chat.id).await.unwrap();
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].status, ToolCallStatus::Pending);
+    assert_eq!(parked[0].execution, ToolCallExecution::Server);
+
+    store
+        .decide_tool_call_approval(
+            chat.id,
+            undecided.call_id,
+            &crate::ApprovalDecision::Approve,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let approved = store
+        .checkpoint_sandbox_spawn(&undecided, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let CheckpointSandboxSpawnOutcome::Checkpointed { child, call, .. } = approved else {
+        panic!("an approved spawn should admit its child");
+    };
+    assert_eq!(
+        child.id,
+        AgentRunId::sandbox_for_spawn_call(undecided.call_id)
+    );
+    // The parked row became the spawn's own completed orchestration call
+    // rather than a second row beside it.
+    assert_eq!(call.id, undecided.call_id);
+    assert_eq!(call.execution, ToolCallExecution::Orchestration);
+    assert_eq!(call.status, ToolCallStatus::Completed);
+    assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+
+    // The same request retried after the commit recovers the one receipt.
+    assert!(matches!(
+        store
+            .checkpoint_sandbox_spawn(&undecided, Utc::now())
+            .await
+            .unwrap(),
+        Some(CheckpointSandboxSpawnOutcome::Existing { .. })
+    ));
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
 }
 
 #[tokio::test]
