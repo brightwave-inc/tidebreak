@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
-import { Bot, Square } from "lucide-react";
+import { Bot, Check, Clock, Square, X } from "lucide-react";
 
 import { useApp } from "./AppContext";
-import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
+import {
+  AgentActivityTimeline,
+  summarizeAgentActivity,
+  useAgentRunActivity,
+} from "./AgentActivityTimeline";
 import { agentRunStatusDetail, RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 import type { AgentRun } from "./api";
+import { MessageMarkdown } from "./MessageMarkdown";
 import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import { useAgentRuns } from "./useAgentRuns";
 import { PanelBreadcrumb } from "@/components/PanelHeader";
@@ -13,6 +18,7 @@ import { usePanelNav } from "@/panel/usePanelNav";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 
 /**
  * One background run, opened beside the conversation from its row in the
@@ -122,23 +128,39 @@ function BackgroundAgentDetail({
   const live = RUNNING_AGENT_STATUSES.has(run.status);
   const now = useNowWhile(live);
   const elapsed = elapsedLabel(run, now);
+  const activitySummary =
+    activity.loaded && activity.items.length > 0
+      ? summarizeAgentActivity(activity.items)
+      : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="shrink-0 px-4 pt-4">
-        <div className="flex items-center gap-2">
-          <Bot className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <h2 className="min-w-0 flex-1 truncate text-base font-medium">
-            {run.task ?? "Background agent"}
-          </h2>
-          <AgentRunStatusBadge status={run.status} />
+        <div className="flex items-start gap-2.5">
+          <div className="grid size-7 shrink-0 place-items-center rounded-lg border bg-muted text-muted-foreground">
+            <Bot className="size-4" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="line-clamp-2 text-sm font-semibold leading-5">
+              {run.task ?? "Background agent"}
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {agentRunStatusDetail(run)}
+              {elapsed && <> · {elapsed}</>}
+              {activitySummary && (
+                <>
+                  {" · "}
+                  {agentActivityMetaLabel(activitySummary)}
+                </>
+              )}
+            </p>
+          </div>
+          <div className="mt-0.5 shrink-0">
+            <AgentRunStatusBadge status={run.status} />
+          </div>
         </div>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {agentRunStatusDetail(run)}
-          {elapsed && <> · {elapsed}</>}
-        </p>
         {run.status === "failed" && run.last_error_code && (
-          <p className="mt-1 font-mono text-xs text-critical">
+          <p className="ml-9 mt-1 font-mono text-xs text-critical">
             {run.last_error_code}
           </p>
         )}
@@ -152,17 +174,17 @@ function BackgroundAgentDetail({
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4" aria-live="polite">
+        <AgentActivityTimeline key={run.id} state={activity} active={live} />
         {run.terminal_text && (
-          <div className="mb-4 rounded-md border bg-muted/40 px-3 py-2.5">
-            <p className="text-xs font-medium text-muted-foreground">
-              {run.status === "failed" ? "Error" : "Result"}
+          <section className="mt-4 border-t pt-3.5">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+              Result
             </p>
-            <p className="mt-1 text-sm break-words whitespace-pre-wrap text-foreground">
-              {run.terminal_text}
-            </p>
-          </div>
+            <div className="break-words text-foreground [&_.message-markdown]:text-sm">
+              <MessageMarkdown>{run.terminal_text}</MessageMarkdown>
+            </div>
+          </section>
         )}
-        <AgentActivityTimeline state={activity} />
       </div>
     </div>
   );
@@ -171,21 +193,59 @@ function BackgroundAgentDetail({
 function AgentRunStatusBadge({ status }: { status: AgentRun["status"] }) {
   switch (status) {
     case "completed":
-      return <Badge variant="success" size="sm">Complete</Badge>;
+      return (
+        <Badge variant="success" size="sm">
+          <Check className="size-3" aria-hidden="true" />
+          Complete
+        </Badge>
+      );
     case "failed":
-      return <Badge variant="critical" size="sm">Failed</Badge>;
+      return (
+        <Badge variant="critical" size="sm">
+          <X className="size-3" aria-hidden="true" />
+          Failed
+        </Badge>
+      );
     case "cancelled":
-      return <Badge variant="critical" size="sm">Stopped</Badge>;
+      return (
+        <Badge variant="critical" size="sm">
+          <X className="size-3" aria-hidden="true" />
+          Stopped
+        </Badge>
+      );
     case "cancelling":
-      return <Badge variant="outline" size="sm">Stopping</Badge>;
+      return (
+        <Badge variant="outline" size="sm">
+          <Spinner className="size-3" aria-hidden="true" />
+          Stopping
+        </Badge>
+      );
     case "waiting":
     case "retry_wait":
-      return <Badge variant="warning" size="sm">Waiting</Badge>;
+      return (
+        <Badge variant="warning" size="sm">
+          <Clock className="size-3" aria-hidden="true" />
+          Waiting
+        </Badge>
+      );
     case "active":
     case "queued":
     case "running":
-      return <Badge variant="info" size="sm">Running</Badge>;
+      return (
+        <Badge variant="info" size="sm">
+          <Spinner className="size-3" aria-hidden="true" />
+          Running
+        </Badge>
+      );
   }
+}
+
+function agentActivityMetaLabel({
+  toolCalls,
+  failed,
+}: ReturnType<typeof summarizeAgentActivity>): string {
+  const count = `${toolCalls} tool ${toolCalls === 1 ? "call" : "calls"}`;
+  return failed > 0 ? `${count}, ${failed} failed` : count;
 }
 
 /** The current second, ticking only while something on screen depends on it. */

@@ -282,7 +282,10 @@ function BackgroundAgentRow({
       )}
       {expanded && (
         <div id={contentId} className="mt-2 pl-5">
-          <AgentActivityTimeline state={activity} />
+          <AgentActivityTimeline
+            state={activity}
+            active={RUNNING_AGENT_STATUSES.has(run.status)}
+          />
         </div>
       )}
     </div>
