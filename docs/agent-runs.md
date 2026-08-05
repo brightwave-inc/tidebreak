@@ -333,6 +333,36 @@ the exact chat and run, a pending or retryable error state is held until
 polling confirms the durable transition, and no worker lease or direct
 scheduler control ever crosses the boundary.
 
+Those surfaces answer *what state* a child is in and *which step* it is on.
+Neither answers what the child is actually doing, which until it submits a
+result is the only thing a reader wants to know.
+`GET /chats/{chat_id}/agent-runs/{run_id}/progress` is that stream: the bounded
+lines the run itself published, each stamped with a monotonic per-run sequence.
+A reader polls with the cursor it last saw and receives only what has arrived
+since, which is what makes watching a long child cheap. A missing, wrong-chat,
+or foreground run answers `404`, exactly as the activity history does.
+
+Two producers write it, and neither is trusted to write it correctly for the
+stream to stay usable. A container-located run's progress comes from the
+sandbox protocol's own sequenced event stream; an in-process run's comes from
+the text its model produced before it checkpointed on a tool. Each line carries
+its producer's identity for that line — an event sequence, or the durable
+checkpoint the narration belongs to — so a reattached container redelivering a
+batch, or a worker retrying an ambiguous commit, leaves one line rather than
+two.
+
+The stream is deliberately outside the correctness contract. No transition
+reads it; the append takes no lease and commits separately from the transition
+that produced the line; a failure to publish is reported and dropped rather
+than allowed to disturb a checkpoint that already committed. Retention bounds
+it, so a run that narrates for an hour costs a bounded number of rows and an
+observer that stops reading may find the oldest lines gone. What it does
+guarantee is order, and that a line already delivered is never delivered twice.
+The text is the run's own prose — the same class the terminal result already
+carries — and nothing else: no tool arguments, queries, results, folder or file
+identities, host paths, provider identities, executor leases, or raw
+diagnostics.
+
 ## Reliability contract
 
 The agent hierarchy preserves the runtime's existing rules:

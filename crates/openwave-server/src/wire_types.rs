@@ -386,6 +386,9 @@ mod tests {
         // A separate endpoint root: the ordered activity history is returned by
         // its own route, so the snapshot walk never reaches it.
         generate::collect_from::<crate::routes::AgentActivityHistoryItem>(&cfg, &mut out);
+        // Likewise its own endpoint root: the live progress stream is paged by
+        // its own route rather than embedded in a snapshot.
+        generate::collect_from::<crate::routes::AgentRunProgressPage>(&cfg, &mut out);
         out
     }
 

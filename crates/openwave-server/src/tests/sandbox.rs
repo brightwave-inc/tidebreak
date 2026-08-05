@@ -405,6 +405,99 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted
 }
 
 #[tokio::test]
+async fn agent_run_progress_is_ordered_resumable_and_bound_to_its_chat() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let other_chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "research").await;
+
+    let read = |after: Option<i64>| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        let chat_id = chat.id;
+        let run_id = run.id;
+        async move {
+            let query = after.map_or_else(String::new, |after| format!("?after_sequence={after}"));
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/chats/{chat_id}/agent-runs/{run_id}/progress{query}"
+                        ))
+                        .header(header::AUTHORIZATION, &bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body::<serde_json::Value>(response).await
+        }
+    };
+
+    // A run that has published nothing reads as an empty page whose cursor is
+    // the one the caller asked for, so a poller does not skip ahead.
+    let empty = read(None).await;
+    assert_eq!(empty["entries"], serde_json::json!([]));
+    assert_eq!(empty["next_sequence"], serde_json::json!(0));
+
+    store
+        .append_agent_run_progress(run.id, "call:one", "Reading the filings.")
+        .await
+        .unwrap();
+    store
+        .append_agent_run_progress(run.id, "call:two", "Writing the summary.")
+        .await
+        .unwrap();
+    // The same producer identity republished is the reattach case: one line,
+    // not two.
+    store
+        .append_agent_run_progress(run.id, "call:one", "Reading the filings.")
+        .await
+        .unwrap();
+
+    let page = read(None).await;
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["sequence"], serde_json::json!(1));
+    assert_eq!(
+        entries[0]["text"],
+        serde_json::json!("Reading the filings.")
+    );
+    assert_eq!(entries[1]["sequence"], serde_json::json!(2));
+    assert_eq!(page["next_sequence"], serde_json::json!(2));
+    assert!(entries[0]["at"].is_string());
+
+    // Resuming from the cursor returns only what arrived after it.
+    let resumed = read(Some(1)).await;
+    let resumed_entries = resumed["entries"].as_array().unwrap();
+    assert_eq!(resumed_entries.len(), 1);
+    assert_eq!(
+        resumed_entries[0]["text"],
+        serde_json::json!("Writing the summary.")
+    );
+    assert_eq!(resumed["next_sequence"], serde_json::json!(2));
+    assert_eq!(read(Some(2)).await["entries"], serde_json::json!([]));
+
+    // Binding to the wrong chat must not reveal that the run exists.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/chats/{}/agent-runs/{}/progress",
+                    other_chat.id, run.id
+                ))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_authority() {
     let (router, token, _state, store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");

@@ -72,6 +72,35 @@ export type AgentRunExecutionLocation = "in_process" | "container";
 export type AgentRunId = string;
 
 /**
+ * One line of live progress a background run published, as the renderer sees
+ * it.
+ *
+ * The text is the run's own bounded narration — the same class of prose the
+ * terminal `terminal_text` already carries, published while the run is still
+ * working instead of only at the end. It is not a tool trace: tool arguments,
+ * queries, results, folder and file identities, host paths, provider
+ * identities, executor leases, and raw diagnostics stay server-side, exactly as
+ * they do for the activity projections.
+ */
+export type AgentRunProgressLine = { 
+/**
+ * Monotonic per-run ordering. Pass the page's `next_sequence` back as
+ * `after_sequence` to read only what has arrived since.
+ */
+sequence: number, text: string, at: string, };
+
+/**
+ * One resumable page of a background run's live progress.
+ */
+export type AgentRunProgressPage = { entries: Array<AgentRunProgressLine>, 
+/**
+ * The cursor to resume from: the highest sequence in this page, or the
+ * requested cursor when the page is empty. A reader that polls with this
+ * value never re-reads a line it already has.
+ */
+next_sequence: number, };
+
+/**
  * Renderer-safe state for one agent run.
  *
  * Worker lease tokens, scheduling budgets, and other executor-facing fields

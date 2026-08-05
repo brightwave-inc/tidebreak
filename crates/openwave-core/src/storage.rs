@@ -36,15 +36,15 @@ use crate::id::{
 use crate::image::ImageRef;
 use crate::local_app::{AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision};
 use crate::model::{
-    AgentRun, AgentRunInboxEntry, AgentRunResult, AgentRunTier, AgentRunWaitSetCandidate,
-    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
-    DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, ExecFileRejection, ExecFileRejectionRecord,
-    ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
-    TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnSteer,
+    AgentRun, AgentRunInboxEntry, AgentRunProgressEntry, AgentRunResult, AgentRunTier,
+    AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
+    Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    ExecFileRejection, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message,
+    MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
+    ToolCallResolution, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -2224,6 +2224,42 @@ pub trait Store: Send + Sync {
 
     /// Fetch the immutable terminal receipt for one agent run, if it exists.
     async fn get_agent_run_result(&self, _id: AgentRunId) -> Result<Option<AgentRunResult>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Append one bounded progress line to a background run's ordered stream,
+    /// assigning it the next per-run sequence.
+    ///
+    /// `source_key` is the producer's own identity for the line — a sandbox
+    /// protocol event sequence, or the durable checkpoint a model preamble
+    /// belongs to. Re-appending a key that already exists is a no-op, so a
+    /// reattached container redelivering events and a worker retrying an
+    /// ambiguous commit both leave one line rather than two.
+    ///
+    /// Text longer than [`AgentRunProgressEntry::MAX_TEXT_LEN`] is truncated on
+    /// a character boundary rather than refused; a line is observation, and a
+    /// truncated one still tells the reader more than a dropped one. Retention
+    /// bounds the stream to [`AgentRunProgressEntry::RETAINED_PER_RUN`] lines.
+    async fn append_agent_run_progress(
+        &self,
+        _run_id: AgentRunId,
+        _source_key: &str,
+        _text: &str,
+    ) -> Result<()> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Read one run's progress lines strictly newer than `after_sequence`, in
+    /// ascending order, bounded by `limit`.
+    ///
+    /// A cursor of zero starts at the beginning of whatever retention still
+    /// holds. This is a read model: it takes no lease and never mutates.
+    async fn list_agent_run_progress(
+        &self,
+        _run_id: AgentRunId,
+        _after_sequence: i64,
+        _limit: u64,
+    ) -> Result<Vec<AgentRunProgressEntry>> {
         agent_run_storage_unavailable()
     }
 

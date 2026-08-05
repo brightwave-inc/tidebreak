@@ -30,6 +30,8 @@ pub(in crate::db) use cancellation::{
     unsettled_sandbox_children_for_origin_turn_on,
 };
 
+pub(in crate::db) mod progress;
+
 pub(in crate::db) async fn insert_foreground_agent_run_on<C>(
     conn: &C,
     chat_id: ChatId,
