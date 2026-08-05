@@ -407,6 +407,7 @@ async fn boot_server(
         Some(office_converter),
         Some(host_tool_broker),
         Some(local_voice),
+        Some(Arc::new(host_access::DesktopHostFolders::new(app.clone()))),
     )
     .await
     .map_err(|e| e.to_string())?;
