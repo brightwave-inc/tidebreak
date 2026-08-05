@@ -1,4 +1,10 @@
+import { useEffect, useState } from "react";
 import { FileSearch, ListChecks, MessageCircle, Sparkles } from "lucide-react";
+import type { ApiClient, CodeExecutionConfigInfo } from "./api";
+import {
+  MANAGED_EXECUTION_DISCLOSURE,
+  requiresManagedExecutionDisclosure,
+} from "./CodeExecutionDisclosure";
 import { Logomark } from "./Logomark";
 
 type StarterPrompt = {
@@ -32,9 +38,41 @@ const STARTER_PROMPTS: StarterPrompt[] = [
 
 export function WelcomeState({
   onSelectPrompt,
+  executionConfigClient,
 }: {
   onSelectPrompt?: (prompt: string) => void;
+  executionConfigClient?: Pick<ApiClient, "getCodeExecutionConfig">;
 }) {
+  const [executionProviders, setExecutionProviders] = useState<
+    CodeExecutionConfigInfo["providers"] | null
+  >(null);
+
+  useEffect(() => {
+    if (
+      !executionConfigClient ||
+      typeof executionConfigClient.getCodeExecutionConfig !== "function"
+    ) {
+      return;
+    }
+    let cancelled = false;
+    setExecutionProviders(null);
+    void executionConfigClient
+      .getCodeExecutionConfig()
+      .then((config) => {
+        if (!cancelled) setExecutionProviders(config.providers);
+      })
+      // A missing disclosure is safer than inventing platform facts when the
+      // capability report cannot be read.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [executionConfigClient]);
+
+  const managedExecutionOnly = requiresManagedExecutionDisclosure(
+    executionProviders,
+  );
+
   return (
     <section className="welcome" aria-label="Start a chat">
       <span className="welcome-mark" aria-hidden="true">
@@ -45,6 +83,7 @@ export function WelcomeState({
         <p>
           Ask a question, search attached sources, or start a task.
         </p>
+        {managedExecutionOnly && <p>{MANAGED_EXECUTION_DISCLOSURE}</p>}
       </div>
       {onSelectPrompt && (
         <div className="welcome-prompts">

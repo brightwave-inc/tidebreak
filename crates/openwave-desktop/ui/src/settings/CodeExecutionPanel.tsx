@@ -6,6 +6,10 @@ import type {
   CodeExecutionCredentialReadiness,
   CodeExecutionProviderKind,
 } from "../api";
+import {
+  MANAGED_EXECUTION_DISCLOSURE,
+  requiresManagedExecutionDisclosure,
+} from "../CodeExecutionDisclosure";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -156,6 +160,14 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
             label={state.label}
             description={state.description}
           />
+
+          {requiresManagedExecutionDisclosure(config.providers) && (
+            <SettingsSection title="Where code runs">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {MANAGED_EXECUTION_DISCLOSURE}
+              </p>
+            </SettingsSection>
+          )}
 
           <SettingsSection
             title="Cloud sandbox keys"

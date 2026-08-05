@@ -239,6 +239,7 @@ type MessageListProps = {
   onRetryTurn?: (turn: RetryableTurn) => void;
   hydrated?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
+  executionConfigClient?: Pick<ApiClient, "getCodeExecutionConfig">;
   changeClient?: Pick<
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
@@ -291,6 +292,7 @@ export function MessageList({
   onRetryTurn,
   hydrated = true,
   imageClient,
+  executionConfigClient,
   changeClient,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
@@ -339,7 +341,10 @@ export function MessageList({
   if (isEmpty) {
     return (
       <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
-        <WelcomeState onSelectPrompt={onSelectPrompt} />
+        <WelcomeState
+          onSelectPrompt={onSelectPrompt}
+          executionConfigClient={executionConfigClient}
+        />
       </div>
     );
   }

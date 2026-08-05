@@ -384,6 +384,7 @@ export function ChatView({
           onRetryTurn={onRetryTurn}
           hydrated={hydrated}
           imageClient={client}
+          executionConfigClient={client}
           changeClient={client}
         />
         <button

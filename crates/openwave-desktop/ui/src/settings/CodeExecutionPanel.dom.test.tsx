@@ -159,6 +159,9 @@ describe("CodeExecutionPanel", () => {
     expect(
       putCodeExecutionCredential.mock.invocationCallOrder[0],
     ).toBeLessThan(putCodeExecutionConfig.mock.invocationCallOrder[0]);
+    expect(
+      screen.queryByText(/Files staged for a run leave this machine/i),
+    ).toBeNull();
   });
 
   it("removes one provider's saved key without touching the other", async () => {
@@ -312,6 +315,9 @@ describe("CodeExecutionPanel", () => {
     // The headline states the host has nothing, and each row says what would
     // change it — a missing key must be readable here, not archaeological.
     await screen.findByText(/No execution provider configured/i);
+    expect(
+      screen.getByText(/Files staged for a run leave this machine/i),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(/Not supported on this operating system/i),
     ).toBeInTheDocument();
