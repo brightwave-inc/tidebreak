@@ -942,6 +942,11 @@ describe("actionable tool results", () => {
     expect(screen.getByText("Sentry triage")).toBeInTheDocument();
     expect(screen.getByText("revision 1")).toBeInTheDocument();
 
+    // Expanding the rail must not repeat the app as an inert row — the card
+    // below is the one copy, and it is the one that can act.
+    await user.click(screen.getByRole("button", { name: "Created an app" }));
+    expect(screen.getAllByText("Sentry triage")).toHaveLength(1);
+
     await user.click(
       screen.getByRole("button", { name: "Open app Sentry triage" }),
     );
