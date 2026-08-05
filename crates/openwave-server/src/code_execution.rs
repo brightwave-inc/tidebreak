@@ -3394,7 +3394,8 @@ mod tests {
 
     /// Local exec is confined to the scratch directory but can create entries
     /// in it, including a symlink aimed at the host. Both preparation writes
-    /// run on that directory before the next command, unsandboxed.    #[cfg(unix)]
+    /// run on that directory before the next command, unsandboxed.
+    #[cfg(unix)]
     #[tokio::test]
     async fn preparation_does_not_write_through_a_planted_symlink() {
         let outside = tempfile::tempdir().unwrap();

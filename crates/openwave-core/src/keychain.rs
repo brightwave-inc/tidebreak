@@ -135,4 +135,39 @@ mod tests {
         // Deleting is a no-op when nothing is persisted (mock is per-entry).
         secrets.delete_secret(key).await.unwrap();
     }
+
+    /// Round-trips a secret through the real OS credential store — Credential
+    /// Manager on Windows, Keychain on macOS — via the platform `keyring`
+    /// backend, the boot-critical path every stored API key takes. Ignored by
+    /// default so ordinary test runs never write to a developer's credential
+    /// store; the Windows CI lane runs it explicitly with `-- --ignored`,
+    /// which also keeps the process-global in-memory mock (set by the test
+    /// above) out of this process.
+    #[tokio::test]
+    #[ignore = "writes to the real OS credential store; the Windows CI lane runs it explicitly"]
+    async fn native_credential_store_round_trip() {
+        assert!(
+            !MOCK_INIT.is_completed(),
+            "the in-memory keyring mock is active in this process; \
+             run this test alone (`-- --ignored`) so it reaches the real backend"
+        );
+        let secrets = KeychainSecretProvider::with_service("openwave-ci-probe");
+        let key = format!("credential-round-trip-{}", uuid::Uuid::new_v4());
+
+        assert_eq!(secrets.get_secret(&key).await.unwrap(), None);
+        secrets.set_secret(&key, "first").await.unwrap();
+        assert_eq!(
+            secrets.get_secret(&key).await.unwrap().as_deref(),
+            Some("first")
+        );
+        secrets.set_secret(&key, "second").await.unwrap();
+        assert_eq!(
+            secrets.get_secret(&key).await.unwrap().as_deref(),
+            Some("second")
+        );
+        secrets.delete_secret(&key).await.unwrap();
+        assert_eq!(secrets.get_secret(&key).await.unwrap(), None);
+        // Deleting an absent entry is a no-op, not an error.
+        secrets.delete_secret(&key).await.unwrap();
+    }
 }
