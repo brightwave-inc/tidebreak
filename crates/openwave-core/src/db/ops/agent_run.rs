@@ -2412,6 +2412,17 @@ fn validate_agent_run_result_payload(payload: &AgentRunResultPayload) -> Result<
                     "agent-run submission names an invalid filename".into(),
                 ));
             }
+            // One pill per file: a repeated name would present the same output
+            // twice and say nothing extra.
+            let distinct = outputs
+                .iter()
+                .map(|output| output.filename.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            if distinct.len() != outputs.len() {
+                return Err(AgentError::Store(
+                    "agent-run submission repeats a filename".into(),
+                ));
+            }
             Ok(())
         }
         AgentRunResultPayload::FolderAccessProposal { request } if request.is_well_formed() => {

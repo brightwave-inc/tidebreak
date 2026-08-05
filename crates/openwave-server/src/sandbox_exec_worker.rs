@@ -103,11 +103,20 @@ impl SandboxExecRunner for HostSandboxExec {
         {
             Ok(outputs) => outputs,
             // The command ran; a scan that could not record its files says so
-            // in the receipt rather than losing the command's result.
-            Err(error) => OutputArtifactScan {
-                entries: Vec::new(),
-                notes: vec![format!("outputs unavailable: {error}")],
-            },
+            // in the receipt rather than losing the command's result. The host's
+            // own diagnosis stays here — the model gets the coarse fact, which
+            // is all it can act on.
+            Err(error) => {
+                tracing::warn!(%error, "agent-run output scan failed");
+                OutputArtifactScan {
+                    entries: Vec::new(),
+                    notes: vec![
+                        "outputs could not be recorded for this command; files under output/ \
+                         are not published yet"
+                            .to_owned(),
+                    ],
+                }
+            }
         };
         Ok((response, outputs))
     }
@@ -519,9 +528,21 @@ fn exec_resolution(
     ToolCallResolution::Completed { result }
 }
 
-/// Keep the tail of a captured stream: a failing command's diagnosis is
-/// usually at the end, not the beginning.
+/// Keep the tail of a captured stream — a failing command's diagnosis is
+/// usually at the end, not the beginning — within the receipt's budget, and
+/// strip interior NUL bytes.
+///
+/// A receipt carrying a NUL is refused when it is resolved, which would leave
+/// the call parked and re-executed every lease period rather than failing. A
+/// command that prints one (reading a binary it just wrote, say) is ordinary,
+/// so the byte comes out here.
 fn clamp(stream: &str) -> String {
+    let stream = if stream.contains('\0') {
+        std::borrow::Cow::Owned(stream.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(stream)
+    };
+    let stream = stream.as_ref();
     if stream.len() <= MAX_RECEIPT_STREAM_BYTES {
         return stream.to_owned();
     }
