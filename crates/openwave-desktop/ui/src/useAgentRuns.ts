@@ -2,8 +2,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentActivityHistoryEntry, AgentRun, ApiClient } from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
+import type { ChatMessage } from "./MessageList";
 
 const LIVE_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * The spawn steps in a transcript worth observing, by the key each one is
+ * matched on: the run it resolved to, or — until it has one — the call that
+ * asked for it. A spawn that failed or was cancelled never produced a durable
+ * child, so nothing is waiting on it.
+ */
+export function backgroundAgentSpawnKeys(
+  messages: readonly ChatMessage[],
+): string[] {
+  return messages.flatMap((message) =>
+    message.role === "tool" &&
+    message.name === "spawn_sandbox_agent" &&
+    message.status !== "failed" &&
+    message.status !== "cancelled"
+      ? [message.backgroundAgentRunId ?? message.callId]
+      : [],
+  );
+}
 
 export type AgentRuns = {
   runs: AgentRun[];

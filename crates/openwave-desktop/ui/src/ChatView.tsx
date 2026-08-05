@@ -32,7 +32,10 @@ import { useStreamStalled } from "./useStreamStalled";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
-import { useAgentRuns } from "./useAgentRuns";
+import {
+  backgroundAgentSpawnKeys as spawnKeysOf,
+  useAgentRuns,
+} from "./useAgentRuns";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -118,14 +121,7 @@ export function ChatView({
   const lastSeq = useChatSessionStore((session) => session.lastSeq);
   const streamStalled = useStreamStalled(busy, lastSeq);
   const backgroundAgentSpawnKeys = useMemo(
-    () =>
-      messages.flatMap((message) =>
-        message.role === "tool" && message.name === "spawn_sandbox_agent"
-          && message.status !== "failed"
-          && message.status !== "cancelled"
-          ? [message.backgroundAgentRunId ?? message.callId]
-          : [],
-      ),
+    () => spawnKeysOf(messages),
     [messages],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);

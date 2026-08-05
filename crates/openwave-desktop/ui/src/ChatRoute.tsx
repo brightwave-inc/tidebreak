@@ -12,6 +12,7 @@ import type {
 import { useApp } from "./AppContext";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import { ChatHeaderTitle } from "./ChatHeaderTitle";
+import { ChatStatusChip } from "./ChatStatusChip";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
@@ -684,6 +685,18 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
         <ChatHeaderTitle chat={chat} />
+        <ChatStatusChip
+          client={client}
+          chat={chat}
+          models={models}
+          defaultModelKey={defaultModelKey}
+          folders={folders.items}
+          disabled={deletingChatId !== null}
+          onModelChange={onModelChange}
+          onPermissionModeChange={onPermissionModeChange}
+          onOpenFolders={() => openPanel({ type: "folders" })}
+          onOpenAgent={(runId) => openPanel({ type: "agent", runId })}
+        />
       </header>
       {/* Citations live in the transcript but open into the panel beside it,
           so the way there is provided above both slots. */}
