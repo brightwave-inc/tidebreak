@@ -169,7 +169,7 @@ export function AgentActivityTimeline({
                 <span
                   className={cn(
                     "min-w-0 truncate font-medium text-foreground",
-                    headline === null ? "flex-1" : "shrink-0",
+                    headline === null && "flex-1",
                     tone === "running" && "animate-pulse",
                   )}
                 >
@@ -180,13 +180,14 @@ export function AgentActivityTimeline({
                     className={cn(
                       "min-w-0 flex-1 truncate text-xs text-muted-foreground",
                       headline.monospace && "font-mono",
+                      tone === "running" && "animate-pulse",
                     )}
                   >
                     {headline.text}
                   </span>
                 )}
                 {exitCode !== null && (
-                  <span className="shrink-0 text-xs font-medium text-destructive">
+                  <span className="shrink-0 text-xs font-medium text-critical">
                     Exit {exitCode}
                   </span>
                 )}

@@ -72,13 +72,12 @@ describe("AgentActivityTimeline", () => {
   it("distinguishes a failed command by its own headline and exit status", () => {
     render(<AgentActivityTimeline state={state} active={false} expanded />);
 
-    const commandRow = within(screen.getByRole("list"))
-      .getByText("pip install matplotlib")
-      .closest("li");
-    expect(commandRow).toBeTruthy();
-    expect(
-      commandRow?.querySelector(".font-mono")?.textContent,
-    ).toBe("pip install matplotlib");
-    expect(within(commandRow!).getByText("Exit 1")).toBeTruthy();
+    const commandRow = within(screen.getByRole("list")).getAllByRole(
+      "listitem",
+    )[1]!;
+    expect(commandRow.querySelector(".font-mono")?.textContent).toBe(
+      "pip install matplotlib",
+    );
+    expect(within(commandRow).getByText("Exit 1")).toBeTruthy();
   });
 });

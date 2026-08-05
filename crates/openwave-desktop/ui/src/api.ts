@@ -2307,10 +2307,18 @@ function nonEmptyBounded(value: unknown, maxChars: number): value is string {
 }
 
 /**
- * A string within `maxChars` characters and free of control characters, which
- * would otherwise let a projected field rewrite the line it is rendered on.
- * Unlike {@link nonEmptyBounded} an empty string passes: an empty command
- * argument is a real element of an argument vector.
+ * A string within `maxChars` characters and free of any character that could
+ * break the one line it is rendered on or spoof its visual order: C0/C1
+ * controls, the line and paragraph separators, and the bidirectional
+ * overrides and isolates. This mirrors the projection's own clamp
+ * (`preview_formatting_character` in `openwave-core`), because the renderer
+ * validates what it is about to draw rather than trusting that the sender
+ * already did.
+ *
+ * Unlike {@link nonEmptyBounded} an empty string passes. Nothing on this wire
+ * is expected to be empty — the projection drops a field that clamps away —
+ * so this only avoids rejecting a whole payload over a field whose emptiness
+ * says nothing about its trustworthiness.
  */
 function bounded(value: unknown, maxChars: number): value is string {
   return (
@@ -2318,7 +2326,14 @@ function bounded(value: unknown, maxChars: number): value is string {
     Array.from(value).length <= maxChars &&
     !Array.from(value).some((character) => {
       const code = character.codePointAt(0) ?? 0;
-      return code < 32 || (code >= 127 && code <= 159);
+      return (
+        code < 32 ||
+        (code >= 127 && code <= 159) ||
+        code === 0x2028 ||
+        code === 0x2029 ||
+        (code >= 0x202a && code <= 0x202e) ||
+        (code >= 0x2066 && code <= 0x2069)
+      );
     })
   );
 }
@@ -2349,19 +2364,17 @@ const AGENT_ACTIVITY_OUTCOMES = new Set<AgentActivityOutcome>([
 const ACTIVITY_DETAIL_FIELD_CHARS = 512;
 const ACTIVITY_DETAIL_ARGS = 32;
 
-/** Largest exit status a signed 32-bit exit code can carry. */
-const ACTIVITY_EXIT_CODE_LIMIT = 2 ** 31;
+/** The half-open range of a signed 32-bit exit code, as the wire type spells it. */
+const ACTIVITY_EXIT_CODE_MIN = -(2 ** 31);
+const ACTIVITY_EXIT_CODE_MAX = 2 ** 31;
 
 /**
- * The kinds a `file` headline may accompany: those that name a single file or
- * folder. `list_connected_folders` names nothing in particular, so a file
- * headline arriving on it is a mismatch rather than an extra fact.
+ * The kinds a `file` headline may accompany. The server pairs one only with the
+ * delegated read today, and the cross-check is worth exactly as much as it is
+ * narrow: widen this when a folder tool starts naming a file, not before.
  */
 const ACTIVITY_FILE_DETAIL_KINDS = new Set<AgentActivityKind>([
   "read_delegated_file",
-  "list_folder",
-  "read_connected_file",
-  "import_connected_file",
 ]);
 
 /**
@@ -2369,10 +2382,11 @@ const ACTIVITY_FILE_DETAIL_KINDS = new Set<AgentActivityKind>([
  *
  * The detail is model-authored text on a surface that otherwise renders only a
  * closed vocabulary, so the check is closed on every axis: an unknown tag, an
- * extra key, an unbounded or control-character field, an oversized argument
- * vector, or a tag that does not belong to this activity kind all yield no
- * detail. Failing that way costs the reader a headline; keeping a mismatched
- * one would let a `search` payload describe a command that ran.
+ * extra key, an unbounded field or one carrying formatting characters, an
+ * oversized argument vector, or a tag that does not belong to this activity
+ * kind all yield no detail. Failing that way costs the reader a headline;
+ * keeping a mismatched one would let a `search` payload describe a command
+ * that ran.
  */
 function parseAgentActivityDetail(
   kind: AgentActivityKind,
@@ -2390,13 +2404,7 @@ function parseAgentActivityDetail(
       ]) ||
       !nonEmptyBounded(value.command, ACTIVITY_DETAIL_FIELD_CHARS) ||
       !Array.isArray(value.args) ||
-      value.args.length > ACTIVITY_DETAIL_ARGS ||
-      !(
-        value.exit_code === undefined ||
-        (typeof value.exit_code === "number" &&
-          Number.isInteger(value.exit_code) &&
-          Math.abs(value.exit_code) < ACTIVITY_EXIT_CODE_LIMIT)
-      )
+      value.args.length > ACTIVITY_DETAIL_ARGS
     ) {
       return undefined;
     }
@@ -2405,13 +2413,16 @@ function parseAgentActivityDetail(
       if (!bounded(arg, ACTIVITY_DETAIL_FIELD_CHARS)) return undefined;
       args.push(arg);
     }
-    return value.exit_code === undefined
+    // The exit status is decoration next to the command itself, so an
+    // unusable one costs only itself: the reader still sees what ran.
+    const exitCode = activityExitCode(value.exit_code);
+    return exitCode === undefined
       ? { kind: "exec", command: value.command, args }
       : {
           kind: "exec",
           command: value.command,
           args,
-          exit_code: value.exit_code,
+          exit_code: exitCode,
         };
   }
   if (value.kind === "search") {
@@ -2441,6 +2452,23 @@ function parseAgentActivityDetail(
     return { kind: "file", name: value.name };
   }
   return undefined;
+}
+
+/**
+ * The recorded exit status, when it is one a process could actually have
+ * produced: the server parses it as an `i32`, so anything fractional or outside
+ * that range did not come from a receipt.
+ */
+function activityExitCode(value: unknown): number | undefined {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < ACTIVITY_EXIT_CODE_MIN ||
+    value >= ACTIVITY_EXIT_CODE_MAX
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 /**

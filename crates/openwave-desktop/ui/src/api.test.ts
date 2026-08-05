@@ -853,6 +853,31 @@ describe("parseAgentActivityHistory", () => {
           at: "2026-08-05T18:41:00Z",
           detail: { kind: "file", name: "brief.md", root_id: "private" },
         },
+        // An argument vector the projection could not have produced: one
+        // element is not a string, so the whole headline would misdescribe
+        // what ran.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:42:00Z",
+          detail: { kind: "exec", command: "python3", args: ["run.py", 7] },
+        },
+        // A bidirectional override would let the headline read in an order
+        // other than the one that ran.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:43:00Z",
+          detail: { kind: "exec", command: "rm", args: ["\u202egnp.txt"] },
+        },
+        // An exit status no process produced costs only itself: the command
+        // is still the useful part of the row.
+        {
+          kind: "exec",
+          outcome: "failed",
+          at: "2026-08-05T18:44:00Z",
+          detail: { kind: "exec", command: "make", args: [], exit_code: 1.5 },
+        },
       ]),
     ).toEqual([
       {
@@ -873,6 +898,14 @@ describe("parseAgentActivityHistory", () => {
         kind: "read_delegated_file",
         outcome: "completed",
         at: "2026-08-05T18:41:00Z",
+      },
+      { kind: "exec", outcome: "completed", at: "2026-08-05T18:42:00Z" },
+      { kind: "exec", outcome: "completed", at: "2026-08-05T18:43:00Z" },
+      {
+        kind: "exec",
+        outcome: "failed",
+        at: "2026-08-05T18:44:00Z",
+        detail: { kind: "exec", command: "make", args: [] },
       },
     ]);
   });
