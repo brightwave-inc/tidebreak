@@ -46,22 +46,19 @@ use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
 use crate::provider::{StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 use crate::storage::{
-    AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
-    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
-    AppendClaimedMessageOutcome, BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome,
-    ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome,
-    ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
-    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, FailAgentRunOutcome,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AcceptTurnOutcome,
+    AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome, AppendClaimedMessageOutcome,
+    BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome, ClaimClientToolCallOutcome,
+    ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome,
+    CompleteTurnRunOutcome, DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome,
+    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
     OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
-    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
-    Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
+    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
+    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
+    RetrySandboxToolCallOutcome, Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
 
 mod ops;
@@ -1064,32 +1061,6 @@ impl Store for DbStore {
         ops::agent_run::get_sandbox_agent_admission(self, child_run_id).await
     }
 
-    #[allow(clippy::too_many_arguments)] // Mirrors the Store checkpoint contract.
-    async fn accept_sandbox_agent_run_and_park_turn(
-        &self,
-        child_run_id: AgentRunId,
-        turn_id: TurnId,
-        spawn_call_id: CallId,
-        input: &str,
-        lease_token: uuid::Uuid,
-        expected_steer_revision: i64,
-        progress: TurnCheckpointProgress,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<Option<AcceptSandboxAgentRunAndParkTurnOutcome>> {
-        ops::agent_run::accept_sandbox_agent_run_and_park_turn(
-            self,
-            child_run_id,
-            turn_id,
-            spawn_call_id,
-            input,
-            lease_token,
-            expected_steer_revision,
-            progress,
-            now,
-        )
-        .await
-    }
-
     async fn get_agent_run(&self, id: AgentRunId) -> Result<Option<AgentRun>> {
         ops::agent_run::get_agent_run(self, id).await
     }
@@ -1314,62 +1285,11 @@ impl Store for DbStore {
         ops::agent_run::list_agent_run_inbox(self, parent_run_id).await
     }
 
-    async fn list_agent_run_inbox_candidates(&self, limit: u64) -> Result<Vec<AgentRunInboxEntry>> {
-        ops::agent_run::list_agent_run_inbox_candidates(self, limit).await
-    }
-
     async fn list_ready_agent_run_wait_set_candidates(
         &self,
         limit: u64,
     ) -> Result<Vec<AgentRunWaitSetCandidate>> {
         ops::turn::list_ready_agent_run_wait_set_candidates(self, limit).await
-    }
-
-    async fn claim_agent_run_inbox_entry(
-        &self,
-        parent_run_id: AgentRunId,
-        child_run_id: AgentRunId,
-        lease_token: uuid::Uuid,
-        lease_duration: chrono::Duration,
-    ) -> Result<Option<ClaimAgentRunInboxOutcome>> {
-        ops::agent_run::claim_agent_run_inbox_entry(
-            self,
-            parent_run_id,
-            child_run_id,
-            lease_token,
-            lease_duration,
-        )
-        .await
-    }
-
-    async fn consume_agent_run_inbox_entry(
-        &self,
-        parent_run_id: AgentRunId,
-        child_run_id: AgentRunId,
-        lease_token: uuid::Uuid,
-    ) -> Result<Option<ConsumeAgentRunInboxOutcome>> {
-        ops::agent_run::consume_agent_run_inbox_entry(
-            self,
-            parent_run_id,
-            child_run_id,
-            lease_token,
-        )
-        .await
-    }
-
-    async fn consume_agent_run_inbox_entry_and_resume_turn(
-        &self,
-        parent_run_id: AgentRunId,
-        child_run_id: AgentRunId,
-        lease_token: uuid::Uuid,
-    ) -> Result<Option<ConsumeAgentRunInboxAndResumeTurnOutcome>> {
-        ops::agent_run::consume_agent_run_inbox_entry_and_resume_turn(
-            self,
-            parent_run_id,
-            child_run_id,
-            lease_token,
-        )
-        .await
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
@@ -1675,27 +1595,6 @@ impl Store for DbStore {
             progress,
             now,
             call,
-        )
-        .await
-    }
-
-    async fn park_turn_for_agent_run_inbox(
-        &self,
-        turn_id: TurnId,
-        child_run_id: AgentRunId,
-        lease_token: uuid::Uuid,
-        expected_steer_revision: i64,
-        progress: TurnCheckpointProgress,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<Option<ParkTurnForAgentRunInboxOutcome>> {
-        ops::turn::park_turn_for_agent_run_inbox(
-            self,
-            turn_id,
-            child_run_id,
-            lease_token,
-            expected_steer_revision,
-            progress,
-            now,
         )
         .await
     }

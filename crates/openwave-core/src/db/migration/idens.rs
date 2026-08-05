@@ -305,27 +305,6 @@ pub(crate) enum AgentRunInbox {
 }
 
 #[derive(DeriveIden)]
-pub(crate) enum TurnAgentRunWait {
-    Table,
-    ChildRunId,
-    ParentRunId,
-    TurnId,
-    ChatId,
-    ParkLeaseToken,
-    AtomicAdmission,
-    AttemptCount,
-    ClaimCount,
-    ModelSteps,
-    InputTokens,
-    OutputTokens,
-    CacheReadInputTokens,
-    CacheCreationInputTokens,
-    Status,
-    ParkedAt,
-    ClosedAt,
-}
-
-#[derive(DeriveIden)]
 pub(crate) enum TurnAgentRunWaitSet {
     Table,
     Id,

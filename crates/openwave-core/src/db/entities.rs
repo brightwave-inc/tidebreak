@@ -806,37 +806,6 @@ pub mod sandbox_tool_call_receipt {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod turn_agent_run_wait {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_agent_run_wait")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub child_run_id: Uuid,
-        pub parent_run_id: Uuid,
-        pub turn_id: Uuid,
-        pub chat_id: Uuid,
-        pub park_lease_token: Uuid,
-        pub atomic_admission: bool,
-        pub attempt_count: i32,
-        pub claim_count: i32,
-        pub model_steps: i32,
-        pub input_tokens: i64,
-        pub output_tokens: i64,
-        pub cache_read_input_tokens: i64,
-        pub cache_creation_input_tokens: i64,
-        pub status: String,
-        pub parked_at: DateTimeUtc,
-        pub closed_at: Option<DateTimeUtc>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod turn_agent_run_wait_set {
     use sea_orm::entity::prelude::*;
 
