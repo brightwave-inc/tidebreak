@@ -138,38 +138,42 @@ automatic.
    prereleases, drafts, or commits outside `main`, and pins all later jobs to
    the resolved commit SHA.
 5. The dispatched workflow first checks whether that exact tag, commit, and
-   publication date already have a complete immutable release on S3. A
-   credential-free prerequisite otherwise compiles the tag with its product
-   version and saves unsigned Cargo outputs before any signing or notarization
-   can fail.
-6. The production job reuses those prepared compiler outputs — every cache key
-   it can restore names the release commit or, at minimum, the `Cargo.lock` and
-   toolchain hashes, and it deletes the linked binaries the archive carries so
-   the products it signs are always linked from the tag's own sources. It then
-   signs the app with the Developer ID identity, notarizes and staples the app
-   and DMG, verifies them with Apple tooling, and creates a signed Tauri updater
-   archive.
+   publication date already have a complete immutable release on S3.
+   Credential-free prerequisites — one per platform — otherwise compile the tag
+   with its product version and save unsigned Cargo outputs before any signing
+   or notarization can fail.
+6. The production jobs reuse those prepared compiler outputs — every cache key
+   they can restore names the release commit or, at minimum, the `Cargo.lock`
+   and toolchain hashes, and they delete the linked binaries the archive
+   carries so the products they package are always linked from the tag's own
+   sources. The macOS job then signs the app with the Developer ID identity,
+   notarizes and staples the app and DMG, verifies them with Apple tooling, and
+   creates a signed Tauri updater archive. The parallel Windows job packages
+   one unsigned NSIS installer — Authenticode signing is deliberately not
+   performed yet — and signs the installer bytes with the same Tauri updater
+   key, which is artifact authenticity rather than Windows code signing.
 7. Only after the build passes does the publisher upload immutable versioned
    files, advance the public manifests, invalidate their CDN paths, and
    smoke-test the hosted release. If a prior attempt already uploaded the
    complete immutable prefix, a new dispatch validates and reuses those bytes,
    skips the desktop build, and resumes only mutable metadata publication,
    CDN invalidation, and smoke testing.
-8. A final job downloads the notarized disk image back from the CDN, checks it
-   against the immutable manifest digests, and attaches it to the GitHub
-   Release as `OpenWave-macos-apple-silicon.dmg` with a `.sha256` sidecar. It
-   holds no signing or AWS credentials. The name omits the version so that
+8. A final job downloads the notarized disk image and the Windows installer
+   back from the CDN, checks them against the immutable manifest digests, and
+   attaches them to the GitHub Release as `OpenWave-macos-apple-silicon.dmg`
+   and `OpenWave-windows-x86_64-setup.exe` with `.sha256` sidecars. It holds no
+   signing or AWS credentials. The names omit the version so that
    `https://github.com/brightwave-inc/openwave/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
    app's own version string identify which build it is.
 
 Publishing the native draft is the only release boundary. Merging ordinary PRs
 updates the draft but never builds or ships a desktop version. A published
-GitHub Release is considered shipped only when its dispatched **Publish macOS
-release** build completes successfully; the initial dispatch run is not the
-shipping signal.
+GitHub Release is considered shipped only when its dispatched **Publish
+desktop release** build completes successfully; the initial dispatch run is
+not the shipping signal.
 
-## Public macOS delivery
+## Public desktop delivery
 
 ### Apple Silicon only, for now
 
@@ -180,18 +184,38 @@ identical crate set — about 18 minutes against 7 on a recent release — so th
 Intel job, not the one anybody installs, set the length of every release and
 cache-warm run. No one on the team or in early testing uses an Intel Mac.
 
-`MACOS_ARCHITECTURES` in `scripts/create-release-manifests.mjs` is the single
+`RELEASE_PLATFORMS` in `scripts/create-release-manifests.mjs` is the single
 source of truth for what a release contains: it drives the manifest, the
 `latest.json` platform keys, and the immutable prefix below. Restoring Intel
-means adding `x86_64` there and adding its row back to the two `release.yml`
-build matrices and the `cache-macos.yml` warm matrix.
+means adding `x86_64` to the macOS entry there and adding its row back to the
+two macOS `release.yml` build matrices and the `cache-macos.yml` warm matrix.
 
-Two consequences worth knowing. `latest.json` advertises only
-`darwin-aarch64`, so an Intel install finds no update rather than a broken one.
-And the preflight that resumes an already-hosted release validates it against
-the current architecture set, so a release published before this change cannot
-be re-dispatched; it fails on the artifact count instead of silently
-republishing.
+Two consequences worth knowing. `latest.json` advertises only the platforms in
+that table, so an unsupported install finds no update rather than a broken
+one. And the preflight that resumes an already-hosted release validates it
+against the current platform set, so a release published before a platform
+change cannot be re-dispatched; it fails on the artifact count instead of
+silently republishing.
+
+### Windows: unsigned x86_64, for now
+
+A release ships one `x86_64` Windows build as a single NSIS `-setup.exe`
+installer. NSIS is the one installer format for v1 because Tauri bundles it
+with no additional configuration and it installs per-user without elevation.
+The installer is deliberately **not** Authenticode-signed yet, so Windows
+SmartScreen will warn on first run; code signing is tracked separately and
+must not be confused with the Tauri updater signature the release does carry.
+That updater signature covers the exact installer bytes and feeds
+`latest.json`'s `windows-x86_64` entry — Tauri v2 installs updates from the
+installer itself, so no separate updater archive exists on Windows. Packaged
+apps currently run the update loop only on macOS; the Windows metadata is
+published so updater-enabled Windows builds can adopt it without a manifest
+change.
+
+Unlike macOS, no cache-warming workflow exists for Windows: the credential-free
+`prepare_windows` job compiles the tag from scratch (or from an earlier
+release's prepared cache) and is the single writer of the Windows Cargo
+registry and prepared-build caches.
 
 The public download contract is rooted at:
 
@@ -204,13 +228,17 @@ Each release has an immutable prefix:
 ```text
 openwave/releases/vMAJOR.MINOR.PATCH/
 ├── manifest.json
-└── macos/
-    └── aarch64/
+├── macos/
+│   └── aarch64/
+└── windows/
+    └── x86_64/
 ```
 
-Each architecture directory contains a notarized DMG, a zip of the notarized
-app, a signed `.app.tar.gz` updater archive, its signature, and SHA-256 files.
-The root `manifest.json` and Tauri-compatible `latest.json` are the only mutable
+Each macOS architecture directory contains a notarized DMG, a zip of the
+notarized app, a signed `.app.tar.gz` updater archive, its signature, and
+SHA-256 files. Each Windows architecture directory contains an unsigned NSIS
+installer, its Tauri updater signature, and SHA-256 files. The root
+`manifest.json` and Tauri-compatible `latest.json` are the only mutable
 objects. The workflow refuses to overwrite a versioned object with different
 bytes or move `latest.json` to an older version.
 
@@ -283,8 +311,9 @@ the configured distribution. No long-lived AWS access key belongs in GitHub.
 
 Before the first public release, protect the environment as appropriate, verify
 all configuration values, and exercise the workflow with the intended first
-tag. The workflow references Apple signing secrets only in the macOS jobs;
-publishing uses short-lived AWS credentials obtained through OIDC.
+tag. The workflow references Apple signing secrets only in the macOS jobs; the
+Windows jobs receive only the Tauri updater key, and publishing uses
+short-lived AWS credentials obtained through OIDC.
 
 ### Release CI and cache security
 

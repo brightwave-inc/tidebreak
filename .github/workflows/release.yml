@@ -1,9 +1,9 @@
-name: Publish macOS release
+name: Publish desktop release
 
 run-name: >-
   ${{ github.event_name == 'release'
-    && format('Dispatch macOS {0}', github.event.release.tag_name)
-    || format('Publish macOS {0}', inputs.release_tag) }}
+    && format('Dispatch desktop {0}', github.event.release.tag_name)
+    || format('Publish desktop {0}', inputs.release_tag) }}
 
 on:
   release:
@@ -24,8 +24,8 @@ concurrency:
   # Serialize production builds so two tags cannot race mutable latest.json.
   group: >-
     ${{ github.event_name == 'release'
-      && format('openwave-macos-release-dispatch-{0}', github.run_id)
-      || 'openwave-macos-production-release' }}
+      && format('openwave-desktop-release-dispatch-{0}', github.run_id)
+      || 'openwave-desktop-production-release' }}
   cancel-in-progress: false
 
 jobs:
@@ -711,9 +711,344 @@ jobs:
           [[ -z "${APPLE_CERTIFICATE_PATH:-}" ]] \
             || rm -f "$APPLE_CERTIFICATE_PATH"
 
+  prepare_windows:
+    name: prepare unsigned Windows · ${{ matrix.arch }}
+    needs: [validate, inspect_hosted]
+    if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 only for the first unsigned Windows releases; see
+        # docs/releases.md.
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Restore unsigned Rust build cache
+        id: rust-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/openwave-desktop.exe
+            target/${{ matrix.target }}/release/openwave-host-broker.exe
+            target/${{ matrix.target }}/release/openwave_desktop_lib.*
+            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}.exe
+          key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          restore-keys: |
+            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          # No cache-warming workflow exists for Windows, so this
+          # credential-free prerequisite is the registry cache's single writer.
+          save-if: true
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile without production credentials or bundles
+        id: compile
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/openwave-desktop
+          args: --target ${{ matrix.target }} --no-bundle --ci
+
+      - name: Save release-specific unsigned Rust build cache
+        if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/openwave-desktop.exe
+            target/${{ matrix.target }}/release/openwave-host-broker.exe
+            target/${{ matrix.target }}/release/openwave_desktop_lib.*
+            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}.exe
+          key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
+
+      - name: Require a successful unsigned compilation
+        if: ${{ steps.compile.outcome != 'success' }}
+        run: exit 1
+
+  build_windows:
+    name: Windows · ${{ matrix.arch }}
+    needs: [validate, inspect_hosted, prepare_windows]
+    if: >-
+      ${{
+        always()
+        && needs.validate.result == 'success'
+        && needs.inspect_hosted.result == 'success'
+        && needs.inspect_hosted.outputs.exists != 'true'
+        && needs.prepare_windows.result == 'success'
+      }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    environment:
+      name: desktop-production
+      url: https://downloads.brightwave.io/openwave/manifest.json
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 only for the first unsigned Windows releases; see
+        # docs/releases.md.
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+    env:
+      # Reuse compiler outputs across trusted release runs without caching the
+      # bundled installers or the updater signing material.
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      # Rust code that reports or gates on the product version reads this value.
+      # Cargo package versions remain development metadata and are not released.
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Build the immutable commit resolved from the validated release tag.
+          ref: ${{ needs.validate.outputs.sha }}
+
+      # This restore-only step runs before the updater-signing secret is
+      # loaded. The matching cache is written by a credential-free prerequisite
+      # job, and every restorable key pins at minimum the Cargo.lock and
+      # toolchain hashes. The path list must stay byte-identical to the writing
+      # job's — `actions/cache` folds it into the cache version. The next step
+      # deletes the linked products the archive carries, so only compiler
+      # intermediates survive into the packaged build.
+      - name: Restore unsigned Rust build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/openwave-desktop.exe
+            target/${{ matrix.target }}/release/openwave-host-broker.exe
+            target/${{ matrix.target }}/release/openwave_desktop_lib.*
+            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}.exe
+          key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          restore-keys: |
+            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      # A restore extracts the whole archive, including the linked products a
+      # prerequisite run left in it. Delete them and let this build relink them
+      # from the tag's own sources; the compiler intermediates that make the
+      # reuse worthwhile stay. The sidecar matters most: Tauri copies it into
+      # the installer verbatim, with no Cargo fingerprint governing it.
+      - name: Discard restored product binaries
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          rm -rf \
+            "target/$RELEASE_TARGET/release/openwave-desktop.exe" \
+            "target/$RELEASE_TARGET/release/openwave-host-broker.exe" \
+            "target/$RELEASE_TARGET/release/"openwave_desktop_lib.* \
+            "crates/openwave-desktop/binaries/openwave-host-broker-$RELEASE_TARGET.exe"
+
+      # Authenticode code signing is deliberately absent: v1 Windows releases
+      # ship unsigned installers. The Tauri updater key still signs the
+      # artifact bytes for latest.json — that is artifact authenticity, not
+      # Windows code signing.
+      - name: Validate updater signing configuration
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in \
+            TAURI_SIGNING_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop-production updater-signing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          # Installers, updater signatures, and signing material remain outside
+          # both the Cargo download cache and the restore-only build cache. The
+          # credential-free prerequisite is the single registry-cache writer.
+          cache-targets: false
+          save-if: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/openwave-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.OPENWAVE_VERSION,
+              // One installer format for v1: NSIS supports per-user installs
+              // without elevation and needs no WiX configuration.
+              bundle: { targets: ["nsis"] },
+              // Release bundles register only the real scheme, mirroring the
+              // macOS release configuration: a release binary refuses
+              // openwave-dev:// links by design, so registering the dev scheme
+              // would shadow whatever debug build should answer it.
+              plugins: { "deep-link": { desktop: { schemes: ["openwave"] } } }
+            }));
+          '
+
+      - name: Build the Tauri app without Windows code signing
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/openwave-desktop
+          args: >-
+            --target ${{ matrix.target }}
+            --config ${{ runner.temp }}/openwave-release.json
+            --bundles nsis
+
+      - name: Verify and collect unsigned artifacts
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          target_dir="$(cygpath -u "$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)")"
+          bundle_dir="$target_dir/$RELEASE_TARGET/release/bundle"
+          setup_paths=("$bundle_dir"/nsis/*-setup.exe)
+          (( ${#setup_paths[@]} == 1 )) && [[ -f "${setup_paths[0]}" ]] || {
+            echo "Expected exactly one NSIS installer in $bundle_dir/nsis" >&2
+            exit 1
+          }
+          setup_path="${setup_paths[0]}"
+
+          # Tauri copies the target-named sidecar into the installer verbatim;
+          # require the executable the bundling step consumed.
+          sidecar="crates/openwave-desktop/binaries/openwave-host-broker-$RELEASE_TARGET.exe"
+          [[ -s "$sidecar" ]] || {
+            echo "Missing target-named host broker sidecar: $sidecar" >&2
+            exit 1
+          }
+
+          # Windows updates install from the NSIS installer itself, so the
+          # updater signature for latest.json covers those exact bytes.
+          updater_path="$setup_path"
+          signature_path="${updater_path}.sig"
+          rm -f "$signature_path"
+          tauri signer sign "$updater_path"
+          [[ -s "$signature_path" ]] || {
+            echo "Tauri updater signature is empty: $signature_path" >&2
+            exit 1
+          }
+
+          output_dir="dist/windows/$RELEASE_ARCH"
+          base_name="OpenWave_${OPENWAVE_VERSION}_${RELEASE_ARCH}"
+          mkdir -p "$output_dir"
+          cp "$setup_path" "$output_dir/${base_name}-setup.exe"
+          cp "$signature_path" "$output_dir/${base_name}-setup.exe.sig"
+          find "$output_dir" -type f -print
+
+      - name: Upload verified Windows artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: openwave-windows-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
+          path: dist/windows/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: publish downloads.brightwave.io
-    needs: [validate, inspect_hosted, build_macos]
+    needs: [validate, inspect_hosted, build_macos, build_windows]
     if: >-
       ${{
         always()
@@ -721,7 +1056,10 @@ jobs:
         && needs.inspect_hosted.result == 'success'
         && (
           needs.inspect_hosted.outputs.exists == 'true'
-          || needs.build_macos.result == 'success'
+          || (
+            needs.build_macos.result == 'success'
+            && needs.build_windows.result == 'success'
+          )
         )
       }}
     runs-on: ubuntu-latest
@@ -775,6 +1113,13 @@ jobs:
         with:
           name: openwave-macos-aarch64-${{ needs.validate.outputs.version }}
           path: dist/macos/aarch64
+
+      - name: Download Windows artifacts
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: openwave-windows-x86_64-${{ needs.validate.outputs.version }}
+          path: dist/windows/x86_64
 
       - name: Create release manifests and checksums
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
@@ -832,6 +1177,7 @@ jobs:
             case "$1" in
               *.json) echo application/json ;;
               *.dmg) echo application/x-apple-diskimage ;;
+              *.exe) echo application/vnd.microsoft.portable-executable ;;
               *.zip) echo application/zip ;;
               *.tar.gz) echo application/gzip ;;
               *.sig|*.sha256) echo text/plain ;;
@@ -928,7 +1274,7 @@ jobs:
       # The hosted release is the only source of artifact bytes. Re-downloading
       # it here keeps the GitHub assets a verified copy of what the CDN serves,
       # and works the same whether this run built the release or resumed one.
-      - name: Download the published disk images
+      - name: Download the published installers
         run: |
           mkdir -p downloads
           manifest="$RUNNER_TEMP/manifest.json"
@@ -936,10 +1282,11 @@ jobs:
             "$RELEASE_BASE_URL/releases/v$OPENWAVE_VERSION/manifest.json" \
             --output "$manifest"
 
-          while IFS=$'\t' read -r arch url digest; do
-            case "$arch" in
-              aarch64) name="OpenWave-macos-apple-silicon.dmg" ;;
-              *) echo "Unsupported release architecture: $arch" >&2; exit 1 ;;
+          while IFS=$'\t' read -r platform arch url digest; do
+            case "$platform/$arch" in
+              macos/aarch64) name="OpenWave-macos-apple-silicon.dmg" ;;
+              windows/x86_64) name="OpenWave-windows-x86_64-setup.exe" ;;
+              *) echo "Unsupported release platform: $platform/$arch" >&2; exit 1 ;;
             esac
             curl --fail --silent --show-error --location "$url" \
               --output "downloads/$name"
@@ -947,19 +1294,21 @@ jobs:
             (cd downloads && sha256sum --check --strict "$name.sha256")
           done < <(jq -r \
             '.artifacts[]
-             | select(.platform == "macos" and .format == "dmg")
-             | [.arch, .url, .sha256] | @tsv' \
+             | select((.platform == "macos" and .format == "dmg")
+                 or (.platform == "windows" and .format == "nsis"))
+             | [.platform, .arch, .url, .sha256] | @tsv' \
             "$manifest")
 
           dmg_count="$(find downloads -name '*.dmg' -type f | wc -l)"
-          (( dmg_count == 1 )) || {
-            echo "Expected one macOS disk image, found $dmg_count." >&2
+          exe_count="$(find downloads -name '*.exe' -type f | wc -l)"
+          (( dmg_count == 1 && exe_count == 1 )) || {
+            echo "Expected one macOS disk image and one Windows installer, found $dmg_count and $exe_count." >&2
             exit 1
           }
 
       # Version-free asset names give the README permanent one-click download
       # links through GitHub's /releases/latest/download/ redirect.
-      - name: Attach the disk images to the GitHub Release
+      - name: Attach the installers to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
