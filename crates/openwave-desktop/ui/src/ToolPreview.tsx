@@ -71,9 +71,7 @@ export function toolPreviewPresentation(
     ].join("\n");
     return { headline, detail };
   }
-  const headline = [preview.command, ...preview.args]
-    .map(quoteArgument)
-    .join(" ");
+  const headline = execCommandHeadline(preview.command, preview.args);
   // Everything below the command is a fact *about* it, so it reads as a
   // comment rather than as something a shell would run. There is no shell here
   // at all — this is an argument vector.
@@ -92,6 +90,20 @@ export function toolPreviewPresentation(
     .filter((line): line is string => typeof line === "string")
     .join("\n");
   return { headline, detail };
+}
+
+/**
+ * The one-line form of a command and its argument vector.
+ *
+ * Shared so a command reads identically wherever it is shown: the foreground
+ * approval and result cards, and the background run's activity timeline, which
+ * has only this headline and no card to open.
+ */
+export function execCommandHeadline(
+  command: string,
+  args: readonly string[],
+): string {
+  return [command, ...args].map(quoteArgument).join(" ");
 }
 
 /**
