@@ -25,10 +25,11 @@ pub const VERSION: &str = match option_env!("OPENWAVE_VERSION") {
 
 /// Upper bound on the filename lookup when matching files to existing
 /// outputs. Far above the catalog's own display cap. Shared between the
-/// output scan and the agent's filename resolution for output write-backs so
-/// both match the same window; it lives here, ungated, because the agent
-/// compiles without the `tools` feature the scan is behind.
-pub(crate) const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
+/// output scan, the agent's filename resolution for output write-backs, and a
+/// background run's submission so all three match the same window; it lives
+/// here, ungated, because the agent compiles without the `tools` feature the
+/// scan is behind.
+pub const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
 
 pub mod agent;
 pub mod agent_tools;
@@ -77,16 +78,20 @@ pub use agent::{
     SandboxAgentSpawnRequest, ToolRegistry, UtilityModel,
 };
 pub use agent_tools::{
-    sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
-    spawn_sandbox_agent_tool_spec, validate_sandbox_read_delegated_file_arguments,
+    sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_read_delegated_file_tool_spec,
+    sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec, validate_sandbox_done_arguments,
+    validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments,
     validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
     wait_for_agents_tool_spec, web_extract_tool_spec, web_search_tool_spec,
-    SandboxAgentFileResource, SpawnSandboxAgentArgs, SpawnSandboxAgentResult, WaitForAgentResult,
-    WaitForAgentsArgs, WaitForAgentsResult, WebExtractArgs, WebSearchArgs,
-    DEFAULT_WEB_SEARCH_RESULTS, MAX_SANDBOX_AGENT_TASK_CHARS, MAX_WAIT_FOR_AGENTS_CHILDREN,
-    MAX_WEB_EXTRACT_URL_BYTES, MAX_WEB_SEARCH_DOMAINS, MAX_WEB_SEARCH_QUERY_CHARS,
-    MAX_WEB_SEARCH_RESULTS, SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_WEB_SEARCH_TOOL,
-    SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL, WEB_EXTRACT_TOOL, WEB_SEARCH_TOOL,
+    SandboxAgentFileResource, SandboxDoneArgs, SandboxExecArgs, SpawnSandboxAgentArgs,
+    SpawnSandboxAgentResult, WaitForAgentResult, WaitForAgentsArgs, WaitForAgentsResult,
+    WebExtractArgs, WebSearchArgs, DEFAULT_WEB_SEARCH_RESULTS, MAX_SANDBOX_AGENT_TASK_CHARS,
+    MAX_SANDBOX_DONE_OUTPUTS, MAX_SANDBOX_DONE_SUMMARY_CHARS, MAX_SANDBOX_EXEC_ARGUMENTS,
+    MAX_SANDBOX_EXEC_COMMAND_BYTES, MAX_SANDBOX_EXEC_CWD_BYTES, MAX_SANDBOX_TOOL_CALLS,
+    MAX_WAIT_FOR_AGENTS_CHILDREN, MAX_WEB_EXTRACT_URL_BYTES, MAX_WEB_SEARCH_DOMAINS,
+    MAX_WEB_SEARCH_QUERY_CHARS, MAX_WEB_SEARCH_RESULTS, SANDBOX_DONE_TOOL, SANDBOX_EXEC_TOOL,
+    SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL,
+    WAIT_FOR_AGENTS_TOOL, WEB_EXTRACT_TOOL, WEB_SEARCH_TOOL,
 };
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
@@ -131,8 +136,7 @@ pub use deliverable::{
 };
 #[cfg(feature = "tools")]
 pub use deliverable_acceptance::{
-    accept_workspace_artifact, merge_agent_run_result, restore_output_to_revision,
-    AgentResultOutputMerge, WorkspaceArtifactProposal,
+    accept_workspace_artifact, restore_output_to_revision, WorkspaceArtifactProposal,
 };
 pub use error::{AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, Result};
 pub use event::{AgentEvent, SequencedEvent};
@@ -149,23 +153,24 @@ pub use keychain::KeychainSecretProvider;
 pub use model::{
     exec_attachment_file_name, AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal,
     AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
-    AgentRunResultPayload, AgentRunStatus, AgentRunTier, AgentRunWaitCondition,
-    AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest, BeginRootAttachmentChange,
-    BlobRetirement, BlobRetirementStatus, Chat, ChatRootAttachment, ClientToolCallRequest,
-    DelegatedFileReadClaim, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileRejection,
-    ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord,
-    ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId,
-    PermissionMode, Project, ReasoningEffort, Role, RootAttachmentChange,
-    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
-    RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
-    SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
-    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, SourceReadiness,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWaitSet,
-    TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus,
-    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
-    EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES,
-    MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+    AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
+    AgentRunWaitCondition, AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest,
+    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ChatRootAttachment,
+    ClientToolCallRequest, DelegatedFileReadClaim, DocumentListCursor, DocumentRecord,
+    DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    ExecFileChange, ExecFileRejection, ExecFileRejectionReason, ExecFileRejectionRecord,
+    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, Message, MessageAttachment,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
+    Role, RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    RootAttachmentSubjectKind, SandboxAgentAdmission, SandboxSpawnCheckpoint,
+    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SandboxToolCallStatus, SourceReadiness, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress,
+    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnRunStatus, TurnSteer, TurnSteerStatus, EXEC_SNAPSHOT_RETAINED_TURNS,
+    MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(feature = "tools")]
 pub use output_scan::{

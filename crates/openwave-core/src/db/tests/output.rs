@@ -496,65 +496,6 @@ async fn a_binary_workspace_artifact_is_accepted_published_and_attributed_to_its
 
 #[cfg(feature = "tools")]
 #[tokio::test]
-async fn a_background_run_result_becomes_a_revertible_text_output() {
-    use crate::deliverable::output_revision_relative_path;
-    use crate::deliverable_acceptance::{merge_agent_run_result, AgentResultOutputMerge};
-    use crate::id::AgentRunId;
-
-    let (_dir, store, chat) = store_with_chat().await;
-    let scratch = tempfile::tempdir().unwrap();
-    let dir = open_scratch(scratch.path());
-
-    let run_id = AgentRunId::new();
-    let merge = AgentResultOutputMerge {
-        run_id,
-        chat_id: chat.id,
-        filename: "Agent result.md".into(),
-        text: "# Findings\n\nThe background agent finished.".into(),
-        created_at: at(0),
-    };
-
-    let record = merge_agent_run_result(&store, &dir, &merge).await.unwrap();
-    assert_eq!(record.chat_id, chat.id);
-    assert_eq!(record.media_type, "text/markdown");
-    assert_eq!(record.revision_count, 1);
-    // Identity is derived from the run, so it is stable and idempotent.
-    assert_eq!(record.id, OutputId::for_run(run_id));
-    assert_eq!(record.current_revision, OutputRevisionId::for_run(run_id));
-
-    // The bytes landed at the write-once revision path the desktop reads.
-    let published = scratch.path().join(output_revision_relative_path(
-        record.id,
-        record.current_revision,
-    ));
-    assert_eq!(std::fs::read(&published).unwrap(), merge.text.as_bytes());
-
-    // The revision is attributed to the producing run, never a turn — this is
-    // what the agent-run surface correlates against.
-    let revision = store
-        .get_output_revision(record.current_revision)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(revision.producing_run_id, Some(run_id));
-    assert_eq!(revision.turn_id, None);
-
-    // An ambiguous submit retry re-runs the merge without forking a second
-    // output or revision.
-    let retried = merge_agent_run_result(&store, &dir, &merge).await.unwrap();
-    assert_eq!(retried, record);
-    assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
-
-    // Recording it is safe because it is revertible: retracting it hides the
-    // output while keeping its revision, and restoring brings it back.
-    assert!(store.delete_output(record.id, at(30)).await.unwrap());
-    assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
-    assert!(store.restore_output(record.id, at(60)).await.unwrap());
-    assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
-}
-
-#[cfg(feature = "tools")]
-#[tokio::test]
 async fn acceptance_enforces_the_binary_cap_and_rejects_empty_artifacts() {
     use crate::deliverable::{RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES};
     use crate::deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};

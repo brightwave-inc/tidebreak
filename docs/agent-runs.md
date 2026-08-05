@@ -54,7 +54,7 @@ differ:
 | --- | --- |
 | Responds directly in the chat | Works on one delegated task |
 | Final assistant text completes a turn | An explicit result submission completes the run |
-| Uses conversation-facing tools | May make at most one sandbox-safe tool call; has no shared conversation context |
+| Uses conversation-facing tools | Uses a small fixed sandbox tool surface over a bounded checkpoint budget; has no shared conversation context |
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
@@ -160,22 +160,38 @@ answer/cancel races cannot produce two results. See
 
 ## Sandbox and host-access boundary
 
-A background agent has private runtime scratch but cannot access that scratch,
-projects, general host folders, the general network, or the parent
-conversation. Its narrow exceptions share one total tool-call budget: a
-checkpointed public web search, a typed folder-access proposal that grants no
-access, or—only in the embedded desktop—one exact file named by its immutable
-admission. The read tool takes no arguments. A native executor revalidates the
-current chat attachment immediately before the host broker performs a bounded
-UTF-8 read, persists private no-replay recovery state, and publishes only
-bounded content or a neutral failure. Headless workers never advertise the
-read. Sandboxes do not receive foreground spawn/wait or broker transport
-contracts, and absolute paths never cross into provider context. See
+A background agent cannot access projects, general host folders, the general
+network, or the parent conversation. Its narrow exceptions share one bounded
+tool-call budget: commands in its own execution workspace, a checkpointed
+public web search, a typed folder-access proposal that grants no access, or—only
+in the embedded desktop—one exact file named by its immutable admission. A run
+may spend that budget over several checkpoints; the worker replays the whole
+resolved chain on every claim, which is why the count is capped. The read tool
+takes no arguments. A native executor revalidates the current chat attachment
+immediately before the host broker performs a bounded UTF-8 read, persists
+private no-replay recovery state, and publishes only bounded content or a
+neutral failure. Headless workers never advertise the read. Sandboxes do not
+receive foreground spawn/wait or broker transport contracts, and absolute paths
+never cross into provider context. See
 [Host access and connected folders](host-access.md).
 
+Execution is how a background run produces anything the user keeps. Its
+workspace is named by the run, not the conversation, so siblings delegated in
+one message never share a filesystem; it starts empty and holds nothing but what
+the run's own earlier commands wrote. The request carries no folder authority
+and stages no host paths — delegation already bypasses the conversation's
+approval gate, so this path must not be the one that hands a delegated agent the
+user's files. The one thing the parent conversation contributes is its network
+policy, because the user chose that policy for this work. After each command the
+host scans the workspace's `output/` and publishes what it finds into the parent
+conversation's outputs, keyed by filename and attributed to the run: a new
+filename becomes a new output, and the same filename written again becomes its
+next version. The agent names its own deliverables that way, and the host never
+invents a title for one. See [Outputs](deliverables.md).
+
 This is intentionally not chat-wide or root-wide access. A sandbox cannot list
-roots or directories, open a picker, request a different file, write, run a
-shell command, or use a general filesystem API. A detach can revoke the exact
+roots or directories, open a picker, request a different file, write outside its
+own workspace, or use a general filesystem API. A detach can revoke the exact
 read before claim, at the final pre-dispatch heartbeat, or at resolution; if
 content arrived after authority was lost, it is discarded rather than returned
 to the model.
@@ -247,7 +263,13 @@ The scheduler's ownership rules are deliberately strict:
   expired worker cannot resume ownership.
 
 Final sandbox output is stored as an immutable typed receipt keyed by the child
-run and the exact lease segment that submitted it. Besides final text, the only
+run and the exact lease segment that submitted it. The ordinary way a run ends is
+a submission: the run calls `done` with the filenames it wrote under `output/`
+and a short summary, and the receipt records the outputs the scan already
+published under those names alongside the summary. Naming a file the run never
+wrote fails the completion like any other malformed one, bounded by the run's own
+attempt budget; a run that genuinely produced nothing submits nothing. Final text
+remains the receipt for a model that simply stops without submitting. The only
 current non-text outcome is a validated folder-consent proposal. It carries no
 host path, root identity, broker grant, or client-call identity; it only tells
 the foreground parent to decide whether the existing foreground consent tool is
@@ -294,7 +316,7 @@ renderer correlation key, not a provider call identity or scheduler control.
 
 When an agent has a live, supported tool checkpoint, the snapshot may also
 contain a small `activity` object. Its values are a deliberately admitted,
-fixed display vocabulary—for example, sandbox `web_search` or foreground
+fixed display vocabulary—for example, sandbox `exec` and `web_search`, or foreground
 `list_connected_folders`, `list_folder`, and `read_connected_file`, each with
 `waiting` or `running` status. It is not a tool trace: queries, tool arguments,
 results, folder/root identities, relative paths, filenames, host paths, grants,

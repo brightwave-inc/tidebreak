@@ -637,6 +637,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onSend={onSend}
             onRetryTurn={retryTurn}
             onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
+            onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
           />
         </TranscriptVisibilityProvider>
       );

@@ -25,7 +25,7 @@ export type AgentActivityHistoryItem = { kind: AgentActivityKind, outcome: Agent
  * Adding a durable tool does not automatically expose it to a renderer: it
  * must be deliberately admitted here with a safe label.
  */
-export type AgentActivityKind = "web_search" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
+export type AgentActivityKind = "exec" | "web_search" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
 
 /**
  * Coarse, renderer-safe lifecycle for one historical activity entry.
@@ -95,14 +95,13 @@ last_error_code: string | null,
  */
 activity: AgentActivitySnapshot | null, 
 /**
- * Whether a completed background run committed an immutable terminal
- * receipt, which happens atomically with its terminal state.
+ * Files a background run submitted as its deliverables, in its own order.
  *
- * This is presence only: the payload, its display text, and any merged
- * deliverable never cross this boundary. A renderer uses it to offer a
- * "view output" affordance and link to the outputs surface.
+ * A background run produces outputs by writing files and submitting them
+ * by name; nothing here is host-authored, and a run that submitted nothing
+ * carries an empty list.
  */
-produced_output: boolean, 
+submitted_outputs: Array<SubmittedOutputSnapshot>, 
 /**
  * Bounded terminal display text returned to the parent, if settled.
  */
@@ -1290,6 +1289,15 @@ resolved_key: string | null, };
 export type NetworkPolicy = { "mode": "off" } | { "mode": "package_managers" } | { "mode": "allowed_hosts", allowed_hosts: Array<string>, package_managers: boolean, } | { "mode": "open" };
 
 /**
+ * Identifies one conversation-owned output across all of its revisions.
+ *
+ * This is the durable handle a model, renderer, or export names. It is
+ * deliberately opaque: possession of an id is not authority, and it never
+ * encodes a filename or a host path.
+ */
+export type OutputId = string;
+
+/**
  * Closed renderer-safe pending approval projection. Canonical arguments,
  * model-authored summaries, and unknown tool names never cross this boundary;
  * only a tool's own closed preview of the action under review does.
@@ -1723,6 +1731,15 @@ level_title: string | null, action: RendererToolName, approval: ToolApprovalKind
  * picker displays is what creation will actually seed.
  */
 export type StickyChatDefaults = { model: string | null, reasoning_effort: ReasoningEffort | null, permission_mode: PermissionMode | null, network_policy: NetworkPolicy | null, };
+
+/**
+ * One file a background run submitted, as the renderer sees it.
+ */
+export type SubmittedOutputSnapshot = { output_id: OutputId, 
+/**
+ * The name the run gave the file, which is the output's name.
+ */
+filename: string, };
 
 /**
  * The action a call will take, in a form a human can inspect.

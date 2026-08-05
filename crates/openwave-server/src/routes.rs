@@ -2193,13 +2193,12 @@ pub struct AgentRunSnapshot {
     /// arguments, results, provider call identities, executor leases, or raw
     /// executor diagnostics.
     pub activity: Option<AgentActivitySnapshot>,
-    /// Whether a completed background run committed an immutable terminal
-    /// receipt, which happens atomically with its terminal state.
+    /// Files a background run submitted as its deliverables, in its own order.
     ///
-    /// This is presence only: the payload, its display text, and any merged
-    /// deliverable never cross this boundary. A renderer uses it to offer a
-    /// "view output" affordance and link to the outputs surface.
-    pub produced_output: bool,
+    /// A background run produces outputs by writing files and submitting them
+    /// by name; nothing here is host-authored, and a run that submitted nothing
+    /// carries an empty list.
+    pub submitted_outputs: Vec<SubmittedOutputSnapshot>,
     /// Bounded terminal display text returned to the parent, if settled.
     pub terminal_text: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
@@ -2215,12 +2214,8 @@ impl AgentRunSnapshot {
         run: AgentRun,
         activity: Option<AgentActivitySnapshot>,
         terminal_text: Option<String>,
+        submitted_outputs: Vec<SubmittedOutputSnapshot>,
     ) -> Self {
-        // A background child commits its final result receipt in the same
-        // transaction as its terminal `Completed` state, so the terminal state
-        // is an exact, renderer-safe proxy for output presence.
-        let produced_output =
-            run.tier == AgentRunTier::Background && run.status == AgentRunStatus::Completed;
         Self {
             id: run.id,
             parent_id: run.parent_id,
@@ -2233,12 +2228,20 @@ impl AgentRunSnapshot {
             finished_at: run.finished_at,
             last_error_code: run.last_error_code,
             activity,
-            produced_output,
+            submitted_outputs,
             terminal_text,
             created_at: run.created_at,
             updated_at: run.updated_at,
         }
     }
+}
+
+/// One file a background run submitted, as the renderer sees it.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct SubmittedOutputSnapshot {
+    pub output_id: openwave_core::OutputId,
+    /// The name the run gave the file, which is the output's name.
+    pub filename: String,
 }
 
 /// Fixed, renderer-safe names for supported live work.
@@ -2248,6 +2251,7 @@ impl AgentRunSnapshot {
 #[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityKind {
+    Exec,
     WebSearch,
     ReadDelegatedFile,
     ListConnectedFolders,
@@ -2280,6 +2284,7 @@ fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> 
     // lingering in the UI after the run has advanced.
     let call = calls.iter().rev().find(|call| !call.status.is_terminal())?;
     let kind = match call.name.as_str() {
+        openwave_core::SANDBOX_EXEC_TOOL => AgentActivityKind::Exec,
         "web_search" => AgentActivityKind::WebSearch,
         openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => AgentActivityKind::ReadDelegatedFile,
         // Unknown tool names are executor data, not a renderer API contract.
@@ -2343,6 +2348,7 @@ fn sandbox_activity_history(calls: &[SandboxToolCall]) -> Vec<AgentActivityHisto
 
 fn sandbox_activity_history_item(call: &SandboxToolCall) -> Option<AgentActivityHistoryItem> {
     let kind = match call.name.as_str() {
+        openwave_core::SANDBOX_EXEC_TOOL => AgentActivityKind::Exec,
         "web_search" => AgentActivityKind::WebSearch,
         openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => AgentActivityKind::ReadDelegatedFile,
         // Unknown tool names are executor data, not a renderer API contract.
@@ -2418,11 +2424,29 @@ pub async fn list_agent_runs(
     let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
+        let mut submitted_outputs = Vec::new();
         let terminal_text = match run.status {
-            AgentRunStatus::Completed | AgentRunStatus::Cancelled => store
-                .get_agent_run_result(run.id)
-                .await?
-                .map(|result| result.text),
+            AgentRunStatus::Completed | AgentRunStatus::Cancelled => {
+                match store.get_agent_run_result(run.id).await? {
+                    Some(result) => match &result.payload {
+                        // A submission's names belong to the structured field,
+                        // where the reader can open each one. Repeating them in
+                        // the prose block would say the same thing twice, so
+                        // the text here is the run's summary alone.
+                        openwave_core::AgentRunResultPayload::Submission { outputs, summary } => {
+                            submitted_outputs.extend(outputs.iter().map(|output| {
+                                SubmittedOutputSnapshot {
+                                    output_id: output.output_id,
+                                    filename: output.filename.clone(),
+                                }
+                            }));
+                            Some(summary.clone())
+                        }
+                        _ => Some(result.text),
+                    },
+                    None => None,
+                }
+            }
             AgentRunStatus::Failed => run
                 .last_error_code
                 .as_deref()
@@ -2437,7 +2461,12 @@ pub async fn list_agent_runs(
         } else {
             None
         };
-        snapshots.push(AgentRunSnapshot::from_run(run, activity, terminal_text));
+        snapshots.push(AgentRunSnapshot::from_run(
+            run,
+            activity,
+            terminal_text,
+            submitted_outputs,
+        ));
     }
     Ok(Json(snapshots))
 }
@@ -2583,7 +2612,7 @@ async fn signal_sandbox_run_after_commit(state: &AppState, run_id: openwave_core
             }
             if let Ok(Some(receipt)) = state.store.get_sandbox_tool_call_receipt(call.id).await {
                 if receipt.status == SandboxToolCallStatus::Cancelled {
-                    state.sandbox_attempts.cancel_search(
+                    state.sandbox_attempts.cancel_checkpoint(
                         call.id,
                         run_id,
                         receipt.executor_lease_token,

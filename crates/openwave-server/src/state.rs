@@ -339,15 +339,18 @@ impl AppState {
     }
 }
 
-/// Exact local cancellation handles for sandbox model and web-search attempts.
+/// Exact local cancellation handles for sandbox model and checkpoint attempts.
 ///
-/// Registration is RAII: stale permits cannot remove a newer lease for the
-/// same durable identity. The maps are intentionally process-local and never
-/// participate in admission or terminal decisions.
+/// Every executor lane shares the checkpoint map — search, delegated file read,
+/// command execution — because a cancellation reaches them all the same way:
+/// by the exact durable call, run, and executor lease identity, never by tool
+/// name. Registration is RAII: stale permits cannot remove a newer lease for
+/// the same durable identity. The maps are intentionally process-local and
+/// never participate in admission or terminal decisions.
 #[derive(Default)]
 pub(crate) struct SandboxAttemptGuard {
     models: Mutex<HashMap<(AgentRunId, Uuid), CancelToken>>,
-    searches: Mutex<HashMap<(CallId, AgentRunId, Uuid), CancelToken>>,
+    checkpoints: Mutex<HashMap<(CallId, AgentRunId, Uuid), CancelToken>>,
 }
 
 impl SandboxAttemptGuard {
@@ -371,20 +374,20 @@ impl SandboxAttemptGuard {
         })
     }
 
-    pub(crate) fn register_search(
+    pub(crate) fn register_checkpoint(
         self: &Arc<Self>,
         call_id: CallId,
         agent_run_id: AgentRunId,
         executor_lease_token: Uuid,
-    ) -> Option<ActiveSandboxSearchAttempt> {
-        let mut searches = self.searches.lock().unwrap();
+    ) -> Option<ActiveSandboxCheckpointAttempt> {
+        let mut checkpoints = self.checkpoints.lock().unwrap();
         let identity = (call_id, agent_run_id, executor_lease_token);
-        if searches.contains_key(&identity) {
+        if checkpoints.contains_key(&identity) {
             return None;
         }
         let cancel = CancelToken::new();
-        searches.insert(identity, cancel.clone());
-        Some(ActiveSandboxSearchAttempt {
+        checkpoints.insert(identity, cancel.clone());
+        Some(ActiveSandboxCheckpointAttempt {
             guard: Arc::clone(self),
             call_id,
             agent_run_id,
@@ -408,14 +411,14 @@ impl SandboxAttemptGuard {
     }
 
     /// Signal only the exact sandbox call, run, and executor lease identity.
-    pub(crate) fn cancel_search(
+    pub(crate) fn cancel_checkpoint(
         &self,
         call_id: CallId,
         agent_run_id: AgentRunId,
         executor_lease_token: Uuid,
     ) -> bool {
         if let Some(cancel) =
-            self.searches
+            self.checkpoints
                 .lock()
                 .unwrap()
                 .get(&(call_id, agent_run_id, executor_lease_token))
@@ -450,7 +453,7 @@ impl Drop for ActiveSandboxModelAttempt {
     }
 }
 
-pub(crate) struct ActiveSandboxSearchAttempt {
+pub(crate) struct ActiveSandboxCheckpointAttempt {
     guard: Arc<SandboxAttemptGuard>,
     call_id: CallId,
     agent_run_id: AgentRunId,
@@ -458,15 +461,15 @@ pub(crate) struct ActiveSandboxSearchAttempt {
     cancel: CancelToken,
 }
 
-impl ActiveSandboxSearchAttempt {
+impl ActiveSandboxCheckpointAttempt {
     pub(crate) fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
     }
 }
 
-impl Drop for ActiveSandboxSearchAttempt {
+impl Drop for ActiveSandboxCheckpointAttempt {
     fn drop(&mut self) {
-        self.guard.searches.lock().unwrap().remove(&(
+        self.guard.checkpoints.lock().unwrap().remove(&(
             self.call_id,
             self.agent_run_id,
             self.executor_lease_token,
@@ -762,18 +765,18 @@ mod tests {
         let run = AgentRunId::sandbox_for_spawn_call(CallId::new());
         let lease = Uuid::new_v4();
         let held = guard
-            .register_search(call, run, lease)
+            .register_checkpoint(call, run, lease)
             .expect("register search");
 
-        assert!(!guard.cancel_search(CallId::new(), run, lease));
-        assert!(!guard.cancel_search(
+        assert!(!guard.cancel_checkpoint(CallId::new(), run, lease));
+        assert!(!guard.cancel_checkpoint(
             call,
             AgentRunId::sandbox_for_spawn_call(CallId::new()),
             lease
         ));
-        assert!(!guard.cancel_search(call, run, Uuid::new_v4()));
+        assert!(!guard.cancel_checkpoint(call, run, Uuid::new_v4()));
         assert!(!held.cancel_token().is_cancelled());
-        assert!(guard.cancel_search(call, run, lease));
+        assert!(guard.cancel_checkpoint(call, run, lease));
         assert!(held.cancel_token().is_cancelled());
     }
 
@@ -798,20 +801,22 @@ mod tests {
         assert!(current_model.cancel_token().is_cancelled());
 
         let call = CallId::new();
-        let old_search_lease = Uuid::new_v4();
+        let old_checkpoint_lease = Uuid::new_v4();
         let stale_search = guard
-            .register_search(call, run, old_search_lease)
+            .register_checkpoint(call, run, old_checkpoint_lease)
             .expect("register old search");
-        let new_search_lease = Uuid::new_v4();
+        let new_checkpoint_lease = Uuid::new_v4();
         let current_search = guard
-            .register_search(call, run, new_search_lease)
+            .register_checkpoint(call, run, new_checkpoint_lease)
             .expect("a distinct search lease may coexist until its heartbeat fences it");
         assert!(!stale_search.cancel_token().is_cancelled());
         assert!(!current_search.cancel_token().is_cancelled());
-        assert!(guard.register_search(call, run, new_search_lease).is_none());
+        assert!(guard
+            .register_checkpoint(call, run, new_checkpoint_lease)
+            .is_none());
         drop(stale_search);
         assert!(!current_search.cancel_token().is_cancelled());
-        assert!(guard.cancel_search(call, run, new_search_lease));
+        assert!(guard.cancel_checkpoint(call, run, new_checkpoint_lease));
         assert!(current_search.cancel_token().is_cancelled());
     }
 }

@@ -21,10 +21,10 @@ use sha2::{Digest, Sha256};
 use crate::deliverable::{
     output_revision_relative_path, revision_byte_ceiling, CreateOutput, DeliverableKind,
     NewOutputRevision, OutputRevision, RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES,
-    MAX_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
+    OUTPUTS_DIRECTORY,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, ChatId, OutputId, OutputRevisionId};
+use crate::id::{ChatId, OutputId, OutputRevisionId};
 use crate::storage::Store;
 use crate::OutputRecord;
 
@@ -122,98 +122,6 @@ pub async fn accept_workspace_artifact(
             })
             .await
     }
-}
-
-/// A completed background agent run's text result, ready to record in the
-/// conversation's output record.
-///
-/// The merge is performed by the host at result-commit time; the model that
-/// produced the text can neither author nor decline it. Its identities are
-/// derived from the producing run ([`OutputId::for_run`],
-/// [`OutputRevisionId::for_run`]) so an ambiguous submit retry lands on the same
-/// output rather than forking a second one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentResultOutputMerge {
-    /// Completed background run whose result is being merged. Fixes the derived
-    /// output and revision identities and is recorded as the revision's producer.
-    pub run_id: AgentRunId,
-    /// Conversation that owns both the run and the merged output.
-    pub chat_id: ChatId,
-    /// Host-derived display filename. Portable ASCII ending in a text extension;
-    /// the model never names it.
-    pub filename: String,
-    /// The run's bounded final text.
-    pub text: String,
-    /// Host-stamped merge time.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Record a completed background run's text result as a conversation output.
-///
-/// The bytes are published once at the derived revision path under the exact
-/// conversation's private scratch, then recorded as a text output whose producer
-/// is the background run. Re-running the same run id is idempotent: the derived
-/// identities and matching content return the original record.
-///
-/// This is host-side by construction — nothing the sandbox model returns can
-/// steer the filename, the media type, or whether the merge happens. Safety
-/// comes from the merge being a durable, revertible output revision, not from a
-/// human accept gate.
-pub async fn merge_agent_run_result(
-    store: &dyn Store,
-    scratch: &Dir,
-    merge: &AgentResultOutputMerge,
-) -> Result<OutputRecord> {
-    if merge.text.is_empty() {
-        return Err(AgentError::Store("agent result is empty".into()));
-    }
-    let content = merge.text.as_bytes();
-    if content.len() > MAX_DELIVERABLE_BYTES {
-        return Err(AgentError::Store(format!(
-            "agent result is too large (maximum {MAX_DELIVERABLE_BYTES} bytes)"
-        )));
-    }
-
-    let output_id = OutputId::for_run(merge.run_id);
-    let revision_id = OutputRevisionId::for_run(merge.run_id);
-    let byte_len = content.len() as u64;
-    let sha256: [u8; 32] = Sha256::digest(content).into();
-    let relative_path = output_revision_relative_path(output_id, revision_id);
-
-    // Publishing is blocking capability I/O; keep it off the async runtime. The
-    // path is write-once, so an interrupted retry re-publishes identical bytes.
-    let scratch = scratch
-        .try_clone()
-        .map_err(|error| AgentError::Store(format!("could not open private scratch: {error}")))?;
-    let content = content.to_vec();
-    tokio::task::spawn_blocking(move || {
-        crate::tools::private_scratch::publish_immutable_file(&scratch, &relative_path, &content)
-    })
-    .await
-    .map_err(|error| AgentError::Store(format!("result publication task failed: {error}")))?
-    .map_err(|error| AgentError::Store(format!("could not publish agent result: {error}")))?;
-
-    let revision = NewOutputRevision {
-        id: revision_id,
-        byte_len,
-        sha256,
-        // Provenance is the background run, never a foreground turn, so the
-        // revision carries no turn-scoped retrieval citations.
-        turn_id: None,
-        producing_run_id: None,
-        created_at: merge.created_at,
-    }
-    .with_producer(RevisionProducer::Run(merge.run_id));
-
-    store
-        .create_output(&CreateOutput {
-            id: output_id,
-            chat_id: merge.chat_id,
-            filename: merge.filename.clone(),
-            kind: DeliverableKind::Text,
-            revision,
-        })
-        .await
 }
 
 /// Restore an output to the content of one of its earlier revisions.

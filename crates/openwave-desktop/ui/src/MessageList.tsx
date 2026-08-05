@@ -199,6 +199,7 @@ type MessageListProps = {
     runId: string,
   ) => Promise<AgentActivityHistoryEntry[]>;
   onOpenBackgroundAgent?: (runId: string) => void;
+  onOpenOutput?: (outputId: string) => void;
   busy: boolean;
   /** The live turn's stream has gone quiet — see [useStreamStalled]. */
   streamStalled?: boolean;
@@ -268,6 +269,7 @@ export function MessageList({
   onCancelBackgroundAgentRun = async () => undefined,
   onLoadBackgroundAgentActivity = async () => [],
   onOpenBackgroundAgent,
+  onOpenOutput,
   busy,
   streamStalled = false,
   scrollRef,
@@ -319,6 +321,7 @@ export function MessageList({
       cancel: onCancelBackgroundAgentRun,
       loadActivity: onLoadBackgroundAgentActivity,
       open: onOpenBackgroundAgent,
+      openOutput: onOpenOutput,
     },
     retry,
   );
@@ -536,6 +539,7 @@ export function groupMessageItems(
     cancel: (runId: string) => Promise<void>;
     loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
     open?: (runId: string) => void;
+    openOutput?: (outputId: string) => void;
   } = {
     runs: [],
     loading: false,
@@ -650,6 +654,7 @@ export function groupMessageItems(
             onCancel={backgroundAgents.cancel}
             onLoadActivity={backgroundAgents.loadActivity}
             onOpen={backgroundAgents.open}
+            onOpenOutput={backgroundAgents.openOutput}
           />,
         ),
       );

@@ -2431,6 +2431,21 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Atomically submit a background run's own files as its terminal receipt.
+    ///
+    /// The outputs already exist: the run wrote them and the host published
+    /// them by filename. Submission records which of them the run offers as its
+    /// deliverables, so nothing here creates or renames conversation content.
+    async fn submit_agent_run_submission(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _outputs: &[crate::AgentRunSubmittedOutput],
+        _summary: &str,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Atomically submit one validated folder-consent proposal as a sandbox's
     /// typed terminal receipt. This only wakes the foreground parent through
     /// its durable inbox; it cannot grant host access or invoke a client tool.

@@ -55,7 +55,7 @@ describe("deliverable renderer projections", () => {
       deliverables: [
         {
           outputId,
-          filename: "Agent result ce116263.md",
+          filename: "Q3 revenue.md",
           mediaType: "text/markdown",
           sizeBytes: 42,
           revisionCount: 1,

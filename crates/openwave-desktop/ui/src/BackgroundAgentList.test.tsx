@@ -21,7 +21,7 @@ function run(
     finished_at: null,
     last_error_code: null,
     activity: null,
-    produced_output: status === "completed",
+    submitted_outputs: [],
     terminal_text: status === "completed" ? `Result from ${id}` : null,
     created_at: "2026-07-27T12:00:00Z",
     updated_at: "2026-07-27T12:00:00Z",
@@ -81,6 +81,28 @@ describe("BackgroundAgentList", () => {
     expect(markup).toContain("Task for run-failed");
     expect(markup).not.toContain("Sandbox task failed (provider_error)");
     expect(markup).not.toContain("Result from run-done");
+  });
+
+  it("names the files an agent submitted, which are its deliverables", () => {
+    const submitted = run("run-done", "call-done", "completed");
+    submitted.submitted_outputs = [
+      { output_id: "output-1", filename: "Q3 revenue.md" },
+      { output_id: "output-2", filename: "revenue.xlsx" },
+    ];
+    const markup = renderToStaticMarkup(
+      <BackgroundAgentList
+        spawns={[{ callId: "call-done", status: "completed" }]}
+        runs={[submitted]}
+        loading={false}
+        error={null}
+        onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
+      />,
+    );
+
+    expect(markup).toContain("Q3 revenue.md");
+    expect(markup).toContain("revenue.xlsx");
   });
 
   it("shows a skeleton as soon as a spawn is visible but not durable yet", () => {
