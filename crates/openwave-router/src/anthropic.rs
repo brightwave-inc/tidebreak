@@ -327,22 +327,20 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // as a long silent pause before the answer. `summarized` is what makes
         // the reasoning stream the renderer already draws worth drawing.
         //
-        // Reasoning captured from this turn's own stream rides back on the
-        // assistant messages that produced it (see `attach_reasoning_blocks`),
-        // restoring the model's inter-tool plan continuity. Anything rebuilt
-        // from the store — a retry, a resumed turn, an older chat — still
-        // replays no thinking blocks at all. Adaptive mode relaxes turn
-        // validation for exactly that case: no assistant turn has to begin
-        // with a thinking block, and history assembled from mixed sources
-        // needs none reinserted, so sending zero of them is always a valid
-        // shape. The 400 lives in *partial* replay — within the latest
-        // assistant message the consecutive thinking blocks must match what
-        // the model generated verbatim, `redacted_thinking` included, which
-        // is why capture and replay below keep the raw blocks whole rather
-        // than filtering on `type == "thinking"`. Omission also keeps history
-        // portable: blocks are bound to the model that produced them and a
-        // chat can switch models mid-conversation, where a foreign block is
-        // ignored rather than rejected and so only wastes input tokens.
+        // Reasoning rides back on the assistant messages that produced it
+        // (see `attach_reasoning_blocks`), restoring the model's inter-tool
+        // plan continuity — within a turn from its own stream, and across
+        // turns from the durable message the step wrote. A step that never
+        // reached the store, or one whose blocks belong to another route,
+        // replays nothing. Adaptive mode relaxes turn validation for exactly
+        // that case: no assistant turn has to begin with a thinking block,
+        // and history assembled from mixed sources needs none reinserted, so
+        // sending zero of them is always a valid shape. The 400 lives in
+        // *partial* replay — within the latest assistant message the
+        // consecutive thinking blocks must match what the model generated
+        // verbatim, `redacted_thinking` included, which is why capture and
+        // replay below keep the raw blocks whole rather than filtering on
+        // `type == "thinking"`.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         if let Some(effort) = req.reasoning_effort {
             body["output_config"] = json!({ "effort": effort.as_str() });
@@ -352,8 +350,8 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     Ok(body)
 }
 
-/// Replay the turn's captured reasoning blocks ahead of the content of the
-/// assistant messages that produced them.
+/// Replay the captured reasoning blocks ahead of the content of the assistant
+/// messages that produced them.
 ///
 /// Anthropic validates the consecutive thinking prefix of an assistant
 /// message against what the model generated, so the blocks go back exactly
@@ -363,18 +361,30 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
 /// runs only on a request that actually thinks (see the caller): replaying
 /// reasoning into a request with thinking off buys nothing and risks a
 /// shape the API rejects, while omission is always valid.
+///
+/// A block is only valid input back to the exact route that minted it, so
+/// each message replays only what `replayable_for` clears against this
+/// request's provider and model. A chat may switch between Anthropic, OpenAI
+/// and Gemini models mid-conversation, and even between two Anthropic models;
+/// history rebuilt across such a switch carries foreign blocks whose
+/// signatures this model never produced. Dropping them is the right answer
+/// rather than failing the turn: sending no reasoning is always a valid
+/// shape, and the alternative is a request the API rejects.
 fn attach_reasoning_blocks(body: &mut Value, req: &ChatRequest) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
     for (message, wire) in req.messages.iter().zip(messages.iter_mut()) {
-        if message.reasoning.is_empty() {
+        let blocks = message
+            .reasoning
+            .replayable_for(req.provider.as_ref(), &req.model);
+        if blocks.is_empty() {
             continue;
         }
         let Some(content) = wire.get_mut("content").and_then(Value::as_array_mut) else {
             continue;
         };
-        let mut combined = message.reasoning.clone();
+        let mut combined = blocks.to_vec();
         combined.append(content);
         *content = combined;
     }
@@ -882,7 +892,7 @@ fn map_stop_reason(reason: &str) -> StopOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::ChatMessage;
+    use openwave_core::provider::{ChatMessage, MessageReasoning, ReasoningOrigin};
     use openwave_core::tool::ToolSpec;
     use openwave_core::ReasoningEffort;
 
@@ -992,7 +1002,7 @@ mod tests {
                     input: json!({"path": format!("f{i}.rs")}),
                 })
                 .collect(),
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         });
         messages.push(ChatMessage {
             role: Role::User,
@@ -1003,7 +1013,7 @@ mod tests {
                     is_error: false,
                 })
                 .collect(),
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         });
         let req = ChatRequest {
             provider: Some(ProviderId::new("anthropic")),
@@ -1432,7 +1442,13 @@ mod tests {
                         input: json!({"path": "a"}),
                     },
                 ],
-                reasoning: reasoning.clone(),
+                reasoning: MessageReasoning::captured(
+                    ReasoningOrigin {
+                        provider: Some(ProviderId::new("anthropic")),
+                        model: "claude-opus-5".into(),
+                    },
+                    reasoning.clone(),
+                ),
             },
             ChatMessage {
                 role: Role::User,
@@ -1441,7 +1457,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
         ];
         let body = build_request_json(&req).unwrap();
@@ -1458,6 +1474,43 @@ mod tests {
             body["messages"][2]["content"][0]["cache_control"],
             ephemeral_cache_control()
         );
+    }
+
+    #[test]
+    fn a_route_switch_replays_no_foreign_reasoning() {
+        // A chat may move between Anthropic, OpenAI and Gemini models — and
+        // between two Anthropic models — mid-conversation. History rebuilt
+        // across such a switch still carries the blocks the earlier model
+        // signed, and this model would reject them. Dropping them is the
+        // answer: sending no reasoning is always a valid shape.
+        let block = json!({"type": "thinking", "thinking": "plan", "signature": "sig-1"});
+        let step = |provider: Option<&str>, model: &str| ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "checking".into(),
+            }],
+            reasoning: MessageReasoning::captured(
+                ReasoningOrigin {
+                    provider: provider.map(ProviderId::new),
+                    model: model.into(),
+                },
+                vec![block.clone()],
+            ),
+        };
+        for origin in [
+            // Another Anthropic model: same wire shape, signature this model
+            // never produced.
+            step(Some("anthropic"), "claude-sonnet-5"),
+            // Another provider entirely.
+            step(Some("openai"), "claude-opus-5"),
+        ] {
+            let mut req = reasoning_request("claude-opus-5", None);
+            req.messages = vec![ChatMessage::text(Role::User, "hi"), origin];
+            let body = build_request_json(&req).unwrap();
+            let content = body["messages"][1]["content"].as_array().unwrap();
+            assert_eq!(content.len(), 1, "no block was replayed: {body}");
+            assert_eq!(content[0]["type"], "text");
+        }
     }
 
     #[test]
@@ -1479,7 +1532,13 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "checking".into(),
             }],
-            reasoning: vec![json!({"type": "thinking", "thinking": "t", "signature": "s"})],
+            reasoning: MessageReasoning::captured(
+                ReasoningOrigin {
+                    provider: Some(ProviderId::new("anthropic")),
+                    model: "claude-opus-5".into(),
+                },
+                vec![json!({"type": "thinking", "thinking": "t", "signature": "s"})],
+            ),
         });
         req.messages.push(ChatMessage::text(Role::User, "go on"));
         let body = build_request_json(&req).unwrap();
@@ -1604,7 +1663,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: Role::User,
                 content,
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             }],
             tools: vec![],
             max_tokens: None,

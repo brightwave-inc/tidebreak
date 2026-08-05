@@ -187,6 +187,7 @@ const fn is_compressible(block: &ContentBlock) -> bool {
 /// estimate runs over their serialized form.
 fn estimate_reasoning_tokens(msg: &ChatMessage) -> usize {
     msg.reasoning
+        .blocks()
         .iter()
         .map(|block| estimate_tokens(&block.to_string()))
         .sum()
@@ -705,6 +706,7 @@ pub fn content_floor_for_level(level: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{MessageReasoning, ReasoningOrigin};
     use serde_json::json;
 
     fn user_msg(text: &str) -> ChatMessage {
@@ -723,7 +725,7 @@ mod tests {
                 name: name.into(),
                 input: json!({ "arg": args }),
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }
     }
 
@@ -735,7 +737,7 @@ mod tests {
                 content: content.into(),
                 is_error: false,
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }
     }
 
@@ -760,11 +762,15 @@ mod tests {
             json!({"type": "thinking", "thinking": "p".repeat(300), "signature": "sig"}),
             json!({"type": "redacted_thinking", "data": "blob"}),
         ];
+        let origin = ReasoningOrigin {
+            provider: None,
+            model: "m".into(),
+        };
         let mut thinking_step = assistant_msg(&"calling a tool ".repeat(50));
-        thinking_step.reasoning = reasoning.clone();
+        thinking_step.reasoning = MessageReasoning::captured(origin, reasoning.clone());
 
         let mut silent_step = thinking_step.clone();
-        silent_step.reasoning = Vec::new();
+        silent_step.reasoning = MessageReasoning::default();
         assert!(
             estimate_message_tokens(&thinking_step) > estimate_message_tokens(&silent_step),
             "reasoning tokens must be counted"
@@ -783,7 +789,8 @@ mod tests {
             .find(|message| message.role == Role::Assistant)
             .expect("the step fits under this budget");
         assert_eq!(
-            fitted_step.reasoning, reasoning,
+            fitted_step.reasoning.blocks(),
+            reasoning,
             "truncation never touches the blocks"
         );
         assert!(
@@ -835,7 +842,7 @@ mod tests {
         let msg = ChatMessage {
             role: Role::User,
             content: blocks,
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         // Callers never allocate below the message's irreducible overhead floor
         // (role + each block's fixed envelope); test at and above it.
@@ -863,7 +870,7 @@ mod tests {
                     text: format!("chunk {i} ").repeat(30),
                 })
                 .collect(),
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let msgs = vec![
             user_msg("kick off the conversation here"),
@@ -1071,7 +1078,7 @@ mod tests {
         ChatMessage {
             role: Role::User,
             content: vec![image_block(width, height)],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }
     }
 
@@ -1173,7 +1180,7 @@ mod tests {
                 },
                 image_block(400, 300),
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }];
         messages.extend((0..10).map(|index| assistant_msg(&format!("message {index}"))));
         messages.push(ChatMessage {
@@ -1186,7 +1193,7 @@ mod tests {
                 },
                 image_block(800, 600),
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         });
 
         evict_old_tool_result_images(&mut messages, TOOL_RESULT_IMAGE_MESSAGE_WINDOW);

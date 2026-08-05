@@ -24,10 +24,11 @@ use openwave_core::{
     sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
     validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments, AgentConfig,
     AgentError, AgentRun, AgentRunStatus, AgentRunSubmittedOutput, CallId, ChatMessage,
-    ChatRequest, ContentBlock, FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome,
-    ProviderEvent, RequestFolderAccessArgs, Result, ResumeTurnForAgentRunWaitSetOutcome, Role,
-    SandboxToolCall, SandboxToolCallRequest, SandboxToolCallStatus, StopReason, Store,
-    SubmitAgentRunResultOutcome, ToolCallRecord, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    ChatRequest, ContentBlock, FailAgentRunOutcome, MessageReasoning, ModelProvider,
+    ParkSandboxToolCallOutcome, ProviderEvent, RequestFolderAccessArgs, Result,
+    ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall, SandboxToolCallRequest,
+    SandboxToolCallStatus, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallRecord,
+    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -967,7 +968,7 @@ async fn sandbox_request(
                 name: call.name.clone(),
                 input: call.arguments.clone(),
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         });
         messages.push(ChatMessage {
             role: Role::User,
@@ -976,7 +977,7 @@ async fn sandbox_request(
                 content: receipt.result,
                 is_error: receipt.status != SandboxToolCallStatus::Completed,
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         });
     }
     Ok(ChatRequest {

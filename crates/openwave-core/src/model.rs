@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::image::ImageRef;
-use crate::provider::Usage;
+use crate::provider::{MessageReasoning, Usage};
 
 use crate::id::{
     AgentRunId, CallId, ChatId, DocumentId, HostRootId, MessageId, ProjectId,
@@ -2349,6 +2349,15 @@ pub struct Message {
     pub role: Role,
     /// The text body.
     pub content: String,
+    /// Reasoning blocks this message's step produced, with the route that
+    /// minted them.
+    ///
+    /// Persisted so an assistant message keeps its reasoning across a reload
+    /// and can be replayed to the same model on a later turn. Empty for every
+    /// user message, and for an assistant step whose reasoning had no message
+    /// row to ride (a tool step with no prose preamble writes no message).
+    #[serde(default, skip_serializing_if = "MessageReasoning::is_empty")]
+    pub reasoning: MessageReasoning,
     /// When it was created.
     pub created_at: DateTime<Utc>,
 }

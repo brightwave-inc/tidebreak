@@ -2133,6 +2133,7 @@ async fn chats_and_messages_roundtrip() {
         chat_id: chat.id,
         turn_id: TurnId::new(),
         role: Role::User,
+        reasoning: Default::default(),
         content: "hi there".into(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
     };
@@ -2157,6 +2158,7 @@ async fn make_queued_turn(
         turn_id: Set(turn_id.0),
         seq: Set(seq),
         role: Set("user".into()),
+        reasoning: Default::default(),
         content: Set("turn input".into()),
         turn_lease_token: Set(None),
         created_at: Set(now),
@@ -2237,6 +2239,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         turn_id: Set(first.id),
         seq: Set(first_output_seq),
         role: Set("assistant".into()),
+        reasoning: Default::default(),
         content: Set("done".into()),
         turn_lease_token: Set(None),
         created_at: Set(now),
@@ -3285,6 +3288,7 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "resumed answer".into(),
         created_at: resume_at + chrono::Duration::seconds(1),
     };
@@ -3691,6 +3695,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "must not commit".into(),
         created_at: resolved_at + chrono::Duration::microseconds(1),
     };
@@ -5092,6 +5097,7 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "final answer".into(),
         created_at: claimed_at + chrono::Duration::nanoseconds(1_234_567),
     };
@@ -5355,6 +5361,7 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "recovered".into(),
         created_at: canonical_retry_at + chrono::Duration::seconds(1),
     };
@@ -6027,6 +6034,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "too late".into(),
         created_at: requested_at + chrono::Duration::seconds(1),
     };
@@ -6494,6 +6502,7 @@ async fn turn_completion_and_cancellation_serialize_to_one_decision() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "race answer".into(),
         created_at: decided_at,
     };
@@ -6572,6 +6581,7 @@ async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "race winner".into(),
         created_at: resolved_at,
     };
@@ -6664,6 +6674,7 @@ async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() 
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "prepared before retry".into(),
         created_at: heartbeat_at - chrono::Duration::microseconds(1),
     };
@@ -6727,6 +6738,7 @@ async fn turn_completion_rejects_prepared_output_retried_after_expiry() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "prepared while live".into(),
         created_at: lease_expires_at - chrono::Duration::seconds(1),
     };
@@ -6792,6 +6804,7 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "stale answer".into(),
         created_at: first_expiry + chrono::Duration::seconds(1),
     };
@@ -6850,6 +6863,7 @@ async fn concurrent_different_turn_completions_commit_one_output_once() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "one answer".into(),
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
@@ -6925,6 +6939,7 @@ async fn turn_completion_rolls_back_output_when_state_update_fails() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "must roll back".into(),
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
@@ -6989,6 +7004,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "must roll back".into(),
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
@@ -7317,6 +7333,7 @@ async fn list_chats_is_newest_first_and_messages_follow_commit_sequence() {
         chat_id: newer.id,
         turn_id: TurnId::new(),
         role: Role::User,
+        reasoning: Default::default(),
         content: format!("t{ts}"),
         created_at: DateTime::<Utc>::from_timestamp(ts, 0).unwrap(),
     };
@@ -7337,6 +7354,7 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         chat_id: chat.id,
         turn_id: TurnId::new(),
         role: Role::User,
+        reasoning: Default::default(),
         content: "delete this history".into(),
         created_at: Utc::now(),
     };
@@ -7593,6 +7611,7 @@ async fn refused_turn_metadata_hydrates_with_its_exact_durable_output() {
             chat_id: chat.id,
             turn_id,
             role: Role::Assistant,
+            reasoning: Default::default(),
             content: content.into(),
             created_at: accepted.available_at,
         };
@@ -7933,6 +7952,7 @@ async fn all_roles_round_trip() {
                 chat_id: chat.id,
                 turn_id: TurnId::new(),
                 role: *role,
+                reasoning: Default::default(),
                 content: String::new(),
                 created_at: DateTime::<Utc>::from_timestamp(i as i64, 0).unwrap(),
             })
@@ -8208,6 +8228,7 @@ async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "intermediate".into(),
         created_at: claimed_at,
     };
@@ -9586,6 +9607,7 @@ async fn reasoning_deltas_rebuild_into_the_transcript() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "the answer".into(),
         created_at: accepted.available_at,
     };
@@ -9875,6 +9897,7 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "the answer so far".into(),
         created_at: requested_at,
     };

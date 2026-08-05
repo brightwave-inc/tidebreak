@@ -551,7 +551,7 @@ fn usage_event(response: &Value) -> Option<ProviderEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::ChatMessage;
+    use openwave_core::provider::{ChatMessage, MessageReasoning};
     use openwave_core::tool::ToolSpec;
     use openwave_core::{ImageData, ImageMediaType, ImageRef, ReasoningEffort};
 
@@ -596,7 +596,7 @@ mod tests {
                 name: "exec".into(),
                 input: json!({"command":"pwd"}),
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let result = openwave_core::ChatMessage {
             role: Role::User,
@@ -605,7 +605,7 @@ mod tests {
                 content: "ok".into(),
                 is_error: false,
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let orphan = openwave_core::ChatMessage {
             role: Role::User,
@@ -614,7 +614,7 @@ mod tests {
                 content: "bad".into(),
                 is_error: true,
             }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let req = ChatRequest {
             model: "gpt-5.6-sol".into(),
@@ -644,7 +644,7 @@ mod tests {
                         input: json!({"command":"pwd"}),
                     },
                 ],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
             openwave_core::ChatMessage {
                 role: Role::User,
@@ -653,7 +653,7 @@ mod tests {
                     content: "/tmp".into(),
                     is_error: false,
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
             ChatMessage::text(Role::User, "thanks"),
         ];
@@ -768,7 +768,7 @@ mod tests {
             messages: vec![openwave_core::ChatMessage {
                 role: Role::User,
                 content: vec![ContentBlock::Image { image }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             }],
             images,
             ..Default::default()

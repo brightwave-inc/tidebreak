@@ -19,7 +19,7 @@ use super::super::super::{entities, store_err, DbStore};
 use super::super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
     conversation::{
-        append_event_on, next_message_seq_on, reserve_message_identity_on,
+        append_event_on, next_message_seq_on, reasoning_to_db, reserve_message_identity_on,
         MESSAGE_IDENTITY_OWNER_MESSAGE,
     },
 };
@@ -328,6 +328,7 @@ async fn complete_turn_run_inner(
         seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(output.content.clone()),
+        reasoning: Set(reasoning_to_db(&output.reasoning)),
         turn_lease_token: Set(Some(lease_token)),
         created_at: Set(output_created_at),
     };
@@ -1065,6 +1066,7 @@ where
                 && message.turn_id == output.turn_id.0
                 && message.role == "assistant"
                 && message.content == output.content
+                && message.reasoning == reasoning_to_db(&output.reasoning)
                 && message.created_at == created_at
         }))
 }

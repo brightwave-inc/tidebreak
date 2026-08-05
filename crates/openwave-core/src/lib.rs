@@ -188,8 +188,9 @@ pub use preview::{
     ToolResultPreview, MAX_RESULT_ENTRIES, MAX_RESULT_ENTRY_CHARS,
 };
 pub use provider::{
-    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId,
-    RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage,
+    ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
+    ProviderId, ReasoningOrigin, RefusalDetails, RefusalOutcome, ResponseFormat, StopReason,
+    ToolChoice, Usage,
 };
 pub use renderer_tool::RendererToolName;
 pub use secret_cache::CachingSecretProvider;

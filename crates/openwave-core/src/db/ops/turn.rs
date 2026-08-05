@@ -180,6 +180,7 @@ pub(in crate::db) async fn accept_turn(
         seq: Set(next_message_seq_on(&transaction, chat_id).await?),
         role: Set("user".into()),
         content: Set(content.into()),
+        reasoning: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
     };

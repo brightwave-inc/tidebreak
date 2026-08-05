@@ -261,6 +261,7 @@ pub mod message {
         pub seq: i64,
         pub role: String,
         pub content: String,
+        pub reasoning: Option<Json>,
         pub turn_lease_token: Option<Uuid>,
         pub created_at: DateTimeUtc,
     }

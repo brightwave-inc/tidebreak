@@ -215,6 +215,7 @@ pub async fn restore_output_to_revision(
             // fresh id is an inert marker rather than a claim on turn state.
             turn_id: crate::id::TurnId::new(),
             role: crate::model::Role::System,
+            reasoning: Default::default(),
             content: format!(
                 "User restored output '{}' to the content of version {} \
                  (now the latest version, v{}). Re-read output/{} before \

@@ -860,6 +860,7 @@ async fn chat_transcript_replays_only_visible_durable_messages() {
             chat_id: chat.id,
             turn_id: TurnId::new(),
             role: Role::User,
+            reasoning: Default::default(),
             content: "remember this".into(),
             created_at: chrono::Utc::now(),
         })

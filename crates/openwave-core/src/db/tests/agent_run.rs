@@ -1698,6 +1698,7 @@ async fn cancellation_retry_remains_pending_while_parent_completion_is_fenced() 
         chat_id: chat.id,
         turn_id: origin.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "parent completed independently".into(),
         created_at: completed_at,
     };
