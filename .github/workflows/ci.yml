@@ -391,6 +391,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
@@ -400,6 +403,19 @@ jobs:
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      # `build.rs` deliberately removes `externalBin` when a plain check starts
+      # from a clean checkout. Prepare the real Windows artifact first so the
+      # desktop check exercises Tauri's target-suffixed sidecar resolution.
+      - name: Prepare target-named host broker sidecar
+        shell: pwsh
+        env:
+          TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
+        run: |
+          node crates/openwave-desktop/scripts/prepare-sidecar.mjs
+          $sidecar = "crates/openwave-desktop/binaries/openwave-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
+          if (!(Test-Path -LiteralPath $sidecar -PathType Leaf)) {
+            throw "prepare-sidecar did not produce $sidecar"
+          }
       - name: Check Windows-gated crates
         run: >-
           cargo check --target x86_64-pc-windows-msvc
@@ -409,13 +425,12 @@ jobs:
           -p openwave-server
           -p openwave-desktop
           --locked
-      # The host broker's containment tests are the only ones in the workspace
-      # that need real NTFS — directory junctions, hidden shares, 8.3 short
-      # names. `cargo check` never compiles a test target, so without this step
-      # those tests exist and run nowhere. Deliberately one crate: this lane is
-      # for the checks that cannot be answered off Windows, not a second copy of
-      # the workspace suite.
-      - name: Host broker containment tests
+      # The host broker suite covers both real NTFS containment and the stdio
+      # sidecar boundary: private state/audit placement, exclusive ownership of
+      # the state directory, restart persistence, and exit when the desktop pipe
+      # closes. Deliberately one crate: this lane is for checks that need the
+      # native host, not a second copy of the workspace suite.
+      - name: Host broker Windows tests
         run: cargo test -p openwave-host-broker --locked
 
   test:
