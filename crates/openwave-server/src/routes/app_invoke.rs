@@ -27,7 +27,7 @@ use openwave_core::id::AppId;
 use openwave_core::local_app::{AppBinding, AppGrantBinding, AppRecord, AppRevision};
 use openwave_core::{AgentError, ChatId, ToolCtx};
 
-use crate::connected_apps::{current_app_fingerprints, current_rest_definitions};
+use crate::connected_apps::{current_fingerprints, current_rest_definitions};
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::rest_executor::{RestExecuteError, RestOperationRequest};
@@ -451,24 +451,19 @@ async fn require_app_grant(
             pinned.description()
         )));
     }
-    let current = current_app_fingerprints(state).await?;
+    let current = current_fingerprints(state).await?;
     for binding in &grant.bindings {
-        // A folder grant binding has no current fingerprint to compare until
-        // the host-folder seam ships; it reads stale, failing the whole grant
-        // closed to re-consent exactly like a deleted record.
-        let matches = binding.app().is_some_and(|app| {
-            current
-                .get(&app)
-                .is_some_and(|candidate| candidate.fingerprint == binding.fingerprint())
-        });
-        if !matches {
+        // Every granted binding must still pin what its target carries now:
+        // a reconfigured connected app or a disconnected folder invalidates
+        // the whole grant, failing closed to re-consent.
+        if !current.grant_binding_current(binding) {
             return Err(consent_required(match binding.app() {
                 Some(app) => format!(
                     "connected app {app} was reconfigured after consent; the grant is \
                      stale"
                 ),
                 None => {
-                    "a granted folder binding cannot be verified; the grant is stale".to_owned()
+                    "a granted folder was disconnected after consent; the grant is stale".to_owned()
                 }
             }));
         }

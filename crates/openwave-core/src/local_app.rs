@@ -473,7 +473,12 @@ pub struct AppFolderBinding {
 /// Consent-bearing: the level is part of what the user grants and part of
 /// the binding's fingerprint, so widening `read` to `read_write` always
 /// re-prompts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The access level of a folder binding.
+///
+/// Consent-bearing: the level is part of what the user grants and part of
+/// the binding's fingerprint, so widening `read` to `read_write` always
+/// re-prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderAccess {
     /// Listing and bounded reads.

@@ -155,11 +155,20 @@ export function AppDetailView({
                 <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
                   <ShieldCheck className="size-3.5 shrink-0" aria-hidden="true" />
                   <span>
-                    Allowed to call{" "}
+                    Allowed to use{" "}
                     {grant.bindings
                       .flatMap((binding) => [
                         ...(binding.tools ?? []),
                         ...(binding.operation_ids ?? []),
+                        ...(binding.folder !== null
+                          ? [
+                              `${binding.name ?? "a folder"} (${
+                                binding.access === "read_write"
+                                  ? "read & write"
+                                  : "read"
+                              })`,
+                            ]
+                          : []),
                       ])
                       .join(", ") || "no tools"}
                   </span>

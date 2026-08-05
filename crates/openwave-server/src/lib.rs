@@ -35,6 +35,7 @@ mod exec_write_snapshot;
 mod extract;
 mod foreground_prompt;
 mod gateway_runtime;
+mod host_folders;
 pub mod logging;
 mod managed_policy;
 mod mcp_config;
@@ -834,6 +835,9 @@ pub async fn rehome_configured_secrets(
     secret_rehome::rehome_secrets(&*store, &*secret_provider(config)).await
 }
 
+// Every parameter is one optional native bridge an embedding may supply;
+// bundling them into a struct would only rename the arity.
+#[allow(clippy::too_many_arguments)]
 async fn bind_inner(
     config: Config,
     client_executor_id: Option<Uuid>,

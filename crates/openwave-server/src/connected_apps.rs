@@ -16,9 +16,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use openwave_core::connected_app::ConnectedAppKind;
-use openwave_core::id::ConnectedAppId;
+use openwave_core::id::{ConnectedAppId, HostRootId};
+use openwave_core::local_app::AppGrantBinding;
 use openwave_core::SecretProvider;
 
+use crate::host_folders::folder_fingerprint;
 use crate::openapi_catalog::OperationCatalog;
 use crate::rest_executor::{
     CredentialPlacement, ReqwestRestTransport, RestApiTarget, RestCredential, RestExecuteError,
@@ -184,6 +186,54 @@ pub(crate) async fn current_app_fingerprints(
         );
     }
     Ok(current)
+}
+
+/// The live surface grant enforcement compares pinned fingerprints against,
+/// across connected apps and connected folders — the one lookup the grant,
+/// invoke, and library surfaces share.
+pub(crate) struct CurrentFingerprints {
+    /// Configured connected apps by record id.
+    pub(crate) apps: BTreeMap<ConnectedAppId, AppFingerprint>,
+    /// Host-approved connected folders, root id → display name. Empty when
+    /// this embedding has no host-folder seam, so every folder binding fails
+    /// closed to "not connected".
+    pub(crate) folders: BTreeMap<HostRootId, String>,
+}
+
+impl CurrentFingerprints {
+    /// Whether one granted binding still pins what its target carries right
+    /// now. A missing record or a disconnected folder is a mismatch, never a
+    /// match.
+    pub(crate) fn grant_binding_current(&self, binding: &AppGrantBinding) -> bool {
+        match binding {
+            AppGrantBinding::Tools(binding) => self
+                .apps
+                .get(&binding.app)
+                .is_some_and(|app| app.fingerprint == binding.fingerprint),
+            AppGrantBinding::Operations(binding) => self
+                .apps
+                .get(&binding.app)
+                .is_some_and(|app| app.fingerprint == binding.fingerprint),
+            AppGrantBinding::Folder(binding) => {
+                self.folders.contains_key(&binding.folder)
+                    && folder_fingerprint(binding.folder, binding.access) == binding.fingerprint
+            }
+        }
+    }
+}
+
+/// Read the whole current fingerprint surface, live per request.
+pub(crate) async fn current_fingerprints(
+    state: &AppState,
+) -> openwave_core::Result<CurrentFingerprints> {
+    let apps = current_app_fingerprints(state).await?;
+    let mut folders = BTreeMap::new();
+    if let Some(host) = &state.host_folders {
+        for folder in host.approved_roots().await? {
+            folders.insert(folder.root_id, folder.display_name);
+        }
+    }
+    Ok(CurrentFingerprints { apps, folders })
 }
 
 /// Every stored `rest_api` record whose definition parses, read live.

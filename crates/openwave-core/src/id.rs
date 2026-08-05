@@ -127,7 +127,7 @@ impl ChunkId {
 /// This is product projection data, not authority: possession of an id never
 /// grants access to the corresponding host path. The broker independently
 /// validates live attachments, consent, capabilities, and revocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, TS)]
 #[serde(transparent)]
 pub struct HostRootId(Uuid);
 

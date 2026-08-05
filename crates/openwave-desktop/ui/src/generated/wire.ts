@@ -175,18 +175,32 @@ revisions: Array<AppRevisionSummary>, };
 /**
  * One current-manifest binding, projected for the consent sheet.
  *
- * Exactly one of `tools` and `operation_ids` is present, matching the
- * binding's vocabulary: mounted MCP tools for an `mcp_server` binding,
- * declared operations for a `rest_api` binding.
+ * Exactly one of `app` and `folder` is present, matching what the binding
+ * names. An app-keyed row carries `tools` or `operation_ids` per its
+ * vocabulary; a folder row carries `access`. The sheet derives the
+ * combined-consent exfiltration warning (docs/folder-bindings.md) from the
+ * rows themselves: a manifest with both a folder row and an operations row
+ * can read files and reach the network.
  */
 export type AppGrantBindingState = { 
 /**
- * Connected app the manifest binds, by record id.
+ * Connected app the manifest binds, by record id, for an app-keyed
+ * binding.
  */
-app: ConnectedAppId, 
+app: ConnectedAppId | null, 
 /**
- * The connected app's display name, absent when no record with that id
- * is configured — the sheet says so instead of showing a raw id alone.
+ * Connected folder the manifest binds, by broker root id, for a folder
+ * binding.
+ */
+folder: HostRootId | null, 
+/**
+ * The access level a folder binding requests.
+ */
+access: FolderAccess | null, 
+/**
+ * The bound connected app's or folder's display name, absent when
+ * nothing configured or approved answers to the id — the sheet says so
+ * instead of showing a raw id alone.
  */
 name: string | null, 
 /**
@@ -201,15 +215,14 @@ tools: Array<string> | null,
 operation_ids: Array<string> | null, 
 /**
  * Whether the live grant covers every listed capability under this
- * connected app and the app's current definition still matches the
- * granted fingerprint.
+ * binding and its target still matches the granted fingerprint.
  */
 granted: boolean, 
 /**
- * Whether a grant names this connected app but its definition changed
- * (or the record disappeared) since consent — the "reconfigured since
- * you agreed" affordance, distinct from a binding that was simply never
- * granted.
+ * Whether a grant names this binding's target but it changed — a
+ * reconfigured record, a disconnected folder — since consent: the
+ * "changed since you agreed" affordance, distinct from a binding that
+ * was simply never granted.
  */
 definition_changed: boolean, };
 
@@ -217,9 +230,9 @@ definition_changed: boolean, };
  * Renderer-safe grant state for one app: the consent sheet's whole input.
  *
  * `bindings` follows the app's **current** revision's manifest — ids and
- * names only. The definitions behind the connected apps, and any environment
- * or credential values they select, are deliberately absent from this
- * projection.
+ * names only. The definitions behind the connected apps, the paths behind
+ * the folders, and any environment or credential values they select, are
+ * deliberately absent from this projection.
  */
 export type AppGrantState = { 
 /**
@@ -230,7 +243,8 @@ export type AppGrantState = {
  */
 granted: boolean, 
 /**
- * The current manifest's bindings, one entry per bound connected app.
+ * The current manifest's bindings, one entry per bound connected app or
+ * folder.
  */
 bindings: Array<AppGrantBindingState>, };
 
@@ -933,6 +947,20 @@ export type ExecFileRejectionReason = "stale" | "snapshot_unavailable" | "staged
  * Whether an applied file can still be safely reverted now.
  */
 export type ExecFileUndoAvailability = "available" | "already_undone" | "stale" | "not_available";
+
+/**
+ * The access level of a folder binding.
+ *
+ * Consent-bearing: the level is part of what the user grants and part of
+ * the binding's fingerprint, so widening `read` to `read_write` always
+ * re-prompts.
+ * The access level of a folder binding.
+ *
+ * Consent-bearing: the level is part of what the user grants and part of
+ * the binding's fingerprint, so widening `read` to `read_write` always
+ * re-prompts.
+ */
+export type FolderAccess = "read" | "read_write";
 
 /**
  * One entitled connected app, with the slugs of the MCP endpoints that
