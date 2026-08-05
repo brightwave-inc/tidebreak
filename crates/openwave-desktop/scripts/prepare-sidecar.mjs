@@ -26,6 +26,7 @@ const cargoArgs = [
   "openwave-host-broker",
   "--bin",
   "openwave-host-broker",
+  "--locked",
 ];
 if (release) cargoArgs.push("--release");
 if (configuredTarget) cargoArgs.push("--target", configuredTarget);
