@@ -14,6 +14,8 @@ type ToolCardShellProps = {
   badge: ReactNode;
   /** Open on mount, which is worth doing only while work is still happening. */
   defaultExpanded?: boolean;
+  /** Extra card-level classes, e.g. a failure tint on the border. */
+  className?: string;
   children: ReactNode;
   /** Assistive label; the visible title is usually not the whole sentence. */
   label: string;
@@ -34,6 +36,7 @@ export function ToolCardShell({
   titleClassName,
   badge,
   defaultExpanded = false,
+  className,
   children,
   label,
 }: ToolCardShellProps) {
@@ -42,7 +45,10 @@ export function ToolCardShell({
 
   return (
     <section
-      className="bg-background max-w-prose overflow-hidden rounded-lg border"
+      className={cn(
+        "bg-background max-w-prose overflow-hidden rounded-lg border",
+        className,
+      )}
       aria-label={label}
       role="status"
       aria-live="polite"

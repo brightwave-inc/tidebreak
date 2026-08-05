@@ -1,12 +1,15 @@
 import { useEffect, useId, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronRight, Clock, Terminal, X } from "lucide-react";
 
 import type { AgentActivityHistoryEntry } from "./api";
 import { agentActivityHistoryLabel } from "./AgentRunDisplay";
+import { ToolCardShell } from "./ToolCardShell";
 import { ToolIcon } from "./ToolIcon";
 import { execCommandHeadline } from "./ToolPreview";
 import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 export type AgentActivityState = {
@@ -146,57 +149,59 @@ export function AgentActivityTimeline({
         >
           {state.items.map((entry, index) => {
             const tone = activityOutcomeTone(entry.outcome);
-            const headline = activityHeadline(entry.detail);
-            const exitCode = failedExitCode(entry);
+            const execDetail =
+              entry.detail?.kind === "exec" ? entry.detail : undefined;
+            const headline =
+              execDetail === undefined ? activityHeadline(entry.detail) : null;
             return (
               <li
                 key={`${entry.at}:${index}`}
-                className="flex min-w-0 items-center gap-1.5"
+                className="flex min-w-0 flex-col gap-1.5"
               >
-                <div
-                  className="absolute -left-px -translate-x-1/2 bg-background py-0.5 text-muted-foreground [&_svg]:size-4"
-                  aria-hidden="true"
-                >
-                  <ToolIcon name={entry.kind} />
-                </div>
-                <ToolStatusIcon
-                  tone={tone}
-                  className={cn(
-                    "size-4 shrink-0",
-                    tone === "failed" && "text-critical",
-                  )}
-                />
-                <span
-                  className={cn(
-                    "min-w-0 truncate font-medium text-foreground",
-                    headline === null && "flex-1",
-                    tone === "running" && "animate-pulse",
-                  )}
-                >
-                  {agentActivityHistoryLabel(entry)}
-                </span>
-                {headline !== null && (
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <div
+                    className="absolute -left-px -translate-x-1/2 bg-background py-0.5 text-muted-foreground [&_svg]:size-4"
+                    aria-hidden="true"
+                  >
+                    <ToolIcon name={entry.kind} />
+                  </div>
+                  <ToolStatusIcon
+                    tone={tone}
+                    className={cn(
+                      "size-4 shrink-0",
+                      tone === "failed" && "text-critical",
+                    )}
+                  />
                   <span
                     className={cn(
-                      "min-w-0 flex-1 truncate text-xs text-muted-foreground",
-                      headline.monospace && "font-mono",
+                      "min-w-0 truncate font-medium text-foreground",
+                      headline === null && "flex-1",
                       tone === "running" && "animate-pulse",
                     )}
                   >
-                    {headline.text}
+                    {agentActivityHistoryLabel(entry)}
                   </span>
+                  {headline !== null && (
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1 truncate text-xs text-muted-foreground",
+                        headline.monospace && "font-mono",
+                        tone === "running" && "animate-pulse",
+                      )}
+                    >
+                      {headline.text}
+                    </span>
+                  )}
+                  <time
+                    className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground"
+                    dateTime={entry.at}
+                  >
+                    {formatActivityTime(entry.at)}
+                  </time>
+                </div>
+                {execDetail !== undefined && (
+                  <ExecActivityCard detail={execDetail} outcome={entry.outcome} />
                 )}
-                {exitCode !== null && (
-                  <span className="shrink-0 text-xs font-medium text-critical">
-                    Exit {exitCode}
-                  </span>
-                )}
-                <time
-                  className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground"
-                  dateTime={entry.at}
-                >
-                  {formatActivityTime(entry.at)}
-                </time>
               </li>
             );
           })}
@@ -210,9 +215,9 @@ export function AgentActivityTimeline({
  * The step's own headline, next to the generic label.
  *
  * "Ran a command" is the same sentence whichever command ran, so the validated
- * detail is what tells the steps apart. It stays a truncated single line: this
- * row is all the renderer has, because no output is retained for a background
- * run's calls.
+ * detail is what tells the steps apart. Non-exec steps carry it inline; a
+ * command gets a full card instead ({@link ExecActivityCard}), so this returns
+ * nothing for exec detail.
  */
 function activityHeadline(
   detail: AgentActivityHistoryEntry["detail"],
@@ -220,10 +225,7 @@ function activityHeadline(
   if (detail === undefined) return null;
   switch (detail.kind) {
     case "exec":
-      return {
-        text: execCommandHeadline(detail.command, detail.args),
-        monospace: true,
-      };
+      return null;
     case "search":
       return { text: detail.query, monospace: false };
     case "file":
@@ -231,16 +233,97 @@ function activityHeadline(
   }
 }
 
+type ExecActivityDetail = Extract<
+  NonNullable<AgentActivityHistoryEntry["detail"]>,
+  { kind: "exec" }
+>;
+
 /**
- * The exit status of a command that failed, when the receipt recorded one. A
- * non-zero exit is the most specific thing the timeline can say about a failed
- * step, the same way the foreground badge prefers it over "failed".
+ * A command step's card: the same collapsed chrome a foreground exec card
+ * uses — monospace command, outcome pill, chevron. The body holds only the
+ * full unelided command line, because a background run's output is not
+ * retained; a failed card starts open so the reader lands on what failed.
  */
-function failedExitCode(entry: AgentActivityHistoryEntry): number | null {
-  if (entry.outcome !== "failed") return null;
-  const detail = entry.detail;
-  if (detail?.kind !== "exec" || detail.exit_code === undefined) return null;
-  return detail.exit_code;
+function ExecActivityCard({
+  detail,
+  outcome,
+}: {
+  detail: ExecActivityDetail;
+  outcome: AgentActivityHistoryEntry["outcome"];
+}) {
+  const headline = execCommandHeadline(detail.command, detail.args);
+  const failed = outcome === "failed";
+  return (
+    <ToolCardShell
+      icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
+      title={headline}
+      titleClassName="font-mono"
+      badge={<ExecActivityBadge outcome={outcome} exitCode={detail.exit_code} />}
+      defaultExpanded={failed}
+      className={cn(failed && "border-critical/35")}
+      label={failed ? `Failed command: ${headline}` : `Command: ${headline}`}
+    >
+      <div className="flex flex-col gap-1.5 p-2">
+        <pre className="bg-muted text-muted-foreground rounded-md p-2 text-xs break-words whitespace-pre-wrap">
+          {headline}
+        </pre>
+        <p className="text-muted-foreground px-0.5 text-[11px]">
+          Output isn't retained for background runs.
+        </p>
+      </div>
+    </ToolCardShell>
+  );
+}
+
+/**
+ * The card's outcome pill, mirroring the foreground exec badge vocabulary. A
+ * recorded non-zero exit outranks the generic "failed", exactly as it does on
+ * the foreground card.
+ */
+function ExecActivityBadge({
+  outcome,
+  exitCode,
+}: {
+  outcome: AgentActivityHistoryEntry["outcome"];
+  exitCode: number | undefined;
+}) {
+  switch (outcome) {
+    case "running":
+      return (
+        <Badge variant="outline" className="shrink-0 gap-1">
+          <Spinner className="size-3" aria-hidden="true" />
+          Running…
+        </Badge>
+      );
+    case "waiting":
+      return (
+        <Badge variant="outline" className="shrink-0 gap-1">
+          <Clock className="size-3" aria-hidden="true" />
+          Waiting
+        </Badge>
+      );
+    case "completed":
+      return (
+        <Badge variant="success" className="shrink-0 gap-1">
+          <Check className="size-3" aria-hidden="true" />
+          Done
+        </Badge>
+      );
+    case "failed":
+      return (
+        <Badge variant="outline" className="text-critical shrink-0 gap-1">
+          <X className="size-3" aria-hidden="true" />
+          {exitCode === undefined ? "Failed" : `Exit ${exitCode}`}
+        </Badge>
+      );
+    case "cancelled":
+      return (
+        <Badge variant="outline" className="text-muted-foreground shrink-0 gap-1">
+          <X className="size-3" aria-hidden="true" />
+          Stopped
+        </Badge>
+      );
+  }
 }
 
 function agentActivitySummaryLabel(summary: AgentActivitySummary): string {
