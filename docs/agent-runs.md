@@ -324,6 +324,20 @@ provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
 activity projection.
 
+`GET /chats/{chat_id}/agent-runs/{run_id}/activity` rebuilds the background
+run's ordered history from those durable checkpoints. Each item keeps the fixed
+kind, coarse outcome, and timestamp, and may add one typed headline: the bounded
+command vector and recorded exit code, the bounded public-web query, or the leaf
+name of the one delegated file. Command, argument, and query strings are
+model-authored: the display clamp bounds and de-spoofs them, but they may repeat
+anything the child already saw and are outside the host-field non-disclosure
+guarantee. The server does not directly copy stored stdout, stderr, search
+results, full broker paths, opaque root identities, provider identities,
+executor leases, or raw diagnostics. The only host-derived detail is the typed
+numeric exit code and delegated leaf name. The detail key is optional, so a call
+without a derivable headline retains the original three-field shape; no separate
+activity-history payload or database migration is involved.
+
 The desktop consumes that projection in two places. The transcript renders one
 status row per spawned child beside the delegation it came from, correlated by
 the snapshot's spawn-call id, and a background-agent panel renders the same
@@ -359,9 +373,9 @@ it, so a run that narrates for an hour costs a bounded number of rows and an
 observer that stops reading may find the oldest lines gone. What it does
 guarantee is order, and that a line already delivered is never delivered twice.
 The text is the run's own prose — the same class the terminal result already
-carries — and nothing else: no tool arguments, queries, results, folder or file
-identities, host paths, provider identities, executor leases, or raw
-diagnostics.
+carries. It may repeat information the run already saw, so the boundary promise
+is about provenance rather than content: the progress path does not directly
+copy stored tool arguments/results or host-owned identities into the stream.
 
 ## Reliability contract
 

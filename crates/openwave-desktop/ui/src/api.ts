@@ -403,9 +403,9 @@ export type AgentActivity = AgentActivitySnapshot;
 /**
  * One settled or live step in a background run's ordered activity history.
  *
- * Same closed vocabulary and posture as {@link AgentActivity}: the server
- * sends only a fixed kind, a coarse outcome, and a timestamp — never tool
- * inputs, queries, results, identities, paths, leases, or diagnostics.
+ * The wire may also carry an additive typed `detail`. This server-only slice
+ * intentionally discards it in {@link parseAgentActivityHistory}; preserving it
+ * waits for the renderer slice's closed, bounded, kind-matched validator.
  */
 export type AgentActivityHistoryEntry = AgentActivityHistoryItem;
 

@@ -1,8 +1,10 @@
 //! Closed renderer projections of what a tool will do, and what it did.
 //!
-//! The renderer boundary carries no tool arguments and no tool output. These
-//! types are the deliberate exceptions: a tool may opt in to showing a human
-//! the action under review and the result it produced, field by field.
+//! The renderer boundary carries neither raw argument objects nor raw tool
+//! output. These types are the deliberate exceptions: a tool may opt in to
+//! showing a human selected fields, one by one. Model-authored strings remain
+//! untrusted text and may repeat information the model already saw; the
+//! boundary guarantee is about which stored and host-owned fields are copied.
 //!
 //! They are not passthroughs. Each variant enumerates exactly what a person
 //! needs in order to consent to an action or to understand its outcome, values
@@ -34,6 +36,101 @@ pub const MAX_RESULT_ENTRY_CHARS: usize = 200;
 
 /// Most rows a result preview lists before it counts the rest instead.
 pub const MAX_RESULT_ENTRIES: usize = 50;
+
+/// A bounded headline for one background-agent activity step.
+///
+/// This is deliberately smaller than [`ToolActionPreview`]. The command,
+/// arguments, and query are model-authored text: they are bounded for safe
+/// single-line presentation, but may repeat any information the background
+/// agent already saw and are therefore outside the host-field non-disclosure
+/// guarantee. The projection never copies stored result text or host-only
+/// broker identity directly. Its only host-derived values are a typed numeric
+/// exit code and the leaf name of the canonically admitted delegated file.
+///
+/// Command and search fields use the foreground approval-card projection so
+/// both surfaces share the same sanitization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentActivityDetail {
+    /// The argument vector a background command ran and its settled exit code,
+    /// when the immutable receipt recorded one.
+    Exec {
+        command: String,
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        exit_code: Option<i32>,
+    },
+    /// One public-web query, trimmed and bounded like its approval preview.
+    Search { query: String },
+    /// The bounded leaf name of the one canonically admitted delegated file.
+    File { name: String },
+}
+
+impl AgentActivityDetail {
+    /// Project the headline fields admitted for one tool call.
+    ///
+    /// Only the two model-authored call shapes reached by background history
+    /// are admitted here. Malformed or unrecognized arguments project no
+    /// detail instead of falling back to raw JSON. Both are first projected
+    /// through [`ToolActionPreview::build`], reusing its sanitization exactly.
+    #[must_use]
+    pub fn build(tool_name: &str, arguments: &Value) -> Option<Self> {
+        match ToolActionPreview::build(tool_name, arguments) {
+            Some(ToolActionPreview::Exec { command, args, .. }) => {
+                return Some(Self::Exec {
+                    command,
+                    args,
+                    exit_code: None,
+                });
+            }
+            Some(ToolActionPreview::WebSearch { query, .. }) => {
+                return Some(Self::Search { query });
+            }
+            _ => None,
+        }
+    }
+
+    /// Project the one file delegated to a background run by base name only.
+    ///
+    /// The admission carries a root-relative path because the trusted broker
+    /// needs it; the activity headline needs only the final display name.
+    #[must_use]
+    pub fn delegated_file(relative_path: &str) -> Option<Self> {
+        let name = std::path::Path::new(relative_path).file_name()?.to_str()?;
+        Some(Self::File {
+            name: clamp(name, MAX_ACTION_FIELD_CHARS)?,
+        })
+    }
+
+    /// Attach an exec exit code from the immutable receipt's first line.
+    ///
+    /// A live call has no receipt, a signal is recorded as `exit: signal`, and
+    /// setup failures carry no `exit:` line; all three keep the field absent.
+    #[must_use]
+    pub fn with_exec_result(self, result: &str) -> Self {
+        let exit_code = result
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("exit: "))
+            .and_then(|code| code.parse::<i32>().ok());
+        match (self, exit_code) {
+            (
+                Self::Exec {
+                    command,
+                    args,
+                    exit_code: _,
+                },
+                Some(exit_code),
+            ) => Self::Exec {
+                command,
+                args,
+                exit_code: Some(exit_code),
+            },
+            (detail, _) => detail,
+        }
+    }
+}
 
 /// The action a call will take, in a form a human can inspect.
 ///
@@ -822,15 +919,15 @@ fn search_query(arguments: &Value) -> Option<String> {
     )
 }
 
-/// Bound one optional single-line preview field, dropping control characters
-/// that could forge card structure. An absent, empty, or all-control field is
-/// not presentable.
+/// Bound one optional single-line preview field, dropping control characters,
+/// Unicode separators, and directional formatting that could forge card
+/// structure. An absent, empty, or entirely-forbidden field is not presentable.
 fn clamped_field(value: Option<&Value>) -> Option<String> {
     clamp(value?.as_str()?, MAX_ACTION_FIELD_CHARS)
 }
 
-/// Bound a list of single-line preview fields: surplus entries elided,
-/// unreadable ones dropped.
+/// Bound a list of single-line preview fields: surplus entries are elided and
+/// unreadable or entirely-forbidden ones are dropped.
 fn clamped_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -896,14 +993,26 @@ fn list_survives_clamp(value: Option<&Value>) -> bool {
 /// nothing.
 fn survives_clamp(value: &str) -> bool {
     !value.is_empty()
-        && !value.chars().any(char::is_control)
+        && !value.chars().any(preview_formatting_character)
         && value.chars().count() <= MAX_ACTION_FIELD_CHARS
+}
+
+/// Characters that can break a one-line preview or spoof its visual order.
+///
+/// This clamp is shared by foreground approval previews and background
+/// activity details, so extending it hardens both renderer surfaces together.
+fn preview_formatting_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 fn clamp(value: &str, max_chars: usize) -> Option<String> {
     let cleaned: String = value
         .chars()
-        .filter(|character| !character.is_control())
+        .filter(|character| !preview_formatting_character(*character))
         .take(max_chars)
         .collect();
     (!cleaned.is_empty()).then_some(cleaned)
@@ -1054,6 +1163,123 @@ mod tests {
                 files: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn agent_activity_detail_bounds_hostile_text_and_parses_only_a_first_line_exit() {
+        let long_command = "x".repeat(MAX_ACTION_FIELD_CHARS + 8);
+        let many_args = (0..MAX_ACTION_ARGS + 2)
+            .map(|index| format!("arg-{index}"))
+            .collect::<Vec<_>>();
+        let cases: Vec<(&str, &str, serde_json::Value, Option<AgentActivityDetail>)> = vec![
+            (
+                "ASCII controls are removed",
+                crate::SANDBOX_EXEC_TOOL,
+                json!({"command": "py\nthon", "args": ["safe\u{0}arg"]}),
+                Some(AgentActivityDetail::Exec {
+                    command: "python".into(),
+                    args: vec!["safearg".into()],
+                    exit_code: None,
+                }),
+            ),
+            (
+                "Unicode separators are removed",
+                crate::SANDBOX_WEB_SEARCH_TOOL,
+                json!({"query": "first\u{2028}second\u{2029}third"}),
+                Some(AgentActivityDetail::Search {
+                    query: "firstsecondthird".into(),
+                }),
+            ),
+            (
+                "directional formatting is removed",
+                crate::SANDBOX_EXEC_TOOL,
+                json!({"command": "python3", "args": ["report\u{202e}cod\u{2067}.exe"]}),
+                Some(AgentActivityDetail::Exec {
+                    command: "python3".into(),
+                    args: vec!["reportcod.exe".into()],
+                    exit_code: None,
+                }),
+            ),
+            (
+                "absolute-looking model text remains model text",
+                crate::SANDBOX_EXEC_TOOL,
+                json!({"command": "cat", "args": ["/Users/alice/private.txt"]}),
+                Some(AgentActivityDetail::Exec {
+                    command: "cat".into(),
+                    args: vec!["/Users/alice/private.txt".into()],
+                    exit_code: None,
+                }),
+            ),
+            (
+                "connected-folder paths are not an admitted detail source",
+                crate::READ_CONNECTED_FILE_TOOL,
+                json!({"path": "/Users/alice/private.txt"}),
+                None,
+            ),
+            (
+                "fields and argument counts are clamped",
+                crate::SANDBOX_EXEC_TOOL,
+                json!({"command": long_command, "args": many_args}),
+                Some(AgentActivityDetail::Exec {
+                    command: "x".repeat(MAX_ACTION_FIELD_CHARS),
+                    args: (0..MAX_ACTION_ARGS)
+                        .map(|index| format!("arg-{index}"))
+                        .collect(),
+                    exit_code: None,
+                }),
+            ),
+        ];
+        for (case, tool, arguments, expected) in cases {
+            assert_eq!(
+                AgentActivityDetail::build(tool, &arguments),
+                expected,
+                "{case}"
+            );
+        }
+
+        // The same predicate guards foreground exact-action previews: a value
+        // needing separator or bidi sanitization must not create a narrow grant.
+        for command in ["line\u{2028}break", "right\u{202e}left"] {
+            assert!(!ToolActionPreview::describes_exactly(
+                "exec",
+                &json!({"command": command})
+            ));
+        }
+
+        // An invalid legacy admission can expose at most its leaf, never the
+        // absolute path it arrived with.
+        assert_eq!(
+            AgentActivityDetail::delegated_file("/Users/alice/private.txt"),
+            Some(AgentActivityDetail::File {
+                name: "private.txt".into(),
+            })
+        );
+
+        let base = AgentActivityDetail::Exec {
+            command: "python3".into(),
+            args: vec!["report.py".into()],
+            exit_code: None,
+        };
+        for (case, result, exit_code) in [
+            ("numeric first line", "exit: 17\nexit: 99", Some(17)),
+            ("numeric second line", "duration_ms: 1\nexit: 17", None),
+            ("signal", "exit: signal\nduration_ms: 1", None),
+            (
+                "setup failure",
+                "The command could not be run in this task's workspace.",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                base.clone().with_exec_result(result),
+                AgentActivityDetail::Exec {
+                    command: "python3".into(),
+                    args: vec!["report.py".into()],
+                    exit_code,
+                },
+                "{case}"
+            );
+        }
     }
 
     /// The exec card lists the durable outputs the command published. Only
