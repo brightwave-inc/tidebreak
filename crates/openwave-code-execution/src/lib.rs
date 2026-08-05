@@ -23,6 +23,7 @@ pub mod office_render;
 mod output;
 pub mod overlay;
 pub mod package_cache;
+pub mod plugins;
 mod preview;
 mod receipt;
 mod remote;
@@ -52,6 +53,10 @@ pub use overlay::{
 };
 pub use package_cache::{
     PromotionReport, SharedPackageCache, PACKAGE_CACHE_DIR, PACKAGE_CACHE_ENV,
+};
+pub use plugins::{
+    is_valid_plugin_name, is_valid_plugin_router_preamble, load_plugins, parse_plugin_manifest,
+    LoadedPlugin, PluginCategory, PluginPackage, PluginParseError, PLUGIN_MANIFEST_FILE,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use remote::RemoteSessionPool;

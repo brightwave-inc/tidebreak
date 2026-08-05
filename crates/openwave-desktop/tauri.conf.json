@@ -62,7 +62,8 @@
     },
     "resources": {
       "../../scripts/exec-documents/": "exec-scripts/",
-      "../../skills/": "skills/"
+      "../../skills/": "skills/",
+      "../../plugins/": "plugins/"
     },
     "externalBin": [
       "binaries/openwave-host-broker"

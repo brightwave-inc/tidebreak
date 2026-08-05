@@ -63,6 +63,12 @@ pub struct Config {
     /// application resources; other embeddings leave it absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_skills_dir: Option<PathBuf>,
+    /// Trusted source directory for the built-in plugin manifests that group
+    /// those skills. Desktop resolves this from its signed application
+    /// resources; other embeddings leave it absent and every skill stands
+    /// alone in the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_plugins_dir: Option<PathBuf>,
     /// Whether newly spawned background agent runs may execute inside a local
     /// container when the configured runtime is available. Disabled by default,
     /// so existing installations keep the in-process scheduler path.
@@ -95,6 +101,13 @@ impl Config {
         self.data_dir.join("skills")
     }
 
+    /// The per-install directory user-authored plugins are read from,
+    /// alongside `{data_dir}/skills` and derived the same way.
+    #[must_use]
+    pub fn user_plugins_dir(&self) -> PathBuf {
+        self.data_dir.join("plugins")
+    }
+
     /// A desktop-profile config rooted at `data_dir`.
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -104,6 +117,7 @@ impl Config {
             bundle_id: None,
             exec_scripts_dir: None,
             exec_skills_dir: None,
+            exec_plugins_dir: None,
             container_execution_enabled: false,
             container_image: None,
             auth_tokens_file: None,
@@ -173,6 +187,7 @@ impl Config {
             bundle_id: None,
             exec_scripts_dir: None,
             exec_skills_dir: None,
+            exec_plugins_dir: None,
             container_execution_enabled,
             container_image,
             auth_tokens_file,
