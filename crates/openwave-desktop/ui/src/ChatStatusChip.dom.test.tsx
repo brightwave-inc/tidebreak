@@ -3,10 +3,16 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { AgentRun, ApiClient, Chat, ModelInfo } from "./api";
+import type { AgentRun, ApiClient, Chat } from "./api";
 import { ChatStatusChip } from "./ChatStatusChip";
 import { useChatSessionStore } from "./ChatSessionStore";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
+
+vi.mock("./deliverables", () => ({
+  listDeliverables: vi.fn().mockResolvedValue({
+    deliverables: [{ id: "out-1" }, { id: "out-2" }],
+  }),
+}));
 
 const chat = {
   id: "chat-1",
@@ -15,10 +21,6 @@ const chat = {
   model: "sonnet",
   permission_mode: "auto",
 } as unknown as Chat;
-
-const models = [
-  { id: "sonnet", display_name: "Claude Sonnet", provider: "anthropic", available: true },
-] as unknown as ModelInfo[];
 
 const folder = {
   rootId: "root-1",
@@ -41,22 +43,20 @@ function renderChip(runs: AgentRun[] = []) {
   const client = {
     listAgentRuns: vi.fn().mockResolvedValue(runs),
   } as unknown as ApiClient;
+  const onOpenOutputs = vi.fn();
   const onOpenFolders = vi.fn();
   const onOpenAgent = vi.fn();
   render(
     <ChatStatusChip
       client={client}
       chat={chat}
-      models={models}
-      defaultModelKey={null}
       folders={[folder]}
-      onModelChange={vi.fn()}
-      onPermissionModeChange={vi.fn()}
+      onOpenOutputs={onOpenOutputs}
       onOpenFolders={onOpenFolders}
       onOpenAgent={onOpenAgent}
     />,
   );
-  return { onOpenFolders, onOpenAgent };
+  return { onOpenOutputs, onOpenFolders, onOpenAgent };
 }
 
 beforeEach(() => {
@@ -67,20 +67,18 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("names the chat's permission mode and opens its details", async () => {
-  const { onOpenFolders } = renderChip();
+it("names the chat's permission mode and opens its chat-scoped places", async () => {
+  const { onOpenOutputs, onOpenFolders } = renderChip();
 
   const chip = screen.getByRole("button", { name: "Chat status: Auto" });
   expect(chip).toHaveTextContent("Auto");
 
   await userEvent.click(chip);
-  expect(await screen.findByText("Model")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /^Model:/ })).toHaveTextContent(
-    "Claude Sonnet",
-  );
-  expect(screen.getByRole("button", { name: "Permissions: Auto" })).toBeInTheDocument();
+  await userEvent.click(await screen.findByText("2 outputs"));
+  expect(onOpenOutputs).toHaveBeenCalled();
 
-  await userEvent.click(screen.getByText("Notes · No access"));
+  await userEvent.click(chip);
+  await userEvent.click(await screen.findByText("Notes · No access"));
   expect(onOpenFolders).toHaveBeenCalled();
 });
 

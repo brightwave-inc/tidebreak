@@ -688,12 +688,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         <ChatStatusChip
           client={client}
           chat={chat}
-          models={models}
-          defaultModelKey={defaultModelKey}
           folders={folders.items}
-          disabled={deletingChatId !== null}
-          onModelChange={onModelChange}
-          onPermissionModeChange={onPermissionModeChange}
+          onOpenOutputs={() => openPanel({ type: "outputs" })}
           onOpenFolders={() => openPanel({ type: "folders" })}
           onOpenAgent={(runId) => openPanel({ type: "agent", runId })}
         />

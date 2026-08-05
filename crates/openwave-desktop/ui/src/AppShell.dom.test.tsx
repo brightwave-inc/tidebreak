@@ -341,12 +341,14 @@ describe("app shell", () => {
     expect(await screen.findByTestId("transcript")).toBeInTheDocument();
   });
 
-  it("opens panels as tabs beside the conversation, from the sidebar", async () => {
+  it("opens panels as tabs beside the conversation", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
-    await user.click(screen.getByRole("button", { name: "Folders" }));
+    // Chat-scoped places open from the chat's own chip, not the rail.
+    await user.click(screen.getByRole("button", { name: /^Chat status:/ }));
+    await user.click(await screen.findByRole("button", { name: /Folders/ }));
 
     expect(await screen.findByTestId("folders")).toBeInTheDocument();
     // The conversation stays mounted beside it rather than being replaced.
@@ -376,13 +378,13 @@ describe("app shell", () => {
     const user = userEvent.setup();
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    await user.click(screen.getByRole("button", { name: "Folders" }));
-    await screen.findByTestId("folders");
+    await user.click(screen.getByRole("button", { name: "Apps" }));
+    await screen.findByTestId("apps");
 
-    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Close Apps" }));
 
     await waitFor(() => expect(router.state.location.search).toEqual({}));
-    expect(screen.queryByTestId("folders")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("apps")).not.toBeInTheDocument();
   });
 
   it("restores the arrangement a deep link describes", async () => {
@@ -425,24 +427,22 @@ describe("app shell", () => {
     },
   );
 
-  it("gives each route only the controls that route can act on", async () => {
-    const conversationOnly = ["Outputs", "Folders"];
-
+  it("keeps chat-scoped places behind the chat's own chip", async () => {
     await mountApp();
     await screen.findByText("How can I help?");
-    // Not disabled — absent. Home has no conversation for these to describe,
-    // and offering them here is what let the rail navigate into whichever
-    // chat happened to have been open last.
-    for (const label of conversationOnly) {
-      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
-    }
+    // Not disabled — absent. Home has no conversation for the chip to
+    // describe, and the rail itself carries nothing chat-scoped anymore.
+    expect(
+      screen.queryByRole("button", { name: /^Chat status:/ }),
+    ).not.toBeInTheDocument();
     cleanup();
 
+    const user = userEvent.setup();
     await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    for (const label of conversationOnly) {
-      expect(screen.getByRole("button", { name: label })).toBeEnabled();
-    }
+    await user.click(screen.getByRole("button", { name: /^Chat status:/ }));
+    expect(await screen.findByRole("button", { name: /Outputs/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Folders/ })).toBeEnabled();
   });
 
   it("switches to another conversation from inside one", async () => {
