@@ -440,6 +440,7 @@ fn postgres_spawn_checkpoint_request(
         },
         max_active_background_agents: AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
+        approval_gated: false,
     }
 }
 
