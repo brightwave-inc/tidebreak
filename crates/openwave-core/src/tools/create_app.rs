@@ -37,6 +37,9 @@ use super::definitions;
 pub struct CreateAppTool {
     store: Arc<dyn Store>,
     profile_data_dir: PathBuf,
+    /// Authoring-time lookup of approved connected folders, when this
+    /// embedding has one. Absent, folder bindings refuse at the door.
+    folders: Option<Arc<dyn crate::local_app::ApprovedFolderSource>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -48,11 +51,14 @@ pub(super) struct Arguments {
     )]
     bundle_html: String,
     #[schemars(description = "The app's manifest: its display name and the exact \
-                       capabilities it may call, grouped by connected app. Each \
-                       binding names a rest_api connected app by id (the tool \
-                       description lists the configured ids) and the declared \
-                       OpenAPI operationIds it may execute (`operation_ids`). \
-                       Mounted MCP tools cannot be bound.")]
+                       capabilities it may call, grouped by binding. A binding \
+                       either names a rest_api connected app by id with the \
+                       declared OpenAPI operationIds it may execute \
+                       (`{app, operation_ids}`), or an approved connected folder \
+                       by root id with an access level \
+                       (`{folder, access: \"read\"|\"read_write\"}`). The tool \
+                       description lists the available ids. Mounted MCP tools \
+                       cannot be bound.")]
     manifest: AppManifest,
     #[serde(default)]
     #[schemars(
@@ -71,7 +77,19 @@ impl CreateAppTool {
         Self {
             store,
             profile_data_dir,
+            folders: None,
         }
+    }
+
+    /// Let the door resolve folder bindings against the host's approved
+    /// connected folders (docs/folder-bindings.md).
+    #[must_use]
+    pub fn with_approved_folders(
+        mut self,
+        folders: Arc<dyn crate::local_app::ApprovedFolderSource>,
+    ) -> Self {
+        self.folders = Some(folders);
+        self
     }
 
     /// Verify the executing call is durably recorded in this conversation and
@@ -113,16 +131,43 @@ impl CreateAppTool {
             .await
             .map_err(|_| "could not read the configured connected apps".to_owned())?;
         for binding in &manifest.bindings {
-            // Folder bindings have a vocabulary but no dispatch yet: the door
-            // stays closed until the host-folder seam ships (see
-            // docs/folder-bindings.md), so nothing half-works in between.
-            let Some(binding_app) = binding.app() else {
-                return Err(
-                    "folder bindings are not yet available; bind a rest_api connected \
-                     app's operations with `operation_ids` instead"
-                        .to_owned(),
-                );
-            };
+            // A folder binding resolves against the host's approved
+            // connected folders — when this embedding has none, the door
+            // says so instead of admitting an ungrantable pin.
+            if let AppBinding::Folder(binding) = binding {
+                let Some(folders) = &self.folders else {
+                    return Err(
+                        "connected folders are not available here, so folder bindings \
+                         cannot be authored"
+                            .to_owned(),
+                    );
+                };
+                let approved = folders.approved_folders().await;
+                if !approved.iter().any(|(id, _)| *id == binding.folder) {
+                    let available: Vec<String> = approved
+                        .iter()
+                        .map(|(id, name)| format!("{id} ({name})"))
+                        .collect();
+                    return Err(if available.is_empty() {
+                        format!(
+                            "folder {} is not an approved connected folder, and none \
+                             are approved",
+                            binding.folder
+                        )
+                    } else {
+                        format!(
+                            "folder {} is not an approved connected folder; bind one \
+                             of: {}",
+                            binding.folder,
+                            available.join(", ")
+                        )
+                    });
+                }
+                continue;
+            }
+            let binding_app = binding
+                .app()
+                .expect("only folder bindings lack a connected app");
             let Some(app) = connected.iter().find(|app| app.id == binding_app) else {
                 let configured: Vec<String> = connected
                     .iter()
@@ -141,8 +186,8 @@ impl CreateAppTool {
                 });
             };
             match binding {
-                // Refused before app resolution above — a folder binding has
-                // no connected app to resolve.
+                // Handled above — a folder binding has no connected app to
+                // resolve.
                 AppBinding::Folder(_) => {}
                 // The tools vocabulary is retired (#1332): MCP was the only
                 // bindable kind when local apps shipped, and REST operations
@@ -711,27 +756,75 @@ mod tests {
         }
     }
 
-    /// Folder bindings parse but the authoring door stays closed until the
-    /// host-folder seam ships (docs/folder-bindings.md) — nothing may publish
-    /// a manifest the consent route cannot yet grant.
+    /// The door resolves folder bindings against the host's approved
+    /// folders: no source (headless embeddings) refuses honestly, an
+    /// unapproved id refuses with the available folders spelled out, and an
+    /// approved one publishes (docs/folder-bindings.md).
     #[tokio::test]
-    async fn folder_bindings_are_refused_at_the_door_until_dispatch_exists() {
-        let fixture = fixture().await;
-        let (_, ctx) = fixture.recorded_call().await;
-        let manifest = json!({
-            "bundle_html": "<!doctype html><h1>Files</h1>",
-            "manifest": {
-                "name": "File browser",
-                "bindings": [{ "folder": Uuid::new_v4(), "access": "read" }],
-            },
-        });
-        let refused = fixture.tool.execute(&ctx, manifest).await.unwrap();
+    async fn folder_bindings_resolve_against_approved_folders_at_the_door() {
+        use crate::id::HostRootId;
+        use crate::local_app::ApprovedFolderSource;
+
+        struct StaticFolders(Vec<(HostRootId, String)>);
+
+        #[async_trait]
+        impl ApprovedFolderSource for StaticFolders {
+            async fn approved_folders(&self) -> Vec<(HostRootId, String)> {
+                self.0.clone()
+            }
+        }
+
+        let folder_manifest = |folder: Uuid| {
+            json!({
+                "bundle_html": "<!doctype html><h1>Files</h1>",
+                "manifest": {
+                    "name": "File browser",
+                    "bindings": [{ "folder": folder, "access": "read_write" }],
+                },
+            })
+        };
+
+        // Without a source, the door refuses honestly.
+        let sourceless = fixture().await;
+        let (_, ctx) = sourceless.recorded_call().await;
+        let refused = sourceless
+            .tool
+            .execute(&ctx, folder_manifest(Uuid::new_v4()))
+            .await
+            .unwrap();
         assert!(refused.is_error);
         assert!(
-            refused.content.contains("not yet available"),
+            refused.content.contains("not available here"),
             "{}",
             refused.content
         );
+
+        // With a source, an unapproved id refuses with the alternatives, and
+        // the approved id publishes.
+        let sourced = fixture().await;
+        let approved = HostRootId::from_uuid(Uuid::new_v4()).unwrap();
+        let tool = CreateAppTool::new(sourced.store.clone(), sourced.profile_dir.clone())
+            .with_approved_folders(Arc::new(StaticFolders(vec![(
+                approved,
+                "Tax documents".into(),
+            )])));
+        let (_, ctx) = sourced.recorded_call().await;
+        let refused = tool
+            .execute(&ctx, folder_manifest(Uuid::new_v4()))
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("Tax documents"),
+            "{}",
+            refused.content
+        );
+        let (_, ctx) = sourced.recorded_call().await;
+        let created = tool
+            .execute(&ctx, folder_manifest(*approved.as_uuid()))
+            .await
+            .unwrap();
+        assert!(!created.is_error, "{}", created.content);
     }
 
     #[tokio::test]

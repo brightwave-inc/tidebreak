@@ -21,6 +21,7 @@ export const MCP_APPS_PROTOCOL_VERSION = "2026-01-26";
 import {
   AppInvokeRefusalError,
   type AppInvokeResult,
+  type AppFolderInvokeResult,
   type AppRestInvokeResult,
   type McpAppPayload,
 } from "./api";
@@ -49,6 +50,20 @@ export type AppOperationInvoker = (
   parameters: unknown,
   body: unknown,
 ) => Promise<AppRestInvokeResult>;
+
+/**
+ * Executes one granted folder operation on the embedded view's behalf — the
+ * `fs/*` sibling of the other two invokers, wired to the same invoke route.
+ * Content crosses base64-encoded in both directions; rejections map to
+ * JSON-RPC errors exactly as tool- and operation-call rejections do.
+ */
+export type AppFolderInvoker = (
+  folder: string,
+  op: "list" | "read" | "write",
+  path?: string,
+  contentBase64?: string,
+  replace?: boolean,
+) => Promise<AppFolderInvokeResult>;
 
 const MIN_FRAME_HEIGHT = 40;
 const MAX_FRAME_HEIGHT = 800;
@@ -83,6 +98,12 @@ export function createMcpAppBridge(options: {
    * gets the methods its host deliberately declared.
    */
   invokeOperation?: AppOperationInvoker;
+  /**
+   * When present, the view may call `fs/list`, `fs/read`, and `fs/write`
+   * and the bridge forwards them here — the folder sibling, under the same
+   * capability-by-presence rule.
+   */
+  invokeFolder?: AppFolderInvoker;
 }): McpAppBridge {
   let viewInitialized = false;
   let payload: McpAppPayload | null = null;
@@ -229,6 +250,58 @@ export function createMcpAppBridge(options: {
           // bridge never interprets; the result object crosses back verbatim.
           // The reply is asynchronous; `post` already refuses after dispose.
           void invoke(operationId, params.parameters, params.body).then(
+            (result) => post({ jsonrpc: "2.0", id, result }),
+            (error: unknown) =>
+              post({
+                jsonrpc: "2.0",
+                id,
+                error:
+                  error instanceof AppInvokeRefusalError
+                    ? {
+                        code: -32000,
+                        message: error.message,
+                        data: { kind: error.kind },
+                      }
+                    : { code: -32000, message: String(error) },
+              }),
+          );
+          break;
+        }
+        case "fs/list":
+        case "fs/read":
+        case "fs/write": {
+          const invoke = options.invokeFolder;
+          if (!invoke) {
+            post({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32601, message: "Method not found" },
+            });
+            break;
+          }
+          const params = isRecord(message.params) ? message.params : {};
+          const folder = typeof params.folder === "string" ? params.folder : null;
+          if (!folder) {
+            post({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32602, message: `${method} needs a string folder` },
+            });
+            break;
+          }
+          const op =
+            method === "fs/list" ? "list" : method === "fs/read" ? "read" : "write";
+          const path = typeof params.path === "string" ? params.path : undefined;
+          const contentBase64 =
+            typeof params.content_base64 === "string"
+              ? params.content_base64
+              : undefined;
+          const replace =
+            typeof params.replace === "boolean" ? params.replace : undefined;
+          // The result object crosses back verbatim; the server owns the
+          // shape and the closed failure vocabulary. The reply is
+          // asynchronous; `post` already refuses after dispose.
+          void invoke(folder, op, path, contentBase64, replace).then(
             (result) => post({ jsonrpc: "2.0", id, result }),
             (error: unknown) =>
               post({

@@ -633,19 +633,24 @@ pub(crate) struct RestRosterApp {
 
 /// The roster text appended to `create_app`'s description: every configured
 /// `rest_api` connected app with the id a manifest binding names and a
-/// bounded sample of its declared operation ids.
+/// bounded sample of its declared operation ids, plus every approved
+/// connected folder with the root id a folder binding names.
 ///
 /// `mcp_server` records are deliberately absent: mounted-tool bindings are
 /// retired (#1332), so listing them would invite the model to author
 /// manifests the door refuses.
-fn connected_app_roster(rest: &[RestRosterApp]) -> String {
-    if rest.is_empty() {
-        return "\n\nNo rest_api connected apps are configured, so only manifests \
-                with an empty bindings list can be created."
+fn connected_app_roster(
+    rest: &[RestRosterApp],
+    folders: &[crate::host_folders::ApprovedFolder],
+) -> String {
+    if rest.is_empty() && folders.is_empty() {
+        return "\n\nNo rest_api connected apps are configured and no folders are \
+                connected, so only manifests with an empty bindings list can be \
+                created."
             .to_owned();
     }
     let mut roster =
-        String::from("\n\nConfigured connected apps (set each binding's `app` to an id):");
+        String::from("\n\nAvailable bindings (set each binding's `app` or `folder` to an id):");
     for app in rest {
         let mut listed: Vec<&str> = app
             .operation_ids
@@ -661,6 +666,14 @@ fn connected_app_roster(rest: &[RestRosterApp]) -> String {
             id = app.id,
             name = app.name,
             operations = listed.join(", ")
+        ));
+    }
+    for folder in folders {
+        roster.push_str(&format!(
+            "\n- {id} — {name} (folder): bind with `{{\"folder\": id, \"access\": \
+             \"read\"|\"read_write\"}}`",
+            id = folder.root_id,
+            name = folder.display_name,
         ));
     }
     roster
@@ -715,6 +728,10 @@ pub(crate) struct McpRuntime {
     /// manual transports; the gateway-endpoint transport is the sanctioned
     /// path and stays open.
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    /// The host-folder seam, for the `create_app` roster's folders section.
+    /// Installed after assembly on desktop embeddings (like
+    /// `AppState::host_folders`); unset, the roster lists no folders.
+    host_folders: std::sync::OnceLock<Arc<dyn crate::host_folders::HostFolders>>,
     next_epoch: AtomicU64,
 }
 
@@ -739,8 +756,15 @@ impl McpRuntime {
             secrets,
             gateway,
             os_policy,
+            host_folders: std::sync::OnceLock::new(),
             next_epoch: AtomicU64::new(1),
         }
+    }
+
+    /// Install the host-folder seam so the `create_app` roster can list
+    /// approved folders. At most once, at assembly.
+    pub(crate) fn set_host_folders(&self, host: Arc<dyn crate::host_folders::HostFolders>) {
+        let _ = self.host_folders.set(host);
     }
 
     /// One server's literal environment as stored, by record id. A missing or
@@ -1555,7 +1579,8 @@ impl McpRuntime {
         servers: HashMap<String, ManagedServer>,
     ) {
         let rest = self.rest_roster().await;
-        let registry = self.registry_with(&servers, &rest);
+        let folders = self.folder_roster().await;
+        let registry = self.registry_with(&servers, &rest, &folders);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
         state.ids = ids;
@@ -1620,13 +1645,33 @@ impl McpRuntime {
     /// configuration.
     async fn registry_for(&self, state: &RuntimeState) -> ToolRegistry {
         let rest = self.rest_roster().await;
-        self.registry_with(&state.servers, &rest)
+        let folders = self.folder_roster().await;
+        self.registry_with(&state.servers, &rest, &folders)
+    }
+
+    /// Every approved connected folder, for the roster's folders section.
+    /// Best-effort like the rest roster: no seam or an unreadable host
+    /// degrades to an absent section, never a failed registry rebuild.
+    async fn folder_roster(&self) -> Vec<crate::host_folders::ApprovedFolder> {
+        let Some(host) = self.host_folders.get() else {
+            return Vec::new();
+        };
+        match host.approved_roots().await {
+            Ok(folders) => folders,
+            Err(error) => {
+                tracing::warn!(
+                    "could not read approved folders for the create_app roster: {error}"
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn registry_with(
         &self,
         servers: &HashMap<String, ManagedServer>,
         rest: &[RestRosterApp],
+        folders: &[crate::host_folders::ApprovedFolder],
     ) -> ToolRegistry {
         let mut registry = self.base_tools.clone();
         for (name, server) in servers {
@@ -1646,7 +1691,7 @@ impl McpRuntime {
         if let Some(inner) = registry.server_tool(CREATE_APP_TOOL) {
             registry.register(Box::new(CreateAppWithRoster {
                 inner,
-                roster: connected_app_roster(rest),
+                roster: connected_app_roster(rest, folders),
             }));
         }
         registry
@@ -2929,7 +2974,7 @@ mod tests {
         // as "nothing bindable", not as a bindable app with a caveat.
         let state = runtime.state.lock().await;
         assert!(!state.definitions.is_empty());
-        let roster = connected_app_roster(&[]);
+        let roster = connected_app_roster(&[], &[]);
         assert!(
             roster.contains("No rest_api connected apps are configured"),
             "{roster}"
@@ -3168,7 +3213,7 @@ mod tests {
         // Even a healthy, connected server contributes nothing bindable to
         // the create_app roster: tool bindings are retired (#1332).
         {
-            let roster = connected_app_roster(&[]);
+            let roster = connected_app_roster(&[], &[]);
             assert!(!roster.contains("mcp__gateway__"), "{roster}");
             assert!(
                 roster.contains("No rest_api connected apps are configured"),

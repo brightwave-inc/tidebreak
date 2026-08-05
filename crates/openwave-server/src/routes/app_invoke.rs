@@ -62,6 +62,18 @@ pub struct AppInvokeRequest {
     pub parameters: Option<serde_json::Value>,
     /// JSON request body, only when the operation declares one.
     pub body: Option<serde_json::Value>,
+    /// Root id of the pinned connected folder, for a folder operation.
+    pub folder: Option<openwave_core::id::HostRootId>,
+    /// Folder operation: `list`, `read`, or `write`.
+    pub op: Option<String>,
+    /// Folder-relative path; empty or absent means the folder root for
+    /// `list`, and is invalid for `read` and `write`.
+    pub path: Option<String>,
+    /// Base64 content for a folder `write`.
+    pub content_base64: Option<String>,
+    /// Whether a folder `write` may replace an existing file; absent means a
+    /// create that refuses to overwrite.
+    pub replace: Option<bool>,
 }
 
 /// Result of a granted MCP-tool invoke, packaged for the sandboxed app frame.
@@ -194,9 +206,30 @@ enum InvokeSurface {
         arguments: serde_json::Value,
     },
     Operation(RestOperationRequest),
+    Folder {
+        folder: openwave_core::id::HostRootId,
+        path: String,
+        op: FolderOp,
+    },
 }
 
-/// Read the request's surface, refusing a body that names both or neither.
+/// One folder operation, as admitted by the request reader.
+enum FolderOp {
+    List,
+    Read,
+    Write {
+        content_base64: String,
+        replace: bool,
+    },
+}
+
+impl FolderOp {
+    fn writes(&self) -> bool {
+        matches!(self, Self::Write { .. })
+    }
+}
+
+/// Read the request's surface, refusing a body that names several or none.
 fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvokeError> {
     let invalid = |message: &str| {
         AppInvokeError::Failed(ServerError::unprocessable_kind(
@@ -204,24 +237,31 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
             message,
         ))
     };
-    match (request.tool, request.operation_id) {
-        (Some(tool), None) => {
-            if request.parameters.is_some() || request.body.is_some() {
-                return Err(invalid(
-                    "parameters and body belong to operation_id invokes; a tool \
-                     invoke takes arguments",
-                ));
+    match (request.tool, request.operation_id, request.folder) {
+        (Some(tool), None, None) => {
+            if request.parameters.is_some()
+                || request.body.is_some()
+                || request.op.is_some()
+                || request.path.is_some()
+                || request.content_base64.is_some()
+                || request.replace.is_some()
+            {
+                return Err(invalid("a tool invoke takes arguments and nothing else"));
             }
             Ok(InvokeSurface::Tool {
                 tool,
                 arguments: request.arguments.unwrap_or_default(),
             })
         }
-        (None, Some(operation_id)) => {
-            if request.arguments.is_some() {
+        (None, Some(operation_id), None) => {
+            if request.arguments.is_some()
+                || request.op.is_some()
+                || request.path.is_some()
+                || request.content_base64.is_some()
+                || request.replace.is_some()
+            {
                 return Err(invalid(
-                    "arguments belong to tool invokes; an operation_id invoke \
-                     takes parameters and body",
+                    "an operation_id invoke takes parameters and body and nothing else",
                 ));
             }
             Ok(InvokeSurface::Operation(RestOperationRequest {
@@ -232,8 +272,49 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
                 body: request.body,
             }))
         }
-        (Some(_), Some(_)) | (None, None) => Err(invalid(
-            "exactly one of tool or operation_id must be provided",
+        (None, None, Some(folder)) => {
+            if request.arguments.is_some() || request.parameters.is_some() || request.body.is_some()
+            {
+                return Err(invalid(
+                    "a folder invoke takes op, path, content_base64, and replace \
+                     and nothing else",
+                ));
+            }
+            let path = request.path.unwrap_or_default();
+            let op = match request.op.as_deref() {
+                Some("list") => {
+                    if request.content_base64.is_some() || request.replace.is_some() {
+                        return Err(invalid("a folder list takes op, folder, and path only"));
+                    }
+                    FolderOp::List
+                }
+                Some("read") => {
+                    if request.content_base64.is_some() || request.replace.is_some() {
+                        return Err(invalid("a folder read takes op, folder, and path only"));
+                    }
+                    if path.is_empty() {
+                        return Err(invalid("a folder read needs a path"));
+                    }
+                    FolderOp::Read
+                }
+                Some("write") => {
+                    let Some(content_base64) = request.content_base64 else {
+                        return Err(invalid("a folder write needs content_base64"));
+                    };
+                    if path.is_empty() {
+                        return Err(invalid("a folder write needs a path"));
+                    }
+                    FolderOp::Write {
+                        content_base64,
+                        replace: request.replace.unwrap_or(false),
+                    }
+                }
+                _ => return Err(invalid("op must be one of list, read, or write")),
+            };
+            Ok(InvokeSurface::Folder { folder, path, op })
+        }
+        _ => Err(invalid(
+            "exactly one of tool, operation_id, or folder must be provided",
         )),
     }
 }
@@ -270,6 +351,22 @@ pub async fn post_app_invoke(
             )
             .await?;
             dispatch_rest_operation(&state, &revision, &request)
+                .await
+                .map(|result| Json(result).into_response())
+        }
+        InvokeSurface::Folder { folder, path, op } => {
+            require_pinned_folder(&revision, folder, op.writes())?;
+            require_app_grant(
+                &state,
+                &app,
+                &revision,
+                &Pinned::Folder {
+                    folder,
+                    writes: op.writes(),
+                },
+            )
+            .await?;
+            dispatch_folder_op(&state, folder, &path, op)
                 .await
                 .map(|result| Json(result).into_response())
         }
@@ -348,10 +445,47 @@ fn require_pinned_operation(
     ))
 }
 
+/// Refuse any folder operation the current revision's manifest does not pin
+/// at the required access level: a write needs a `read_write` binding, and a
+/// `read` binding never pins one.
+fn require_pinned_folder(
+    revision: &AppRevision,
+    folder: openwave_core::id::HostRootId,
+    writes: bool,
+) -> Result<(), AppInvokeError> {
+    let pinned = revision
+        .manifest
+        .bindings
+        .iter()
+        .any(|binding| match binding {
+            AppBinding::Folder(binding) => {
+                binding.folder == folder
+                    && (!writes
+                        || binding.access == openwave_core::local_app::FolderAccess::ReadWrite)
+            }
+            AppBinding::Tools(_) | AppBinding::Operations(_) => false,
+        });
+    if pinned {
+        return Ok(());
+    }
+    Err(AppInvokeError::refused(
+        AppInvokeRefusalKind::NotPinned,
+        if writes {
+            format!("folder {folder} is not pinned for writing in this app's current manifest")
+        } else {
+            format!("folder {folder} is not pinned in this app's current manifest")
+        },
+    ))
+}
+
 /// The invoked capability, for the grant gate.
 enum Pinned<'a> {
     Tool(&'a str),
     Operation(&'a str),
+    Folder {
+        folder: openwave_core::id::HostRootId,
+        writes: bool,
+    },
 }
 
 impl Pinned<'_> {
@@ -359,6 +493,13 @@ impl Pinned<'_> {
         match self {
             Self::Tool(tool) => format!("{tool:?}"),
             Self::Operation(operation_id) => format!("operation {operation_id:?}"),
+            Self::Folder { folder, writes } => {
+                if *writes {
+                    format!("writing folder {folder}")
+                } else {
+                    format!("folder {folder}")
+                }
+            }
         }
     }
 }
@@ -407,44 +548,60 @@ async fn require_app_grant(
             pinned.description()
         )));
     };
-    // The pin check has already passed, so exactly one current-manifest
-    // binding names this capability; its connected app is the record the
-    // grant must cover the capability under. (Folder bindings answer to a
-    // different surface and never resolve here.)
-    let connected_app = revision
-        .manifest
-        .bindings
-        .iter()
-        .find(|binding| match (binding, pinned) {
-            (AppBinding::Tools(binding), Pinned::Tool(tool)) => {
-                binding.tools.iter().any(|held| held == tool)
-            }
-            (AppBinding::Operations(binding), Pinned::Operation(operation_id)) => binding
-                .operation_ids
+    // The pin check has already passed. For an app-keyed capability, exactly
+    // one current-manifest binding names it and its connected app is the
+    // record the grant must cover the capability under; for a folder
+    // capability, the grant must hold the same root at an access level that
+    // covers the operation — a `read_write` grant covers reads, a `read`
+    // grant never covers a write.
+    let covered = match pinned {
+        Pinned::Folder { folder, writes } => grant.bindings.iter().any(|binding| {
+            matches!(
+                binding,
+                AppGrantBinding::Folder(granted)
+                    if granted.folder == *folder
+                        && (!writes
+                            || granted.access
+                                == openwave_core::local_app::FolderAccess::ReadWrite)
+            )
+        }),
+        _ => {
+            let connected_app = revision
+                .manifest
+                .bindings
                 .iter()
-                .any(|held| held == operation_id),
-            _ => false,
-        })
-        .and_then(AppBinding::app);
-    let covered = connected_app.is_some_and(|connected_app| {
-        grant
-            .bindings
-            .iter()
-            .any(|binding| match (binding, pinned) {
-                (AppGrantBinding::Tools(binding), Pinned::Tool(tool)) => {
-                    binding.app == connected_app
-                        && binding.tools.iter().any(|granted| granted == tool)
-                }
-                (AppGrantBinding::Operations(binding), Pinned::Operation(operation_id)) => {
-                    binding.app == connected_app
-                        && binding
-                            .operation_ids
-                            .iter()
-                            .any(|granted| granted == operation_id)
-                }
-                _ => false,
+                .find(|binding| match (binding, pinned) {
+                    (AppBinding::Tools(binding), Pinned::Tool(tool)) => {
+                        binding.tools.iter().any(|held| held == tool)
+                    }
+                    (AppBinding::Operations(binding), Pinned::Operation(operation_id)) => binding
+                        .operation_ids
+                        .iter()
+                        .any(|held| held == operation_id),
+                    _ => false,
+                })
+                .and_then(AppBinding::app);
+            connected_app.is_some_and(|connected_app| {
+                grant
+                    .bindings
+                    .iter()
+                    .any(|binding| match (binding, pinned) {
+                        (AppGrantBinding::Tools(binding), Pinned::Tool(tool)) => {
+                            binding.app == connected_app
+                                && binding.tools.iter().any(|granted| granted == tool)
+                        }
+                        (AppGrantBinding::Operations(binding), Pinned::Operation(operation_id)) => {
+                            binding.app == connected_app
+                                && binding
+                                    .operation_ids
+                                    .iter()
+                                    .any(|granted| granted == operation_id)
+                        }
+                        _ => false,
+                    })
             })
-    });
+        }
+    };
     if !covered {
         return Err(consent_required(format!(
             "the app grant does not cover {}",
@@ -575,6 +732,125 @@ async fn dispatch_rest_operation(
             error: Some(error.to_string()),
         }),
     }
+}
+
+/// Result of a granted folder invoke, packaged for the sandboxed app frame —
+/// the folder sibling of [`AppRestInvokeResult`], and a hand-written TS twin
+/// for the same reason.
+///
+/// Exactly one payload half is present per operation: `entries` for a list,
+/// `content_base64` for a read, `replaced` for a write. A refused or failed
+/// operation is `is_error: true` with the seam's closed failure vocabulary —
+/// never a path, never an OS error, never a 500.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct AppFolderInvokeResult {
+    /// Directory entries, for a `list`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<AppFolderEntry>>,
+    /// Base64 of the file's bytes (at most the host's binary read bound),
+    /// for a `read`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    /// Whether an existing file was replaced, for a `write`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<bool>,
+    /// Whether the operation failed.
+    pub is_error: bool,
+    /// The closed failure text when `is_error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One listed entry under a granted folder.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct AppFolderEntry {
+    pub name: String,
+    pub directory: bool,
+}
+
+impl AppFolderInvokeResult {
+    fn failure(error: crate::host_folders::FolderOpError) -> Self {
+        Self {
+            entries: None,
+            content_base64: None,
+            replaced: None,
+            is_error: true,
+            error: Some(error.to_string()),
+        }
+    }
+
+    fn success() -> Self {
+        Self {
+            entries: None,
+            content_base64: None,
+            replaced: None,
+            is_error: false,
+            error: None,
+        }
+    }
+}
+
+/// Execute one granted folder operation through the host-folder seam.
+///
+/// An embedding without the seam refuses with `unknown_tool`: the manifest
+/// pin exists but nothing configured answers to it — the same reading as a
+/// pinned name no server mounts. Operation failures cross as `is_error`
+/// results in the seam's closed vocabulary, exactly like REST executor
+/// failures.
+async fn dispatch_folder_op(
+    state: &AppState,
+    folder: openwave_core::id::HostRootId,
+    path: &str,
+    op: FolderOp,
+) -> Result<AppFolderInvokeResult, AppInvokeError> {
+    let Some(host) = &state.host_folders else {
+        return Err(AppInvokeError::refused(
+            AppInvokeRefusalKind::UnknownTool,
+            "connected folders are not available in this embedding",
+        ));
+    };
+    Ok(match op {
+        FolderOp::List => match host.list_folder(folder, path).await {
+            Ok(entries) => AppFolderInvokeResult {
+                entries: Some(
+                    entries
+                        .into_iter()
+                        .map(|entry| AppFolderEntry {
+                            name: entry.name,
+                            directory: entry.directory,
+                        })
+                        .collect(),
+                ),
+                ..AppFolderInvokeResult::success()
+            },
+            Err(error) => AppFolderInvokeResult::failure(error),
+        },
+        FolderOp::Read => match host.read_file(folder, path).await {
+            Ok(bytes) => AppFolderInvokeResult {
+                content_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                ..AppFolderInvokeResult::success()
+            },
+            Err(error) => AppFolderInvokeResult::failure(error),
+        },
+        FolderOp::Write {
+            content_base64,
+            replace,
+        } => {
+            let Ok(content) = base64::engine::general_purpose::STANDARD.decode(content_base64)
+            else {
+                return Ok(AppFolderInvokeResult::failure(
+                    crate::host_folders::FolderOpError::Failed,
+                ));
+            };
+            match host.write_file(folder, path, &content, replace).await {
+                Ok(receipt) => AppFolderInvokeResult {
+                    replaced: Some(receipt.replaced),
+                    ..AppFolderInvokeResult::success()
+                },
+                Err(error) => AppFolderInvokeResult::failure(error),
+            }
+        }
+    })
 }
 
 /// Whether a name has the mounted `mcp__{server}__{tool}` shape.

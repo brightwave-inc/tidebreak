@@ -516,6 +516,20 @@ impl FolderAccess {
     }
 }
 
+/// Best-effort authoring-time lookup of the host's approved connected
+/// folders, for the `create_app` door and its roster.
+///
+/// Legibility, not the gate: the consent and invoke surfaces resolve live
+/// against the host. An embedding without a host (or one whose lookup
+/// fails) answers empty, and the door refuses folder bindings with that
+/// honestly.
+#[async_trait::async_trait]
+pub trait ApprovedFolderSource: Send + Sync {
+    /// Every approved connected folder as `(root id, display name)`; empty
+    /// on any error.
+    async fn approved_folders(&self) -> Vec<(HostRootId, String)>;
+}
+
 /// Validate an app manifest structurally and return the JSON to store.
 ///
 /// Checks the display name, the mounted-tool grammar of every binding, and the

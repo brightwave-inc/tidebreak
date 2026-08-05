@@ -4,6 +4,7 @@ import type {
   AppGrantState,
   AppInvokeResult,
   AppLibrary,
+  AppFolderInvokeResult,
   AppRestInvokeResult,
   AppViewSessionInfo,
 } from "@/api";
@@ -31,6 +32,14 @@ export type AppsApis = {
     parameters?: unknown,
     body?: unknown,
   ): Promise<AppRestInvokeResult>;
+  invokeFolder(
+    appId: string,
+    folder: string,
+    op: "list" | "read" | "write",
+    path?: string,
+    contentBase64?: string,
+    replace?: boolean,
+  ): Promise<AppFolderInvokeResult>;
 };
 
 export function appsApisFromClient(client: ApiClient): AppsApis {
@@ -46,5 +55,7 @@ export function appsApisFromClient(client: ApiClient): AppsApis {
     invoke: (appId, tool, args) => client.invokeApp(appId, tool, args),
     invokeOperation: (appId, operationId, parameters, body) =>
       client.invokeAppOperation(appId, operationId, parameters, body),
+    invokeFolder: (appId, folder, op, path, contentBase64, replace) =>
+      client.invokeAppFolder(appId, folder, op, path, contentBase64, replace),
   };
 }

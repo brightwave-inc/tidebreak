@@ -933,6 +933,7 @@ async fn bind_inner(
         web_extract,
         store.clone(),
         config.data_dir.clone(),
+        host_folders.clone(),
     );
     let tools = Arc::new(tools);
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
@@ -971,7 +972,11 @@ async fn bind_inner(
     }
     // The host-folder surface local-app folder bindings dispatch through;
     // absent everywhere but the desktop, where folder bindings then refuse
-    // to grant (docs/folder-bindings.md).
+    // to grant (docs/folder-bindings.md). The MCP runtime gets the same
+    // handle so the create_app roster can list approved folders.
+    if let Some(host) = &host_folders {
+        state.mcp.set_host_folders(host.clone());
+    }
     state.host_folders = host_folders;
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
@@ -1132,7 +1137,36 @@ fn agent_deps(
     web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
     profile_data_dir: std::path::PathBuf,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> (ToolRegistry, AgentConfig) {
+    /// The host-folder seam folded into `create_app`'s authoring-time folder
+    /// lookup: approved roots as (id, name) pairs, empty on any error —
+    /// legibility, never the gate.
+    struct HostFolderAuthoringSource(Arc<dyn host_folders::HostFolders>);
+
+    #[async_trait::async_trait]
+    impl openwave_core::local_app::ApprovedFolderSource for HostFolderAuthoringSource {
+        async fn approved_folders(&self) -> Vec<(openwave_core::id::HostRootId, String)> {
+            self.0
+                .approved_roots()
+                .await
+                .map(|folders| {
+                    folders
+                        .into_iter()
+                        .map(|folder| (folder.root_id, folder.display_name))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    let create_app = {
+        let tool = CreateAppTool::new(source_store.clone(), profile_data_dir);
+        match host_folders {
+            Some(host) => tool.with_approved_folders(Arc::new(HostFolderAuthoringSource(host))),
+            None => tool,
+        }
+    };
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
@@ -1147,7 +1181,7 @@ fn agent_deps(
         .with(Box::new(source_tools::ReadToolResultTool::new(
             source_store.clone(),
         )))
-        .with(Box::new(CreateAppTool::new(source_store, profile_data_dir)))
+        .with(Box::new(create_app))
         .with(web_search)
         .with(web_extract);
     tools.register_validated_client(
