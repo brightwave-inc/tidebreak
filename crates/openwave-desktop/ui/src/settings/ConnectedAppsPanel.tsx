@@ -19,7 +19,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { McpHealthChip, McpPanel } from "./McpPanel";
+import { McpHealthChip, McpPanel, McpTierChip } from "./McpPanel";
 import {
   SettingsError,
   SettingsField,
@@ -169,6 +169,7 @@ function McpAppEntry({
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <p className="text-sm font-bold">{mcpTitle(entry)}</p>
         <McpHealthChip health={entry.health} />
+        <McpTierChip curated={entry.curated} />
         {entry.gateway_endpoint !== null && (
           <span className="text-xs text-muted-foreground">
             · via your organization's gateway

@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+use crate::mcp_curated::{curation_for, McpCuration};
+
 const CONFIG_ENV: &str = "OPENWAVE_MCP_CONFIG";
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_CONFIG_BODY_BYTES: usize = 1024 * 1024;
@@ -565,6 +567,11 @@ pub(crate) struct McpServerInfo {
     pub(crate) health: McpHealth,
     pub(crate) tool_count: usize,
     pub(crate) diagnostic: Option<String>,
+    /// The curated-list entry this definition matches, when OpenWave has
+    /// exercised the server end to end. `null` means community: mounted and
+    /// usable, just not something we have driven ourselves. Derived from the
+    /// definition on every read, never stored.
+    pub(crate) curated: Option<McpCuration>,
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -1086,7 +1093,6 @@ impl McpRuntime {
                 .map(|definition| {
                     let managed = state.servers.get(&definition.name);
                     McpServerInfo {
-                        definition: definition.clone(),
                         health: managed.map_or(
                             if definition.enabled {
                                 McpHealth::Initializing
@@ -1099,6 +1105,8 @@ impl McpRuntime {
                             .and_then(|server| server.client.as_ref())
                             .map_or(0, |client| client.tools().count()),
                         diagnostic: managed.and_then(|server| server.diagnostic.clone()),
+                        curated: curation(definition),
+                        definition: definition.clone(),
                     }
                 })
                 .collect(),
@@ -1913,17 +1921,31 @@ impl McpRuntime {
                 .map(|definition| {
                     let managed = state.servers.get(&definition.name);
                     McpServerInfo {
-                        definition: definition.clone(),
                         health: managed.map_or(McpHealth::Initializing, |server| server.health),
                         tool_count: managed
                             .and_then(|server| server.client.as_ref())
                             .map_or(0, |client| client.tools().count()),
                         diagnostic: managed.and_then(|server| server.diagnostic.clone()),
+                        curated: curation(definition),
+                        definition: definition.clone(),
                     }
                 })
                 .collect(),
         }
     }
+}
+
+/// The curated-list entry this definition matches, if any.
+///
+/// A gateway mount carries neither a command nor a URL here — the endpoint is
+/// resolved from the session at connect time — so it never matches, which is
+/// the honest answer: the curated list is about servers we drove ourselves.
+fn curation(definition: &McpServerDefinition) -> Option<McpCuration> {
+    curation_for(
+        definition.command.as_deref(),
+        &definition.args,
+        definition.url.as_deref(),
+    )
 }
 
 /// Whether this definition should hold a live connection right now.

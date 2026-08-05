@@ -34,6 +34,7 @@ const healthy: McpServersInfo = {
       health: "healthy",
       tool_count: 2,
       diagnostic: null,
+      curated: null,
     },
   ],
 };
@@ -67,6 +68,7 @@ function gatewayMount(
     health: "healthy",
     tool_count: 3,
     diagnostic: null,
+    curated: null,
     ...overrides,
   };
 }

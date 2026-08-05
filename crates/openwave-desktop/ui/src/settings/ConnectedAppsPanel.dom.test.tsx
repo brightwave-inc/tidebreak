@@ -29,6 +29,7 @@ const docsServer: McpServerInfo = {
   health: "healthy",
   tool_count: 3,
   diagnostic: null,
+  curated: null,
 };
 
 /** The app-first listing: a gateway-backed record (org apps ride the
@@ -44,6 +45,7 @@ const listing: ConnectedAppsInfo = {
       tool_count: 2,
       tools: ["sentry__proxy_api", "linear__proxy_api"],
       diagnostic: null,
+      curated: null,
       gateway_endpoint: "primary",
       gateway_apps: ["Sentry (org)", "Linear (org)"],
       used_by_app_count: 0,
@@ -56,6 +58,7 @@ const listing: ConnectedAppsInfo = {
       tool_count: 3,
       tools: ["search", "fetch", "list_sources"],
       diagnostic: null,
+      curated: null,
       gateway_endpoint: null,
       gateway_apps: [],
       used_by_app_count: 2,

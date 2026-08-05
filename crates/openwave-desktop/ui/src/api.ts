@@ -32,6 +32,7 @@ import {
   type EgressConfig as WireEgressConfig,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
+  type McpCuration as WireMcpCuration,
   type McpServerDefinition as WireMcpServerDefinition,
   type McpViewSession,
   type GatewayApps as WireGatewayApps,
@@ -276,6 +277,12 @@ export type McpServerDefinition = WireMcpServerDefinition;
 export type McpServerInfo = WireMcpServerInfo;
 
 export type McpServersInfo = WireMcpServersInfo;
+
+/**
+ * The curated-list entry a configured MCP server matched. Present means
+ * OpenWave has driven the server end to end; absent is the community tier.
+ */
+export type McpCuration = WireMcpCuration;
 
 /** The Connected apps listing: per-kind projections, both kinds. */
 export type ConnectedAppsInfo = WireConnectedAppsInfo;
