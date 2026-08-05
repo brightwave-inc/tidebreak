@@ -508,59 +508,69 @@ impl SandboxAgentRunWorker {
                 .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
                 .await;
         };
-        match completion_result {
-            Ok(SandboxCompletion::Final(text)) => self.submit_result(&run, lease_token, text).await,
-            Ok(SandboxCompletion::WebSearch {
+        let step = match completion_result {
+            Ok(step) => step,
+            Err(error) => return self.record_failure(&run, lease_token, error).await,
+        };
+        let SandboxStep {
+            narration,
+            completion,
+        } = step;
+        match completion {
+            SandboxCompletion::Final(text) => self.submit_result(&run, lease_token, text).await,
+            SandboxCompletion::WebSearch {
                 provider_id,
                 arguments,
-            }) => {
+            } => {
                 self.park_sandbox_tool_call(
                     run,
                     lease_token,
                     provider_id,
                     openwave_core::SANDBOX_WEB_SEARCH_TOOL,
                     arguments,
+                    &narration,
                     "sandbox web-search checkpoint identity conflict",
                 )
                 .await
             }
-            Ok(SandboxCompletion::Exec {
+            SandboxCompletion::Exec {
                 provider_id,
                 arguments,
-            }) => {
+            } => {
                 self.park_sandbox_tool_call(
                     run,
                     lease_token,
                     provider_id,
                     SANDBOX_EXEC_TOOL,
                     arguments,
+                    &narration,
                     "sandbox exec checkpoint identity conflict",
                 )
                 .await
             }
-            Ok(SandboxCompletion::Done { outputs, summary }) => {
+            SandboxCompletion::Done { outputs, summary } => {
                 self.submit_submission(&run, lease_token, &outputs, &summary)
                     .await
             }
-            Ok(SandboxCompletion::FolderAccessProposal { request }) => {
+            SandboxCompletion::FolderAccessProposal { request } => {
                 self.submit_folder_access_proposal(run.id, lease_token, request)
                     .await
             }
-            Ok(SandboxCompletion::DelegatedFileRead {
+            SandboxCompletion::DelegatedFileRead {
                 provider_id,
                 arguments,
-            }) => {
+            } => {
                 self.park_sandbox_tool_call(
                     run,
                     lease_token,
                     provider_id,
                     openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL,
                     arguments,
+                    &narration,
                     "sandbox delegated-file checkpoint identity conflict",
                 )
                 .await
             }
-            Err(error) => self.record_failure(&run, lease_token, error).await,
         }
     }
 
@@ -817,6 +827,7 @@ impl SandboxAgentRunWorker {
     /// tool name and the conflict message differ — so they share this body
     /// rather than each carrying its own copy of the crash-recovery reasoning
     /// below.
+    #[allow(clippy::too_many_arguments)]
     async fn park_sandbox_tool_call(
         &self,
         run: AgentRun,
@@ -824,6 +835,7 @@ impl SandboxAgentRunWorker {
         provider_id: String,
         name: &str,
         arguments: serde_json::Value,
+        narration: &str,
         conflict_message: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
         let call = SandboxToolCallRequest {
@@ -857,6 +869,7 @@ impl SandboxAgentRunWorker {
                             && existing.arguments == call.arguments
                     });
                 if let Some(call) = recovered {
+                    self.publish_progress(run.id, call.id, narration).await;
                     self.wake.notify_one();
                     return Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id));
                 }
@@ -866,6 +879,7 @@ impl SandboxAgentRunWorker {
         match outcome {
             ParkSandboxToolCallOutcome::Parked { call, .. }
             | ParkSandboxToolCallOutcome::Existing { call, .. } => {
+                self.publish_progress(run.id, call.id, narration).await;
                 // This shared wake is only a latency hint; the dedicated
                 // executor's durable candidate scan remains the recovery path.
                 self.wake.notify_one();
@@ -887,6 +901,32 @@ impl SandboxAgentRunWorker {
                 self.acknowledge_cancellation_or_lease_loss(run.id, lease_token)
                     .await
             }
+        }
+    }
+
+    /// Publish what the model said before it checkpointed, so an observer can
+    /// see what the run is doing between steps.
+    ///
+    /// This is observation, not correctness state. It is written after the
+    /// checkpoint has already committed under a proven lease, keyed by that
+    /// checkpoint's durable identity so a retried commit republishes nothing,
+    /// and a failure here is reported and dropped rather than allowed to
+    /// disturb a transition that already succeeded.
+    async fn publish_progress(
+        &self,
+        run_id: openwave_core::AgentRunId,
+        call_id: CallId,
+        narration: &str,
+    ) {
+        if narration.trim().is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .store
+            .append_agent_run_progress(run_id, &format!("call:{call_id}"), narration)
+            .await
+        {
+            eprintln!("openwave: could not publish progress for run {run_id}: {error}");
         }
     }
 
@@ -1055,6 +1095,20 @@ async fn sandbox_request(
     })
 }
 
+/// One completed model step: the tool checkpoint or terminal outcome it
+/// produced, plus whatever the model said on the way there.
+#[derive(Debug)]
+struct SandboxStep {
+    /// Text the model produced before checkpointing on a tool.
+    ///
+    /// This is the run's own account of what it is about to do, and between
+    /// checkpoints it is the only thing an observer could see. A step that ends
+    /// the run carries nothing here — its result text already says it.
+    narration: String,
+    completion: SandboxCompletion,
+}
+
+#[derive(Debug)]
 enum SandboxCompletion {
     Final(String),
     /// The run's own files, offered as the deliverables for the task.
@@ -1083,7 +1137,7 @@ enum SandboxCompletion {
 async fn complete_sandbox_task(
     provider: Arc<dyn ModelProvider>,
     request: ChatRequest,
-) -> Result<SandboxCompletion> {
+) -> Result<SandboxStep> {
     let web_search_advertised = request
         .tools
         .iter()
@@ -1167,9 +1221,12 @@ async fn complete_sandbox_task(
                         let arguments = serde_json::from_str(&arguments).map_err(|_| {
                             AgentError::msg("sandbox agent emitted invalid web-search arguments")
                         })?;
-                        return Ok(SandboxCompletion::WebSearch {
-                            provider_id,
-                            arguments,
+                        return Ok(SandboxStep {
+                            narration: text,
+                            completion: SandboxCompletion::WebSearch {
+                                provider_id,
+                                arguments,
+                            },
                         });
                     }
                     if name == SANDBOX_EXEC_TOOL && exec_advertised {
@@ -1181,9 +1238,12 @@ async fn complete_sandbox_task(
                                 "sandbox agent emitted invalid exec arguments",
                             ));
                         }
-                        return Ok(SandboxCompletion::Exec {
-                            provider_id,
-                            arguments,
+                        return Ok(SandboxStep {
+                            narration: text,
+                            completion: SandboxCompletion::Exec {
+                                provider_id,
+                                arguments,
+                            },
                         });
                     }
                     if name == openwave_core::SANDBOX_DONE_TOOL && done_advertised {
@@ -1201,9 +1261,12 @@ async fn complete_sandbox_task(
                                 .map_err(|_| {
                                     AgentError::msg("sandbox agent emitted invalid done arguments")
                                 })?;
-                        return Ok(SandboxCompletion::Done {
-                            outputs: arguments.outputs,
-                            summary: arguments.summary,
+                        return Ok(SandboxStep {
+                            narration: String::new(),
+                            completion: SandboxCompletion::Done {
+                                outputs: arguments.outputs,
+                                summary: arguments.summary,
+                            },
                         });
                     }
                     if name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL
@@ -1218,7 +1281,10 @@ async fn complete_sandbox_task(
                                 "sandbox agent emitted invalid folder-access proposal",
                             ));
                         }
-                        return Ok(SandboxCompletion::FolderAccessProposal { request });
+                        return Ok(SandboxStep {
+                            narration: String::new(),
+                            completion: SandboxCompletion::FolderAccessProposal { request },
+                        });
                     }
                     if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
                         && delegated_file_advertised
@@ -1233,9 +1299,12 @@ async fn complete_sandbox_task(
                                 "sandbox agent emitted invalid delegated-file arguments",
                             ));
                         }
-                        return Ok(SandboxCompletion::DelegatedFileRead {
-                            provider_id,
-                            arguments,
+                        return Ok(SandboxStep {
+                            narration: text,
+                            completion: SandboxCompletion::DelegatedFileRead {
+                                provider_id,
+                                arguments,
+                            },
                         });
                     }
                     return Err(AgentError::msg(
@@ -1252,7 +1321,10 @@ async fn complete_sandbox_task(
                         "sandbox agent produced an empty final result",
                     ));
                 }
-                return Ok(SandboxCompletion::Final(text));
+                return Ok(SandboxStep {
+                    narration: String::new(),
+                    completion: SandboxCompletion::Final(text),
+                });
             }
             ProviderEvent::Refusal { details } => {
                 let category = details
@@ -1893,6 +1965,20 @@ mod tests {
             store.get_agent_run(id).await.unwrap().unwrap().status,
             AgentRunStatus::Waiting
         );
+        // The narration the model produced before checkpointing is published as
+        // live progress, so the run is observable while it is still parked
+        // rather than only once it submits a result.
+        let progress = store.list_agent_run_progress(id, 0, 50).await.unwrap();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].sequence, 1);
+        assert_eq!(progress[0].text, "I’ll research that now.");
+        // Reading past the cursor the observer already holds returns nothing,
+        // which is what makes polling cheap.
+        assert!(store
+            .list_agent_run_progress(id, progress[0].sequence, 50)
+            .await
+            .unwrap()
+            .is_empty());
         let executor_lease = uuid::Uuid::new_v4();
         store
             .claim_sandbox_tool_call(call_id, executor_lease, chrono::Duration::minutes(1))
@@ -2171,6 +2257,7 @@ mod tests {
                     "search_1".into(),
                     openwave_core::SANDBOX_WEB_SEARCH_TOOL,
                     serde_json::json!({"query":"OpenWave"}),
+                    "",
                     "sandbox web-search checkpoint identity conflict",
                 )
                 .await
@@ -2996,7 +3083,7 @@ mod tests {
             },
         ]));
         assert!(matches!(
-            complete_sandbox_task(provider, request).await.unwrap(),
+            complete_sandbox_task(provider, request).await.unwrap().completion,
             SandboxCompletion::DelegatedFileRead { arguments, .. }
                 if arguments == serde_json::json!({})
         ));

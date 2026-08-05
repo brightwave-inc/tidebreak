@@ -448,6 +448,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::list_agent_run_activity),
         )
         .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/progress",
+            get(routes::list_agent_run_progress),
+        )
+        .route(
             "/chats/{chat_id}/agent-runs/{run_id}/cancel",
             post(routes::post_agent_run_cancel),
         )

@@ -703,6 +703,27 @@ pub mod agent_run_result {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod agent_run_progress {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run_progress")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub agent_run_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub sequence: i64,
+        pub source_key: String,
+        pub text: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod agent_run_cancellation {
     use sea_orm::entity::prelude::*;
 

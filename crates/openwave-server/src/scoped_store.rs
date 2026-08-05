@@ -271,6 +271,18 @@ impl ScopedStore {
         self.store.request_agent_run_cancellation(id).await
     }
 
+    /// [`Store::list_agent_run_progress`].
+    pub async fn list_agent_run_progress(
+        &self,
+        run_id: AgentRunId,
+        after_sequence: i64,
+        limit: u64,
+    ) -> Result<Vec<openwave_core::AgentRunProgressEntry>> {
+        self.store
+            .list_agent_run_progress(run_id, after_sequence, limit)
+            .await
+    }
+
     /// [`Store::list_sandbox_tool_calls_for_agent_run`].
     pub async fn list_sandbox_tool_calls_for_agent_run(
         &self,

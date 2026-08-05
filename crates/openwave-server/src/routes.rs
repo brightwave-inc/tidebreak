@@ -2501,6 +2501,96 @@ pub async fn list_agent_run_activity(
     Ok(Json(sandbox_activity_history(&calls)))
 }
 
+/// One line of live progress a background run published, as the renderer sees
+/// it.
+///
+/// The text is the run's own bounded narration — the same class of prose the
+/// terminal `terminal_text` already carries, published while the run is still
+/// working instead of only at the end. It is not a tool trace: tool arguments,
+/// queries, results, folder and file identities, host paths, provider
+/// identities, executor leases, and raw diagnostics stay server-side, exactly as
+/// they do for the activity projections.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct AgentRunProgressLine {
+    /// Monotonic per-run ordering. Pass the page's `next_sequence` back as
+    /// `after_sequence` to read only what has arrived since.
+    pub sequence: i64,
+    pub text: String,
+    pub at: chrono::DateTime<Utc>,
+}
+
+/// One resumable page of a background run's live progress.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct AgentRunProgressPage {
+    pub entries: Vec<AgentRunProgressLine>,
+    /// The cursor to resume from: the highest sequence in this page, or the
+    /// requested cursor when the page is empty. A reader that polls with this
+    /// value never re-reads a line it already has.
+    pub next_sequence: i64,
+}
+
+/// Query for `GET /chats/{chat_id}/agent-runs/{run_id}/progress`.
+#[derive(Debug, Deserialize)]
+pub struct AgentRunProgressQuery {
+    /// Return only lines strictly newer than this sequence; `0` (the default)
+    /// starts from the oldest line retention still holds.
+    #[serde(default)]
+    pub after_sequence: i64,
+    /// Maximum lines to return, clamped to the read model's own bound.
+    pub limit: Option<u64>,
+}
+
+/// `GET /chats/{chat_id}/agent-runs/{run_id}/progress` — the resumable live
+/// progress stream for one background run.
+///
+/// The run snapshot says what state a child is in and the activity projections
+/// say which step it is on; neither says what the child is actually doing. This
+/// is that: the ordered lines the run itself published, readable while it is
+/// still running rather than only once it submits a result. Because each line
+/// carries a monotonic sequence, an observer polls with the cursor it last saw
+/// and receives only what is new.
+///
+/// Read-only, and bound to the exact chat: a missing, wrong-chat, or foreground
+/// run returns `404` rather than revealing whether an unrelated run identifier
+/// exists.
+pub async fn list_agent_run_progress(
+    store: ScopedStore,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+    Query(query): Query<AgentRunProgressQuery>,
+) -> Result<Json<AgentRunProgressPage>, ServerError> {
+    store.require_chat(chat_id).await?;
+    let run = store
+        .get_agent_run(run_id)
+        .await?
+        .filter(|run| run.chat_id == chat_id && run.tier == AgentRunTier::Background);
+    if run.is_none() {
+        return Err(ServerError::not_found(format!(
+            "agent run {run_id} not found"
+        )));
+    }
+    let after_sequence = query.after_sequence.max(0);
+    let limit = query
+        .limit
+        .unwrap_or(openwave_core::AgentRunProgressEntry::DEFAULT_PAGE);
+    let entries = store
+        .list_agent_run_progress(run_id, after_sequence, limit)
+        .await?;
+    let next_sequence = entries
+        .last()
+        .map_or(after_sequence, |entry| entry.sequence);
+    Ok(Json(AgentRunProgressPage {
+        entries: entries
+            .into_iter()
+            .map(|entry| AgentRunProgressLine {
+                sequence: entry.sequence,
+                text: entry.text,
+                at: entry.created_at,
+            })
+            .collect(),
+        next_sequence,
+    }))
+}
+
 /// Closed renderer-safe acknowledgement for sandbox cancellation.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AgentRunCancellationSnapshot {

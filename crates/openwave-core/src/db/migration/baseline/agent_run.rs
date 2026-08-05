@@ -472,6 +472,73 @@ pub(super) fn agent_run_result_indexes() -> Vec<IndexCreateStatement> {
         .to_owned()]
 }
 
+/// The bounded, ordered progress stream one background run publishes while it
+/// works.
+///
+/// This is observation, not correctness state: nothing reads it to decide what
+/// a run may do next, and losing a line only leaves a gap in what an observer
+/// sees. Its ordering contract is the per-run `sequence`, which is what lets a
+/// reader resume from a cursor instead of re-reading the whole stream.
+///
+/// `source_key` is the producer's own identity for the line — a sandbox
+/// protocol event sequence, or the durable checkpoint a model preamble belongs
+/// to. It makes an append idempotent, so a reattached container that redelivers
+/// events, or a worker that retries an ambiguous commit, cannot duplicate a
+/// line the reader already has.
+pub(super) fn agent_run_progress_table() -> TableCreateStatement {
+    Table::create()
+        .table(AgentRunProgress::Table)
+        .col(
+            ColumnDef::new(AgentRunProgress::AgentRunId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AgentRunProgress::Sequence)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AgentRunProgress::SourceKey)
+                .string_len(96)
+                .not_null(),
+        )
+        .col(ColumnDef::new(AgentRunProgress::Text).text().not_null())
+        .col(
+            ColumnDef::new(AgentRunProgress::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .col(AgentRunProgress::AgentRunId)
+                .col(AgentRunProgress::Sequence),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_agent_run_progress_run")
+                .from(AgentRunProgress::Table, AgentRunProgress::AgentRunId)
+                .to(AgentRun::Table, AgentRun::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(Expr::col(AgentRunProgress::Sequence).gte(1))
+        .check(
+            Func::char_length(Expr::col(AgentRunProgress::Text))
+                .between(1, crate::model::AgentRunProgressEntry::MAX_TEXT_LEN as i32),
+        )
+        .to_owned()
+}
+
+pub(super) fn agent_run_progress_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("idx_agent_run_progress_source")
+        .table(AgentRunProgress::Table)
+        .col(AgentRunProgress::AgentRunId)
+        .col(AgentRunProgress::SourceKey)
+        .unique()
+        .to_owned()]
+}
+
 /// A cancellation request against a live run, recorded under the lease it
 /// interrupts so a stale worker cannot observe someone else's request.
 pub(super) fn agent_run_cancellation_table() -> TableCreateStatement {

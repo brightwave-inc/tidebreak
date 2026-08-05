@@ -275,6 +275,16 @@ pub(crate) enum AgentRunResult {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum AgentRunProgress {
+    Table,
+    AgentRunId,
+    Sequence,
+    SourceKey,
+    Text,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum AgentRunCancellation {
     Table,
     AgentRunId,

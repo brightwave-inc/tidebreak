@@ -14,6 +14,7 @@ import {
   type PendingApprovalSnapshot,
   type AgentActivitySnapshot,
   type AgentActivityHistoryItem,
+  type AgentRunProgressLine,
   type AgentActivityKind,
   type AgentActivityOutcome,
   type AgentRunCancellationSnapshot,
@@ -407,6 +408,22 @@ export type AgentActivity = AgentActivitySnapshot;
  * inputs, queries, results, identities, paths, leases, or diagnostics.
  */
 export type AgentActivityHistoryEntry = AgentActivityHistoryItem;
+
+/**
+ * One line of live progress a background run published.
+ *
+ * The text is the run's own bounded narration, the same class of prose the
+ * terminal result carries. `sequence` is the resume cursor: order is the
+ * contract, and gaps are possible once the server's retention trims the
+ * oldest lines.
+ */
+export type AgentRunProgressEntry = AgentRunProgressLine;
+
+/** A page of live progress plus the cursor to resume from. */
+export type AgentRunProgress = {
+  entries: AgentRunProgressEntry[];
+  nextSequence: number;
+};
 
 
 
@@ -1662,6 +1679,30 @@ export class ApiClient {
     return parseAgentActivityHistory(body);
   }
 
+  /**
+   * One resumable page of a background run's live progress.
+   *
+   * Poll with the previous page's `nextSequence` to receive only what the run
+   * has published since. A wrong-chat, foreground, or missing run answers
+   * `404`, which surfaces as a thrown error.
+   */
+  async listAgentRunProgress(
+    chatId: string,
+    runId: string,
+    afterSequence = 0,
+    limit?: number,
+  ): Promise<AgentRunProgress> {
+    const query = new URLSearchParams({
+      after_sequence: String(afterSequence),
+    });
+    if (limit !== undefined) query.set("limit", String(limit));
+    const body = await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/agent-runs/${encodeURIComponent(runId)}/progress?${query}`,
+      { headers: this.headers() },
+    );
+    return parseAgentRunProgress(body, afterSequence);
+  }
+
   async cancelAgentRun(
     chatId: string,
     runId: string,
@@ -2319,6 +2360,42 @@ export function parseAgentActivityHistory(
       },
     ];
   });
+}
+
+/**
+ * Keep only well-formed progress lines, in server order.
+ *
+ * A line without a finite sequence, non-empty text, and a timestamp is dropped
+ * rather than rendered. The cursor falls back to what the caller asked for, so
+ * a malformed page re-reads rather than silently skipping ahead.
+ */
+export function parseAgentRunProgress(
+  value: unknown,
+  requestedAfter = 0,
+): AgentRunProgress {
+  if (!isRecord(value) || !Array.isArray(value.entries)) {
+    return { entries: [], nextSequence: requestedAfter };
+  }
+  const entries = value.entries.flatMap((entry): AgentRunProgressEntry[] => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.sequence !== "number" ||
+      !Number.isFinite(entry.sequence) ||
+      typeof entry.text !== "string" ||
+      entry.text.length === 0 ||
+      typeof entry.at !== "string" ||
+      entry.at.length === 0
+    ) {
+      return [];
+    }
+    return [{ sequence: entry.sequence, text: entry.text, at: entry.at }];
+  });
+  const nextSequence =
+    typeof value.next_sequence === "number" &&
+    Number.isFinite(value.next_sequence)
+      ? value.next_sequence
+      : requestedAfter;
+  return { entries, nextSequence };
 }
 
 export function parseSandboxAgentCancellation(

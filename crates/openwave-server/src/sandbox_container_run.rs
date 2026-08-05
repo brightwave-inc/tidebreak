@@ -673,7 +673,7 @@ impl SandboxContainerRunner {
         // heartbeat the run is failed out from under a container that is still
         // working and still spending. The whole drive is additionally bounded by
         // the run's absolute deadline, so no path can wait forever.
-        let drive = self.drive_events(protocol_run_id, handle, &host, &init);
+        let drive = self.drive_events(run_id, protocol_run_id, handle, &host, &init);
         tokio::pin!(drive);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -820,6 +820,7 @@ impl SandboxContainerRunner {
     /// event, reattaching across unplanned disconnects within the budget.
     async fn drive_events(
         &self,
+        run_id: AgentRunId,
         protocol_run_id: RunId,
         handle: &SandboxHandle,
         host: &CapabilityHost,
@@ -829,7 +830,7 @@ impl SandboxContainerRunner {
         let mut attempt = 0u32;
         loop {
             match self
-                .drain_connection(protocol_run_id, handle, host, init, &mut cursor)
+                .drain_connection(run_id, protocol_run_id, handle, host, init, &mut cursor)
                 .await
             {
                 DrainOutcome::Result(text) => return DriveEnd::Result(text),
@@ -852,8 +853,10 @@ impl SandboxContainerRunner {
 
     /// Dial the container, attach, and drain its event stream over one
     /// connection until it delivers a result or drops.
+    #[allow(clippy::too_many_arguments)]
     async fn drain_connection(
         &self,
+        run_id: AgentRunId,
         protocol_run_id: RunId,
         handle: &SandboxHandle,
         host: &CapabilityHost,
@@ -917,6 +920,24 @@ impl SandboxContainerRunner {
             match payload {
                 EventPayload::Result(text) => return DrainOutcome::Result(text),
                 EventPayload::Failed(detail) => return DrainOutcome::AgentFailed(detail),
+                // Progress is observation, published so a reader can watch the
+                // run without waiting for its result. The sandbox's own event
+                // sequence keys the append, so a reattach that redelivers a
+                // batch leaves one line rather than two, and a failure to
+                // publish is dropped rather than allowed to end the drive.
+                EventPayload::Progress(text) => {
+                    if let Err(error) = self
+                        .store
+                        .append_agent_run_progress(
+                            run_id,
+                            &format!("event:{}", event.sequence.get()),
+                            &text,
+                        )
+                        .await
+                    {
+                        eprintln!("openwave: could not publish progress for run {run_id}: {error}");
+                    }
+                }
                 _ => {}
             }
         }

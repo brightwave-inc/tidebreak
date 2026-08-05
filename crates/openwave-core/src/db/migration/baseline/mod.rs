@@ -87,6 +87,10 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             agent_run::agent_run_cancellation_table(),
             agent_run::agent_run_cancellation_indexes(),
         ),
+        entry(
+            agent_run::agent_run_progress_table(),
+            agent_run::agent_run_progress_indexes(),
+        ),
         // Turn runs and the journal.
         entry(turn::turn_run_table(), turn::turn_run_indexes()),
         entry(chat::event_table(), chat::event_indexes()),

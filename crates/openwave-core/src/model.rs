@@ -1374,6 +1374,44 @@ impl AgentRun {
     pub const MAX_RESULT_LEN: usize = 65_536;
 }
 
+/// One durable, ordered line of live progress published by a background run.
+///
+/// A background run is otherwise only observable at its edges — the state it is
+/// in, the checkpoint it currently sits on, and the result it eventually
+/// submits. This is the stream in between: bounded prose the run itself
+/// produced, ordered by a per-run [`sequence`](Self::sequence) so a reader can
+/// resume from what it already has rather than re-reading everything.
+///
+/// It is deliberately not correctness state. No transition reads it, and a
+/// dropped line costs an observer one gap, never a wrong decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunProgressEntry {
+    pub run_id: crate::id::AgentRunId,
+    /// Monotonic per-run ordering, starting at one. Gaps are possible once
+    /// retention trims the oldest lines; order never is.
+    pub sequence: i64,
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl AgentRunProgressEntry {
+    /// Maximum persisted characters in one line. A progress line is a sentence
+    /// of narration, not a transcript; anything longer is truncated on the way
+    /// in rather than rejected, because losing the line entirely would be the
+    /// worse outcome for an observer.
+    pub const MAX_TEXT_LEN: usize = 2_048;
+    /// Lines retained per run. A long-running child can narrate indefinitely,
+    /// and this stream is disposable observation, so the oldest lines are
+    /// dropped rather than allowed to grow the journal without bound.
+    pub const RETAINED_PER_RUN: i64 = 200;
+    /// Maximum lines one read may return.
+    pub const MAX_PAGE: u64 = 200;
+    /// Lines one read returns when the caller does not ask for a bound.
+    pub const DEFAULT_PAGE: u64 = 50;
+    /// Maximum length of a producer's own identity for a line.
+    pub const MAX_SOURCE_KEY_LEN: usize = 96;
+}
+
 /// Immutable ownership receipt for one admitted sandbox child.
 ///
 /// The origin turn is intentionally distinct from the long-lived foreground

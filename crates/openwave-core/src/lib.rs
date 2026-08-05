@@ -152,8 +152,8 @@ pub use image::{
 pub use keychain::KeychainSecretProvider;
 pub use model::{
     exec_attachment_file_name, AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal,
-    AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
-    AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
+    AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry,
+    AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
     AgentRunWaitCondition, AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ChatRootAttachment,
     ClientToolCallRequest, DelegatedFileReadClaim, DocumentListCursor, DocumentRecord,

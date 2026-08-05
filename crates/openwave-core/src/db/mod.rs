@@ -1081,6 +1081,24 @@ impl Store for DbStore {
         ops::agent_run::get_agent_run_result(self, id).await
     }
 
+    async fn append_agent_run_progress(
+        &self,
+        run_id: AgentRunId,
+        source_key: &str,
+        text: &str,
+    ) -> Result<()> {
+        ops::agent_run::progress::append(self, run_id, source_key, text).await
+    }
+
+    async fn list_agent_run_progress(
+        &self,
+        run_id: AgentRunId,
+        after_sequence: i64,
+        limit: u64,
+    ) -> Result<Vec<crate::model::AgentRunProgressEntry>> {
+        ops::agent_run::progress::list(self, run_id, after_sequence, limit).await
+    }
+
     async fn claim_agent_run(
         &self,
         lease_token: uuid::Uuid,
