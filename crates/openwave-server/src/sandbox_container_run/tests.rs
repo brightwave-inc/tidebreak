@@ -26,7 +26,7 @@ use openwave_core::{
     AgentRunStatus, CallId, Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderEvent,
     ProviderId, Result, StopReason, Store,
 };
-use openwave_sandbox_agent::run_agent;
+use openwave_sandbox_agent::{run_agent, STEERING_PREFIX};
 use openwave_sandbox_protocol::{
     ids::{OperationId, RunId, SandboxTag},
     protocol::{Response, PROTOCOL_VERSION},
@@ -53,6 +53,7 @@ use crate::sandbox_container_run_worker::{
     SandboxContainerRunWorker, SandboxContainerRunWorkerConfig,
 };
 use crate::scoped_model_token::{MintedScopedToken, ScopedModelTokenIssuer};
+use crate::state::{SandboxSteerGuard, SandboxSteerRefusal};
 
 // --- Mock host model (the resolver the driver proxies inference through) ------
 
@@ -60,6 +61,15 @@ use crate::scoped_model_token::{MintedScopedToken, ScopedModelTokenIssuer};
 /// many completions it is asked for. Drives the real in-container loop: the first
 /// completion tells the sandbox to run a filesystem tool, the second is the
 /// final result the sandbox submits.
+/// Holds the sandbox's first model step open so a test can act while the run is
+/// genuinely attached and working: the provider announces the step on `started`
+/// and answers only once the test signals `release`.
+#[derive(Default)]
+struct StepGate {
+    started: Notify,
+    release: Notify,
+}
+
 struct ScriptedProvider {
     completions: Mutex<Vec<String>>,
     calls: AtomicUsize,
@@ -70,6 +80,8 @@ struct ScriptedProvider {
     /// How long each completion stalls, so a test can hold a drive open across
     /// several lease periods.
     delay: Duration,
+    /// When set, the first completion is held at this gate.
+    gate: Option<Arc<StepGate>>,
 }
 
 impl ScriptedProvider {
@@ -79,6 +91,15 @@ impl ScriptedProvider {
             calls: AtomicUsize::new(0),
             prompts: Mutex::new(Vec::new()),
             delay: Duration::ZERO,
+            gate: None,
+        }
+    }
+
+    /// The same provider, but holding its first completion at `gate`.
+    fn gated(completions: Vec<String>, gate: Arc<StepGate>) -> Self {
+        Self {
+            gate: Some(gate),
+            ..Self::new(completions)
         }
     }
 
@@ -109,6 +130,12 @@ impl ModelProvider for ScriptedProvider {
 
     async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if index == 0 {
+            if let Some(gate) = &self.gate {
+                gate.started.notify_one();
+                gate.release.notified().await;
+            }
+        }
         for message in &request.messages {
             for block in &message.content {
                 if let openwave_core::ContentBlock::Text { text } = block {
@@ -463,6 +490,7 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
             backend.clone(),
             Arc::new(FixedResolver(provider)),
             Arc::new(Notify::new()),
+            Arc::new(SandboxSteerGuard::default()),
             true,
             fast_config(),
             fast_worker_config(),
@@ -513,6 +541,7 @@ async fn container_worker_service_cadence_completes_pending_teardown() {
             backend.clone(),
             Arc::new(FixedResolver(provider)),
             Arc::new(Notify::new()),
+            Arc::new(SandboxSteerGuard::default()),
             true,
             fast_config(),
             fast_worker_config(),
@@ -1700,6 +1729,101 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
         assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
         // The container did not outlive the cancellation.
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Steering a live sandbox-resident run: an instruction the host sends while the
+/// container is mid-run reaches the agent's *next* model step, and a run nobody
+/// is attached to refuses the instruction instead of queueing it.
+///
+/// This is the whole contract of the feature across the real stack — the host
+/// API, the wire frame over a loopback socket, and the in-container loop folding
+/// the text into its transcript — so it is driven end to end rather than
+/// asserted on the frame in isolation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        const INSTRUCTION: &str = "stop listing files and report what you have";
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "inspect the workspace").await;
+
+        let backend = MockBackend::spawning();
+        let gate = Arc::new(StepGate::default());
+        // Two tool steps then a final answer, so the run is still working when
+        // the instruction arrives and has a later step to apply it on.
+        let provider = Arc::new(ScriptedProvider::gated(
+            vec![
+                "use-tool:list_dir:{\"path\":\".\"}".to_owned(),
+                "use-tool:list_dir:{\"path\":\".\"}".to_owned(),
+                "nothing but an empty workspace".to_owned(),
+            ],
+            gate.clone(),
+        ));
+        let steering = Arc::new(SandboxSteerGuard::default());
+        let runner = Arc::new(
+            SandboxContainerRunner::new(
+                store.clone(),
+                backend.clone(),
+                Arc::new(FixedResolver(provider.clone())),
+                fast_config(),
+            )
+            .with_steering(steering.clone()),
+        );
+
+        // Nothing is attached yet: the instruction is refused outright rather
+        // than parked for a connection that may never exist.
+        assert_eq!(
+            steering.steer(run_id, "too early to steer".to_owned()),
+            Err(SandboxSteerRefusal::NotAttached),
+        );
+
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        // The first model step proves the container is attached and working, so
+        // the instruction below is genuinely mid-run.
+        gate.started.notified().await;
+        steering
+            .steer(run_id, INSTRUCTION.to_owned())
+            .expect("a live attached run accepts steering");
+        // Let the frame cross the socket while the sandbox is parked on its
+        // model call, then release the step it was waiting on.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        gate.release.notify_one();
+
+        let outcome = drive
+            .await
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
+
+        // The sandbox folded the instruction into a later step's transcript: the
+        // host proxied a prompt carrying it, which the first prompt did not.
+        let prompts = provider.prompts.lock().unwrap().clone();
+        let steered = format!("{STEERING_PREFIX}{INSTRUCTION}");
+        assert!(
+            !prompts[0].contains(&steered),
+            "the instruction cannot appear before it was sent"
+        );
+        assert!(
+            prompts
+                .iter()
+                .skip(1)
+                .any(|prompt| prompt.contains(&steered)),
+            "a step after the instruction must carry it, got prompts: {prompts:?}"
+        );
+
+        // The run is over, so its connection is gone and steering is refused
+        // again — the registration lives exactly as long as the attachment.
+        assert_eq!(
+            steering.steer(run_id, "too late to steer".to_owned()),
+            Err(SandboxSteerRefusal::NotAttached),
+        );
     })
     .await
     .expect("test completed within its time bound");

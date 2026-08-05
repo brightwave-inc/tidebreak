@@ -62,6 +62,7 @@ pub mod protocol;
 pub mod provisioning;
 pub mod reference;
 pub mod reverse;
+pub mod steer;
 pub mod wire;
 
 pub use host::{CapabilityHost, ReverseWaiter};
@@ -82,8 +83,9 @@ pub use reverse::{
     ModelInferenceResult, RequestFrame, ReverseEnvelope, ReverseRequest, ReverseResponseEnvelope,
     ReverseResult, RunProvenance,
 };
+pub use steer::{SteerMessage, MAX_PENDING_STEERS, MAX_STEER_BYTES};
 pub use wire::sandbox::serve_connection;
 pub use wire::{
     host::ConnectError, read_frame, write_frame, FrameError, HostConnection, ReverseOutcome,
-    SandboxRun, WireClient, WireFrame,
+    SandboxRun, SteerError, WireClient, WireFrame,
 };

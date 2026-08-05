@@ -456,6 +456,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_agent_run_cancel),
         )
         .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/steer",
+            post(routes::post_agent_run_steer),
+        )
+        .route(
             "/settings/api-key",
             axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
         )
@@ -1040,6 +1044,7 @@ async fn bind_inner(
             sandbox_container_admission.backend,
             state.resolver.clone(),
             state.agent_run_wake.clone(),
+            state.sandbox_steering.clone(),
             enabled,
             sandbox_container_run::SandboxContainerRunConfig::default(),
             sandbox_container_run_worker::SandboxContainerRunWorkerConfig::default(),

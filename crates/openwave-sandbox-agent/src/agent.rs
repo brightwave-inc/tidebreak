@@ -25,6 +25,16 @@
 //! back for the next step; any other completion is the final answer. The host
 //! (or, in tests, a mock host model) is what decides the directive, so the loop
 //! is genuinely driven from the model over the reverse channel.
+//!
+//! # Steering
+//!
+//! The run is not fire-and-forget once it starts. At every step boundary the
+//! loop takes whatever the host has
+//! [steered](openwave_sandbox_protocol::steer) over the live connection and
+//! appends it to the transcript as user-authored guidance, so a mid-run
+//! instruction changes what the next completion is asked for. Guidance that
+//! arrives while a model call is in flight lands on the following step; nothing
+//! interrupts a step already underway.
 
 use std::path::PathBuf;
 
@@ -36,6 +46,10 @@ use crate::tools::sandbox_tool_registry;
 
 /// The prefix a model completion uses to request a local tool call.
 const TOOL_DIRECTIVE: &str = "use-tool:";
+
+/// How a host-sent steering instruction is labelled in the transcript, so the
+/// model reads it as guidance from the user rather than as tool output.
+pub const STEERING_PREFIX: &str = "Steering from the user: ";
 
 /// Bound on model steps, so a model that never finishes cannot loop forever.
 const MAX_STEPS: usize = 8;
@@ -105,6 +119,19 @@ async fn run_loop(
 
     let mut transcript = format!("Task: {task}\n");
     for _step in 0..MAX_STEPS {
+        // Fold in whatever the host has steered since the last step. Steering is
+        // applied at the step boundary, as user-authored guidance appended to the
+        // transcript the next completion is asked for — the loop reads it exactly
+        // as it reads the task, so late guidance can redirect the run without
+        // restarting it. Each one is echoed on the event stream so the host's
+        // journal shows when an instruction took effect, not merely that it was
+        // sent.
+        for instruction in run.take_steering() {
+            let _ = run
+                .emit_progress(format!("applying steering: {instruction}"))
+                .await;
+            transcript.push_str(&format!("{STEERING_PREFIX}{instruction}\n"));
+        }
         // Each model step is its own durable operation, so a re-issue after a
         // reconnect is answered from the host's recorded outcome.
         let completion = model

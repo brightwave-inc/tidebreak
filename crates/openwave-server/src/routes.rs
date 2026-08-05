@@ -47,7 +47,7 @@ use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::model_roles::{self, ModelRole};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::scoped_store::ScopedStore;
-use crate::state::AppState;
+use crate::state::{AppState, SandboxSteerRefusal};
 use crate::view_frames::ViewFrameSource;
 use crate::voice_transcription::{self, VoiceTranscriptionInfo, VoiceTranscriptionUpdate};
 use crate::web_search::{
@@ -2675,6 +2675,62 @@ pub async fn post_agent_run_cancel(
         StatusCode::ACCEPTED,
         Json(AgentRunCancellationSnapshot { id: run.id, status }),
     ))
+}
+
+/// Body of `POST /chats/{chat_id}/agent-runs/{run_id}/steer`.
+#[derive(Debug, Deserialize)]
+pub struct AgentRunSteerBody {
+    /// The instruction to hand the running sandbox agent.
+    pub content: String,
+}
+
+/// `POST /chats/{chat_id}/agent-runs/{run_id}/steer` — hand one mid-run
+/// instruction to a sandbox-resident child that is running right now.
+///
+/// Unlike turn steering, this is **attached-only and not durable**: the
+/// instruction travels over the connection the container driver is holding, and
+/// the sandbox folds it into its next model step. A run this process holds no
+/// connection to is refused with `409` and nothing is queued, so a caller is
+/// never told an instruction was accepted that no agent will ever read.
+/// `202 Accepted` means a live connection took it. Foreground, wrong-chat, and
+/// terminal runs are rejected without exposing executor details.
+pub async fn post_agent_run_steer(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+    Json(body): Json<AgentRunSteerBody>,
+) -> Result<StatusCode, ServerError> {
+    let content = body.content.trim().to_owned();
+    if content.is_empty()
+        || content.contains('\0')
+        || content.len() > openwave_sandbox_protocol::steer::MAX_STEER_BYTES
+    {
+        return Err(ServerError::bad_request(
+            "steering content must be non-empty, contain no NUL characters, and fit the size limit",
+        ));
+    }
+    store.require_chat(chat_id).await?;
+    let run = store
+        .get_agent_run(run_id)
+        .await?
+        .filter(|run| run.chat_id == chat_id && run.tier == AgentRunTier::Background);
+    let Some(run) = run else {
+        return Err(ServerError::not_found(format!(
+            "agent run {run_id} not found"
+        )));
+    };
+    if run.status != AgentRunStatus::Running {
+        return Err(ServerError::conflict("sandbox run is not steerable"));
+    }
+    match state.sandbox_steering.steer(run_id, content) {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(SandboxSteerRefusal::NotAttached) => Err(ServerError::conflict(
+            "sandbox run is not attached; steering is not queued",
+        )),
+        Err(SandboxSteerRefusal::Backlogged) => Err(ServerError::conflict(
+            "sandbox run has not consumed its pending steering yet",
+        )),
+    }
 }
 
 /// Best-effort local acceleration after a sandbox cancellation has committed.

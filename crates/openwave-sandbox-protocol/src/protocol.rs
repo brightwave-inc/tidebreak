@@ -20,9 +20,16 @@ use crate::provisioning::TransportSecret;
 /// negotiation window across versions.
 ///
 /// Version 2 added authenticated attach, version 3 added run initialization,
-/// and version 4 adds sandbox acknowledgement of consumed reverse responses so
-/// the host can evict replay bodies safely.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// version 4 added sandbox acknowledgement of consumed reverse responses so the
+/// host can evict replay bodies safely, and version 5 adds host -> sandbox
+/// [steering](crate::steer) of a live run.
+///
+/// A new frame is an incompatible change here even though it is additive: the
+/// wire envelope names a closed set of lanes and refuses an unknown one rather
+/// than skipping it, so a peer that has never heard of a lane must be turned
+/// away at the handshake — where the refusal is legible — instead of dropping a
+/// frame it cannot parse mid-run.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Largest single reverse-RPC or event frame a conforming transport accepts,
 /// so a peer cannot force unbounded buffering with one enormous frame.

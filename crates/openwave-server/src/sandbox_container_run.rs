@@ -54,6 +54,7 @@ use openwave_sandbox_protocol::{
         Capability, CapabilityResponder, GrantSet, ModelInferenceResult, ReverseRequest,
         ReverseResult, RunProvenance,
     },
+    steer::SteerMessage,
     AttachRequest, BackendError, CapabilityHost, ConnectError, ProvisionRequest, SandboxAddress,
     SandboxBackend, SandboxHandle, SandboxNetworkPolicy, SandboxTag, WireClient,
 };
@@ -65,6 +66,7 @@ use crate::resolver::ProviderResolver;
 use crate::sandbox_admission::{evaluate_detached_admission, DetachedPreconditions};
 use crate::sandbox_docker::DEFAULT_IDLE_TIMEOUT_SECS;
 use crate::scoped_model_token::{GatewayScopedTokenIssuer, ScopedModelTokenIssuer};
+use crate::state::SandboxSteerGuard;
 
 /// The provider attribution stamped on reverse operations from a local
 /// container. Untrusted attribution rendered on consent prompts, never a claim
@@ -74,6 +76,13 @@ const CONTAINER_PROVENANCE_PROVIDER: &str = "local-container";
 /// comfortably below it. Kept together so the safety margin is reviewable and
 /// testable instead of existing only in matching comments across crates.
 const SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many steering instructions the host holds for one attached run before it
+/// refuses new ones. Steering is applied at the sandbox's step boundary, so a
+/// small backlog covers a burst arriving mid-step; past it the caller is told to
+/// retry rather than the host growing an unbounded queue for a run that may
+/// never read it.
+const STEER_BACKLOG: usize = 8;
 
 const _: () = assert!(
     SANDBOX_KEEPALIVE_INTERVAL.as_secs() * 2 < DEFAULT_IDLE_TIMEOUT_SECS,
@@ -280,6 +289,10 @@ pub struct SandboxContainerRunner {
     /// `scoped_model_token_available` input. Defaults to the gateway position
     /// — unavailable, fail-closed — until the gateway can mint for real.
     token_issuer: Arc<dyn ScopedModelTokenIssuer>,
+    /// Where this driver publishes the steering sink of every connection it
+    /// holds, so an API caller can reach a live run. A driver assembled without
+    /// one (a test that never steers) publishes into its own empty guard.
+    steering: Arc<SandboxSteerGuard>,
 }
 
 impl SandboxContainerRunner {
@@ -298,7 +311,16 @@ impl SandboxContainerRunner {
             resolver,
             config,
             token_issuer: Arc::new(GatewayScopedTokenIssuer),
+            steering: Arc::new(SandboxSteerGuard::default()),
         }
+    }
+
+    /// Publish this driver's live-connection steering sinks into `steering`, the
+    /// same guard the server's steer route resolves a run against.
+    #[must_use]
+    pub(crate) fn with_steering(mut self, steering: Arc<SandboxSteerGuard>) -> Self {
+        self.steering = steering;
+        self
     }
 
     /// Replace the scoped-token issuer — the seam tests and future
@@ -673,7 +695,22 @@ impl SandboxContainerRunner {
         // heartbeat the run is failed out from under a container that is still
         // working and still spending. The whole drive is additionally bounded by
         // the run's absolute deadline, so no path can wait forever.
-        let drive = self.drive_events(run_id, protocol_run_id, handle, &host, &init);
+        // The steering channel outlives any single connection: an instruction
+        // accepted just as a connection drops is carried to the reattach rather
+        // than lost. It is *not* a durable queue — it dies with this drive, and
+        // nothing accepts steering while the run is unattached, because the
+        // guard entry exists only while a connection is live.
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel::<String>(STEER_BACKLOG);
+        let drive = self.drive_events(
+            run_id,
+            protocol_run_id,
+            handle,
+            &host,
+            &init,
+            lease_token,
+            &steer_tx,
+            &mut steer_rx,
+        );
         tokio::pin!(drive);
         let mut heartbeat = tokio::time::interval(self.config.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -818,6 +855,7 @@ impl SandboxContainerRunner {
 
     /// Attach and drain the container's event stream until it reports a terminal
     /// event, reattaching across unplanned disconnects within the budget.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_events(
         &self,
         run_id: AgentRunId,
@@ -825,12 +863,25 @@ impl SandboxContainerRunner {
         handle: &SandboxHandle,
         host: &CapabilityHost,
         init: &RunInit,
+        lease_token: Uuid,
+        steer_tx: &tokio::sync::mpsc::Sender<String>,
+        steer_rx: &mut tokio::sync::mpsc::Receiver<String>,
     ) -> DriveEnd {
         let mut cursor = EventCursor::START;
         let mut attempt = 0u32;
         loop {
             match self
-                .drain_connection(run_id, protocol_run_id, handle, host, init, &mut cursor)
+                .drain_connection(
+                    run_id,
+                    protocol_run_id,
+                    handle,
+                    host,
+                    init,
+                    &mut cursor,
+                    lease_token,
+                    steer_tx,
+                    steer_rx,
+                )
                 .await
             {
                 DrainOutcome::Result(text) => return DriveEnd::Result(text),
@@ -862,6 +913,9 @@ impl SandboxContainerRunner {
         host: &CapabilityHost,
         init: &RunInit,
         cursor: &mut EventCursor,
+        lease_token: Uuid,
+        steer_tx: &tokio::sync::mpsc::Sender<String>,
+        steer_rx: &mut tokio::sync::mpsc::Receiver<String>,
     ) -> DrainOutcome {
         let address = match self.backend.address(handle).await {
             Ok(address) => address,
@@ -908,40 +962,62 @@ impl SandboxContainerRunner {
         // Deliver the run init on every attach; the sandbox keeps the first
         // and ignores redeliveries, so a reattach is idempotent.
         conn.send_init(init.clone()).await;
+        // Publish this connection's steering sink for exactly as long as the
+        // connection lives, so the API can tell "attached, instruction taken"
+        // from "not attached, nothing queued" by whether an entry exists. A
+        // registration refused (an identity already published) means a
+        // superseded attempt still holds it; drive on rather than displacing it.
+        let _attached = self
+            .steering
+            .register(run_id, lease_token, steer_tx.clone());
         // Drain events, committing the cursor by acknowledging each, until a
-        // terminal event arrives or the connection closes. Both terminal events
-        // end the drive: the supervisor keeps serving after its agent loop
-        // returns, so waiting only for a result would hang on an open socket and
-        // leak the container.
-        while let Some(event) = conn.next_event().await {
-            let payload = event.payload.clone();
-            *cursor = EventCursor::committed(event.sequence);
-            conn.acknowledge(*cursor).await;
-            match payload {
-                EventPayload::Result(text) => return DrainOutcome::Result(text),
-                EventPayload::Failed(detail) => return DrainOutcome::AgentFailed(detail),
-                // Progress is observation, published so a reader can watch the
-                // run without waiting for its result. The sandbox's own event
-                // sequence keys the append, so a reattach that redelivers a
-                // batch leaves one line rather than two, and a failure to
-                // publish is dropped rather than allowed to end the drive.
-                EventPayload::Progress(text) => {
-                    if let Err(error) = self
-                        .store
-                        .append_agent_run_progress(
-                            run_id,
-                            &format!("event:{}", event.sequence.get()),
-                            &text,
-                        )
-                        .await
-                    {
-                        eprintln!("openwave: could not publish progress for run {run_id}: {error}");
+        // terminal event arrives or the connection closes, while forwarding any
+        // steering the host accepted onto the reserved control lane. Both
+        // terminal events end the drive: the supervisor keeps serving after its
+        // agent loop returns, so waiting only for a result would hang on an open
+        // socket and leak the container.
+        loop {
+            tokio::select! {
+                event = conn.next_event() => {
+                    let Some(event) = event else { return DrainOutcome::Disconnected };
+                    let payload = event.payload.clone();
+                    *cursor = EventCursor::committed(event.sequence);
+                    conn.acknowledge(*cursor).await;
+                    match payload {
+                        EventPayload::Result(text) => return DrainOutcome::Result(text),
+                        EventPayload::Failed(detail) => return DrainOutcome::AgentFailed(detail),
+                        // Progress is observation, published so a reader can watch the
+                        // run without waiting for its result. The sandbox's own event
+                        // sequence keys the append, so a reattach that redelivers a
+                        // batch leaves one line rather than two, and a failure to
+                        // publish is dropped rather than allowed to end the drive.
+                        EventPayload::Progress(text) => {
+                            if let Err(error) = self
+                                .store
+                                .append_agent_run_progress(
+                                    run_id,
+                                    &format!("event:{}", event.sequence.get()),
+                                    &text,
+                                )
+                                .await
+                            {
+                                eprintln!("openwave: could not publish progress for run {run_id}: {error}");
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
+                Some(instruction) = steer_rx.recv() => {
+                    if let Err(error) = conn.send_steer(SteerMessage::new(instruction)).await {
+                        // The connection went away under the instruction. The
+                        // drive reattaches; the instruction is not re-sent,
+                        // because guidance the run never saw is the caller's to
+                        // repeat, not the host's to replay later out of context.
+                        eprintln!("openwave: a steering instruction was not delivered: {error}");
+                    }
+                }
             }
         }
-        DrainOutcome::Disconnected
     }
 
     /// Connect a TCP stream to the container's loopback address.
