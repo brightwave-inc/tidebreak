@@ -36,6 +36,7 @@ import type { RetryableTurn } from "./MessageList";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { AppsPanel } from "./apps/AppsPanel";
+import { PluginsPanel } from "./plugins/PluginsPanel";
 import { BackgroundAgentPanel } from "./BackgroundAgentPanel";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
@@ -678,6 +679,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         );
       case "apps":
         return <AppsPanel panel={panel} position={side} />;
+      case "plugins":
+        return <PluginsPanel panel={panel} position={side} />;
       case "agent":
         return (
           <BackgroundAgentPanel

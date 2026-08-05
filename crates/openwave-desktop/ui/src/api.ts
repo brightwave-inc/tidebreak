@@ -55,6 +55,13 @@ import {
   type ProviderInfo as WireProviderInfo,
   type ProviderKind as WireProviderKind,
   type PermissionMode as WirePermissionMode,
+  type PluginCapability as WirePluginCapability,
+  type PluginCatalog as WirePluginCatalog,
+  type PluginCategory as WirePluginCategory,
+  type PluginEnableUpdate as WirePluginEnableUpdate,
+  type PluginInfo as WirePluginInfo,
+  type PluginSkillInfo as WirePluginSkillInfo,
+  type SkillOrigin as WireSkillOrigin,
   type NetworkPolicy as WireNetworkPolicy,
   type ReasoningEffort as WireReasoningEffort,
   type Settings,
@@ -518,6 +525,27 @@ export type McpAppPayload = {
   structured_content?: unknown;
   is_error: boolean;
 };
+
+/** Everything installed, bundle by bundle, in the enable state it is in. */
+export type PluginCatalog = WirePluginCatalog;
+
+/** One bundle: its identity, its host-derived badges, and its members. */
+export type PluginInfo = WirePluginInfo;
+
+/** One skill, inside a bundle or standing alone. */
+export type PluginSkillInfo = WirePluginSkillInfo;
+
+/** What a bundle can do, derived by the host from what it contains. */
+export type PluginCapability = WirePluginCapability;
+
+/** What kind of work a bundle is for. */
+export type PluginCategory = WirePluginCategory;
+
+/** A merge patch over enable flags: absent names are left alone. */
+export type PluginEnableUpdate = WirePluginEnableUpdate;
+
+/** Where a skill package was loaded from; host-derived, never claimed. */
+export type SkillOrigin = WireSkillOrigin;
 
 /** The Apps library listing: every live local app, newest activity first. */
 export type AppLibrary = WireAppLibrary;
@@ -1153,6 +1181,25 @@ export class ApiClient {
 
   listApps(): Promise<AppLibrary> {
     return this.json("/apps", { headers: this.headers() });
+  }
+
+  listPlugins(): Promise<PluginCatalog> {
+    return this.json("/plugins", { headers: this.headers() });
+  }
+
+  /**
+   * Set the named enable flags, and take the fresh catalog back.
+   *
+   * A merge patch: the body names only what is changing, and the response is
+   * the authority on what the whole catalog now looks like — which is what
+   * lets a surface toggle optimistically and reconcile from one round trip.
+   */
+  setPluginsEnabled(update: PluginEnableUpdate): Promise<PluginCatalog> {
+    return this.json("/plugins/enabled", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(update),
+    });
   }
 
   getApp(appId: string): Promise<AppDetail> {

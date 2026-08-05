@@ -1,5 +1,5 @@
 import { useNavigate, useRouterState, useSearch } from "@tanstack/react-router";
-import { LayoutGrid, MessagesSquare } from "lucide-react";
+import { LayoutGrid, MessagesSquare, Puzzle } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
@@ -35,6 +35,13 @@ export function HomeSidebar() {
     segment === "apps" || segment?.startsWith("apps.") === true;
   const appsOpen =
     pathname === "/" && (holdsApps(search.left) || holdsApps(search.right));
+
+  // Plugins read the same way: install-wide, hosted on home, current whichever
+  // slot holds the list or one bundle's detail.
+  const holdsPlugins = (segment: string | undefined) =>
+    segment === "plugins" || segment?.startsWith("plugins.") === true;
+  const pluginsOpen =
+    pathname === "/" && (holdsPlugins(search.left) || holdsPlugins(search.right));
 
   return (
     <SidebarFrame>
@@ -75,7 +82,8 @@ export function HomeSidebar() {
       </div>
 
       {/* Apps are profile-scoped — they outlive every conversation — so their
-          library belongs on the chat-free rail, opening as a panel on home. */}
+          library belongs on the chat-free rail, opening as a panel on home.
+          Plugins are install-wide for the same reason and sit beside them. */}
       <SidebarSectionTitle className="mt-4">Library</SidebarSectionTitle>
       <SidebarButton
         aria-current={appsOpen ? "page" : undefined}
@@ -85,6 +93,15 @@ export function HomeSidebar() {
       >
         <LayoutGrid />
         <span>Apps</span>
+      </SidebarButton>
+      <SidebarButton
+        aria-current={pluginsOpen ? "page" : undefined}
+        data-active={pluginsOpen || undefined}
+        className="data-[active]:bg-muted"
+        onClick={() => void navigate({ to: "/", search: { left: "plugins" } })}
+      >
+        <Puzzle />
+        <span>Plugins</span>
       </SidebarButton>
     </SidebarFrame>
   );

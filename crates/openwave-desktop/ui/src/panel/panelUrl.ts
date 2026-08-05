@@ -21,6 +21,8 @@ import {
  *   folders
  *   apps
  *   apps.{appId}
+ *   plugins
+ *   plugins.{pluginSlug}
  *   agent.{runId}
  *
  * Only the first separator picks the panel type; what follows is read by that
@@ -48,6 +50,8 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return id ? { type: "outputs", outputId: id } : { type: "outputs" };
     case "apps":
       return id ? { type: "apps", appId: id } : { type: "apps" };
+    case "plugins":
+      return id ? { type: "plugins", pluginId: id } : { type: "plugins" };
     case "agent":
       // A run id is the whole address; there is no bare agent panel.
       return id ? { type: "agent", runId: id } : null;
@@ -83,6 +87,8 @@ export function encodePanelSegment(panel: PanelContent): string {
       return panel.outputId ? `outputs.${panel.outputId}` : "outputs";
     case "apps":
       return panel.appId ? `apps.${panel.appId}` : "apps";
+    case "plugins":
+      return panel.pluginId ? `plugins.${panel.pluginId}` : "plugins";
     case "agent":
       return `agent.${panel.runId}`;
   }
