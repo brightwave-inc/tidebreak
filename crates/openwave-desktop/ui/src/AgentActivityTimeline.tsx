@@ -78,17 +78,21 @@ export function summarizeAgentActivity(
 export function AgentActivityTimeline({
   state,
   active,
+  activeLabel,
+  expanded: controlledExpanded,
+  onExpandedChange,
 }: {
   state: AgentActivityState;
   active: boolean;
+  activeLabel?: string;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   const contentId = useId();
-  const [expanded, setExpanded] = useState(active);
-  const [userToggled, setUserToggled] = useState(false);
-
-  useEffect(() => {
-    if (!userToggled) setExpanded(active);
-  }, [active, userToggled]);
+  const [expandedPreference, setExpandedPreference] = useState<boolean | null>(
+    null,
+  );
+  const expanded = controlledExpanded ?? expandedPreference ?? active;
 
   if (state.error) {
     return (
@@ -108,6 +112,10 @@ export function AgentActivityTimeline({
   }
 
   const summary = summarizeAgentActivity(state.items);
+  const latest = state.items[state.items.length - 1]!;
+  const triggerLabel = active
+    ? (activeLabel ?? agentActivityHistoryLabel(latest))
+    : agentActivitySummaryLabel(summary);
 
   return (
     <div className="flex flex-col gap-0.5">
@@ -118,15 +126,16 @@ export function AgentActivityTimeline({
         aria-expanded={expanded}
         aria-controls={contentId}
         onClick={() => {
-          setUserToggled(true);
-          setExpanded((current) => !current);
+          const next = !expanded;
+          if (onExpandedChange) onExpandedChange(next);
+          else setExpandedPreference(next);
         }}
       >
         <ChevronRight
           className={cn("size-3 transition-transform", expanded && "rotate-90")}
           aria-hidden="true"
         />
-        {agentActivitySummaryLabel(summary)}
+        <span>{triggerLabel}</span>
       </Button>
       {expanded && (
         <ol
@@ -188,6 +197,7 @@ function activityOutcomeTone(
 ): ToolTone {
   switch (outcome) {
     case "waiting":
+      return "waiting_approval";
     case "running":
       return "running";
     case "completed":

@@ -54,6 +54,12 @@ export function BackgroundAgentList({
   onOpenOutput,
 }: BackgroundAgentListProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  // Rows move between keyed status groups as polling advances. Keep both
+  // disclosures here, keyed by run, so that remount does not erase a choice.
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+  const [activityExpandedByRunId, setActivityExpandedByRunId] = useState<
+    Map<string, boolean>
+  >(new Map());
   const sandboxRuns = runs.filter((run) => run.tier === "background");
   const matchedRuns = sandboxRuns.filter((run) =>
     spawns.some(
@@ -84,6 +90,23 @@ export function BackgroundAgentList({
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  };
+
+  const setRunExpanded = (runId: string, expanded: boolean) => {
+    setExpandedRunIds((current) => {
+      const next = new Set(current);
+      if (expanded) next.add(runId);
+      else next.delete(runId);
+      return next;
+    });
+  };
+
+  const setActivityExpanded = (runId: string, expanded: boolean) => {
+    setActivityExpandedByRunId((current) => {
+      const next = new Map(current);
+      next.set(runId, expanded);
       return next;
     });
   };
@@ -144,6 +167,14 @@ export function BackgroundAgentList({
                         onLoadActivity={onLoadActivity}
                         onOpen={onOpen}
                         onOpenOutput={onOpenOutput}
+                        expanded={expandedRunIds.has(run.id)}
+                        onExpandedChange={(expanded) =>
+                          setRunExpanded(run.id, expanded)
+                        }
+                        activityExpanded={activityExpandedByRunId.get(run.id)}
+                        onActivityExpandedChange={(expanded) =>
+                          setActivityExpanded(run.id, expanded)
+                        }
                       />
                     ))}
                   </div>
@@ -179,14 +210,21 @@ function BackgroundAgentRow({
   onLoadActivity,
   onOpen,
   onOpenOutput,
+  expanded,
+  onExpandedChange,
+  activityExpanded,
+  onActivityExpandedChange,
 }: {
   run: AgentRun;
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   onOpen?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+  activityExpanded?: boolean;
+  onActivityExpandedChange: (expanded: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [stopping, setStopping] = useState(false);
   const activity = useAgentRunActivity(
     run.id,
@@ -227,7 +265,7 @@ function BackgroundAgentRow({
         <button
           type="button"
           className="shrink-0"
-          onClick={() => setExpanded((open) => !open)}
+          onClick={() => onExpandedChange(!expanded)}
           aria-expanded={expanded}
           aria-controls={contentId}
           aria-label={expanded ? "Hide activity" : "Show activity"}
@@ -244,7 +282,7 @@ function BackgroundAgentRow({
           type="button"
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
           onClick={() =>
-            onOpen ? onOpen(run.id) : setExpanded((open) => !open)
+            onOpen ? onOpen(run.id) : onExpandedChange(!expanded)
           }
         >
           <span
@@ -285,6 +323,11 @@ function BackgroundAgentRow({
           <AgentActivityTimeline
             state={activity}
             active={RUNNING_AGENT_STATUSES.has(run.status)}
+            activeLabel={agentRunStatusDetail(run)}
+            expanded={
+              activityExpanded ?? RUNNING_AGENT_STATUSES.has(run.status)
+            }
+            onExpandedChange={onActivityExpandedChange}
           />
         </div>
       )}

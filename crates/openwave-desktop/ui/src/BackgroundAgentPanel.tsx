@@ -174,7 +174,12 @@ function BackgroundAgentDetail({
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4" aria-live="polite">
-        <AgentActivityTimeline key={run.id} state={activity} active={live} />
+        <AgentActivityTimeline
+          key={run.id}
+          state={activity}
+          active={live}
+          activeLabel={agentRunStatusDetail(run)}
+        />
         {run.terminal_text && (
           <section className="mt-4 border-t pt-3.5">
             <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
