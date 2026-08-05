@@ -113,26 +113,37 @@ impl CreateAppTool {
             .await
             .map_err(|_| "could not read the configured connected apps".to_owned())?;
         for binding in &manifest.bindings {
-            let Some(app) = connected.iter().find(|app| app.id == binding.app()) else {
+            // Folder bindings have a vocabulary but no dispatch yet: the door
+            // stays closed until the host-folder seam ships (see
+            // docs/folder-bindings.md), so nothing half-works in between.
+            let Some(binding_app) = binding.app() else {
+                return Err(
+                    "folder bindings are not yet available; bind a rest_api connected \
+                     app's operations with `operation_ids` instead"
+                        .to_owned(),
+                );
+            };
+            let Some(app) = connected.iter().find(|app| app.id == binding_app) else {
                 let configured: Vec<String> = connected
                     .iter()
                     .map(|app| format!("{} ({}, {})", app.id, app.name, app.kind))
                     .collect();
                 return Err(if configured.is_empty() {
                     format!(
-                        "connected app {} is not configured, and no connected apps \
-                         are; only an empty bindings list is valid",
-                        binding.app()
+                        "connected app {binding_app} is not configured, and no connected \
+                         apps are; only an empty bindings list is valid"
                     )
                 } else {
                     format!(
-                        "connected app {} is not configured; bind one of: {}",
-                        binding.app(),
+                        "connected app {binding_app} is not configured; bind one of: {}",
                         configured.join(", ")
                     )
                 });
             };
             match binding {
+                // Refused before app resolution above — a folder binding has
+                // no connected app to resolve.
+                AppBinding::Folder(_) => {}
                 // The tools vocabulary is retired (#1332): MCP was the only
                 // bindable kind when local apps shipped, and REST operations
                 // replaced it as the app-facing surface. The grammar still
@@ -698,6 +709,29 @@ mod tests {
                 refused.content
             );
         }
+    }
+
+    /// Folder bindings parse but the authoring door stays closed until the
+    /// host-folder seam ships (docs/folder-bindings.md) — nothing may publish
+    /// a manifest the consent route cannot yet grant.
+    #[tokio::test]
+    async fn folder_bindings_are_refused_at_the_door_until_dispatch_exists() {
+        let fixture = fixture().await;
+        let (_, ctx) = fixture.recorded_call().await;
+        let manifest = json!({
+            "bundle_html": "<!doctype html><h1>Files</h1>",
+            "manifest": {
+                "name": "File browser",
+                "bindings": [{ "folder": Uuid::new_v4(), "access": "read" }],
+            },
+        });
+        let refused = fixture.tool.execute(&ctx, manifest).await.unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("not yet available"),
+            "{}",
+            refused.content
+        );
     }
 
     #[tokio::test]

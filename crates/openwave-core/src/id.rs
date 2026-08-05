@@ -509,6 +509,18 @@ impl schemars::JsonSchema for ConnectedAppId {
     }
 }
 
+/// Schema for the other id the model writes: `create_app` manifests bind
+/// connected folders by broker root id.
+impl schemars::JsonSchema for HostRootId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "HostRootId".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Uuid as schemars::JsonSchema>::json_schema(generator)
+    }
+}
+
 id_type!(
     /// Identifies one immutable revision of a local app.
     AppRevisionId

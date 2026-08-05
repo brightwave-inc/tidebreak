@@ -513,7 +513,10 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
         std::collections::BTreeMap::new();
     for grant in state.store.list_live_app_grants().await? {
         for binding in &grant.bindings {
-            *used_by.entry(binding.app()).or_default() += 1;
+            // Folder grant bindings name broker roots, not connected apps.
+            if let Some(app) = binding.app() {
+                *used_by.entry(app).or_default() += 1;
+            }
         }
     }
     // Org-app display names by endpoint slug, so gateway-backed entries can

@@ -262,3 +262,53 @@ async fn body_string(response: axum::response::Response) -> String {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
+
+/// A manifest carrying a folder binding reads ungranted and cannot be
+/// granted: the vocabulary landed ahead of its dispatch
+/// (docs/folder-bindings.md), so the consent door stays closed and no
+/// half-granted state can exist.
+#[tokio::test]
+async fn folder_bindings_read_ungranted_and_conflict_on_consent() {
+    use openwave_core::local_app::{AppFolderBinding, FolderAccess};
+
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Files fixture".into(),
+                    bindings: vec![AppBinding::Folder(AppFolderBinding {
+                        folder: openwave_core::id::HostRootId::from_uuid(uuid::Uuid::new_v4())
+                            .unwrap(),
+                        access: FolderAccess::Read,
+                    })],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let state = grant_request(&router, &bearer, "GET", app_id).await;
+    assert_eq!(state.status(), StatusCode::OK);
+    let state: serde_json::Value = serde_json::from_str(&body_string(state).await).unwrap();
+    assert_eq!(state["granted"], json!(false));
+
+    let refused = grant_request(&router, &bearer, "POST", app_id).await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(refused).await;
+    assert!(
+        info.message.contains("not yet grantable"),
+        "{}",
+        info.message
+    );
+}
