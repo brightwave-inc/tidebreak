@@ -1122,6 +1122,97 @@ mod tests {
         );
     }
 
+    /// A background run executes in its own `agent-run-{id}` workspace, not in
+    /// the conversation's scratch directory. Its published revisions must still
+    /// land where the catalog reader looks, or every file a background run
+    /// produces renders as unavailable. Publisher and reader are driven against
+    /// each other here because that gap is invisible to either alone.
+    #[tokio::test]
+    async fn a_background_runs_published_output_is_readable_from_the_chats_scratch() {
+        use openwave_code_execution::ExecutionWorkspaceId;
+        use openwave_core::{AgentRunId, CallId, Chat, DbStore, SecretProvider, Store};
+        use std::sync::Arc;
+
+        struct NoSecrets;
+
+        #[async_trait::async_trait]
+        impl SecretProvider for NoSecrets {
+            async fn get_secret(&self, _key: &str) -> openwave_core::Result<Option<String>> {
+                Ok(None)
+            }
+            async fn set_secret(&self, _key: &str, _value: &str) -> openwave_core::Result<()> {
+                Ok(())
+            }
+            async fn delete_secret(&self, _key: &str) -> openwave_core::Result<()> {
+                Ok(())
+            }
+        }
+
+        let database = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                database.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        // The run wrote a file under `output/` in its own workspace, and the
+        // conversation's scratch does not exist yet.
+        let scratch_root = tempfile::tempdir().unwrap();
+        let run_id = AgentRunId::sandbox_for_spawn_call(CallId::new());
+        let workspace = ExecutionWorkspaceId::parse(format!("agent-run-{run_id}")).unwrap();
+        let output_dir = scratch_root
+            .path()
+            .join(workspace.as_str())
+            .join(openwave_core::EXEC_OUTPUT_DIRECTORY);
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let content = b"# Q3 revenue\n\nUp.";
+        std::fs::write(output_dir.join("summary.md"), content).unwrap();
+
+        let provider = openwave_server::code_execution::ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            Arc::new(NoSecrets),
+            scratch_root.path(),
+        );
+        let scan = provider
+            .collect_agent_run_outputs(&workspace, chat.id, CallId::new(), run_id)
+            .await
+            .unwrap();
+        assert_eq!(scan.entries.len(), 1, "{:?}", scan.notes);
+
+        let output = store
+            .list_outputs(chat.id, 10)
+            .await
+            .unwrap()
+            .pop()
+            .expect("the run's file should be a conversation output");
+        let revision = store
+            .get_output_revision(output.current_revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision.producing_run_id, Some(run_id));
+        assert_eq!(
+            read_output_revision_bytes(scratch_root.path(), chat.id, &output, &revision).unwrap(),
+            content
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_revision_and_export_destinations_reject_symlinks() {

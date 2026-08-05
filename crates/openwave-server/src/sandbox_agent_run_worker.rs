@@ -27,8 +27,7 @@ use openwave_core::{
     ChatRequest, ContentBlock, FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome,
     ProviderEvent, RequestFolderAccessArgs, Result, ResumeTurnForAgentRunWaitSetOutcome, Role,
     SandboxToolCall, SandboxToolCallRequest, SandboxToolCallStatus, StopReason, Store,
-    SubmitAgentRunResultOutcome, ToolCallRecord, MAX_SANDBOX_TOOL_CALLS, OUTPUT_LOOKUP_LIMIT,
-    SANDBOX_EXEC_TOOL,
+    SubmitAgentRunResultOutcome, ToolCallRecord, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -716,26 +715,24 @@ impl SandboxAgentRunWorker {
     /// that scope a run could hand over any file already in the conversation —
     /// including one the user's own turn produced — and have it presented as
     /// its work.
+    ///
+    /// The lookup asks the store for the filename rather than paging the
+    /// catalog, so a conversation holding more outputs than any one page
+    /// returns cannot hide a run's own file from it.
     async fn resolve_submitted_outputs(
         &self,
         run: &AgentRun,
         filenames: &[String],
     ) -> Result<Vec<AgentRunSubmittedOutput>> {
-        if filenames.is_empty() {
-            return Ok(vec![]);
-        }
-        let existing = self
-            .store
-            .list_outputs(run.chat_id, OUTPUT_LOOKUP_LIMIT)
-            .await?;
         let mut resolved = Vec::with_capacity(filenames.len());
         for filename in filenames {
-            // `list_outputs` orders newest-updated first, so the first match
+            // The candidates come back newest-updated first, so the first match
             // this run wrote is the record its file landed on.
             let mut output_id = None;
-            for output in existing
-                .iter()
-                .filter(|output| &output.filename == filename)
+            for output in self
+                .store
+                .find_outputs_by_filename(run.chat_id, filename)
+                .await?
             {
                 if self.run_produced_output(run.id, output.id).await? {
                     output_id = Some(output.id);

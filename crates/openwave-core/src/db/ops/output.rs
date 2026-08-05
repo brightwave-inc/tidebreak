@@ -166,6 +166,25 @@ pub(in crate::db) async fn list_outputs(
         .collect()
 }
 
+pub(in crate::db) async fn find_outputs_by_filename(
+    store: &DbStore,
+    chat_id: ChatId,
+    filename: &str,
+) -> Result<Vec<OutputRecord>> {
+    entities::output::Entity::find()
+        .filter(entities::output::Column::ChatId.eq(chat_id.0))
+        .filter(entities::output::Column::Filename.eq(filename))
+        .filter(entities::output::Column::DeletedAt.is_null())
+        .order_by_desc(entities::output::Column::UpdatedAt)
+        .order_by_desc(entities::output::Column::Id)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(output_from_model)
+        .collect()
+}
+
 pub(in crate::db) async fn list_output_revisions(
     store: &DbStore,
     output_id: OutputId,

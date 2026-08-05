@@ -746,6 +746,14 @@ impl Store for DbStore {
         ops::output::list_outputs(self, chat_id, limit).await
     }
 
+    async fn find_outputs_by_filename(
+        &self,
+        chat_id: ChatId,
+        filename: &str,
+    ) -> Result<Vec<OutputRecord>> {
+        ops::output::find_outputs_by_filename(self, chat_id, filename).await
+    }
+
     async fn list_output_revisions(&self, output_id: OutputId) -> Result<Vec<OutputRevision>> {
         ops::output::list_output_revisions(self, output_id).await
     }

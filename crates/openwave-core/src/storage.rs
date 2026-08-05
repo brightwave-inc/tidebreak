@@ -1694,6 +1694,21 @@ pub trait Store: Send + Sync {
         output_storage_unavailable()
     }
 
+    /// List a conversation's live outputs carrying one exact filename, most
+    /// recently updated first.
+    ///
+    /// Filename is the identity everything outside the store works with, and a
+    /// conversation can hold more outputs than any bounded listing returns, so
+    /// resolving a name asks for the name rather than paging the catalog and
+    /// hoping it is on the page.
+    async fn find_outputs_by_filename(
+        &self,
+        _chat_id: ChatId,
+        _filename: &str,
+    ) -> Result<Vec<OutputRecord>> {
+        output_storage_unavailable()
+    }
+
     /// List one output's revisions, newest first.
     async fn list_output_revisions(&self, _output_id: OutputId) -> Result<Vec<OutputRevision>> {
         output_storage_unavailable()
