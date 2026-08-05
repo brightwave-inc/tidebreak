@@ -951,7 +951,7 @@ describe("actionable tool results", () => {
       screen.getByRole("button", { name: "Open app Sentry triage" }),
     );
     await waitFor(() => {
-      expect(router.state.location.search).toMatchObject({ tabs: "apps.app-1" });
+      expect(router.state.location.pathname).toBe("/apps/app-1");
     });
   });
 

@@ -2,6 +2,11 @@
  * The workspace is the conversation and, beside it, a region of open panels.
  * The conversation is always there — it is the frame, not a panel — and
  * everything else opens as a tab in the region to its right.
+ *
+ * Every panel here is scoped to the conversation beside it. Install-wide
+ * surfaces — the Apps and Plugins libraries — are routes with the rail, not
+ * tabs: they outlive every conversation, so they take the whole pane rather
+ * than a slot beside one.
  */
 export type PanelContent =
   /**
@@ -12,18 +17,9 @@ export type PanelContent =
   | { type: "document"; documentId: string; citationId?: string }
   | { type: "outputs"; outputId?: string }
   | { type: "folders" }
-  /** The Apps library; an app id turns the list into that app's detail. */
-  | { type: "apps"; appId?: string }
-  /**
-   * The Plugins library; a plugin slug turns the list into that bundle's
-   * detail, with its member skills and their own switches.
-   */
-  | { type: "plugins"; pluginId?: string }
-  /**
-   * One background agent run, opened from its row in the transcript's agent
-   * list. There is no bare agent catalog — the transcript is the list — so the
-   * run id is always present.
-   */
+  /** This conversation's background agents, as a table of runs. */
+  | { type: "agents" }
+  /** One background agent run, opened from the agents table or the transcript. */
   | { type: "agent"; runId: string };
 
 export type PanelType = PanelContent["type"];
@@ -44,10 +40,10 @@ export const EMPTY_LAYOUT: LayoutState = { tabs: [], activeIndex: 0, fullscreen:
  * What makes two panels the same tab.
  *
  * A library and the item drilled into from it are one panel showing something
- * else, not two — the Apps list and an app's detail share a tab, and clicking
- * Folders again lands on the tab already open. Documents and agent runs are
- * addressed by identity instead, so two documents are two tabs while
- * re-opening one at a different citation moves within the tab it already has.
+ * else, not two — the agents table and clicking Folders again land on the tab
+ * already open. Documents and agent runs are addressed by identity instead, so
+ * two documents are two tabs while re-opening one at a different citation
+ * moves within the tab it already has.
  */
 export function panelKey(panel: PanelContent): string {
   switch (panel.type) {

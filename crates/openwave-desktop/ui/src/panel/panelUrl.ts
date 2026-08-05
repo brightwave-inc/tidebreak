@@ -13,10 +13,7 @@ import { EMPTY_LAYOUT, panelKey, type LayoutState, type PanelContent } from "./p
  *   outputs
  *   outputs.{outputId}
  *   folders
- *   apps
- *   apps.{appId}
- *   plugins
- *   plugins.{pluginSlug}
+ *   agents
  *   agent.{runId}
  *
  * Only the first separator picks the panel type; what follows is read by that
@@ -43,14 +40,14 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return id ? parseDocumentTarget(id) : null;
     case "outputs":
       return id ? { type: "outputs", outputId: id } : { type: "outputs" };
-    case "apps":
-      return id ? { type: "apps", appId: id } : { type: "apps" };
-    case "plugins":
-      return id ? { type: "plugins", pluginId: id } : { type: "plugins" };
+    case "agents":
+      return id ? null : { type: "agents" };
     case "agent":
-      // A run id is the whole address; there is no bare agent panel.
+      // A run id is the whole address; there is no id-less run panel.
       return id ? { type: "agent", runId: id } : null;
     default:
+      // `apps` and `plugins` were panel segments before the libraries became
+      // routes of their own; those links fall back to the conversation alone.
       return null;
   }
 }
@@ -78,10 +75,8 @@ export function encodePanelSegment(panel: PanelContent): string {
         : `document.${panel.documentId}`;
     case "outputs":
       return panel.outputId ? `outputs.${panel.outputId}` : "outputs";
-    case "apps":
-      return panel.appId ? `apps.${panel.appId}` : "apps";
-    case "plugins":
-      return panel.pluginId ? `plugins.${panel.pluginId}` : "plugins";
+    case "agents":
+      return "agents";
     case "agent":
       return `agent.${panel.runId}`;
   }

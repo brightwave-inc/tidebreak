@@ -8,12 +8,13 @@ import {
 } from "@tanstack/react-router";
 
 import { AppShell } from "./AppShell";
-import { ChatExplorer } from "./ChatExplorer";
+import { AppsPage } from "./apps/AppsPage";
 import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
 import { InboxView } from "./InboxView";
 import { useManagedPolicy } from "./managedPolicy";
 import type { PanelSearch } from "./panel/panelUrl";
+import { PluginsPage } from "./plugins/PluginsPage";
 import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
@@ -55,23 +56,42 @@ const homeRoute = createRoute({
 });
 
 /**
- * The whole chat list as a searchable table. It shares home's rail — nothing
- * here is scoped to a conversation either.
+ * The install-wide libraries, each a full page with the shared rail. They used
+ * to open as tabs beside a conversation; nothing about an app or a plugin is
+ * scoped to one, so they take the pane the way the inbox does.
  */
-const allChatsRoute = createRoute({
+const appsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/chats",
-  component: AllChatsRoute,
+  path: "/apps",
+  component: () => <AppsPage />,
 });
 
-function AllChatsRoute() {
-  return (
-    <RouteFrame sidebar={<AppSidebar />}>
-      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <ChatExplorer />
-      </div>
-    </RouteFrame>
-  );
+const appDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/apps/$appId",
+  component: AppDetailRouteComponent,
+});
+
+function AppDetailRouteComponent() {
+  const { appId } = appDetailRoute.useParams();
+  return <AppsPage appId={appId} />;
+}
+
+const pluginsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/plugins",
+  component: () => <PluginsPage />,
+});
+
+const pluginDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/plugins/$pluginId",
+  component: PluginDetailRouteComponent,
+});
+
+function PluginDetailRouteComponent() {
+  const { pluginId } = pluginDetailRoute.useParams();
+  return <PluginsPage pluginId={pluginId} />;
 }
 
 /**
@@ -183,7 +203,10 @@ const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
 
 export const routeTree = rootRoute.addChildren([
   homeRoute,
-  allChatsRoute,
+  appsRoute,
+  appDetailRoute,
+  pluginsRoute,
+  pluginDetailRoute,
   inboxRoute,
   chatRoute,
   settingsRoute.addChildren([

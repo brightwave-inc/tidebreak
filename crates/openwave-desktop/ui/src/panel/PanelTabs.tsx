@@ -1,17 +1,17 @@
-import { Bot, FileText, FolderOpen, LayoutGrid, Package, Shapes, X } from "lucide-react";
+import { Bot, FileText, FolderOpen, Package, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "./panelTypes";
 
 /**
- * What a tab says it is.
+ * The label a tab falls back to: the kind of thing it holds.
  *
- * Nothing here fetches: the strip has to be right the moment a panel opens,
- * before the panel behind it has loaded anything, so a tab names the kind of
- * thing it holds rather than the title of the particular one. The panel's own
- * header carries the title once it has it.
+ * The strip has to be right the moment a panel opens, before the panel behind
+ * it has loaded anything, so this never fetches. The route hosting the strip
+ * passes `labelFor` to upgrade a tab to the name of the particular thing —
+ * an output's filename, an agent's task — once it knows it.
  */
-function panelTabLabel(panel: PanelContent): string {
+function panelTabFallbackLabel(panel: PanelContent): string {
   switch (panel.type) {
     case "document":
       return "Document";
@@ -19,10 +19,8 @@ function panelTabLabel(panel: PanelContent): string {
       return panel.outputId ? "Output" : "Outputs";
     case "folders":
       return "Folders";
-    case "apps":
-      return "Apps";
-    case "plugins":
-      return "Plugins";
+    case "agents":
+      return "Agents";
     case "agent":
       return "Agent";
   }
@@ -37,10 +35,7 @@ function PanelTabIcon({ panel }: { panel: PanelContent }) {
       return <Package className={className} />;
     case "folders":
       return <FolderOpen className={className} />;
-    case "apps":
-      return <LayoutGrid className={className} />;
-    case "plugins":
-      return <Shapes className={className} />;
+    case "agents":
     case "agent":
       return <Bot className={className} />;
   }
@@ -57,11 +52,14 @@ function PanelTabIcon({ panel }: { panel: PanelContent }) {
 export function PanelTabs({
   tabs,
   activeIndex,
+  labelFor,
   onSelect,
   onClose,
 }: {
   tabs: PanelContent[];
   activeIndex: number;
+  /** Name a tab after the thing it shows; `undefined` keeps the type label. */
+  labelFor?: (panel: PanelContent) => string | undefined;
   onSelect: (index: number) => void;
   onClose: (index: number) => void;
 }) {
@@ -75,7 +73,7 @@ export function PanelTabs({
     >
       {tabs.map((panel, index) => {
         const active = index === activeIndex;
-        const label = panelTabLabel(panel);
+        const label = labelFor?.(panel) ?? panelTabFallbackLabel(panel);
         return (
           <div
             key={panelKey(panel)}

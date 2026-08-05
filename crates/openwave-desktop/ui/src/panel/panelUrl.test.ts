@@ -11,11 +11,7 @@ describe("panel URLs", () => {
   it("reads navigation panels and addressed document viewers", () => {
     expect(parsePanelSegment("outputs")).toEqual({ type: "outputs" });
     expect(parsePanelSegment("folders")).toEqual({ type: "folders" });
-    expect(parsePanelSegment("apps.app-1")).toEqual({ type: "apps", appId: "app-1" });
-    expect(parsePanelSegment("plugins.documents")).toEqual({
-      type: "plugins",
-      pluginId: "documents",
-    });
+    expect(parsePanelSegment("agents")).toEqual({ type: "agents" });
     expect(parsePanelSegment("agent.run-1")).toEqual({ type: "agent", runId: "run-1" });
     expect(parsePanelSegment("agent")).toBeNull();
     expect(parsePanelSegment("document.doc-1.cite-1")).toEqual({
@@ -23,6 +19,14 @@ describe("panel URLs", () => {
       documentId: "doc-1",
       citationId: "cite-1",
     });
+  });
+
+  // The install-wide libraries became routes; links that still open them as
+  // tabs fall back to the conversation alone.
+  it("no longer reads the retired library panels", () => {
+    expect(parsePanelSegment("apps")).toBeNull();
+    expect(parsePanelSegment("apps.app-1")).toBeNull();
+    expect(parsePanelSegment("plugins.documents")).toBeNull();
   });
 
   // The conversation holds its own region now; a URL still naming it as a
@@ -54,8 +58,7 @@ describe("panel URLs", () => {
       { type: "outputs" },
       { type: "outputs", outputId: "output-1" },
       { type: "folders" },
-      { type: "apps" },
-      { type: "plugins", pluginId: "documents" },
+      { type: "agents" },
       { type: "agent", runId: "run-1" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
@@ -96,7 +99,7 @@ describe("layout URLs", () => {
   });
 
   it("falls back to the first tab when nothing usable is named active", () => {
-    expect(layoutFromSearch({ tabs: "folders,outputs", active: "apps" }).activeIndex).toBe(0);
+    expect(layoutFromSearch({ tabs: "folders,outputs", active: "agents" }).activeIndex).toBe(0);
     expect(layoutFromSearch({ tabs: "folders,outputs" }).activeIndex).toBe(0);
   });
 

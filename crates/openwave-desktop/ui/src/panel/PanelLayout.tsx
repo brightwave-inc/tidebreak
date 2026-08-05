@@ -30,10 +30,13 @@ const MAX_PANEL_SIZE = 75;
  */
 export function PanelLayout({
   layout,
+  tabLabel,
   renderChat,
   renderPanel,
 }: {
   layout: LayoutState;
+  /** Name tabs after the things they show; see {@link PanelTabs}. */
+  tabLabel?: (panel: PanelContent) => string | undefined;
   /**
    * `visible` is false while a panel is expanded over the conversation. The
    * conversation is rendered either way, so the body is told rather than
@@ -102,6 +105,7 @@ export function PanelLayout({
               <PanelTabs
                 tabs={layout.tabs}
                 activeIndex={layout.activeIndex}
+                labelFor={tabLabel}
                 onSelect={focusTab}
                 onClose={closeTab}
               />

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatListStore } from "./ChatListStore";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
+import { useChatsSectionState } from "./sidebar/ChatsSection";
 import { useUiStore } from "./UiStore";
 
 /**
@@ -141,8 +142,8 @@ vi.mock("./FoldersView", () => ({
   FoldersView: () => <div data-testid="folders">folders</div>,
 }));
 
-vi.mock("./apps/AppsPanel", () => ({
-  AppsPanel: () => <div data-testid="apps">apps</div>,
+vi.mock("./apps/AppsView", () => ({
+  AppsView: () => <div data-testid="apps">apps</div>,
 }));
 
 // The settings rail (Back to app, section links) is the real thing here; only
@@ -227,6 +228,9 @@ beforeEach(() => {
   // decide the next test's routing before its own boot ever ran.
   useChatListStore.setState({ chats: [], chatsLoaded: false, chatsError: null });
   useUiStore.setState({ sidebarCollapsed: false });
+  // Module-level chrome state survives a render, so a test that collapsed or
+  // filtered the list would otherwise decide the next one's rail.
+  useChatsSectionState.setState({ collapsed: false, filtering: false, query: "" });
 });
 afterEach(() => {
   cleanup();
@@ -256,21 +260,24 @@ describe("app shell", () => {
 
   it("marks a parked conversation other than the one that is open", async () => {
     listInbox.mockResolvedValue([parked("chat-2", "call-parked")]);
+    const user = userEvent.setup();
     await mountApp({ at: "/c/chat-1" });
 
-    // A chat that has parked a turn can sit past the rail's cut, so the way to
-    // the full table is what reports that one of the others is waiting.
+    // The row itself carries the marker while the list is showing…
     expect(
-      await screen.findByLabelText("Another chat needs attention"),
+      await screen.findByLabelText("New chat needs attention"),
     ).toBeInTheDocument();
     expect(requestUserAttention).toHaveBeenCalledOnce();
-  });
 
-  it("says so when there is nothing to pick up", async () => {
-    listChats.mockResolvedValue([]);
-    await mountApp({ at: "/chats" });
-
-    expect(await screen.findByText("No chats yet")).toBeInTheDocument();
+    // …and collapsing the list moves the report to the section header, so a
+    // folded rail cannot hide that something is waiting. (`expanded` singles
+    // out the section toggle from the header breadcrumb, which is also
+    // named "Chats".)
+    await user.click(screen.getByRole("button", { name: "Chats", expanded: true }));
+    expect(screen.queryByLabelText("New chat needs attention")).not.toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("A chat needs attention"),
+    ).toBeInTheDocument();
   });
 
   it("keeps the shell up with a retryable list when loading chats fails", async () => {
@@ -347,7 +354,7 @@ describe("app shell", () => {
     await screen.findByTestId("transcript");
 
     // Chat-scoped places open from the chat's own chip, not the rail.
-    await user.click(screen.getByRole("button", { name: /^Chat status:/ }));
+    await user.click(screen.getByRole("button", { name: /^Chat activity/ }));
     await user.click(await screen.findByRole("button", { name: /Folders/ }));
 
     expect(await screen.findByTestId("folders")).toBeInTheDocument();
@@ -355,15 +362,16 @@ describe("app shell", () => {
     expect(screen.getByTestId("transcript")).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
 
-    // The Library entry reaches the app catalog without closing what is open:
-    // it joins the strip and comes forward.
-    await user.click(screen.getByRole("button", { name: "Apps" }));
+    // A second place joins the strip and comes forward without closing the
+    // first.
+    await user.click(screen.getByRole("button", { name: /^Chat activity/ }));
+    await user.click(await screen.findByRole("button", { name: /Outputs/ }));
 
-    expect(await screen.findByTestId("apps")).toBeInTheDocument();
+    expect(await screen.findByTestId("outputs")).toBeInTheDocument();
     await waitFor(() =>
       expect(router.state.location.search).toEqual({
-        tabs: "folders,apps",
-        active: "apps",
+        tabs: "folders,outputs",
+        active: "outputs",
       }),
     );
     expect(screen.queryByTestId("folders")).not.toBeInTheDocument();
@@ -371,20 +379,33 @@ describe("app shell", () => {
     // The tab it displaced is still there to go back to.
     await user.click(screen.getByRole("tab", { name: "Folders" }));
     expect(await screen.findByTestId("folders")).toBeInTheDocument();
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders,apps" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders,outputs" }),
+    );
   });
 
   it("closes a panel back to the conversation alone", async () => {
     const user = userEvent.setup();
-    const { router } = await mountApp({ at: "/c/chat-1" });
-    await screen.findByTestId("transcript");
-    await user.click(screen.getByRole("button", { name: "Apps" }));
-    await screen.findByTestId("apps");
+    const { router } = await mountApp({ at: "/c/chat-1?tabs=outputs" });
+    await screen.findByTestId("outputs");
 
-    await user.click(screen.getByRole("button", { name: "Close Apps" }));
+    await user.click(screen.getByRole("button", { name: "Close Outputs" }));
 
     await waitFor(() => expect(router.state.location.search).toEqual({}));
-    expect(screen.queryByTestId("apps")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("outputs")).not.toBeInTheDocument();
+  });
+
+  it("gives the install-wide libraries the whole pane", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountApp({ at: "/c/chat-1" });
+    await screen.findByTestId("transcript");
+
+    // Apps is a page of its own, not a tab beside the conversation.
+    await user.click(screen.getByRole("button", { name: "Apps" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/apps"));
+    expect(await screen.findByTestId("apps")).toBeInTheDocument();
+    expect(screen.queryByTestId("transcript")).not.toBeInTheDocument();
   });
 
   it("restores the arrangement a deep link describes", async () => {
@@ -402,30 +423,28 @@ describe("app shell", () => {
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();
   });
 
-  it(
-    "leaves a conversation to find another one, and searches for it there",
-    { timeout: 15000 },
-    async () => {
+  it("filters the rail's chat list in place", async () => {
     const user = userEvent.setup();
-    const { router } = await mountApp({ at: "/c/chat-1" });
+    await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
-    // Finding a chat is something done between conversations, so the way out
-    // of one is what leads to it.
-    await user.click(screen.getByRole("button", { name: "All chats" }));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/chats"));
-    const search = await screen.findByRole("searchbox", { name: "Search chats" });
+    // The filter lives behind the list's own options — there is no separate
+    // page to go find a chat on.
+    await user.click(screen.getByRole("button", { name: "Chat list options" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Filter chats" }));
+    const search = await screen.findByRole("searchbox", { name: "Filter chats" });
 
     await user.type(search, "roadmap");
-    const grid = await screen.findByRole("grid");
-    await within(grid).findByText("Roadmap");
-    expect(within(grid).queryByText("Release notes")).not.toBeInTheDocument();
+    const chatList = screen.getByLabelText("Chats");
+    expect(within(chatList).getByRole("button", { name: "Roadmap" })).toBeInTheDocument();
+    expect(
+      within(chatList).queryByRole("button", { name: "New chat" }),
+    ).not.toBeInTheDocument();
 
     await user.clear(search);
     await user.type(search, "nothing matches this");
-    expect(await screen.findByText("No matches")).toBeInTheDocument();
-    },
-  );
+    expect(await screen.findByText("No chat title contains that.")).toBeInTheDocument();
+  });
 
   it("keeps chat-scoped places behind the chat's own chip", async () => {
     await mountApp();
@@ -433,14 +452,14 @@ describe("app shell", () => {
     // Not disabled — absent. Home has no conversation for the chip to
     // describe, and the rail itself carries nothing chat-scoped anymore.
     expect(
-      screen.queryByRole("button", { name: /^Chat status:/ }),
+      screen.queryByRole("button", { name: /^Chat activity/ }),
     ).not.toBeInTheDocument();
     cleanup();
 
     const user = userEvent.setup();
     await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    await user.click(screen.getByRole("button", { name: /^Chat status:/ }));
+    await user.click(screen.getByRole("button", { name: /^Chat activity/ }));
     expect(await screen.findByRole("button", { name: /Outputs/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /Folders/ })).toBeEnabled();
   });

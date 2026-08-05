@@ -1,26 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
-import type { AgentRun, ApiClient, Chat } from "./api";
+import type { AgentRun } from "./api";
 import { ChatStatusChip } from "./ChatStatusChip";
-import { useChatSessionStore } from "./ChatSessionStore";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
-
-vi.mock("./deliverables", () => ({
-  listDeliverables: vi.fn().mockResolvedValue({
-    deliverables: [{ id: "out-1" }, { id: "out-2" }],
-  }),
-}));
-
-const chat = {
-  id: "chat-1",
-  title: "Roadmap",
-  project_id: null,
-  model: "sonnet",
-  permission_mode: "auto",
-} as unknown as Chat;
 
 const folder = {
   rootId: "root-1",
@@ -29,7 +14,7 @@ const folder = {
   statements: [],
 } as unknown as ChatFolderAccess;
 
-function runningRun(id: string, status: AgentRun["status"]): AgentRun {
+function run(id: string, status: AgentRun["status"]): AgentRun {
   return {
     id,
     parent_id: null,
@@ -39,46 +24,44 @@ function runningRun(id: string, status: AgentRun["status"]): AgentRun {
   } as unknown as AgentRun;
 }
 
-function renderChip(runs: AgentRun[] = []) {
-  const client = {
-    listAgentRuns: vi.fn().mockResolvedValue(runs),
-  } as unknown as ApiClient;
+function renderChip({
+  outputCount = 0,
+  runs = [] as AgentRun[],
+} = {}) {
   const onOpenOutputs = vi.fn();
   const onOpenFolders = vi.fn();
-  const onOpenAgent = vi.fn();
+  const onOpenAgents = vi.fn();
   render(
     <ChatStatusChip
-      client={client}
-      chat={chat}
+      outputCount={outputCount}
       folders={[folder]}
+      runs={runs}
       onOpenOutputs={onOpenOutputs}
       onOpenFolders={onOpenFolders}
-      onOpenAgent={onOpenAgent}
+      onOpenAgents={onOpenAgents}
     />,
   );
-  return { onOpenOutputs, onOpenFolders, onOpenAgent };
+  return { onOpenOutputs, onOpenFolders, onOpenAgents };
 }
 
-beforeEach(() => {
-  useChatSessionStore.getState().reset();
-});
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
-it("names the chat's permission mode and opens its chat-scoped places", async () => {
-  const { onOpenOutputs, onOpenFolders } = renderChip();
+it("summarizes activity on its face and opens the chat-scoped places", async () => {
+  const { onOpenOutputs, onOpenFolders } = renderChip({ outputCount: 2 });
 
-  const chip = screen.getByRole("button", { name: "Chat status: Auto" });
-  expect(chip).toHaveTextContent("Auto");
+  // No live work, so the face falls back to what the chat has produced.
+  const chip = screen.getByRole("button", { name: "Chat activity: 2 outputs" });
 
   await userEvent.click(chip);
-  await userEvent.click(await screen.findByText("2 outputs"));
+  // The label span sits inside the row button, so the click lands on it.
+  await userEvent.click(await screen.findByText("Outputs"));
   expect(onOpenOutputs).toHaveBeenCalled();
 
   await userEvent.click(chip);
-  await userEvent.click(await screen.findByText("Notes · No access"));
+  await userEvent.click(await screen.findByText("Folders"));
   expect(onOpenFolders).toHaveBeenCalled();
 });
 
@@ -86,35 +69,13 @@ it("names the chat's permission mode and opens its chat-scoped places", async ()
  * The dots are the whole reason the chip is persistent: background work is
  * invisible from a scrolled-away transcript otherwise.
  */
-it("counts live background runs and opens the newest one", async () => {
-  useChatSessionStore.getState().update((session) => ({
-    ...session,
-    messages: [
-      {
-        id: "m1",
-        role: "tool",
-        name: "spawn_sandbox_agent",
-        callId: "call-run-1",
-        status: "completed",
-      },
-      {
-        id: "m2",
-        role: "tool",
-        name: "spawn_sandbox_agent",
-        callId: "call-run-2",
-        status: "completed",
-      },
-    ] as never,
-  }));
-  const { onOpenAgent } = renderChip([
-    runningRun("run-1", "running"),
-    runningRun("run-2", "retry_wait"),
-  ]);
-
-  const chip = await screen.findByRole("button", {
-    name: "Chat status: Auto, 2 running",
+it("counts live background runs and opens the agents table", async () => {
+  const { onOpenAgents } = renderChip({
+    runs: [run("run-1", "running"), run("run-2", "retry_wait"), run("run-3", "completed")],
   });
+
+  const chip = screen.getByRole("button", { name: "Chat activity: 2 running" });
   await userEvent.click(chip);
-  await userEvent.click(screen.getByText("2 background agents"));
-  expect(onOpenAgent).toHaveBeenCalledWith("run-2");
+  await userEvent.click(screen.getByText("2 of 3 running"));
+  expect(onOpenAgents).toHaveBeenCalled();
 });

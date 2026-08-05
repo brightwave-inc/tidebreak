@@ -26,11 +26,6 @@ import {
 import { ModelMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
-import { AppsPanel } from "./apps/AppsPanel";
-import { PluginsPanel } from "./plugins/PluginsPanel";
-import { PanelLayout } from "./panel/PanelLayout";
-import { EMPTY_LAYOUT, type LayoutState, type PanelContent } from "./panel/panelTypes";
-import { useLayoutState } from "./panel/usePanelNav";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
 import { AppSidebar } from "./sidebar/AppSidebar";
@@ -267,25 +262,16 @@ export function HomeRoute() {
         }
       : undefined;
 
-  // Home hosts panels the way a conversation does, but only the ones that
-  // mean something outside a chat — the Apps library and the Plugins library.
-  // Anything else in the URL collapses back to home alone rather than
-  // rendering a panel whose content is scoped to a conversation this route
-  // does not have.
-  const layout = homeLayout(useLayoutState());
-
-  function renderPanel(panel: PanelContent) {
-    if (panel.type === "apps") return <AppsPanel panel={panel} />;
-    if (panel.type === "plugins") return <PluginsPanel panel={panel} />;
-    return null;
-  }
-
-  function homeContent() {
-    return (
-      // The panel slot this sits in is a plain block, so nothing stretches
-      // the column to the slot's height — it has to claim it itself, the
-      // same way .chat-pane does.
-      <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
+  // Home is the composer alone. The install-wide libraries that used to open
+  // as panels here are routes of their own now, so nothing beside the
+  // conversation starter needs hosting.
+  return (
+    <RouteFrame sidebar={<AppSidebar />}>
+      <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
+        {/* The panel slot this used to sit in was a plain block, so nothing
+            stretches the column to the slot's height — it has to claim it
+            itself, the same way .chat-pane does. */}
+        <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
           {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
@@ -374,34 +360,8 @@ export function HomeRoute() {
             onStop={async () => {}}
           />
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <RouteFrame sidebar={<AppSidebar />}>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <PanelLayout
-          layout={layout}
-          renderChat={() => homeContent()}
-          renderPanel={renderPanel}
-        />
+        </div>
       </div>
     </RouteFrame>
   );
-}
-
-/**
- * The tabs home is willing to host: only the install-wide libraries. A URL
- * naming any conversation-scoped panel is a stale or hand-edited link, and
- * that tab is dropped rather than opened onto content this route cannot fetch.
- */
-function homeLayout(layout: LayoutState): LayoutState {
-  const supported = (panel: PanelContent) =>
-    panel.type === "apps" || panel.type === "plugins";
-  const active = layout.tabs[layout.activeIndex];
-  const tabs = layout.tabs.filter(supported);
-  if (tabs.length === 0) return EMPTY_LAYOUT;
-  const activeIndex = active && supported(active) ? tabs.indexOf(active) : 0;
-  return { ...layout, tabs, activeIndex: Math.max(activeIndex, 0) };
 }

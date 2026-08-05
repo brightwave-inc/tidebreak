@@ -80,7 +80,20 @@ export function BackgroundAgentPanel({
 
   return (
     <PanelFrame
-      breadcrumb={<PanelBreadcrumb firstPart="Agent" />}
+      breadcrumb={
+        <PanelBreadcrumb
+          firstPart={
+            <button
+              type="button"
+              className="cursor-pointer hover:underline"
+              onClick={() => openPanel({ type: "agents" })}
+            >
+              Agents
+            </button>
+          }
+          currentItem={run?.task ?? "Agent"}
+        />
+      }
       headerRightSlot={stopButton}
       showBorder
     >
@@ -195,7 +208,7 @@ function BackgroundAgentDetail({
   );
 }
 
-function AgentRunStatusBadge({ status }: { status: AgentRun["status"] }) {
+export function AgentRunStatusBadge({ status }: { status: AgentRun["status"] }) {
   switch (status) {
     case "completed":
       return (
@@ -254,7 +267,7 @@ function agentActivityMetaLabel({
 }
 
 /** The current second, ticking only while something on screen depends on it. */
-function useNowWhile(active: boolean): number {
+export function useNowWhile(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -270,7 +283,7 @@ function useNowWhile(active: boolean): number {
  * durable finish — or to now, while it is still live. A run that has not
  * started yet has nothing to count.
  */
-function elapsedLabel(run: AgentRun, now: number): string | null {
+export function elapsedLabel(run: AgentRun, now: number): string | null {
   if (!run.started_at) return null;
   const started = new Date(run.started_at).getTime();
   if (Number.isNaN(started)) return null;

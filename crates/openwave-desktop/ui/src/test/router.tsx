@@ -44,6 +44,11 @@ export async function renderWithRouter(
     path: "/settings",
     component: () => <>{ui}</>,
   });
+  const appDetailRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/apps/$appId",
+    component: () => <>{ui}</>,
+  });
   const webSearchSettingsRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: "web-search",
@@ -59,6 +64,7 @@ export async function renderWithRouter(
     routeTree: rootRoute.addChildren([
       homeRoute,
       chatRoute,
+      appDetailRoute,
       settingsRoute.addChildren([webSearchSettingsRoute, voiceSettingsRoute]),
     ]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
