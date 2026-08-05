@@ -27,6 +27,7 @@ import { ModelMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { AppsPanel } from "./apps/AppsPanel";
+import { PluginsPanel } from "./plugins/PluginsPanel";
 import { PanelLayout } from "./panel/PanelLayout";
 import type { LayoutState, PanelContent } from "./panel/panelTypes";
 import { useLayoutState } from "./panel/usePanelNav";
@@ -267,9 +268,10 @@ export function HomeRoute() {
       : undefined;
 
   // Home hosts panels the way a conversation does, but only the ones that
-  // mean something outside a chat — today, the Apps library. Anything else in
-  // the URL collapses back to home alone rather than rendering a panel whose
-  // content is scoped to a conversation this route does not have.
+  // mean something outside a chat — the Apps library and the Plugins library.
+  // Anything else in the URL collapses back to home alone rather than
+  // rendering a panel whose content is scoped to a conversation this route
+  // does not have.
   const layout = homeLayout(useLayoutState());
 
   function renderPanel(
@@ -278,6 +280,9 @@ export function HomeRoute() {
   ) {
     if (panel.type === "apps" && position !== "chat") {
       return <AppsPanel panel={panel} position={position} />;
+    }
+    if (panel.type === "plugins" && position !== "chat") {
+      return <PluginsPanel panel={panel} position={position} />;
     }
     return homeContent();
   }
@@ -390,14 +395,14 @@ export function HomeRoute() {
 }
 
 /**
- * The layouts home is willing to host: itself alone, or itself beside the
- * Apps library. A URL naming any conversation-scoped panel is a stale or
- * hand-edited link; it lands on plain home rather than an empty panel.
+ * The layouts home is willing to host: itself alone, or itself beside one of
+ * the install-wide libraries. A URL naming any conversation-scoped panel is a
+ * stale or hand-edited link; it lands on plain home rather than an empty panel.
  */
 function homeLayout(layout: LayoutState): LayoutState {
   if (layout.mode === "single") return { mode: "single", panel: { type: "chat" } };
   const supported = (panel: PanelContent) =>
-    panel.type === "chat" || panel.type === "apps";
+    panel.type === "chat" || panel.type === "apps" || panel.type === "plugins";
   if (!supported(layout.left) || !supported(layout.right)) {
     return { mode: "single", panel: { type: "chat" } };
   }

@@ -17,6 +17,11 @@ export type PanelContent =
   /** The Apps library; an app id turns the list into that app's detail. */
   | { type: "apps"; appId?: string }
   /**
+   * The Plugins library; a plugin slug turns the list into that bundle's
+   * detail, with its member skills and their own switches.
+   */
+  | { type: "plugins"; pluginId?: string }
+  /**
    * One background agent run, opened from its row in the transcript's agent
    * list. There is no bare agent catalog — the transcript is the list — so the
    * run id is always present.
@@ -56,6 +61,7 @@ export function isContentPanel(panel: PanelContent): boolean {
     case "chat":
     case "folders":
     case "apps":
+    case "plugins":
       return false;
     case "outputs":
       // The outputs list is navigation; a single opened output is the thing
