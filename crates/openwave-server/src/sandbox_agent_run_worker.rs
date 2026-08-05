@@ -676,6 +676,16 @@ impl SandboxAgentRunWorker {
     /// that produced them. Submission only resolves those names to the output
     /// identities they landed on and records which ones the run offers, so no
     /// host-authored document is invented on the run's behalf.
+    ///
+    /// A name that does not resolve — the model named a file this run never
+    /// wrote — is never silently dropped, but it also never fails the run.
+    /// `done` is a terminal tool, not a checkpoint, so failing here would
+    /// schedule a retry that replays byte-identical context: the model would
+    /// re-emit the same wrong name until the attempt budget was gone, and any
+    /// files it genuinely did produce would be discarded along with it even
+    /// though they are already sitting in the outputs catalog. Instead the
+    /// submission carries every name that did resolve and reports the rest in
+    /// the receipt the user reads.
     async fn submit_submission(
         &self,
         run: &AgentRun,
@@ -684,16 +694,25 @@ impl SandboxAgentRunWorker {
         summary: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
         let id = run.id;
-        let outputs = match self.resolve_submitted_outputs(run, filenames).await {
-            Ok(outputs) => outputs,
-            // The model named a file that was never published. That is a model
-            // error, not a host failure: report it the same way as any other
-            // malformed completion so the run's own attempt budget bounds it.
-            Err(error) => return self.record_failure(run, lease_token, error).await,
+        let (outputs, unresolved) = self.resolve_submitted_outputs(run, filenames).await?;
+        let summary = if unresolved.is_empty() {
+            summary.to_owned()
+        } else {
+            let names = unresolved.join(", ");
+            let mut summary = format!(
+                "{summary}\n\nCould not submit {count} of the named file(s) — this run never \
+                 wrote them under output/: {names}.",
+                count = unresolved.len(),
+            );
+            summary = summary
+                .chars()
+                .take(openwave_core::MAX_SANDBOX_DONE_SUMMARY_CHARS)
+                .collect();
+            summary
         };
         match self
             .store
-            .submit_agent_run_submission(id, lease_token, &outputs, summary)
+            .submit_agent_run_submission(id, lease_token, &outputs, &summary)
             .await?
         {
             Some(SubmitAgentRunResultOutcome::Completed(_))
@@ -719,12 +738,17 @@ impl SandboxAgentRunWorker {
     /// The lookup asks the store for the filename rather than paging the
     /// catalog, so a conversation holding more outputs than any one page
     /// returns cannot hide a run's own file from it.
+    ///
+    /// Returns the outputs that resolved and, separately, the names that did
+    /// not — the caller submits the former and reports the latter, rather
+    /// than discarding a partially correct submission over one bad name.
     async fn resolve_submitted_outputs(
         &self,
         run: &AgentRun,
         filenames: &[String],
-    ) -> Result<Vec<AgentRunSubmittedOutput>> {
+    ) -> Result<(Vec<AgentRunSubmittedOutput>, Vec<String>)> {
         let mut resolved = Vec::with_capacity(filenames.len());
+        let mut unresolved = Vec::new();
         for filename in filenames {
             // The candidates come back newest-updated first, so the first match
             // this run wrote is the record its file landed on.
@@ -739,17 +763,15 @@ impl SandboxAgentRunWorker {
                     break;
                 }
             }
-            let Some(output_id) = output_id else {
-                return Err(AgentError::msg(format!(
-                    "sandbox agent submitted {filename}, which it never wrote under output/"
-                )));
-            };
-            resolved.push(AgentRunSubmittedOutput {
-                output_id,
-                filename: filename.clone(),
-            });
+            match output_id {
+                Some(output_id) => resolved.push(AgentRunSubmittedOutput {
+                    output_id,
+                    filename: filename.clone(),
+                }),
+                None => unresolved.push(filename.clone()),
+            }
         }
-        Ok(resolved)
+        Ok((resolved, unresolved))
     }
 
     /// Whether any revision of one output was published for this run.
@@ -2242,11 +2264,19 @@ mod tests {
     }
 
     /// A run's deliverables are the files it wrote, so submission has exactly two
-    /// jobs: carry the names the model chose through to the parent, and refuse a
-    /// name the run did not produce — whether nothing in the conversation carries
-    /// it, or something does but another writer put it there.
+    /// jobs: carry the names the model chose through to the parent, and never
+    /// let a name the run did not produce — whether nothing in the conversation
+    /// carries it, or something does but another writer put it there — pass as
+    /// a deliverable. `done` is a terminal tool, not a checkpoint, so failing
+    /// the whole submission over one bad name would schedule a retry that
+    /// replays byte-identical context: the model would repeat the same wrong
+    /// name until its attempts ran out, discarding files it did produce along
+    /// the way even though they are already sitting in the outputs catalog.
+    /// Submission instead carries every name that resolved and reports the
+    /// rest in the receipt, so a bad name costs nothing but itself.
     #[tokio::test]
-    async fn submitting_files_carries_their_names_and_refuses_a_name_this_run_did_not_write() {
+    async fn submitting_files_carries_resolved_names_and_reports_the_rest_without_failing_the_run()
+    {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -2284,7 +2314,7 @@ mod tests {
         seed(published, "Q3 revenue.md", Some(id)).await;
         seed(openwave_core::OutputId::new(), "Q4 revenue.md", None).await;
 
-        let done = |filename: &str| {
+        let done = |filenames: &[&str]| {
             Arc::new(EventProvider(vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
@@ -2294,7 +2324,7 @@ mod tests {
                 ProviderEvent::ToolCallArgsDelta {
                     index: 0,
                     fragment: serde_json::json!({
-                        "outputs": [filename],
+                        "outputs": filenames,
                         "summary": "Wrote the revenue summary.",
                     })
                     .to_string(),
@@ -2322,7 +2352,7 @@ mod tests {
 
         admit_sandbox(&store, chat.id, call, "Summarize Q3 revenue.").await;
         assert_eq!(
-            worker(done("Q3 revenue.md")).run_once().await.unwrap(),
+            worker(done(&["Q3 revenue.md"])).run_once().await.unwrap(),
             SandboxAgentRunWorkerOutcome::Completed(id)
         );
         let result = store.get_agent_run_result(id).await.unwrap().unwrap();
@@ -2337,18 +2367,37 @@ mod tests {
         // The parent reads the filenames, because the files are the result.
         assert!(result.text.contains("Q3 revenue.md"));
 
-        let unwritten = CallId::new();
-        let unwritten_id = openwave_core::AgentRunId::sandbox_for_spawn_call(unwritten);
-        admit_sandbox(&store, chat.id, unwritten, "Summarize Q4 revenue.").await;
+        // A second run names a file it wrote alongside one it never wrote —
+        // "Q4 revenue.md" belongs to nobody's run above, and "Q3 revenue.md"
+        // belongs to the first run, not this one.
+        let mixed = CallId::new();
+        let mixed_id = openwave_core::AgentRunId::sandbox_for_spawn_call(mixed);
+        let own = openwave_core::OutputId::new();
+        seed(own, "Q4 revenue (final).md", Some(mixed_id)).await;
+        admit_sandbox(&store, chat.id, mixed, "Summarize Q4 revenue.").await;
         assert_eq!(
-            worker(done("Q4 revenue.md")).run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::RetryScheduled(unwritten_id)
-        );
-        assert!(store
-            .get_agent_run_result(unwritten_id)
+            worker(done(&[
+                "Q4 revenue (final).md",
+                "Q4 revenue.md",
+                "Q3 revenue.md"
+            ]))
+            .run_once()
             .await
-            .unwrap()
-            .is_none());
+            .unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(mixed_id)
+        );
+        let mixed_result = store.get_agent_run_result(mixed_id).await.unwrap().unwrap();
+        assert!(matches!(
+            &mixed_result.payload,
+            openwave_core::AgentRunResultPayload::Submission { outputs, summary }
+                if outputs.len() == 1
+                    && outputs[0].output_id == own
+                    && outputs[0].filename == "Q4 revenue (final).md"
+                    && summary.contains("Wrote the revenue summary.")
+                    // The bad names are reported, never silently dropped.
+                    && summary.contains("Q4 revenue.md")
+                    && summary.contains("Q3 revenue.md")
+        ));
     }
 
     #[tokio::test]
