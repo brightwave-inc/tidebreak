@@ -205,7 +205,9 @@ Nothing in the local design depends on promotion shipping.
   Autonomous behavior has no viewer to attribute and is a gateway-side
   service-principal question, deferred there too.
 - **No peer-to-peer sharing.** The gateway is the sharing plane.
-- **No app state primitive** until a real app needs one.
+- **No app state primitive** until a real app needs one — though a
+  folder-writing app ([folder-bindings.md](folder-bindings.md)) can keep
+  its state in a granted folder, which is the interim answer.
 
 ## Slices
 
