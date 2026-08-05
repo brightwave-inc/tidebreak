@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::deliverable::RevisionProducer;
-use crate::id::{AgentRunId, AppId, AppRevisionId, ChatId, ConnectedAppId, TurnId};
+use crate::id::{AgentRunId, AppId, AppRevisionId, ChatId, ConnectedAppId, HostRootId, TurnId};
 
 /// Stable name of the foreground tool that creates and revises local apps.
 ///
@@ -233,15 +233,19 @@ pub enum AppGrantBinding {
     Tools(AppToolsGrantBinding),
     /// `{ app, operation_ids[], fingerprint }` — granted REST operations.
     Operations(AppOperationsGrantBinding),
+    /// `{ folder, access, fingerprint }` — granted folder access.
+    Folder(AppFolderGrantBinding),
 }
 
 impl AppGrantBinding {
-    /// The connected app the grant binding names.
+    /// The connected app the grant binding names, when it names one — a
+    /// folder grant binding names a broker root instead.
     #[must_use]
-    pub fn app(&self) -> ConnectedAppId {
+    pub fn app(&self) -> Option<ConnectedAppId> {
         match self {
-            Self::Tools(binding) => binding.app,
-            Self::Operations(binding) => binding.app,
+            Self::Tools(binding) => Some(binding.app),
+            Self::Operations(binding) => Some(binding.app),
+            Self::Folder(_) => None,
         }
     }
 
@@ -251,6 +255,7 @@ impl AppGrantBinding {
         match self {
             Self::Tools(binding) => binding.fingerprint,
             Self::Operations(binding) => binding.fingerprint,
+            Self::Folder(binding) => binding.fingerprint,
         }
     }
 }
@@ -285,6 +290,22 @@ pub struct AppOperationsGrantBinding {
     /// consent time — for a `rest_api` record, over the base URL, document
     /// hash, and credential *reference* and placement, never a credential
     /// value. Persisted as lowercase hex.
+    #[serde(with = "hex_fingerprint")]
+    pub fingerprint: [u8; 32],
+}
+
+/// The granted access to one connected folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppFolderGrantBinding {
+    /// Broker root the consent names, matching the manifest binding it
+    /// covers.
+    pub folder: HostRootId,
+    /// The granted access level.
+    pub access: FolderAccess,
+    /// SHA-256 fingerprint over the folder grant's canonical form — the root
+    /// id and access level, never a path or display name. Persisted as
+    /// lowercase hex.
     #[serde(with = "hex_fingerprint")]
     pub fingerprint: [u8; 32],
 }
@@ -326,12 +347,17 @@ mod hex_fingerprint {
 /// validator would have refused.
 pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String> {
     validate_binding_set(grant.bindings.iter().map(|binding| match binding {
-        AppGrantBinding::Tools(binding) => {
-            (binding.app, BindingCapabilities::Tools(&binding.tools))
-        }
+        AppGrantBinding::Tools(binding) => (
+            BindingKey::App(binding.app),
+            BindingCapabilities::Tools(&binding.tools),
+        ),
         AppGrantBinding::Operations(binding) => (
-            binding.app,
+            BindingKey::App(binding.app),
             BindingCapabilities::Operations(&binding.operation_ids),
+        ),
+        AppGrantBinding::Folder(binding) => (
+            BindingKey::Folder(binding.folder),
+            BindingCapabilities::Folder(binding.access),
         ),
     }))?;
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
@@ -355,13 +381,13 @@ pub struct AppManifest {
     pub bindings: Vec<AppBinding>,
 }
 
-/// The capabilities one connected app contributes to a local app: mounted MCP
-/// tools for an `mcp_server` record, declared REST operations for a
-/// `rest_api` record.
+/// The capabilities one binding contributes to a local app: declared REST
+/// operations of a `rest_api` connected app, bounded access to a connected
+/// folder, or — retired (#1332) but still parseable — mounted MCP tools.
 ///
-/// Untagged and closed: the two shapes are distinguished by their one
-/// differing field (`tools` vs `operation_ids`), each variant refuses unknown
-/// fields, and a body carrying both fields matches neither.
+/// Untagged and closed: the shapes are distinguished by their differing
+/// field names, each variant refuses unknown fields, and a body mixing
+/// fields from two shapes matches none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum AppBinding {
@@ -370,15 +396,19 @@ pub enum AppBinding {
     /// `{ app, operation_ids[] }` — declared operations of a `rest_api`
     /// record.
     Operations(AppOperationsBinding),
+    /// `{ folder, access }` — bounded access to a connected folder.
+    Folder(AppFolderBinding),
 }
 
 impl AppBinding {
-    /// The connected app the binding names.
+    /// The connected app the binding names, when it names one — a folder
+    /// binding names a broker root instead.
     #[must_use]
-    pub fn app(&self) -> ConnectedAppId {
+    pub fn app(&self) -> Option<ConnectedAppId> {
         match self {
-            Self::Tools(binding) => binding.app,
-            Self::Operations(binding) => binding.app,
+            Self::Tools(binding) => Some(binding.app),
+            Self::Operations(binding) => Some(binding.app),
+            Self::Folder(_) => None,
         }
     }
 }
@@ -417,6 +447,52 @@ pub struct AppOperationsBinding {
     pub operation_ids: Vec<String>,
 }
 
+/// Bounded access to one connected folder, by broker root id.
+///
+/// The folder is not a connected app: its identity is the host broker's
+/// registration, established through the trusted native picker, and the
+/// binding names it by the same opaque root id every other product surface
+/// uses. See `docs/folder-bindings.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppFolderBinding {
+    /// Root id of the connected folder. The available ids are listed in the
+    /// `create_app` tool description.
+    #[schemars(description = "Root id of the approved connected folder.")]
+    pub folder: HostRootId,
+    /// The access level the app requests over the folder.
+    #[schemars(description = "Access the app requests: \"read\" for listing and \
+                       bounded reads, \"read_write\" to also write files. Write \
+                       access is a louder consent — request it only when the app \
+                       needs it.")]
+    pub access: FolderAccess,
+}
+
+/// The access level of a folder binding.
+///
+/// Consent-bearing: the level is part of what the user grants and part of
+/// the binding's fingerprint, so widening `read` to `read_write` always
+/// re-prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderAccess {
+    /// Listing and bounded reads.
+    Read,
+    /// Listing, bounded reads, and bounded writes.
+    ReadWrite,
+}
+
+impl FolderAccess {
+    /// Stable wire spelling, for canonical forms and display.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::ReadWrite => "read_write",
+        }
+    }
+}
+
 /// Validate an app manifest structurally and return the JSON to store.
 ///
 /// Checks the display name, the mounted-tool grammar of every binding, and the
@@ -427,10 +503,17 @@ pub struct AppOperationsBinding {
 pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value, String> {
     validate_app_name(&manifest.name)?;
     validate_binding_set(manifest.bindings.iter().map(|binding| match binding {
-        AppBinding::Tools(binding) => (binding.app, BindingCapabilities::Tools(&binding.tools)),
+        AppBinding::Tools(binding) => (
+            BindingKey::App(binding.app),
+            BindingCapabilities::Tools(&binding.tools),
+        ),
         AppBinding::Operations(binding) => (
-            binding.app,
+            BindingKey::App(binding.app),
             BindingCapabilities::Operations(&binding.operation_ids),
+        ),
+        AppBinding::Folder(binding) => (
+            BindingKey::Folder(binding.folder),
+            BindingCapabilities::Folder(binding.access),
         ),
     }))?;
     let json =
@@ -444,16 +527,26 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
     Ok(json)
 }
 
+/// One binding's identity for the duplicate check: the connected app it
+/// binds, or the folder root it binds.
+#[derive(PartialEq, Eq, Hash)]
+enum BindingKey {
+    App(ConnectedAppId),
+    Folder(HostRootId),
+}
+
 /// One binding's capability list, by vocabulary, for the shared grammar check.
 enum BindingCapabilities<'a> {
     Tools(&'a [String]),
     Operations(&'a [String]),
+    Folder(FolderAccess),
 }
 
 /// The binding grammar shared by manifests and grants: no duplicate connected
-/// apps (one binding per record, whichever vocabulary), every tool shaped
-/// like a full mounted name, and every operation id within the ingest
-/// module's `operationId` grammar.
+/// apps or folders (one binding per record or root, whichever vocabulary),
+/// every tool shaped like a full mounted name, and every operation id within
+/// the ingest module's `operationId` grammar. A folder binding has no list to
+/// validate — its access level is closed by type.
 ///
 /// A namespace may itself contain `_`, so a mounted name cannot be split
 /// unambiguously without knowing the namespace — and the bound record lives
@@ -463,13 +556,23 @@ enum BindingCapabilities<'a> {
 /// belongs to the host layers that resolve ids (the `create_app` door, grant
 /// computation, the invoke gate).
 fn validate_binding_set<'a>(
-    bindings: impl Iterator<Item = (ConnectedAppId, BindingCapabilities<'a>)>,
+    bindings: impl Iterator<Item = (BindingKey, BindingCapabilities<'a>)>,
 ) -> Result<(), String> {
-    let mut apps = std::collections::HashSet::new();
-    for (app, capabilities) in bindings {
-        if !apps.insert(app) {
-            return Err(format!("duplicate binding for connected app {app}"));
+    let mut keys = std::collections::HashSet::new();
+    for (key, capabilities) in bindings {
+        match &key {
+            BindingKey::App(app) => {
+                if keys.contains(&key) {
+                    return Err(format!("duplicate binding for connected app {app}"));
+                }
+            }
+            BindingKey::Folder(folder) => {
+                if keys.contains(&key) {
+                    return Err(format!("duplicate binding for folder {folder}"));
+                }
+            }
         }
+        keys.insert(key);
         match capabilities {
             BindingCapabilities::Tools(binding_tools) => {
                 let mut tools = std::collections::HashSet::new();
@@ -506,6 +609,9 @@ fn validate_binding_set<'a>(
                     }
                 }
             }
+            // A folder binding carries no capability list; the access level
+            // is closed by type and consent-bearing rather than grammatical.
+            BindingCapabilities::Folder(_) => {}
         }
     }
     Ok(())
@@ -747,6 +853,91 @@ mod tests {
         assert_eq!(granted.fingerprint(), [0xab; 32]);
         assert!(serde_json::from_value::<AppGrantBinding>(
             json!({ "app": app, "tools": [], "operation_ids": [], "fingerprint": fingerprint })
+        )
+        .is_err());
+    }
+
+    /// The folder vocabulary joins the same untagged, closed grammar: its
+    /// shape parses, its access levels are a closed set, mixing it with an
+    /// app-keyed shape matches nothing, and one binding per root holds like
+    /// one binding per connected app.
+    #[test]
+    fn folder_bindings_parse_closed_and_dedupe_by_root() {
+        use serde_json::json;
+
+        let app = ConnectedAppId::new();
+        let folder = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+        let read: AppBinding =
+            serde_json::from_value(json!({ "folder": folder, "access": "read" })).unwrap();
+        let AppBinding::Folder(binding) = &read else {
+            panic!("a folder shape must parse as a folder binding");
+        };
+        assert_eq!(binding.access, FolderAccess::Read);
+        assert!(read.app().is_none());
+        let write: AppBinding =
+            serde_json::from_value(json!({ "folder": folder, "access": "read_write" })).unwrap();
+        assert!(matches!(
+            write,
+            AppBinding::Folder(AppFolderBinding {
+                access: FolderAccess::ReadWrite,
+                ..
+            })
+        ));
+
+        // Closed on every edge: an open-ended access value, a mixed shape,
+        // an unknown field, and a nil root id all refuse.
+        for body in [
+            json!({ "folder": folder, "access": "write" }),
+            json!({ "folder": folder, "access": "read", "app": app }),
+            json!({ "folder": folder, "access": "read", "extra": true }),
+            json!({ "folder": folder }),
+            json!({ "folder": uuid::Uuid::nil(), "access": "read" }),
+        ] {
+            assert!(
+                serde_json::from_value::<AppBinding>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
+
+        // One binding per folder root; a folder and a connected app never
+        // collide on the duplicate check.
+        let folder_binding =
+            |access: FolderAccess| AppBinding::Folder(AppFolderBinding { folder, access });
+        assert!(validate_app_manifest(&AppManifest {
+            name: "Files".into(),
+            bindings: vec![
+                folder_binding(FolderAccess::Read),
+                AppBinding::Operations(AppOperationsBinding {
+                    app,
+                    operation_ids: vec!["listIssues".into()],
+                }),
+            ],
+        })
+        .is_ok());
+        assert!(
+            validate_app_manifest(&AppManifest {
+                name: "Files".into(),
+                bindings: vec![
+                    folder_binding(FolderAccess::Read),
+                    folder_binding(FolderAccess::ReadWrite),
+                ],
+            })
+            .is_err(),
+            "duplicate folder bindings are refused across access levels"
+        );
+
+        // The grant twin round-trips with its pinned fingerprint and keeps
+        // the untagged discrimination.
+        let fingerprint = "cd".repeat(32);
+        let granted: AppGrantBinding = serde_json::from_value(
+            json!({ "folder": folder, "access": "read_write", "fingerprint": fingerprint }),
+        )
+        .unwrap();
+        assert!(matches!(granted, AppGrantBinding::Folder(_)));
+        assert!(granted.app().is_none());
+        assert_eq!(granted.fingerprint(), [0xcd; 32]);
+        assert!(serde_json::from_value::<AppGrantBinding>(
+            json!({ "folder": folder, "access": "read" })
         )
         .is_err());
     }

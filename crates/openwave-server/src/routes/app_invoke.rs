@@ -312,7 +312,7 @@ fn require_pinned_tool(revision: &AppRevision, tool: &str) -> Result<(), AppInvo
         .iter()
         .any(|binding| match binding {
             AppBinding::Tools(binding) => binding.tools.iter().any(|pinned| pinned == tool),
-            AppBinding::Operations(_) => false,
+            AppBinding::Operations(_) | AppBinding::Folder(_) => false,
         });
     if pinned {
         return Ok(());
@@ -337,7 +337,7 @@ fn require_pinned_operation(
                 .operation_ids
                 .iter()
                 .any(|pinned| pinned == operation_id),
-            AppBinding::Tools(_) => false,
+            AppBinding::Tools(_) | AppBinding::Folder(_) => false,
         });
     if pinned {
         return Ok(());
@@ -409,7 +409,8 @@ async fn require_app_grant(
     };
     // The pin check has already passed, so exactly one current-manifest
     // binding names this capability; its connected app is the record the
-    // grant must cover the capability under.
+    // grant must cover the capability under. (Folder bindings answer to a
+    // different surface and never resolve here.)
     let connected_app = revision
         .manifest
         .bindings
@@ -424,7 +425,7 @@ async fn require_app_grant(
                 .any(|held| held == operation_id),
             _ => false,
         })
-        .map(AppBinding::app);
+        .and_then(AppBinding::app);
     let covered = connected_app.is_some_and(|connected_app| {
         grant
             .bindings
@@ -452,14 +453,24 @@ async fn require_app_grant(
     }
     let current = current_app_fingerprints(state).await?;
     for binding in &grant.bindings {
-        let matches = current
-            .get(&binding.app())
-            .is_some_and(|app| app.fingerprint == binding.fingerprint());
+        // A folder grant binding has no current fingerprint to compare until
+        // the host-folder seam ships; it reads stale, failing the whole grant
+        // closed to re-consent exactly like a deleted record.
+        let matches = binding.app().is_some_and(|app| {
+            current
+                .get(&app)
+                .is_some_and(|candidate| candidate.fingerprint == binding.fingerprint())
+        });
         if !matches {
-            return Err(consent_required(format!(
-                "connected app {} was reconfigured after consent; the grant is stale",
-                binding.app()
-            )));
+            return Err(consent_required(match binding.app() {
+                Some(app) => format!(
+                    "connected app {app} was reconfigured after consent; the grant is \
+                     stale"
+                ),
+                None => {
+                    "a granted folder binding cannot be verified; the grant is stale".to_owned()
+                }
+            }));
         }
     }
     Ok(())
