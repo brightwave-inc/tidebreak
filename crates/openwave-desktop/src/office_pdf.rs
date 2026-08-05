@@ -8,13 +8,15 @@
 //! installed. Its absence is a first-class state the renderer turns into a
 //! download or an install hint, not an error.
 //!
-//! The converter processes untrusted bytes, so the invocation is contained
-//! the way the rest of the app treats external processes: on macOS it runs
-//! under `sandbox-exec` with the profile in [`crate::office_sandbox`] — no IP
-//! network, no writes outside the throwaway directory, the user's files
-//! unreadable — plus an empty environment, a throwaway working directory that
-//! also holds the LibreOffice profile, piped stdio, a hard timeout with
-//! `kill_on_drop`, and size caps on both input and output.
+//! The converter processes untrusted bytes, so it only runs inside a
+//! confinement boundary: on macOS, `sandbox-exec` with the profile in
+//! [`crate::office_sandbox`] — no IP network, no writes outside the throwaway
+//! directory, the user's files unreadable — plus an empty environment, a
+//! throwaway working directory that also holds the LibreOffice profile, piped
+//! stdio, a hard timeout with `kill_on_drop`, and size caps on both input and
+//! output. Hosts without a confinement implementation (everything but macOS
+//! today) report the converter unavailable instead of converting; those
+//! hygiene measures are not a security boundary on their own.
 //!
 //! Converted PDFs are cached on disk under `derived/office-pdf/`, keyed by the
 //! SHA-256 of the source bytes. The directory sits deliberately outside
@@ -49,6 +51,14 @@ const MAX_PDF_BYTES: u64 = 4 * MAX_BINARY_DELIVERABLE_BYTES as u64;
 const CACHE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 
 const CACHE_DIRECTORY: &str = "derived/office-pdf";
+
+/// Whether this host confines the converter. LibreOffice parses untrusted
+/// document bytes, and the throwaway profile plus cleared environment are
+/// hygiene, not a boundary — so where no confinement implementation exists
+/// (everywhere but macOS's Seatbelt profile today) the converter is treated
+/// as unavailable rather than launched directly. A future confined Windows
+/// converter widens this alongside its own boundary.
+const CONVERTER_CONFINED: bool = cfg!(target_os = "macos");
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -220,11 +230,16 @@ fn locate_soffice(data_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The resolution order, as a seam: a managed install wins outright and the
-/// system is not probed at all behind one.
+/// system is not probed at all behind one. On a host without converter
+/// confinement nothing resolves, however many LibreOffices are installed —
+/// the missing-converter state is the only one conversion may answer with.
 fn resolve_soffice(
     managed: Option<PathBuf>,
     system: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
+    if !CONVERTER_CONFINED {
+        return None;
+    }
     managed.or_else(system)
 }
 
@@ -253,7 +268,14 @@ fn system_soffice() -> Option<PathBuf> {
 /// `/Applications` bundle resolves as a file, spawns, and exits 126/127. One
 /// cheap `--version` probe (called at most once per app run) separates a
 /// converter that will work from remains that will not.
+///
+/// On a host without converter confinement the answer is false regardless of
+/// what is installed: a converter that conversion refuses to run is not
+/// workable, and the tool-status seam must agree with the converter about it.
 pub(crate) async fn workable_system_soffice() -> bool {
+    if !CONVERTER_CONFINED {
+        return false;
+    }
     let Some(candidate) = system_soffice() else {
         return false;
     };
@@ -344,13 +366,10 @@ impl ConversionFailure {
     }
 }
 
-/// The command that runs one conversion: on macOS, `sandbox-exec` wrapping
-/// `soffice` with the profile from [`crate::office_sandbox`].
-///
-/// Elsewhere the converter is invoked directly, unchanged. Nothing but the
-/// desktop app converts today and its office rendering is macOS-only in
-/// practice, so no second confinement mechanism is invented here; a Windows
-/// or Linux converter needs its own and this is where it would go.
+/// The command that runs one conversion: `sandbox-exec` wrapping `soffice`
+/// with the profile from [`crate::office_sandbox`]. macOS is the only host
+/// with a confinement implementation, and therefore the only one that
+/// converts at all.
 #[cfg(target_os = "macos")]
 fn converter_command(soffice: &Path, workdir: &Path) -> Result<Command, ConversionError> {
     // A converter that vanished between resolution and here is the
@@ -362,9 +381,16 @@ fn converter_command(soffice: &Path, workdir: &Path) -> Result<Command, Conversi
     crate::office_sandbox::confined_command(soffice, workdir).map_err(ConversionError::Sandbox)
 }
 
+/// Unreachable through resolution — an unconfined host resolves no converter
+/// — and kept a refusal rather than a direct launch so no future call path
+/// can run LibreOffice against untrusted bytes outside a boundary. A
+/// confined Windows converter replaces this with its own equivalent of the
+/// Seatbelt branch above.
 #[cfg(not(target_os = "macos"))]
-fn converter_command(soffice: &Path, _workdir: &Path) -> Result<Command, ConversionError> {
-    Ok(Command::new(soffice))
+fn converter_command(_soffice: &Path, _workdir: &Path) -> Result<Command, ConversionError> {
+    Err(ConversionError::Sandbox(
+        "this host has no confinement implementation for the converter".to_owned(),
+    ))
 }
 
 /// Run one headless conversion in a throwaway directory.
@@ -676,6 +702,9 @@ mod tests {
     /// A verified managed install answers resolution outright; the system is
     /// only probed when there is none. Probing order matters because the
     /// system scan reads `PATH` and can resolve stale launcher scripts.
+    /// macOS-only because it is the only host where resolution resolves at
+    /// all; the gate below pins the others.
+    #[cfg(target_os = "macos")]
     #[test]
     fn managed_install_preempts_the_system_scan() {
         let managed = PathBuf::from("/data/tools/libreoffice/x/soffice");
@@ -687,6 +716,20 @@ mod tests {
         );
         let system = PathBuf::from("/usr/bin/soffice");
         assert_eq!(resolve_soffice(None, || Some(system.clone())), Some(system));
+    }
+
+    /// The platform gate: a host without a confinement implementation
+    /// resolves no converter even with LibreOffice on offer — the preview
+    /// reports the converter unavailable rather than launching it against
+    /// untrusted documents outside a boundary. On macOS resolution keeps
+    /// working; everywhere else this asserts the refusal.
+    #[test]
+    fn unconfined_hosts_resolve_no_converter() {
+        let resolved = resolve_soffice(
+            Some(PathBuf::from("/data/tools/libreoffice/x/soffice")),
+            || Some(PathBuf::from("/usr/bin/soffice")),
+        );
+        assert_eq!(resolved.is_some(), cfg!(target_os = "macos"));
     }
 
     #[test]
@@ -719,6 +762,10 @@ mod tests {
     /// designs for, not a test failure.
     #[tokio::test]
     async fn converts_a_real_deck_when_libreoffice_is_installed() {
+        if !CONVERTER_CONFINED {
+            eprintln!("skipping: this host does not convert");
+            return;
+        }
         let Some(soffice) = system_soffice() else {
             eprintln!("skipping: no LibreOffice installed");
             return;
