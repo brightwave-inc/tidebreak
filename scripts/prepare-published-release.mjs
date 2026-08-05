@@ -6,14 +6,8 @@ import { pathToFileURL } from "node:url";
 
 import {
   createLatestDocument,
-  MACOS_ARCHITECTURES,
+  RELEASE_PLATFORMS,
 } from "./create-release-manifests.mjs";
-
-const ARTIFACT_FORMATS = [
-  { extension: ".dmg", format: "dmg" },
-  { extension: ".app.zip", format: "app.zip" },
-  { extension: ".app.tar.gz", format: "app.tar.gz", updater: true },
-];
 
 function requiredOption(options, name) {
   const value = options.get(name);
@@ -63,14 +57,20 @@ export function validatePublishedReleaseManifest({
 
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const expected = new Map();
-  for (const arch of MACOS_ARCHITECTURES) {
-    for (const descriptor of ARTIFACT_FORMATS) {
-      const filename = path.posix.join(
-        "macos",
-        arch,
-        `OpenWave_${version}_${arch}${descriptor.extension}`,
-      );
-      expected.set(filename, { arch, ...descriptor });
+  for (const platformDescriptor of RELEASE_PLATFORMS) {
+    for (const arch of platformDescriptor.architectures) {
+      for (const descriptor of platformDescriptor.formats) {
+        const filename = path.posix.join(
+          platformDescriptor.platform,
+          arch,
+          `OpenWave_${version}_${arch}${descriptor.extension}`,
+        );
+        expected.set(filename, {
+          platform: platformDescriptor.platform,
+          arch,
+          ...descriptor,
+        });
+      }
     }
   }
 
@@ -89,7 +89,7 @@ export function validatePublishedReleaseManifest({
     }
     seen.add(artifact.filename);
 
-    requireExact(artifact.platform, "macos", "artifact platform");
+    requireExact(artifact.platform, descriptor.platform, "artifact platform");
     requireExact(artifact.arch, descriptor.arch, "artifact architecture");
     requireExact(artifact.format, descriptor.format, "artifact format");
     if (!Number.isSafeInteger(artifact.size) || artifact.size <= 0) {

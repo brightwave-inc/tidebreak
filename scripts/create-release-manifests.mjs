@@ -12,14 +12,30 @@ import { pathToFileURL } from "node:url";
 
 import { parseReleaseTag } from "./check-release-tag.mjs";
 
-// The architectures a release ships. Apple Silicon only while the product is
-// in active development; see docs/releases.md.
-export const MACOS_ARCHITECTURES = ["aarch64"];
-
-const ARTIFACT_FORMATS = [
-  { extension: ".dmg", format: "dmg" },
-  { extension: ".app.zip", format: "app.zip" },
-  { extension: ".app.tar.gz", format: "app.tar.gz", updater: true },
+// The platforms, architectures, and artifact formats a release ships. This is
+// the single source of truth for what a release contains: it drives the
+// manifest, the `latest.json` platform keys, and the immutable hosting prefix.
+// macOS is Apple Silicon only while the product is in active development; see
+// docs/releases.md. Windows ships one unsigned NSIS installer, which is also
+// its Tauri updater artifact (Tauri v2 installs updates from the installer
+// itself, so the `.sig` covers those exact bytes).
+export const RELEASE_PLATFORMS = [
+  {
+    platform: "macos",
+    updaterPlatform: "darwin",
+    architectures: ["aarch64"],
+    formats: [
+      { extension: ".dmg", format: "dmg" },
+      { extension: ".app.zip", format: "app.zip" },
+      { extension: ".app.tar.gz", format: "app.tar.gz", updater: true },
+    ],
+  },
+  {
+    platform: "windows",
+    updaterPlatform: "windows",
+    architectures: ["x86_64"],
+    formats: [{ extension: "-setup.exe", format: "nsis", updater: true }],
+  },
 ];
 
 function requiredOption(options, name) {
@@ -60,36 +76,47 @@ function requireFile(file) {
 
 export function createLatestDocument({ version, publishedAt, artifacts }) {
   const updaterArtifacts = new Map();
-  for (const artifact of artifacts) {
-    if (artifact.platform !== "macos" || artifact.format !== "app.tar.gz") {
-      continue;
+  for (const descriptor of RELEASE_PLATFORMS) {
+    const updaterFormat = descriptor.formats.find((format) => format.updater);
+    for (const artifact of artifacts) {
+      if (
+        artifact.platform !== descriptor.platform ||
+        artifact.format !== updaterFormat.format
+      ) {
+        continue;
+      }
+      if (
+        !descriptor.architectures.includes(artifact.arch) ||
+        typeof artifact.signature !== "string" ||
+        !artifact.signature
+      ) {
+        throw new Error(
+          `invalid ${descriptor.platform} updater artifact in release manifest`,
+        );
+      }
+      updaterArtifacts.set(
+        `${descriptor.updaterPlatform}-${artifact.arch}`,
+        artifact,
+      );
     }
-    if (
-      !MACOS_ARCHITECTURES.includes(artifact.arch) ||
-      typeof artifact.signature !== "string" ||
-      !artifact.signature
-    ) {
-      throw new Error("invalid macOS updater artifact in release manifest");
-    }
-    updaterArtifacts.set(artifact.arch, artifact);
   }
 
   return {
     version,
     pub_date: publishedAt,
     platforms: Object.fromEntries(
-      MACOS_ARCHITECTURES.map((arch) => {
-        const artifact = updaterArtifacts.get(arch);
-        if (!artifact) {
-          throw new Error(
-            `missing ${arch} updater artifact in release manifest`,
-          );
-        }
-        return [
-          `darwin-${arch}`,
-          { signature: artifact.signature, url: artifact.url },
-        ];
-      }),
+      RELEASE_PLATFORMS.flatMap((descriptor) =>
+        descriptor.architectures.map((arch) => {
+          const key = `${descriptor.updaterPlatform}-${arch}`;
+          const artifact = updaterArtifacts.get(key);
+          if (!artifact) {
+            throw new Error(
+              `missing ${key} updater artifact in release manifest`,
+            );
+          }
+          return [key, { signature: artifact.signature, url: artifact.url }];
+        }),
+      ),
     ),
   };
 }
@@ -124,59 +151,69 @@ export function createReleaseManifests({
   const distPath = path.resolve(dist);
   const artifacts = [];
 
-  for (const arch of MACOS_ARCHITECTURES) {
-    const directory = path.join(distPath, "macos", arch);
-    const baseName = `OpenWave_${version}_${arch}`;
+  for (const platformDescriptor of RELEASE_PLATFORMS) {
+    for (const arch of platformDescriptor.architectures) {
+      const directory = path.join(distPath, platformDescriptor.platform, arch);
+      const baseName = `OpenWave_${version}_${arch}`;
 
-    for (const descriptor of ARTIFACT_FORMATS) {
-      const filename = `${baseName}${descriptor.extension}`;
-      const file = path.join(directory, filename);
-      requireFile(file);
+      for (const descriptor of platformDescriptor.formats) {
+        const filename = `${baseName}${descriptor.extension}`;
+        const file = path.join(directory, filename);
+        requireFile(file);
 
-      const digest = sha256(file);
-      writeFileSync(`${file}.sha256`, `${digest}  ${filename}\n`);
-      const relativeFilename = path.posix.join("macos", arch, filename);
-      const checksumFilename = `${relativeFilename}.sha256`;
-      const artifact = {
-        platform: "macos",
-        arch,
-        format: descriptor.format,
-        filename: relativeFilename,
-        url: publicUrl(normalizedBaseUrl, version, relativeFilename),
-        size: statSync(file).size,
-        sha256: digest,
-        checksum_filename: checksumFilename,
-        checksum_url: publicUrl(normalizedBaseUrl, version, checksumFilename),
-      };
+        const digest = sha256(file);
+        writeFileSync(`${file}.sha256`, `${digest}  ${filename}\n`);
+        const relativeFilename = path.posix.join(
+          platformDescriptor.platform,
+          arch,
+          filename,
+        );
+        const checksumFilename = `${relativeFilename}.sha256`;
+        const artifact = {
+          platform: platformDescriptor.platform,
+          arch,
+          format: descriptor.format,
+          filename: relativeFilename,
+          url: publicUrl(normalizedBaseUrl, version, relativeFilename),
+          size: statSync(file).size,
+          sha256: digest,
+          checksum_filename: checksumFilename,
+          checksum_url: publicUrl(
+            normalizedBaseUrl,
+            version,
+            checksumFilename,
+          ),
+        };
 
-      if (descriptor.updater) {
-        const signatureFile = `${file}.sig`;
-        requireFile(signatureFile);
-        const signature = readFileSync(signatureFile, "utf8").trim();
-        if (!signature) {
-          throw new Error(`empty updater signature: ${signatureFile}`);
+        if (descriptor.updater) {
+          const signatureFile = `${file}.sig`;
+          requireFile(signatureFile);
+          const signature = readFileSync(signatureFile, "utf8").trim();
+          if (!signature) {
+            throw new Error(`empty updater signature: ${signatureFile}`);
+          }
+          const signatureDigest = sha256(signatureFile);
+          writeFileSync(
+            `${signatureFile}.sha256`,
+            `${signatureDigest}  ${path.basename(signatureFile)}\n`,
+          );
+          artifact.signature = signature;
+          artifact.signature_filename = `${relativeFilename}.sig`;
+          artifact.signature_url = publicUrl(
+            normalizedBaseUrl,
+            version,
+            artifact.signature_filename,
+          );
+          artifact.signature_sha256 = signatureDigest;
+          artifact.signature_checksum_url = publicUrl(
+            normalizedBaseUrl,
+            version,
+            `${artifact.signature_filename}.sha256`,
+          );
         }
-        const signatureDigest = sha256(signatureFile);
-        writeFileSync(
-          `${signatureFile}.sha256`,
-          `${signatureDigest}  ${path.basename(signatureFile)}\n`,
-        );
-        artifact.signature = signature;
-        artifact.signature_filename = `${relativeFilename}.sig`;
-        artifact.signature_url = publicUrl(
-          normalizedBaseUrl,
-          version,
-          artifact.signature_filename,
-        );
-        artifact.signature_sha256 = signatureDigest;
-        artifact.signature_checksum_url = publicUrl(
-          normalizedBaseUrl,
-          version,
-          `${artifact.signature_filename}.sha256`,
-        );
-      }
 
-      artifacts.push(artifact);
+        artifacts.push(artifact);
+      }
     }
   }
 

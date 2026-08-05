@@ -51,7 +51,7 @@ jobs:
       matrix:
         # Apple Silicon only while the product is in active development; see
         # docs/releases.md. Restoring Intel means adding its row back here, to
-        # the two release matrices, and to MACOS_ARCHITECTURES.
+        # the two macOS release matrices, and to RELEASE_PLATFORMS.
         include:
           - arch: aarch64
             target: aarch64-apple-darwin

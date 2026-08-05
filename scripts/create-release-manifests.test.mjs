@@ -6,26 +6,34 @@ import test from "node:test";
 
 import {
   createReleaseManifests,
-  MACOS_ARCHITECTURES,
+  RELEASE_PLATFORMS,
 } from "./create-release-manifests.mjs";
 import { preparePublishedRelease } from "./prepare-published-release.mjs";
 
+const EXPECTED_ARTIFACT_COUNT = RELEASE_PLATFORMS.reduce(
+  (count, descriptor) =>
+    count + descriptor.architectures.length * descriptor.formats.length,
+  0,
+);
+
 function releaseFixture() {
   const dist = mkdtempSync(path.join(tmpdir(), "openwave-release-"));
-  for (const arch of MACOS_ARCHITECTURES) {
-    const directory = path.join(dist, "macos", arch);
-    mkdirSync(directory, { recursive: true });
-    const baseName = `OpenWave_0.4.2_${arch}`;
-    writeFileSync(path.join(directory, `${baseName}.dmg`), `dmg-${arch}`);
-    writeFileSync(path.join(directory, `${baseName}.app.zip`), `zip-${arch}`);
-    writeFileSync(
-      path.join(directory, `${baseName}.app.tar.gz`),
-      `updater-${arch}`,
-    );
-    writeFileSync(
-      path.join(directory, `${baseName}.app.tar.gz.sig`),
-      `signature-${arch}\n`,
-    );
+  for (const descriptor of RELEASE_PLATFORMS) {
+    for (const arch of descriptor.architectures) {
+      const directory = path.join(dist, descriptor.platform, arch);
+      mkdirSync(directory, { recursive: true });
+      const baseName = `OpenWave_0.4.2_${arch}`;
+      for (const format of descriptor.formats) {
+        const file = path.join(directory, `${baseName}${format.extension}`);
+        writeFileSync(file, `${format.format}-${descriptor.platform}-${arch}`);
+        if (format.updater) {
+          writeFileSync(
+            `${file}.sig`,
+            `signature-${descriptor.platform}-${arch}\n`,
+          );
+        }
+      }
+    }
   }
   return dist;
 }
@@ -42,15 +50,26 @@ test("creates a complete manifest and Tauri updater document", () => {
   const dist = releaseFixture();
   const { manifest, latest } = createReleaseManifests({ dist, ...RELEASE });
 
-  assert.equal(manifest.artifacts.length, MACOS_ARCHITECTURES.length * 3);
-  assert.deepEqual(Object.keys(latest.platforms), ["darwin-aarch64"]);
+  assert.equal(manifest.artifacts.length, EXPECTED_ARTIFACT_COUNT);
+  assert.deepEqual(Object.keys(latest.platforms), [
+    "darwin-aarch64",
+    "windows-x86_64",
+  ]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
     /releases\/v0\.4\.2\/macos\/aarch64\/OpenWave_0\.4\.2_aarch64\.app\.tar\.gz$/,
   );
   assert.equal(
     latest.platforms["darwin-aarch64"].signature,
-    "signature-aarch64",
+    "signature-macos-aarch64",
+  );
+  assert.match(
+    latest.platforms["windows-x86_64"].url,
+    /releases\/v0\.4\.2\/windows\/x86_64\/OpenWave_0\.4\.2_x86_64-setup\.exe$/,
+  );
+  assert.equal(
+    latest.platforms["windows-x86_64"].signature,
+    "signature-windows-x86_64",
   );
 
   const diskManifest = JSON.parse(

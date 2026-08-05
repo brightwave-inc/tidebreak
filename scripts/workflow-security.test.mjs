@@ -604,6 +604,98 @@ test("release caches restore only credential-free compiler products", () => {
   );
 });
 
+test("Windows release jobs mirror the credential-free prepare/build split", () => {
+  const release = workflows["release.yml"];
+  const prepareJob = workflowJob(release, "prepare_windows");
+  const buildJob = workflowJob(release, "build_windows");
+  const prepareCacheSave = prepareJob.match(
+    /- name: Save release-specific unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  const buildCacheRestore = buildJob.match(
+    /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(prepareCacheSave);
+  assert.ok(buildCacheRestore);
+
+  // The prerequisite compiles without any production credential and never
+  // uploads what it built; only the cache carries its outputs forward.
+  assert.match(prepareJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
+  assert.match(prepareJob, /--no-bundle --ci/);
+  assert.match(prepareJob, /continue-on-error: true/);
+  assert.doesNotMatch(prepareJob, /^    environment:/m);
+  assert.doesNotMatch(prepareJob, /secrets\./);
+  assert.doesNotMatch(
+    prepareJob,
+    /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_|actions\/upload-artifact/,
+  );
+  assert.ok(
+    prepareJob.indexOf("Save release-specific unsigned Rust build cache") <
+      prepareJob.indexOf("Require a successful unsigned compilation"),
+    "release compiler outputs must be saved before a failed compile is reported",
+  );
+
+  // The packaging job is restore-only and loads the updater key only after
+  // the credential-free cache restore.
+  assert.doesNotMatch(buildJob, /actions\/cache\/save/);
+  assert.ok(
+    buildJob.indexOf("Restore unsigned Rust build cache") <
+      buildJob.indexOf("Validate updater signing configuration"),
+    "the build cache must be restored before the updater secret is loaded",
+  );
+
+  // Identical path lists keep the cache version shared between the writing
+  // and restoring jobs; every restorable key pins at least the lockfile and
+  // toolchain hashes.
+  const cachedPaths = (step) =>
+    step.match(/path: \|\n([\s\S]*?)\n\s+key:/)?.[1];
+  assert.ok(cachedPaths(buildCacheRestore));
+  assert.equal(cachedPaths(buildCacheRestore), cachedPaths(prepareCacheSave));
+  const restorableKeys = buildCacheRestore
+    .split("\n")
+    .map((line) => line.trim().replace(/^key: /, ""))
+    .filter((line) => line.startsWith("windows-release-"));
+  assert.ok(restorableKeys.length >= 3);
+  for (const key of restorableKeys) {
+    assert.ok(
+      key.includes("hashFiles('Cargo.lock',"),
+      `restorable Windows cache key does not pin the source: ${key}`,
+    );
+  }
+
+  // Whatever a restore extracts, the products that get packaged are relinked
+  // from the tag's own sources.
+  const discardProducts = buildJob.match(
+    /- name: Discard restored product binaries[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(discardProducts);
+  for (const product of [
+    /release\/openwave-desktop\.exe/,
+    /release\/openwave-host-broker\.exe/,
+    /openwave_desktop_lib\./,
+    /binaries\/openwave-host-broker-\$RELEASE_TARGET\.exe/,
+  ]) {
+    assert.match(discardProducts, product);
+  }
+  assert.ok(
+    buildJob.indexOf("Discard restored product binaries") >
+      buildJob.indexOf("Restore unsigned Rust build cache") &&
+      buildJob.indexOf("Discard restored product binaries") <
+        buildJob.indexOf("Build the Tauri app without Windows code signing"),
+    "restored product binaries must be discarded before the packaged build",
+  );
+
+  // v1 ships unsigned Windows artifacts: no Authenticode configuration may
+  // creep in, no Apple credential reaches the Windows jobs, and the updater
+  // private key stays out of the Tauri build step.
+  assert.doesNotMatch(release, /certificateThumbprint|signCommand/);
+  assert.doesNotMatch(buildJob, /APPLE_|AWS_|DOWNLOADS_/);
+  const buildStep = buildJob.match(
+    /- name: Build the Tauri app without Windows code signing[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(buildStep);
+  assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
+});
+
 test("an existing immutable release resumes without rebuilding or overwriting", () => {
   const release = workflows["release.yml"];
   const inspectJob = workflowJob(release, "inspect_hosted");
@@ -618,6 +710,14 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
   assert.match(prepareJob, /needs\.inspect_hosted\.outputs\.exists != 'true'/);
   assert.match(
     signedBuildJob,
+    /needs\.inspect_hosted\.outputs\.exists != 'true'/,
+  );
+  assert.match(
+    workflowJob(release, "prepare_windows"),
+    /needs\.inspect_hosted\.outputs\.exists != 'true'/,
+  );
+  assert.match(
+    workflowJob(release, "build_windows"),
     /needs\.inspect_hosted\.outputs\.exists != 'true'/,
   );
   assert.match(
@@ -652,6 +752,7 @@ test("GitHub release downloads are copied from the hosted release", () => {
   assert.match(attachJob, /releases\/v\$OPENWAVE_VERSION\/manifest\.json/);
   assert.match(attachJob, /sha256sum --check --strict/);
   assert.match(attachJob, /OpenWave-macos-apple-silicon\.dmg/);
+  assert.match(attachJob, /OpenWave-windows-x86_64-setup\.exe/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
 
   assert.match(
