@@ -20,6 +20,7 @@ import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
 import {
   ComposerToolsMenu,
   type ComposerNetwork,
+  type ComposerPlugins,
   type ComposerReasoning,
 } from "./ComposerToolsMenu";
 import {
@@ -36,6 +37,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { documentIcon } from "@/documentIcon";
 import type { ImportedDocument } from "@/documents";
+import type { PluginInfo } from "./api";
 import { folderAccessLabel, folderReach } from "./FolderAccess";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
 
@@ -100,6 +102,33 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
     verticalInsets,
   )}px`;
   textarea.style.overflowY = textarea.scrollHeight > maximum ? "auto" : "hidden";
+}
+
+/**
+ * The sentence that engages a plugin, and where the caret lands after it.
+ *
+ * There is no directive the backend parses: an enabled bundle's skills are in
+ * the model's system prompt, so asking for one in plain words is what makes it
+ * happen. The text goes in at the caret, with a space in front of it when it
+ * would otherwise run into what is already written.
+ */
+export function insertPluginDirective(
+  draft: string,
+  directive: string,
+  selectionStart: number,
+  selectionEnd: number,
+): { text: string; caret: number } {
+  const before = draft.slice(0, selectionStart);
+  const after = draft.slice(selectionEnd);
+  const gap = before && !/\s$/.test(before) ? " " : "";
+  return {
+    text: `${before}${gap}${directive}${after}`,
+    caret: before.length + gap.length + directive.length,
+  };
+}
+
+export function pluginDirective(displayName: string): string {
+  return `Use the ${displayName} plugin: `;
 }
 
 /**
@@ -168,6 +197,7 @@ export type ComposerProps = {
   permissionMenu?: ReactNode;
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
+  plugins?: ComposerPlugins;
   images?: ComposerImages;
   files?: ComposerFiles;
   folders?: ComposerFolders;
@@ -195,6 +225,7 @@ export function Composer({
   permissionMenu,
   network,
   reasoning,
+  plugins,
   images,
   files,
   folders,
@@ -216,6 +247,7 @@ export function Composer({
   // dragenter and dragleave fire for every descendant the pointer crosses, so a
   // boolean flickers the drop hint on and off while the file is held still.
   const dragDepthRef = useRef(0);
+  const selectionRef = useRef<{ start: number; end: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const inputDisabled = disabled;
@@ -241,6 +273,12 @@ export function Composer({
     if (textarea) resizeComposerTextarea(textarea);
   }, [draft, resetKey]);
 
+  // A different conversation is a different draft: the caret from the last one
+  // means nothing in it.
+  useLayoutEffect(() => {
+    selectionRef.current = null;
+  }, [resetKey]);
+
   async function submit(): Promise<void> {
     if (!canSubmit) return;
     const submissionKey = resetKey;
@@ -264,7 +302,47 @@ export function Composer({
   }
 
   function onChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    rememberSelection(event.target);
     onDraftChange(event.target.value);
+  }
+
+  /** Where the reader last had the caret, for text inserted from a menu. */
+  function rememberSelection(textarea: HTMLTextAreaElement) {
+    selectionRef.current = {
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+    };
+  }
+
+  /**
+   * Turn the bundle on, then say so in the message being written.
+   *
+   * The caret is restored after the insertion so the reader carries on typing
+   * their request where the sentence left off, rather than at the end of a
+   * draft they may have been editing in the middle of. A draft nobody has put
+   * a caret in yet — a starter prompt, a transcript — is appended to.
+   */
+  function engagePlugin(plugin: PluginInfo) {
+    plugins?.onSelect(plugin);
+    const remembered = selectionRef.current;
+    const start = Math.min(remembered?.start ?? draft.length, draft.length);
+    const end = Math.min(remembered?.end ?? draft.length, draft.length);
+    const { text, caret } = insertPluginDirective(
+      draft,
+      pluginDirective(plugin.display_name),
+      start,
+      end,
+    );
+    selectionRef.current = { start: caret, end: caret };
+    onDraftChange(text);
+    // After the menu has closed and the new value has been painted; focusing
+    // while the menu is still up hands focus straight back to the trigger.
+    window.requestAnimationFrame(() => {
+      const field = textareaRef.current;
+      if (!field || field.disabled) return;
+      field.focus();
+      field.setSelectionRange(caret, caret);
+    });
   }
 
   function endDrag() {
@@ -409,6 +487,7 @@ export function Composer({
         data-composer-input=""
         disabled={inputDisabled}
         onChange={onChange}
+        onSelect={(event) => rememberSelection(event.currentTarget)}
         onPaste={onPaste}
         onKeyDown={(event) => {
           if (!shouldSubmitComposerKey(event.nativeEvent)) return;
@@ -432,6 +511,11 @@ export function Composer({
             }
             network={network}
             reasoning={reasoning}
+            plugins={
+              plugins
+                ? { items: plugins.items, onSelect: engagePlugin }
+                : undefined
+            }
           />
           {modelMenu}
         </div>

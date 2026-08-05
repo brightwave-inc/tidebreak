@@ -4,10 +4,24 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ComposerToolsMenu } from "./ComposerToolsMenu";
+import type { PluginInfo } from "./api";
 
 afterEach(cleanup);
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
+  return {
+    name: "documents",
+    display_name: "Documents",
+    description: "Writes Word, Excel, and PowerPoint files.",
+    category: "documents",
+    capabilities: [],
+    enabled: false,
+    skills: [],
+    ...overrides,
+  };
+}
 
 function open() {
   return userEvent.setup().click(screen.getByRole("button", { name: "Tools" }));
@@ -83,4 +97,38 @@ it("opens the network policy in a dialog the menu does not clip", async () => {
 it("renders nothing when the surface offers none of its actions", () => {
   const { container } = render(<ComposerToolsMenu disabled={false} />);
   expect(container).toBeEmptyDOMElement();
+});
+
+it("offers the installed plugins under the turn's setup actions", async () => {
+  const onSelect = vi.fn();
+  render(
+    <ComposerToolsMenu
+      disabled={false}
+      attachFiles={{ attaching: false, onAttach: vi.fn() }}
+      plugins={{ items: [plugin()], onSelect }}
+    />,
+  );
+
+  await open();
+  const rows = screen.getAllByRole("menuitem");
+  expect(rows.map((row) => row.textContent)).toEqual([
+    "Attach files",
+    "DocumentsWrites Word, Excel, and PowerPoint files.",
+  ]);
+
+  await userEvent.setup().click(rows[1]);
+  expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ name: "documents" }));
+});
+
+it("keeps the plugins section off a catalog that is empty or unread", async () => {
+  render(
+    <ComposerToolsMenu
+      disabled={false}
+      attachFiles={{ attaching: false, onAttach: vi.fn() }}
+      plugins={{ items: [], onSelect: vi.fn() }}
+    />,
+  );
+
+  await open();
+  expect(screen.queryByText("Plugins")).not.toBeInTheDocument();
 });
