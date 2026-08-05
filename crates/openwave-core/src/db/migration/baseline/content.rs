@@ -135,13 +135,27 @@ pub(super) fn output_table() -> TableCreateStatement {
 }
 
 pub(super) fn output_indexes() -> Vec<IndexCreateStatement> {
-    vec![Index::create()
-        .name("idx_output_chat_created")
-        .table(Output::Table)
-        .col(Output::ChatId)
-        .col(Output::CreatedAt)
-        .col(Output::Id)
-        .to_owned()]
+    vec![
+        Index::create()
+            .name("idx_output_chat_created")
+            .table(Output::Table)
+            .col(Output::ChatId)
+            .col(Output::CreatedAt)
+            .col(Output::Id)
+            .to_owned(),
+        // Filename is the identity everything outside the store addresses an
+        // output by, so at most one live output in a conversation may carry a
+        // given name. Retracted outputs are excluded: deleting `report.md` must
+        // leave the name free for a later one.
+        Index::create()
+            .name("idx_output_chat_live_filename")
+            .table(Output::Table)
+            .col(Output::ChatId)
+            .col(Output::Filename)
+            .unique()
+            .and_where(Expr::col(Output::DeletedAt).is_null())
+            .to_owned(),
+    ]
 }
 
 /// One immutable revision of an output: the length and digest of the bytes,

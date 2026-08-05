@@ -61,7 +61,8 @@ pub struct OutputRecord {
     pub id: OutputId,
     /// Conversation that exclusively owns this output.
     pub chat_id: ChatId,
-    /// Display filename. Not identity, and not unique within a chat.
+    /// Display filename. Not identity, but unique among a conversation's
+    /// live outputs: at most one live record answers to a given name.
     pub filename: String,
     /// Fixed media type set when the output was created: derived from `filename`
     /// for a text deliverable, or the explicit type of an accepted binary

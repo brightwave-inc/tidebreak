@@ -51,6 +51,20 @@ pub(in crate::db) async fn create_output(
             )))
         };
     }
+    // Filename is the identity everything outside the store addresses an
+    // output by, so the conversation's write lock (held above) plus this check
+    // decide the name's owner exactly once: the first writer keeps it, and a
+    // concurrent scan that lost the race is told which output to revise
+    // instead of publishing a second live record under the same name.
+    if let Some(taken) =
+        find_live_output_by_filename_on(&transaction, request.chat_id, &request.filename).await?
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::OutputFilenameTaken {
+            filename: request.filename.clone(),
+            output_id: taken,
+        });
+    }
     entities::output::ActiveModel {
         id: Set(request.id.0),
         chat_id: Set(request.chat_id.0),
@@ -250,6 +264,25 @@ pub(in crate::db) async fn restore_output(
         // Restoring a live output is the same durable outcome, not a conflict.
         transaction.rollback().await.map_err(store_err)?;
         return Ok(true);
+    }
+    // A retraction frees the filename, so something else may have claimed it in
+    // the meantime. Refuse rather than let two live outputs answer to one name;
+    // the caller can retract the current holder first.
+    if !acquire_chat_write_lock(&transaction, existing.chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "chat {} does not exist",
+            existing.chat_id
+        )));
+    }
+    if let Some(taken) =
+        find_live_output_by_filename_on(&transaction, existing.chat_id, &existing.filename).await?
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::OutputFilenameTaken {
+            filename: existing.filename,
+            output_id: taken,
+        });
     }
     // Clearing the soft-delete is the exact inverse of `delete_output`; the
     // revision history is untouched. Surfacing the restored output as freshly
@@ -452,6 +485,28 @@ where
     find_output_on(conn, id)
         .await?
         .ok_or_else(|| AgentError::Store(format!("output {id} not found")))
+}
+
+/// The live output holding `filename` in `chat_id`, if any.
+///
+/// The partial unique index on the same predicate guarantees there is at most
+/// one, so this reads a single id rather than a list.
+async fn find_live_output_by_filename_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+    filename: &str,
+) -> Result<Option<OutputId>>
+where
+    C: ConnectionTrait,
+{
+    Ok(entities::output::Entity::find()
+        .filter(entities::output::Column::ChatId.eq(chat_id.0))
+        .filter(entities::output::Column::Filename.eq(filename))
+        .filter(entities::output::Column::DeletedAt.is_null())
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map(|model| OutputId(model.id)))
 }
 
 async fn require_output(store: &DbStore, id: OutputId) -> Result<OutputRecord> {
