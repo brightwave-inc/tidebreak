@@ -70,8 +70,16 @@ const LIST_VERBS: Readonly<Partial<Record<string, string>>> = {
  * rail line, and only one of them is a fact about the conversation.
  */
 export function ToolEntriesList({ name, result }: ToolEntriesListProps) {
-  const { entries, failures, elided } = result;
+  const { failures, elided } = result;
+  // App rows are promoted to standing cards under the phase, where the open
+  // action lives. Repeated here they would be inert copies of a card the
+  // reader can already act on — keyed on kind, like the promotion itself, so
+  // any tool that publishes an app is covered.
+  const entries = result.entries.filter((entry) => entry.kind !== "app");
   if (entries.length === 0 && failures.length === 0) {
+    // A result that was all app rows has been shown in full as cards;
+    // "Nothing was found" would be a different and untrue claim.
+    if (result.entries.length > 0) return null;
     return (
       <div className="bg-background max-w-prose rounded-lg border p-3">
         <p className="text-muted-foreground text-xs">Nothing was found.</p>
