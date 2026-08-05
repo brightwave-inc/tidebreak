@@ -1,42 +1,28 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import {
-  CircleAlert,
-  FolderOpen,
-  LayoutGrid,
-  MessagesSquare,
-  Puzzle,
-  Shapes,
-} from "lucide-react";
+import { CircleAlert, LayoutGrid, MessagesSquare, Puzzle } from "lucide-react";
 
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
 import { useChatListStore } from "@/ChatListStore";
-import { Badge } from "@/components/ui/badge";
-import { listDeliverables, type DeliverablesCatalog } from "@/deliverables";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
-import { useRefreshSignals } from "@/RefreshSignals";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
 import { NewChatButton } from "./NewChatButton";
 import { SidebarButton, SidebarSectionTitle } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 
-// Module scope, not an inline arrow: the count effect keys on the extractor's
-// identity, and this rail re-renders on every composer keystroke.
-const countDeliverables = (catalog: DeliverablesCatalog) =>
-  catalog.deliverables.length;
-
 /**
  * The one navigation rail, used by every route that is not settings.
  *
- * Its subject is the chat list: a slim block of actions at the top, and the
- * conversations filling everything below it. Home and a conversation see the
- * same rail so that moving between them does not rearrange the furniture —
- * what a conversation adds is the two panels that only mean something when
- * there is one to act on, Outputs and Folders.
+ * Its subject is the chat list: a slim block of install-wide destinations at
+ * the top, and the conversations filling everything below it. Home and a
+ * conversation see the same rail so that moving between them does not
+ * rearrange the furniture. Everything that describes one conversation —
+ * outputs, folders, agents — lives in the chat header's status chip instead,
+ * beside the conversation it describes.
  *
  * `chat` is the conversation the route is showing, when it is showing one.
  */
@@ -71,27 +57,6 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
 
       <div className="mt-2 flex shrink-0 flex-col gap-0.5">
         <InboxButton />
-
-        {/* Outputs and Folders describe one conversation, so they exist only
-            where there is one. Offering them on home is what let the rail
-            navigate into whichever chat happened to have been open last. */}
-        {chat && (
-          <>
-            <PanelButton
-              label="Outputs"
-              icon={<Shapes />}
-              active={openPanelTypes.has("outputs")}
-              onClick={() => openPanel({ type: "outputs" })}
-              badge={<OutputCountBadge chatId={chat.id} />}
-            />
-            <PanelButton
-              label="Folders"
-              icon={<FolderOpen />}
-              active={openPanelTypes.has("folders")}
-              onClick={() => openPanel({ type: "folders" })}
-            />
-          </>
-        )}
 
         {/* Apps and plugins are install-wide — they outlive every conversation
             — so they open the same way from anywhere: as a panel beside the
@@ -152,13 +117,11 @@ function PanelButton({
   label,
   icon,
   active,
-  badge,
   onClick,
 }: {
   label: string;
   icon: ReactNode;
   active: boolean;
-  badge?: ReactNode;
   onClick: () => void;
 }) {
   return (
@@ -170,45 +133,6 @@ function PanelButton({
     >
       {icon}
       <span>{label}</span>
-      {badge}
     </SidebarButton>
   );
-}
-
-/** How many outputs this conversation has produced, or nothing while it has none. */
-function OutputCountBadge({ chatId }: { chatId: string }) {
-  const count = useSidebarCount(chatId, listDeliverables, countDeliverables);
-  if (count === 0) return null;
-  return (
-    <Badge variant="outline" className="-my-0.5">
-      {count}
-    </Badge>
-  );
-}
-
-/**
- * Fetch a count on mount and whenever the refresh-signal store ticks any of the
- * targets that could change the number (folder access for sources, output
- * writebacks for deliverables). Errors are swallowed — the badge simply stays at
- * its last known value or zero.
- */
-function useSidebarCount<T>(
-  chatId: string,
-  fetcher: (chatId: string) => Promise<T>,
-  extract: (result: T) => number,
-): number {
-  const [count, setCount] = useState(0);
-  const folderAccess = useRefreshSignals((s) => s.folderAccess);
-  const outputWritebacks = useRefreshSignals((s) => s.outputWritebacks);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetcher(chatId).then(
-      (result) => { if (!cancelled) setCount(extract(result)); },
-      () => { /* swallow — stale count is acceptable */ },
-    );
-    return () => { cancelled = true; };
-  }, [chatId, folderAccess, outputWritebacks, fetcher, extract]);
-
-  return count;
 }

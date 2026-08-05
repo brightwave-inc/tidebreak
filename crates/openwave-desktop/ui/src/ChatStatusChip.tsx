@@ -1,19 +1,13 @@
-import { useMemo, useState } from "react";
-import { Bot, ChevronDown, FolderOpen } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Bot, ChevronDown, FolderOpen, Shapes } from "lucide-react";
 
-import type {
-  AgentRun,
-  ApiClient,
-  Chat,
-  ModelInfo,
-  ModelSelectionKey,
-  PermissionMode,
-} from "./api";
+import type { AgentRun, ApiClient, Chat } from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { listDeliverables } from "./deliverables";
 import { folderAccessLabel, folderReach } from "./FolderAccess";
-import { ModelMenu } from "./ModelMenu";
-import { permissionModeOption, PermissionModeMenu } from "./PermissionModeMenu";
+import { permissionModeOption } from "./PermissionModeMenu";
+import { useRefreshSignals } from "./RefreshSignals";
 import { backgroundAgentSpawnKeys, useAgentRuns } from "./useAgentRuns";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -41,12 +35,9 @@ function liveRunDotClass(status: AgentRun["status"]): string {
 export type ChatStatusChipProps = {
   client: ApiClient;
   chat: Chat;
-  models: ModelInfo[];
-  defaultModelKey: string | null;
   folders: readonly ChatFolderAccess[];
-  disabled?: boolean;
-  onModelChange: (key: ModelSelectionKey | null) => void | Promise<void>;
-  onPermissionModeChange: (mode: PermissionMode) => void | Promise<void>;
+  /** Bring the Outputs panel forward. */
+  onOpenOutputs: () => void;
   /** Bring the Folders panel forward. */
   onOpenFolders: () => void;
   /** Bring one background run's panel forward. */
@@ -57,21 +48,17 @@ export type ChatStatusChipProps = {
  * The chat's standing state, always in the header: which permission mode new
  * turns run under, and whether anything is still working in the background.
  *
- * The composer keeps its own controls — this is the answer to "what is this
- * conversation set to right now" from anywhere in the transcript, plus a way
- * to change it without scrolling back down. The menus behind it are the same
- * components the composer uses, so a mode or model can only be described one
- * way in the app.
+ * Behind it, the places that describe only this conversation — its outputs,
+ * its folders, its background agents. The composer already owns changing the
+ * model and the mode; repeating those controls here would leave two switches
+ * for one setting, so this popover only holds what has nowhere else to live
+ * now that the rail is the chat list.
  */
 export function ChatStatusChip({
   client,
   chat,
-  models,
-  defaultModelKey,
   folders,
-  disabled,
-  onModelChange,
-  onPermissionModeChange,
+  onOpenOutputs,
   onOpenFolders,
   onOpenAgent,
 }: ChatStatusChipProps) {
@@ -98,6 +85,7 @@ export function ChatStatusChip({
   const overflowRuns = Math.max(0, liveRuns.length - MAX_STATUS_DOTS);
 
   const mode = permissionModeOption(chat.permission_mode);
+  const outputCount = useOutputCount(chat.id);
 
   const folderSummary =
     folders.length === 0
@@ -145,71 +133,101 @@ export function ChatStatusChip({
           <ChevronDown className="size-3.5 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent
-        align="end"
-        className="w-80 p-1"
-        // The rows open their own menus, which are portalled outside this
-        // content. Dismissing on those clicks would take the popover down
-        // underneath the menu the reader is still using.
-        onPointerDownOutside={(event) => {
-          if ((event.target as Element | null)?.closest?.("[role='menu']")) {
-            event.preventDefault();
+      <PopoverContent align="end" className="w-80 p-1">
+        <DetailRow
+          icon={<Shapes className="size-3.5" aria-hidden="true" />}
+          label="Outputs"
+          value={
+            outputCount === 0
+              ? "No outputs yet"
+              : outputCount === 1
+                ? "1 output"
+                : `${outputCount} outputs`
           }
-        }}
-      >
-        <div className="flex items-center justify-between gap-2 px-2 py-1">
-          <span className="text-xs text-muted-foreground">Model</span>
-          <ModelMenu
-            models={models}
-            value={chat.model}
-            defaultKey={defaultModelKey}
-            disabled={disabled}
-            onChange={onModelChange}
-          />
-        </div>
-        <div className="flex items-center justify-between gap-2 px-2 py-1">
-          <span className="text-xs text-muted-foreground">Permissions</span>
-          <PermissionModeMenu
-            value={chat.permission_mode}
-            disabled={disabled}
-            onChange={onPermissionModeChange}
-          />
-        </div>
-        <button
-          type="button"
-          className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
+          onClick={() => {
+            setOpen(false);
+            onOpenOutputs();
+          }}
+        />
+        <DetailRow
+          icon={<FolderOpen className="size-3.5" aria-hidden="true" />}
+          label="Folders"
+          value={folderSummary}
           onClick={() => {
             setOpen(false);
             onOpenFolders();
           }}
-        >
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <FolderOpen className="size-3.5" aria-hidden="true" />
-            Folders
-          </span>
-          <span className="min-w-0 truncate text-xs">{folderSummary}</span>
-        </button>
+        />
         {focusRun && (
-          <button
-            type="button"
-            className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
+          <DetailRow
+            icon={<Bot className="size-3.5" aria-hidden="true" />}
+            label="Agents"
+            value={
+              matched.length === 1
+                ? "1 background agent"
+                : `${matched.length} background agents`
+            }
             onClick={() => {
               setOpen(false);
               onOpenAgent(focusRun.id);
             }}
-          >
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Bot className="size-3.5" aria-hidden="true" />
-              Agents
-            </span>
-            <span className="text-xs">
-              {matched.length === 1
-                ? "1 background agent"
-                : `${matched.length} background agents`}
-            </span>
-          </button>
+          />
         )}
       </PopoverContent>
     </Popover>
   );
+}
+
+function DetailRow({
+  icon,
+  label,
+  value,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
+      onClick={onClick}
+    >
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {icon}
+        {label}
+      </span>
+      <span className="min-w-0 truncate text-xs">{value}</span>
+    </button>
+  );
+}
+
+/**
+ * How many outputs this conversation has produced. Fetched on mount and again
+ * whenever a refresh signal says the number could have moved; errors are
+ * swallowed, leaving the last known count, because a stale number in a summary
+ * row is better than an error state in one.
+ */
+function useOutputCount(chatId: string): number {
+  const [count, setCount] = useState(0);
+  const outputWritebacks = useRefreshSignals((s) => s.outputWritebacks);
+
+  useEffect(() => {
+    let cancelled = false;
+    listDeliverables(chatId).then(
+      (catalog) => {
+        if (!cancelled) setCount(catalog.deliverables.length);
+      },
+      () => {
+        /* swallow — stale count is acceptable */
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId, outputWritebacks]);
+
+  return count;
 }
