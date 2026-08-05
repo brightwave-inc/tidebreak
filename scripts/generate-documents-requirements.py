@@ -8,12 +8,14 @@ Run from the repository root:
 Reads the top-level pins from the document skills' SKILL.md `deps` manifests
 (plus pypdfium2 for the bundled render helpers), resolves their transitive
 closure for the image's platform (linux cp311) with pip, and records every
-file hash PyPI publishes for each resolved version. The Dockerfile's documents
-stage installs the result with `pip install --require-hashes`, so the publish
-moment trusts these recorded digests rather than whatever the index serves
-that day. Also asserts that every compiled package publishes an aarch64
-manylinux wheel, so the arm64 image build cannot discover a missing wheel at
-publish time.
+file hash PyPI publishes for each resolved version. It also resolves the skill
+pins for the local sandbox's fixed runtime (macOS arm64 cp39), so an incompatible
+pin fails regeneration instead of making every local cache-population pass
+retry it. The Dockerfile's documents stage installs the result with
+`pip install --require-hashes`, so the publish moment trusts these recorded
+digests rather than whatever the index serves that day. Also asserts that every
+compiled package publishes an aarch64 manylinux wheel, so the arm64 image build
+cannot discover a missing wheel at publish time.
 """
 
 import json
@@ -28,6 +30,9 @@ import urllib.request
 HELPER_PINS = ["pypdfium2==4.30.0"]
 
 OUTPUT = pathlib.Path("crates/openwave-sandbox-agent/documents-requirements.txt")
+LOCAL_SANDBOX_PLATFORM = "macosx_11_0_arm64"
+LOCAL_SANDBOX_PYTHON = "3.9"
+LOCAL_SANDBOX_ABI = "cp39"
 
 HEADER = """\
 # Hash-checked closure for the documents image variant. Installed by the
@@ -55,6 +60,21 @@ def skill_pins():
         if match:
             pins += [entry.strip().strip('"') for entry in match.group(1).split(",")]
     return pins
+
+
+def validate_local_sandbox(pins):
+    with tempfile.TemporaryDirectory() as scratch:
+        subprocess.run(
+            [
+                sys.executable, "-m", "pip", "download", "-q",
+                "--dest", scratch, "--no-cache-dir", "--only-binary=:all:",
+                "--platform", LOCAL_SANDBOX_PLATFORM,
+                "--python-version", LOCAL_SANDBOX_PYTHON,
+                "--implementation", "cp", "--abi", LOCAL_SANDBOX_ABI,
+                *pins,
+            ],
+            check=True,
+        )
 
 
 def resolve_closure(pins):
@@ -98,9 +118,11 @@ def hash_lines(resolved):
 
 
 def main():
-    pins = skill_pins() + HELPER_PINS
+    skill_dependencies = skill_pins()
+    pins = skill_dependencies + HELPER_PINS
     if len(pins) < len(HELPER_PINS) + 5:
         sys.exit(f"expected at least five SKILL.md pins, found: {pins}")
+    validate_local_sandbox(skill_dependencies)
     resolved = resolve_closure(pins)
     for pin in pins:
         name, version = pin.split("==")
