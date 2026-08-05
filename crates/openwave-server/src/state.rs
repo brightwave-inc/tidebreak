@@ -201,6 +201,13 @@ pub struct AppState {
     /// provider's own load — so an embedding without one (tests, headless)
     /// simply has nothing to manage.
     pub(crate) code_execution: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
+    /// The host-folder surface for local-app folder bindings, when this
+    /// embedding has one (docs/folder-bindings.md).
+    ///
+    /// Installed after assembly by the desktop over its broker client;
+    /// absent everywhere else, where folder bindings read as not connected
+    /// and refuse to grant instead of parking.
+    pub(crate) host_folders: Option<Arc<dyn crate::host_folders::HostFolders>>,
 }
 
 impl AppState {
@@ -347,6 +354,7 @@ impl AppState {
             approvals: Arc::new(ApprovalBroker::new(store)),
             local_voice: Arc::new(UnavailableLocalVoiceRunner),
             code_execution: None,
+            host_folders: None,
         })
     }
 

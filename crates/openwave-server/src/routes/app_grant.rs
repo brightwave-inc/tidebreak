@@ -3,37 +3,36 @@
 //!
 //! The renderer never supplies grant content. Consent (`POST`) is a bare
 //! affirmative — the server computes the grant from the app's *current*
-//! manifest and the connected-app definitions *current* at that moment, so a
-//! stale sheet can never grant capabilities the manifest no longer pins or
-//! pin a definition that has since changed. State (`GET`) is renderer-safe
-//! metadata: connected-app, tool, and operation *names* with
-//! coverage/staleness booleans, never definitions and never environment or
-//! credential values.
-
-use std::collections::BTreeMap;
+//! manifest and the connected-app definitions and folder registrations
+//! *current* at that moment, so a stale sheet can never grant capabilities
+//! the manifest no longer pins or pin a definition that has since changed.
+//! State (`GET`) is renderer-safe metadata: connected-app, folder, tool, and
+//! operation *names* with coverage/staleness booleans, never definitions,
+//! never paths, and never environment or credential values.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Serialize;
 
-use openwave_core::id::{AppId, ConnectedAppId};
+use openwave_core::id::{AppId, ConnectedAppId, HostRootId};
 use openwave_core::local_app::{
-    AppBinding, AppGrant, AppGrantBinding, AppManifest, AppOperationsGrantBinding, AppRecord,
-    AppRevision,
+    AppBinding, AppFolderGrantBinding, AppGrant, AppGrantBinding, AppManifest,
+    AppOperationsGrantBinding, AppRecord, AppRevision, FolderAccess,
 };
 
-use crate::connected_apps::{current_app_fingerprints, current_rest_definitions, AppFingerprint};
+use crate::connected_apps::{current_fingerprints, current_rest_definitions, CurrentFingerprints};
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::host_folders::folder_fingerprint;
 use crate::state::AppState;
 
 /// Renderer-safe grant state for one app: the consent sheet's whole input.
 ///
 /// `bindings` follows the app's **current** revision's manifest — ids and
-/// names only. The definitions behind the connected apps, and any environment
-/// or credential values they select, are deliberately absent from this
-/// projection.
+/// names only. The definitions behind the connected apps, the paths behind
+/// the folders, and any environment or credential values they select, are
+/// deliberately absent from this projection.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantState {
     /// Whether a live grant fully covers the current manifest with every
@@ -41,21 +40,32 @@ pub struct AppGrantState {
     /// verdict. When `false`, (re-)consent is required before every pinned
     /// capability is invokable.
     pub granted: bool,
-    /// The current manifest's bindings, one entry per bound connected app.
+    /// The current manifest's bindings, one entry per bound connected app or
+    /// folder.
     pub bindings: Vec<AppGrantBindingState>,
 }
 
 /// One current-manifest binding, projected for the consent sheet.
 ///
-/// Exactly one of `tools` and `operation_ids` is present, matching the
-/// binding's vocabulary: mounted MCP tools for an `mcp_server` binding,
-/// declared operations for a `rest_api` binding.
+/// Exactly one of `app` and `folder` is present, matching what the binding
+/// names. An app-keyed row carries `tools` or `operation_ids` per its
+/// vocabulary; a folder row carries `access`. The sheet derives the
+/// combined-consent exfiltration warning (docs/folder-bindings.md) from the
+/// rows themselves: a manifest with both a folder row and an operations row
+/// can read files and reach the network.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantBindingState {
-    /// Connected app the manifest binds, by record id.
-    pub app: ConnectedAppId,
-    /// The connected app's display name, absent when no record with that id
-    /// is configured — the sheet says so instead of showing a raw id alone.
+    /// Connected app the manifest binds, by record id, for an app-keyed
+    /// binding.
+    pub app: Option<ConnectedAppId>,
+    /// Connected folder the manifest binds, by broker root id, for a folder
+    /// binding.
+    pub folder: Option<HostRootId>,
+    /// The access level a folder binding requests.
+    pub access: Option<FolderAccess>,
+    /// The bound connected app's or folder's display name, absent when
+    /// nothing configured or approved answers to the id — the sheet says so
+    /// instead of showing a raw id alone.
     pub name: Option<String>,
     /// Full mounted tool names the current manifest pins under this app, for
     /// an `mcp_server` binding.
@@ -64,13 +74,12 @@ pub struct AppGrantBindingState {
     /// `rest_api` binding.
     pub operation_ids: Option<Vec<String>>,
     /// Whether the live grant covers every listed capability under this
-    /// connected app and the app's current definition still matches the
-    /// granted fingerprint.
+    /// binding and its target still matches the granted fingerprint.
     pub granted: bool,
-    /// Whether a grant names this connected app but its definition changed
-    /// (or the record disappeared) since consent — the "reconfigured since
-    /// you agreed" affordance, distinct from a binding that was simply never
-    /// granted.
+    /// Whether a grant names this binding's target but it changed — a
+    /// reconfigured record, a disconnected folder — since consent: the
+    /// "changed since you agreed" affordance, distinct from a binding that
+    /// was simply never granted.
     pub definition_changed: bool,
 }
 
@@ -81,7 +90,7 @@ pub async fn get_app_grant_state(
 ) -> Result<Json<AppGrantState>, ServerError> {
     let (app, revision) = current_live_app(&state, app_id).await?;
     let grant = state.store.get_app_grant(app.id).await?;
-    let current = current_app_fingerprints(&state).await?;
+    let current = current_fingerprints(&state).await?;
     Ok(Json(grant_state(
         &revision.manifest,
         grant.as_ref(),
@@ -93,51 +102,64 @@ pub async fn get_app_grant_state(
 ///
 /// The request carries no body: consent is only ever "yes to what the server
 /// shows right now". The grant is computed here from the current revision's
-/// manifest and the current definition fingerprints, then replaces any
-/// previous grant wholesale.
+/// manifest, the current definition fingerprints, and the currently approved
+/// folders, then replaces any previous grant wholesale.
 pub async fn post_app_grant(
     State(state): State<AppState>,
     Path(app_id): Path<AppId>,
 ) -> Result<Json<AppGrantState>, ServerError> {
     let (app, revision) = current_live_app(&state, app_id).await?;
-    let current = current_app_fingerprints(&state).await?;
+    let current = current_fingerprints(&state).await?;
     let rest_definitions = current_rest_definitions(&state).await?;
     let mut bindings = Vec::with_capacity(revision.manifest.bindings.len());
     for binding in &revision.manifest.bindings {
-        // Folder bindings have a vocabulary but no grant computation yet
-        // (docs/folder-bindings.md): the consent door stays closed until the
-        // host-folder seam ships, so no half-granted state can exist.
-        let Some(binding_app) = binding.app() else {
-            return Err(ServerError::conflict(
-                "folder bindings are not yet grantable".to_owned(),
-            ));
-        };
-        // A binding whose connected app is not configured cannot be pinned to
-        // a definition, so there is nothing coherent to consent to. An
-        // unparseable rest_api definition reads the same way, by design.
-        let Some(app_fingerprint) = current.get(&binding_app) else {
-            return Err(ServerError::conflict(format!(
-                "connected app {binding_app} is not configured, so this app cannot \
-                 be granted"
-            )));
-        };
         match binding {
-            // Refused before app resolution above.
-            AppBinding::Folder(_) => {}
+            // A folder binding pins a host-approved registration. An
+            // embedding without the host-folder seam, or a folder no longer
+            // approved, leaves nothing coherent to consent to — the same
+            // fail-closed reading as an unconfigured connected app.
+            AppBinding::Folder(binding) => {
+                if !current.folders.contains_key(&binding.folder) {
+                    return Err(ServerError::conflict(format!(
+                        "folder {} is not a connected folder, so this app cannot be \
+                         granted",
+                        binding.folder
+                    )));
+                }
+                bindings.push(AppGrantBinding::Folder(AppFolderGrantBinding {
+                    folder: binding.folder,
+                    access: binding.access,
+                    fingerprint: folder_fingerprint(binding.folder, binding.access),
+                }));
+            }
             // Mounted-tool bindings are retired: MCP was the only bindable
             // kind when local apps shipped, and the REST vocabulary has since
             // replaced it as the app-facing surface (#1332). A manifest still
             // pinning tools cannot be granted — the failure direction is
             // "revise the app", never "grant the legacy surface".
-            AppBinding::Tools(_) => {
+            AppBinding::Tools(binding) => {
+                let name = current
+                    .apps
+                    .get(&binding.app)
+                    .map_or_else(|| binding.app.to_string(), |app| app.name.clone());
                 return Err(ServerError::conflict(format!(
-                    "connected app {:?} is bound by mounted MCP tools, which local \
+                    "connected app {name:?} is bound by mounted MCP tools, which local \
                      apps no longer support; publish a revision binding a rest_api \
-                     connected app's operations instead",
-                    app_fingerprint.name
+                     connected app's operations instead"
                 )));
             }
             AppBinding::Operations(binding) => {
+                // A binding whose connected app is not configured cannot be
+                // pinned to a definition, so there is nothing coherent to
+                // consent to. An unparseable rest_api definition reads the
+                // same way, by design.
+                let Some(app_fingerprint) = current.apps.get(&binding.app) else {
+                    return Err(ServerError::conflict(format!(
+                        "connected app {} is not configured, so this app cannot be \
+                         granted",
+                        binding.app
+                    )));
+                };
                 // Every pinned operation must exist in the record's current
                 // catalog — a pin the catalog no longer declares leaves
                 // nothing coherent to consent to.
@@ -184,21 +206,6 @@ pub async fn post_app_grant(
     )))
 }
 
-/// Whether one granted binding still pins the definition its connected app
-/// carries right now. A missing record is a mismatch, never a match, and a
-/// folder grant binding has no current fingerprint to match until the
-/// host-folder seam ships — it reads stale, failing closed to re-consent.
-fn fingerprint_current(
-    binding: &AppGrantBinding,
-    current: &BTreeMap<ConnectedAppId, AppFingerprint>,
-) -> bool {
-    binding.app().is_some_and(|app| {
-        current
-            .get(&app)
-            .is_some_and(|candidate| candidate.fingerprint == binding.fingerprint())
-    })
-}
-
 /// `DELETE /apps/{id}/grant` — revoke consent.
 ///
 /// Idempotent, and deliberately available for a soft-deleted app too:
@@ -237,11 +244,14 @@ async fn current_live_app(
 }
 
 /// Whether a granted binding covers everything a current-manifest binding
-/// pins, in the same vocabulary. A grant kept under the other vocabulary
-/// covers nothing: consent named tools or operations, never "whatever the
-/// record now speaks". A tools binding is never covered — the vocabulary is
-/// retired (#1332), so a grant recorded before the retirement reads as
-/// ungranted rather than keeping the legacy surface invokable.
+/// pins, in the same vocabulary. A grant kept under another vocabulary
+/// covers nothing: consent named operations or a folder at an access level,
+/// never "whatever the target now speaks". A tools binding is never covered —
+/// the vocabulary is retired (#1332), so a grant recorded before the
+/// retirement reads as ungranted rather than keeping the legacy surface
+/// invokable. A `read_write` folder grant covers a `read` pin: a revision
+/// that narrows its access stays granted, mirroring how a narrowed operation
+/// set stays covered.
 fn binding_covered(pinned: &AppBinding, granted: &AppGrantBinding) -> bool {
     match (pinned, granted) {
         (AppBinding::Tools(_), _) => false,
@@ -249,69 +259,87 @@ fn binding_covered(pinned: &AppBinding, granted: &AppGrantBinding) -> bool {
             .operation_ids
             .iter()
             .all(|operation| granted.operation_ids.iter().any(|held| held == operation)),
+        (AppBinding::Folder(pinned), AppGrantBinding::Folder(granted)) => {
+            granted.folder == pinned.folder
+                && (granted.access == pinned.access || granted.access == FolderAccess::ReadWrite)
+        }
         _ => false,
     }
 }
 
-/// Project grant state against the current manifest and current definitions.
+/// The grant binding covering one manifest binding's target, when the grant
+/// names it: app-keyed bindings match by record id, folder bindings by root
+/// id.
+fn granted_binding_for<'a>(
+    grant: Option<&'a AppGrant>,
+    binding: &AppBinding,
+) -> Option<&'a AppGrantBinding> {
+    let grant = grant?;
+    grant.bindings.iter().find(|candidate| match binding {
+        AppBinding::Folder(binding) => {
+            matches!(candidate, AppGrantBinding::Folder(granted) if granted.folder == binding.folder)
+        }
+        _ => binding.app().is_some() && candidate.app() == binding.app(),
+    })
+}
+
+/// Project grant state against the current manifest, definitions, and
+/// approved folders.
 ///
-/// The same three checks the invoke gate applies, evaluated for the whole
+/// The same checks the invoke gate applies, evaluated for the whole
 /// manifest: `granted` is true exactly when every pinned capability would
 /// pass the gate right now. Shared with the library listing so its granted
 /// badge is this verdict rather than a reimplementation of it.
-///
-/// Folder bindings are not yet projected (docs/folder-bindings.md): a
-/// manifest carrying one lists its app-keyed bindings and reads ungranted
-/// overall, matching the consent route's refusal, so the sheet shows and its
-/// affirmative conflicts with the explanation.
 pub(crate) fn grant_state(
     manifest: &AppManifest,
     grant: Option<&AppGrant>,
-    current: &BTreeMap<ConnectedAppId, AppFingerprint>,
+    current: &CurrentFingerprints,
 ) -> AppGrantState {
-    let has_folder_binding = manifest
-        .bindings
-        .iter()
-        .any(|binding| matches!(binding, AppBinding::Folder(_)));
     let bindings: Vec<AppGrantBindingState> = manifest
         .bindings
         .iter()
-        .filter_map(|binding| {
-            let binding_app = binding.app()?;
-            let granted_binding = grant.and_then(|grant| {
-                grant
-                    .bindings
-                    .iter()
-                    .find(|candidate| candidate.app() == Some(binding_app))
-            });
+        .map(|binding| {
+            let granted_binding = granted_binding_for(grant, binding);
             let covered = granted_binding.is_some_and(|granted| binding_covered(binding, granted));
-            let definition_changed =
-                granted_binding.is_some_and(|granted| !fingerprint_current(granted, current));
-            let (tools, operation_ids) = match binding {
-                AppBinding::Tools(binding) => (Some(binding.tools.clone()), None),
-                AppBinding::Operations(binding) => (None, Some(binding.operation_ids.clone())),
-                AppBinding::Folder(_) => return None,
+            let target_current =
+                granted_binding.is_some_and(|granted| current.grant_binding_current(granted));
+            let (tools, operation_ids, access) = match binding {
+                AppBinding::Tools(binding) => (Some(binding.tools.clone()), None, None),
+                AppBinding::Operations(binding) => {
+                    (None, Some(binding.operation_ids.clone()), None)
+                }
+                AppBinding::Folder(binding) => (None, None, Some(binding.access)),
             };
-            Some(AppGrantBindingState {
-                app: binding_app,
-                name: current.get(&binding_app).map(|app| app.name.clone()),
+            let name = match binding {
+                AppBinding::Folder(binding) => current.folders.get(&binding.folder).cloned(),
+                _ => binding
+                    .app()
+                    .and_then(|app| current.apps.get(&app))
+                    .map(|app| app.name.clone()),
+            };
+            AppGrantBindingState {
+                app: binding.app(),
+                folder: match binding {
+                    AppBinding::Folder(binding) => Some(binding.folder),
+                    _ => None,
+                },
+                access,
+                name,
                 tools,
                 operation_ids,
-                granted: covered
-                    && granted_binding.is_some_and(|granted| fingerprint_current(granted, current)),
-                definition_changed,
-            })
+                granted: covered && target_current,
+                definition_changed: granted_binding.is_some() && !target_current,
+            }
         })
         .collect();
-    // The invoke gate also pins connected apps the grant names beyond the
-    // current manifest, so the overall verdict does too.
-    let granted = !has_folder_binding
-        && grant.is_some_and(|grant| {
-            bindings.iter().all(|binding| binding.granted)
-                && grant
-                    .bindings
-                    .iter()
-                    .all(|binding| fingerprint_current(binding, current))
-        });
+    // The invoke gate also pins targets the grant names beyond the current
+    // manifest, so the overall verdict does too.
+    let granted = grant.is_some_and(|grant| {
+        bindings.iter().all(|binding| binding.granted)
+            && grant
+                .bindings
+                .iter()
+                .all(|binding| current.grant_binding_current(binding))
+    });
     AppGrantState { granted, bindings }
 }

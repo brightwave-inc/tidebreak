@@ -23,6 +23,8 @@ const GRANTED: AppGrantState = {
   bindings: [
     {
       app: "11111111-1111-4111-8111-111111111111",
+      folder: null,
+      access: null,
       name: "cmd",
       tools: ["mcp__cmd__doit"],
       operation_ids: null,
@@ -37,6 +39,8 @@ const STALE: AppGrantState = {
   bindings: [
     {
       app: "11111111-1111-4111-8111-111111111111",
+      folder: null,
+      access: null,
       name: "cmd",
       tools: ["mcp__cmd__doit"],
       operation_ids: null,
@@ -45,6 +49,8 @@ const STALE: AppGrantState = {
     },
     {
       app: "22222222-2222-4222-8222-222222222222",
+      folder: null,
+      access: null,
       name: "issues",
       tools: null,
       operation_ids: ["listIssues"],
@@ -259,5 +265,49 @@ describe("AppDetailView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Allow access" }));
     expect(apis.consent).toHaveBeenCalledWith("app-1");
     expect(await screen.findByTitle("App: Fixture app")).toBeInTheDocument();
+  });
+
+  it("renders the combined-consent warning when a manifest mixes a folder and operations", async () => {
+    const mixed: AppGrantState = {
+      granted: false,
+      bindings: [
+        {
+          app: null,
+          folder: "33333333-3333-4333-8333-333333333333",
+          access: "read_write",
+          name: "Tax documents",
+          tools: null,
+          operation_ids: null,
+          granted: false,
+          definition_changed: false,
+        },
+        {
+          app: "22222222-2222-4222-8222-222222222222",
+          folder: null,
+          access: null,
+          name: "issues",
+          tools: null,
+          operation_ids: ["listIssues"],
+          granted: false,
+          definition_changed: false,
+        },
+      ],
+    };
+    render(
+      <AppDetailView appId="app-1" apis={apisWith(mixed)} onBack={() => {}} />,
+    );
+
+    // The folder row names the folder, its read line, and its louder write
+    // line; the exfiltration warning names both sides in prose.
+    expect(await screen.findByText("Tax documents")).toBeInTheDocument();
+    expect(screen.getByText("Read files and folders")).toBeInTheDocument();
+    expect(
+      screen.getByText("Create and replace files in this folder"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This app can read 'Tax documents' and send data to 'issues'.",
+      ),
+    ).toBeInTheDocument();
   });
 });

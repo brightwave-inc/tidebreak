@@ -263,12 +263,12 @@ async fn body_string(response: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-/// A manifest carrying a folder binding reads ungranted and cannot be
-/// granted: the vocabulary landed ahead of its dispatch
-/// (docs/folder-bindings.md), so the consent door stays closed and no
-/// half-granted state can exist.
+/// Without a host-folder seam — headless serve, generic embeddings — a
+/// manifest carrying a folder binding reads ungranted and consent conflicts:
+/// the folder cannot resolve, honestly, instead of parking or half-granting
+/// (docs/folder-bindings.md).
 #[tokio::test]
-async fn folder_bindings_read_ungranted_and_conflict_on_consent() {
+async fn folder_bindings_read_ungranted_and_conflict_without_a_host_seam() {
     use openwave_core::local_app::{AppFolderBinding, FolderAccess};
 
     let (router, token, store, _dir) = test_app().await;
@@ -307,8 +307,104 @@ async fn folder_bindings_read_ungranted_and_conflict_on_consent() {
     assert_eq!(refused.status(), StatusCode::CONFLICT);
     let info: AgentErrorInfo = json_body(refused).await;
     assert!(
-        info.message.contains("not yet grantable"),
+        info.message.contains("not a connected folder"),
         "{}",
         info.message
     );
+}
+
+/// The folder consent lifecycle over the API with a host seam present: an
+/// approved folder grants at the pinned access, the projection carries its
+/// display name and access level (never a path), and disconnecting the
+/// folder invalidates the grant on the next read — consent never outlives
+/// the registration it named.
+#[tokio::test]
+async fn folder_bindings_grant_and_fail_closed_when_the_folder_disconnects() {
+    use std::sync::Mutex as StdMutex;
+
+    use openwave_core::local_app::{AppFolderBinding, FolderAccess};
+
+    use crate::host_folders::{ApprovedFolder, HostFolders};
+
+    struct FakeFolders(StdMutex<Vec<ApprovedFolder>>);
+
+    #[async_trait::async_trait]
+    impl HostFolders for FakeFolders {
+        async fn approved_roots(&self) -> openwave_core::Result<Vec<ApprovedFolder>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+    }
+
+    let (dir, store) = temp_db_store("folder-grant.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let root = openwave_core::id::HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let folders = Arc::new(FakeFolders(StdMutex::new(vec![ApprovedFolder {
+        root_id: root,
+        display_name: "Tax documents".into(),
+    }])));
+    state.host_folders = Some(folders.clone());
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Files fixture".into(),
+                    bindings: vec![AppBinding::Folder(AppFolderBinding {
+                        folder: root,
+                        access: FolderAccess::ReadWrite,
+                    })],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Ungranted at first; the row names the folder and its access level.
+    let state_response = grant_request(&router, &bearer, "GET", app_id).await;
+    assert_eq!(state_response.status(), StatusCode::OK);
+    let before: serde_json::Value =
+        serde_json::from_str(&body_string(state_response).await).unwrap();
+    assert_eq!(before["granted"], json!(false));
+    assert_eq!(before["bindings"][0]["folder"], json!(root));
+    assert_eq!(before["bindings"][0]["access"], json!("read_write"));
+    assert_eq!(before["bindings"][0]["name"], json!("Tax documents"));
+    assert_eq!(before["bindings"][0]["app"], json!(null));
+
+    // Consent grants at exactly the pinned access.
+    let consented = grant_request(&router, &bearer, "POST", app_id).await;
+    assert_eq!(consented.status(), StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_str(&body_string(consented).await).unwrap();
+    assert_eq!(after["granted"], json!(true));
+    assert_eq!(after["bindings"][0]["granted"], json!(true));
+
+    // Disconnecting the folder invalidates the grant on the next read, with
+    // the changed-since-you-agreed marker set.
+    folders.0.lock().unwrap().clear();
+    let stale = grant_request(&router, &bearer, "GET", app_id).await;
+    let stale: serde_json::Value = serde_json::from_str(&body_string(stale).await).unwrap();
+    assert_eq!(stale["granted"], json!(false));
+    assert_eq!(stale["bindings"][0]["definition_changed"], json!(true));
+    assert_eq!(stale["bindings"][0]["name"], json!(null));
 }
