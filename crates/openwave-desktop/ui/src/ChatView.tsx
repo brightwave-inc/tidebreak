@@ -32,6 +32,7 @@ import { useStreamStalled } from "./useStreamStalled";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
+import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import {
   backgroundAgentSpawnKeys as spawnKeysOf,
   useAgentRuns,
@@ -105,6 +106,7 @@ export function ChatView({
   // viewer that re-renders per keystroke is one unstable dependency away from
   // reloading its engine mid-typing.
   const draft = useComposerDraft(chat.id);
+  const composerPlugins = useComposerPlugins(client);
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
@@ -413,6 +415,7 @@ export function ChatView({
           permissionMenu={composerPermissionMenu}
           network={composerNetwork}
           reasoning={composerReasoning}
+          plugins={composerPlugins}
           images={composerImages}
           files={files}
           folders={folders}

@@ -27,6 +27,7 @@ import { ModelMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
+import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import { RouteFrame } from "./RouteFrame";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { WelcomeState } from "./WelcomeState";
@@ -50,6 +51,7 @@ export function HomeRoute() {
   const { client, models, defaultModelKey } = useApp();
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const draft = useComposerDraft(HOME_DRAFT_KEY);
+  const composerPlugins = useComposerPlugins(client);
   const setDraft = (text: string) =>
     composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
   const voice = useVoiceComposer(
@@ -291,6 +293,7 @@ export function HomeRoute() {
             cancelPending={false}
             disabled={creatingChat}
             draft={draft}
+            plugins={composerPlugins}
             images={composerImages}
             voice={{
               available: voice.available,
