@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
+  parseAgentActivityHistory,
   parseFolderAccessRequest,
   parseInboxItem,
   parsePendingChatPrompt,
@@ -806,6 +807,107 @@ describe("code-execution configuration API", () => {
         }),
       }),
     );
+  });
+});
+
+describe("parseAgentActivityHistory", () => {
+  it("keeps an entry whose typed detail it cannot vouch for, without the detail", () => {
+    expect(
+      parseAgentActivityHistory([
+        {
+          kind: "exec",
+          outcome: "failed",
+          at: "2026-08-05T18:37:00Z",
+          detail: {
+            kind: "exec",
+            command: "pip",
+            args: ["install", "matplotlib"],
+            exit_code: 1,
+          },
+        },
+        // A search headline on a command step: the tag is known, but it would
+        // describe an action other than the one that ran.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:38:00Z",
+          detail: { kind: "search", query: "quarterly revenue" },
+        },
+        // A headline the server's own projection would never emit: an unknown
+        // tag, a control character, and an extra key it does not admit.
+        {
+          kind: "web_search",
+          outcome: "completed",
+          at: "2026-08-05T18:39:00Z",
+          detail: { kind: "host_path", path: "/Users/someone" },
+        },
+        {
+          kind: "web_search",
+          outcome: "completed",
+          at: "2026-08-05T18:40:00Z",
+          detail: { kind: "search", query: "quarterly\nrevenue" },
+        },
+        {
+          kind: "read_delegated_file",
+          outcome: "completed",
+          at: "2026-08-05T18:41:00Z",
+          detail: { kind: "file", name: "brief.md", root_id: "private" },
+        },
+        // An argument vector the projection could not have produced: one
+        // element is not a string, so the whole headline would misdescribe
+        // what ran.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:42:00Z",
+          detail: { kind: "exec", command: "python3", args: ["run.py", 7] },
+        },
+        // A bidirectional override would let the headline read in an order
+        // other than the one that ran.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:43:00Z",
+          detail: { kind: "exec", command: "rm", args: ["\u202egnp.txt"] },
+        },
+        // An exit status no process produced costs only itself: the command
+        // is still the useful part of the row.
+        {
+          kind: "exec",
+          outcome: "failed",
+          at: "2026-08-05T18:44:00Z",
+          detail: { kind: "exec", command: "make", args: [], exit_code: 1.5 },
+        },
+      ]),
+    ).toEqual([
+      {
+        kind: "exec",
+        outcome: "failed",
+        at: "2026-08-05T18:37:00Z",
+        detail: {
+          kind: "exec",
+          command: "pip",
+          args: ["install", "matplotlib"],
+          exit_code: 1,
+        },
+      },
+      { kind: "exec", outcome: "completed", at: "2026-08-05T18:38:00Z" },
+      { kind: "web_search", outcome: "completed", at: "2026-08-05T18:39:00Z" },
+      { kind: "web_search", outcome: "completed", at: "2026-08-05T18:40:00Z" },
+      {
+        kind: "read_delegated_file",
+        outcome: "completed",
+        at: "2026-08-05T18:41:00Z",
+      },
+      { kind: "exec", outcome: "completed", at: "2026-08-05T18:42:00Z" },
+      { kind: "exec", outcome: "completed", at: "2026-08-05T18:43:00Z" },
+      {
+        kind: "exec",
+        outcome: "failed",
+        at: "2026-08-05T18:44:00Z",
+        detail: { kind: "exec", command: "make", args: [] },
+      },
+    ]);
   });
 });
 

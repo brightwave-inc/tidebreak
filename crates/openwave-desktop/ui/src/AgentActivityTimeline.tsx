@@ -4,6 +4,7 @@ import { ChevronRight } from "lucide-react";
 import type { AgentActivityHistoryEntry } from "./api";
 import { agentActivityHistoryLabel } from "./AgentRunDisplay";
 import { ToolIcon } from "./ToolIcon";
+import { execCommandHeadline } from "./ToolPreview";
 import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -145,6 +146,8 @@ export function AgentActivityTimeline({
         >
           {state.items.map((entry, index) => {
             const tone = activityOutcomeTone(entry.outcome);
+            const headline = activityHeadline(entry.detail);
+            const exitCode = failedExitCode(entry);
             return (
               <li
                 key={`${entry.at}:${index}`}
@@ -165,12 +168,29 @@ export function AgentActivityTimeline({
                 />
                 <span
                   className={cn(
-                    "min-w-0 flex-1 truncate font-medium text-foreground",
+                    "min-w-0 truncate font-medium text-foreground",
+                    headline === null && "flex-1",
                     tone === "running" && "animate-pulse",
                   )}
                 >
                   {agentActivityHistoryLabel(entry)}
                 </span>
+                {headline !== null && (
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate text-xs text-muted-foreground",
+                      headline.monospace && "font-mono",
+                      tone === "running" && "animate-pulse",
+                    )}
+                  >
+                    {headline.text}
+                  </span>
+                )}
+                {exitCode !== null && (
+                  <span className="shrink-0 text-xs font-medium text-critical">
+                    Exit {exitCode}
+                  </span>
+                )}
                 <time
                   className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground"
                   dateTime={entry.at}
@@ -184,6 +204,43 @@ export function AgentActivityTimeline({
       )}
     </div>
   );
+}
+
+/**
+ * The step's own headline, next to the generic label.
+ *
+ * "Ran a command" is the same sentence whichever command ran, so the validated
+ * detail is what tells the steps apart. It stays a truncated single line: this
+ * row is all the renderer has, because no output is retained for a background
+ * run's calls.
+ */
+function activityHeadline(
+  detail: AgentActivityHistoryEntry["detail"],
+): { text: string; monospace: boolean } | null {
+  if (detail === undefined) return null;
+  switch (detail.kind) {
+    case "exec":
+      return {
+        text: execCommandHeadline(detail.command, detail.args),
+        monospace: true,
+      };
+    case "search":
+      return { text: detail.query, monospace: false };
+    case "file":
+      return { text: detail.name, monospace: false };
+  }
+}
+
+/**
+ * The exit status of a command that failed, when the receipt recorded one. A
+ * non-zero exit is the most specific thing the timeline can say about a failed
+ * step, the same way the foreground badge prefers it over "failed".
+ */
+function failedExitCode(entry: AgentActivityHistoryEntry): number | null {
+  if (entry.outcome !== "failed") return null;
+  const detail = entry.detail;
+  if (detail?.kind !== "exec" || detail.exit_code === undefined) return null;
+  return detail.exit_code;
 }
 
 function agentActivitySummaryLabel(summary: AgentActivitySummary): string {

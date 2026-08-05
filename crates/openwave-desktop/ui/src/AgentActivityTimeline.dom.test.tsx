@@ -23,6 +23,12 @@ const state: AgentActivityState = {
       kind: "exec",
       outcome: "failed",
       at: "2026-08-05T18:37:00Z",
+      detail: {
+        kind: "exec",
+        command: "pip",
+        args: ["install", "matplotlib"],
+        exit_code: 1,
+      },
     },
     {
       kind: "web_search",
@@ -61,5 +67,17 @@ describe("AgentActivityTimeline", () => {
     });
     expect(settledTrigger.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("list")).toBeNull();
+  });
+
+  it("distinguishes a failed command by its own headline and exit status", () => {
+    render(<AgentActivityTimeline state={state} active={false} expanded />);
+
+    const commandRow = within(screen.getByRole("list")).getAllByRole(
+      "listitem",
+    )[1]!;
+    expect(commandRow.querySelector(".font-mono")?.textContent).toBe(
+      "pip install matplotlib",
+    );
+    expect(within(commandRow).getByText("Exit 1")).toBeTruthy();
   });
 });

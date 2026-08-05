@@ -14,6 +14,7 @@ import {
   type PendingApprovalSnapshot,
   type AgentActivitySnapshot,
   type AgentActivityHistoryItem,
+  type AgentActivityDetail,
   type AgentRunProgressLine,
   type AgentActivityKind,
   type AgentActivityOutcome,
@@ -403,9 +404,10 @@ export type AgentActivity = AgentActivitySnapshot;
 /**
  * One settled or live step in a background run's ordered activity history.
  *
- * The wire may also carry an additive typed `detail`. This server-only slice
- * intentionally discards it in {@link parseAgentActivityHistory}; preserving it
- * waits for the renderer slice's closed, bounded, kind-matched validator.
+ * The wire may also carry an additive typed `detail`, kept only when
+ * {@link parseAgentActivityHistory} can validate it as a bounded headline whose
+ * tag matches the entry's own kind. An entry whose detail fails that check is
+ * still rendered, without the headline.
  */
 export type AgentActivityHistoryEntry = AgentActivityHistoryItem;
 
@@ -2337,13 +2339,37 @@ function onlyKeys<Wire>(
 }
 
 function nonEmptyBounded(value: unknown, maxChars: number): value is string {
+  return bounded(value, maxChars) && value.trim().length > 0;
+}
+
+/**
+ * A string within `maxChars` characters and free of any character that could
+ * break the one line it is rendered on or spoof its visual order: C0/C1
+ * controls, the line and paragraph separators, and the bidirectional
+ * overrides and isolates. This mirrors the projection's own clamp
+ * (`preview_formatting_character` in `openwave-core`), because the renderer
+ * validates what it is about to draw rather than trusting that the sender
+ * already did.
+ *
+ * Unlike {@link nonEmptyBounded} an empty string passes. Nothing on this wire
+ * is expected to be empty — the projection drops a field that clamps away —
+ * so this only avoids rejecting a whole payload over a field whose emptiness
+ * says nothing about its trustworthiness.
+ */
+function bounded(value: unknown, maxChars: number): value is string {
   return (
     typeof value === "string" &&
-    value.trim().length > 0 &&
     Array.from(value).length <= maxChars &&
     !Array.from(value).some((character) => {
       const code = character.codePointAt(0) ?? 0;
-      return code < 32 || (code >= 127 && code <= 159);
+      return (
+        code < 32 ||
+        (code >= 127 && code <= 159) ||
+        code === 0x2028 ||
+        code === 0x2029 ||
+        (code >= 0x202a && code <= 0x202e) ||
+        (code >= 0x2066 && code <= 0x2069)
+      );
     })
   );
 }
@@ -2367,6 +2393,121 @@ const AGENT_ACTIVITY_OUTCOMES = new Set<AgentActivityOutcome>([
 ]);
 
 /**
+ * The bounds one activity headline may carry: the server projects each field
+ * through the same caps the approval preview uses, so a longer field or a
+ * larger vector is a payload it would not have produced.
+ */
+const ACTIVITY_DETAIL_FIELD_CHARS = 512;
+const ACTIVITY_DETAIL_ARGS = 32;
+
+/** The half-open range of a signed 32-bit exit code, as the wire type spells it. */
+const ACTIVITY_EXIT_CODE_MIN = -(2 ** 31);
+const ACTIVITY_EXIT_CODE_MAX = 2 ** 31;
+
+/**
+ * The kinds a `file` headline may accompany. The server pairs one only with the
+ * delegated read today, and the cross-check is worth exactly as much as it is
+ * narrow: widen this when a folder tool starts naming a file, not before.
+ */
+const ACTIVITY_FILE_DETAIL_KINDS = new Set<AgentActivityKind>([
+  "read_delegated_file",
+]);
+
+/**
+ * Validate one entry's optional headline against the entry's own kind.
+ *
+ * The detail is model-authored text on a surface that otherwise renders only a
+ * closed vocabulary, so the check is closed on every axis: an unknown tag, an
+ * extra key, an unbounded field or one carrying formatting characters, an
+ * oversized argument vector, or a tag that does not belong to this activity
+ * kind all yield no detail. Failing that way costs the reader a headline;
+ * keeping a mismatched one would let a `search` payload describe a command
+ * that ran.
+ */
+function parseAgentActivityDetail(
+  kind: AgentActivityKind,
+  value: unknown,
+): AgentActivityDetail | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.kind === "exec") {
+    if (
+      kind !== "exec" ||
+      !onlyKeys<Extract<AgentActivityDetail, { kind: "exec" }>>(value, [
+        "kind",
+        "command",
+        "args",
+        "exit_code",
+      ]) ||
+      !nonEmptyBounded(value.command, ACTIVITY_DETAIL_FIELD_CHARS) ||
+      !Array.isArray(value.args) ||
+      value.args.length > ACTIVITY_DETAIL_ARGS
+    ) {
+      return undefined;
+    }
+    const args: string[] = [];
+    for (const arg of value.args) {
+      if (!bounded(arg, ACTIVITY_DETAIL_FIELD_CHARS)) return undefined;
+      args.push(arg);
+    }
+    // The exit status is decoration next to the command itself, so an
+    // unusable one costs only itself: the reader still sees what ran.
+    const exitCode = activityExitCode(value.exit_code);
+    return exitCode === undefined
+      ? { kind: "exec", command: value.command, args }
+      : {
+          kind: "exec",
+          command: value.command,
+          args,
+          exit_code: exitCode,
+        };
+  }
+  if (value.kind === "search") {
+    if (
+      kind !== "web_search" ||
+      !onlyKeys<Extract<AgentActivityDetail, { kind: "search" }>>(value, [
+        "kind",
+        "query",
+      ]) ||
+      !nonEmptyBounded(value.query, ACTIVITY_DETAIL_FIELD_CHARS)
+    ) {
+      return undefined;
+    }
+    return { kind: "search", query: value.query };
+  }
+  if (value.kind === "file") {
+    if (
+      !ACTIVITY_FILE_DETAIL_KINDS.has(kind) ||
+      !onlyKeys<Extract<AgentActivityDetail, { kind: "file" }>>(value, [
+        "kind",
+        "name",
+      ]) ||
+      !nonEmptyBounded(value.name, ACTIVITY_DETAIL_FIELD_CHARS)
+    ) {
+      return undefined;
+    }
+    return { kind: "file", name: value.name };
+  }
+  return undefined;
+}
+
+/**
+ * The recorded exit status, when it is one a process could actually have
+ * produced: the server parses it as an `i32`, so anything fractional or outside
+ * that range did not come from a receipt.
+ */
+function activityExitCode(value: unknown): number | undefined {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < ACTIVITY_EXIT_CODE_MIN ||
+    value >= ACTIVITY_EXIT_CODE_MAX
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
  * Keep only well-formed history entries in their server order. An entry whose
  * kind or outcome falls outside the closed vocabulary, or whose timestamp is
  * missing, is dropped rather than rendered — the same defensive discipline the
@@ -2388,11 +2529,14 @@ export function parseAgentActivityHistory(
     ) {
       return [];
     }
+    const kind = entry.kind as AgentActivityKind;
+    const detail = parseAgentActivityDetail(kind, entry.detail);
     return [
       {
-        kind: entry.kind as AgentActivityKind,
+        kind,
         outcome: entry.outcome as AgentActivityOutcome,
         at: entry.at,
+        ...(detail === undefined ? {} : { detail }),
       },
     ];
   });
