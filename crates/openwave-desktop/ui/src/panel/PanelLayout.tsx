@@ -72,7 +72,12 @@ export function PanelLayout({
     <PanelGroup
       ref={groupRef}
       direction="horizontal"
-      className={cn("content-container min-h-0 w-full max-w-full flex-1 overflow-clip")}
+      className={cn(
+        // min-w-0 stops the group's content-driven min-content width from
+        // pushing the row wider than its flex basis, which is what let panel
+        // content squeeze the sidebar rail beside it.
+        "content-container min-h-0 w-full max-w-full min-w-0 flex-1 overflow-clip",
+      )}
       data-dragging={dragging || undefined}
     >
       <Panel
