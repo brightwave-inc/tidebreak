@@ -28,10 +28,9 @@ import { useUiStore } from "@/UiStore";
  * The parts of the rail that do not depend on where the reader is: the way
  * home, the collapse control, and the app's own settings.
  *
- * Each route supplies the middle for itself, because that is the part that
- * differs — a rail shared across every route has to carry the union of what
- * every route needs, and the routes it does not fit are left holding controls
- * they cannot use.
+ * The middle is supplied by whoever is rendering the rail — {@link AppSidebar}
+ * everywhere but settings, which has its own section list and no use for a
+ * chat list beside it.
  */
 export function SidebarFrame({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
@@ -71,7 +70,10 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
         )}
       </SidebarHeader>
 
-      <SidebarContent className="gap-1 overflow-y-auto px-2">
+      {/* min-h-0 so the chat list inside can be the part that scrolls: without
+          it the content column grows to its content and the rail's own rows
+          scroll away with the list. */}
+      <SidebarContent className="min-h-0 gap-1 overflow-y-auto px-2">
         {isCompact && (
           <SidebarButton aria-label="Expand sidebar" onClick={toggleSidebar}>
             <PanelLeftOpen />

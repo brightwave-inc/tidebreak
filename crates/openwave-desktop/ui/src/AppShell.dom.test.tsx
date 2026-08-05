@@ -258,8 +258,8 @@ describe("app shell", () => {
     listInbox.mockResolvedValue([parked("chat-2", "call-parked")]);
     await mountApp({ at: "/c/chat-1" });
 
-    // The conversation's own rail carries no chat list, so the way back to the
-    // others is what reports that one of them is waiting.
+    // A chat that has parked a turn can sit past the rail's cut, so the way to
+    // the full table is what reports that one of the others is waiting.
     expect(
       await screen.findByLabelText("Another chat needs attention"),
     ).toBeInTheDocument();
@@ -331,10 +331,10 @@ describe("app shell", () => {
     const { router } = await mountApp();
     await screen.findByText("How can I help?");
 
-    const recentList = screen.getByLabelText("Recent chats");
+    const chatList = screen.getByLabelText("Chats");
     const [row] = screen
       .getAllByRole("button", { name: "Roadmap" })
-      .filter((button) => recentList.contains(button));
+      .filter((button) => chatList.contains(button));
     await user.click(row);
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
@@ -450,14 +450,14 @@ describe("app shell", () => {
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
-    // The rail lists the recents with the open chat marked, so leaving for
+    // The rail is the chat list, with the open chat marked, so leaving for
     // another conversation is one click, not a trip through home.
-    const recentList = await screen.findByLabelText("Recent chats");
+    const chatList = await screen.findByLabelText("Chats");
     expect(
-      within(recentList).getByRole("button", { name: "Roadmap" }),
+      within(chatList).getByRole("button", { name: "Roadmap" }),
     ).toHaveAttribute("aria-current", "page");
 
-    await user.click(within(recentList).getByRole("button", { name: "New chat" }));
+    await user.click(within(chatList).getByRole("button", { name: "New chat" }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-2"));
   });

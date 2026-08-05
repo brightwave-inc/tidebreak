@@ -33,7 +33,7 @@ import { EMPTY_LAYOUT, type LayoutState, type PanelContent } from "./panel/panel
 import { useLayoutState } from "./panel/usePanelNav";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { RouteFrame } from "./RouteFrame";
-import { HomeSidebar } from "./sidebar/HomeSidebar";
+import { AppSidebar } from "./sidebar/AppSidebar";
 import { WelcomeState } from "./WelcomeState";
 import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
@@ -379,7 +379,7 @@ export function HomeRoute() {
   }
 
   return (
-    <RouteFrame sidebar={<HomeSidebar />}>
+    <RouteFrame sidebar={<AppSidebar />}>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <PanelLayout
           layout={layout}

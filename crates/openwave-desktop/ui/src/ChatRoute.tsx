@@ -69,7 +69,7 @@ import type { PanelContent } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
 import { SourceNavProvider, useStableSourceNav } from "./panel/SourceNav";
 import { RouteFrame } from "./RouteFrame";
-import { ChatSidebar } from "./sidebar/ChatSidebar";
+import { AppSidebar } from "./sidebar/AppSidebar";
 import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
@@ -681,7 +681,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   return (
-    <RouteFrame sidebar={<ChatSidebar chat={chat} />}>
+    <RouteFrame sidebar={<AppSidebar chat={chat} />}>
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
         <ChatHeaderTitle chat={chat} />

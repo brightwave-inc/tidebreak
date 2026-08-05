@@ -17,7 +17,7 @@ import type { PanelSearch } from "./panel/panelUrl";
 import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
-import { HomeSidebar } from "./sidebar/HomeSidebar";
+import { AppSidebar } from "./sidebar/AppSidebar";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -66,7 +66,7 @@ const allChatsRoute = createRoute({
 
 function AllChatsRoute() {
   return (
-    <RouteFrame sidebar={<HomeSidebar />}>
+    <RouteFrame sidebar={<AppSidebar />}>
       <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
         <ChatExplorer />
       </div>
@@ -86,7 +86,7 @@ const inboxRoute = createRoute({
 
 function InboxRoute() {
   return (
-    <RouteFrame sidebar={<HomeSidebar />}>
+    <RouteFrame sidebar={<AppSidebar />}>
       <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
         <InboxView />
       </div>
