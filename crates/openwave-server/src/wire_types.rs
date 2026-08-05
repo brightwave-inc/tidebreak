@@ -364,6 +364,9 @@ mod tests {
         // badges, and the toggle body the management surface sends back.
         generate::collect_from::<crate::routes::PluginCatalog>(&cfg, &mut out);
         generate::collect_from::<crate::routes::PluginEnableUpdate>(&cfg, &mut out);
+        // Its own endpoint root: a skill's instruction body is fetched on
+        // demand rather than carried in the catalog.
+        generate::collect_from::<crate::routes::SkillInstructions>(&cfg, &mut out);
         // The Connected apps settings listing: per-kind health/catalog
         // projections and credential *status* — never definitions or values.
         generate::collect_from::<crate::routes::ConnectedAppsInfo>(&cfg, &mut out);

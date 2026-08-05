@@ -333,6 +333,10 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(routes::MAX_PLUGIN_ENABLE_BODY_BYTES)),
         )
         .route(
+            "/plugins/skills/{name}/instructions",
+            get(routes::get_skill_instructions),
+        )
+        .route(
             "/connected-apps/rest/{id}",
             axum::routing::put(routes::put_rest_connected_app)
                 .delete(routes::delete_rest_connected_app)

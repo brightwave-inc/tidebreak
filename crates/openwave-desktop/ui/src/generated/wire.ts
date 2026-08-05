@@ -1880,6 +1880,20 @@ max_active_background_agents: number, };
 export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
 
 /**
+ * One skill's instruction body, for the management surface's detail view.
+ *
+ * Its own route rather than a catalog field on purpose: a body is kilobytes
+ * where a catalog row is bytes, and the catalog is fetched far more often
+ * than any one skill is read.
+ */
+export type SkillInstructions = { name: string, 
+/**
+ * The `SKILL.md` markdown body, with the frontmatter removed — what the
+ * model is taught when the skill is staged, shown to the reader verbatim.
+ */
+instructions: string, };
+
+/**
  * Which source a validated skill package was loaded from.
  *
  * Origin is host-derived from the load path, never from manifest content, so

@@ -12,7 +12,7 @@
 //! [`crate::plugin_state`]; what is enforced here is that a name is a
 //! well-formed slug and that the recorded set stays bounded.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -141,6 +141,55 @@ fn skill_info(
         origin: skill.origin,
         enabled: flags.skill_flag(&skill.name),
     }
+}
+
+/// One skill's instruction body, for the management surface's detail view.
+///
+/// Its own route rather than a catalog field on purpose: a body is kilobytes
+/// where a catalog row is bytes, and the catalog is fetched far more often
+/// than any one skill is read.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct SkillInstructions {
+    pub name: String,
+    /// The `SKILL.md` markdown body, with the frontmatter removed — what the
+    /// model is taught when the skill is staged, shown to the reader verbatim.
+    pub instructions: String,
+}
+
+/// `GET /plugins/skills/{name}/instructions`.
+pub async fn get_skill_instructions(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<SkillInstructions>, ServerError> {
+    if !is_valid_skill_name(&name) {
+        return Err(ServerError::bad_request(format!(
+            "not a skill name: {name:?}"
+        )));
+    }
+    let skill = state
+        .code_execution
+        .as_ref()
+        .and_then(|exec| {
+            exec.installed_skills()
+                .into_iter()
+                .find(|skill| skill.package.name == name)
+        })
+        .ok_or_else(|| ServerError::not_found(format!("no skill named {name:?}")))?;
+    Ok(Json(SkillInstructions {
+        name,
+        instructions: manifest_body(&skill.manifest).to_owned(),
+    }))
+}
+
+/// The manifest with its frontmatter fences removed. Every staged manifest
+/// parsed on the way in, so the split always succeeds; falling back to the
+/// whole source keeps a malformed one readable rather than blank.
+fn manifest_body(manifest: &str) -> &str {
+    manifest
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map_or(manifest, |(_, body)| body)
+        .trim()
 }
 
 /// `PUT /plugins/enabled` — set the named flags, returning the fresh catalog.

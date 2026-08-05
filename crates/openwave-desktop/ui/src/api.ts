@@ -64,6 +64,7 @@ import {
   type PluginInfo as WirePluginInfo,
   type PluginSkillInfo as WirePluginSkillInfo,
   type SkillOrigin as WireSkillOrigin,
+  type SkillInstructions as WireSkillInstructions,
   type NetworkPolicy as WireNetworkPolicy,
   type ReasoningEffort as WireReasoningEffort,
   type Settings,
@@ -565,6 +566,9 @@ export type PluginEnableUpdate = WirePluginEnableUpdate;
 
 /** Where a skill package was loaded from; host-derived, never claimed. */
 export type SkillOrigin = WireSkillOrigin;
+
+/** One skill's instruction body, fetched on demand for its detail view. */
+export type SkillInstructions = WireSkillInstructions;
 
 /** The Apps library listing: every live local app, newest activity first. */
 export type AppLibrary = WireAppLibrary;
@@ -1219,6 +1223,13 @@ export class ApiClient {
 
   listPlugins(): Promise<PluginCatalog> {
     return this.json("/plugins", { headers: this.headers() });
+  }
+
+  /** One skill's full instruction body — what the model is taught by it. */
+  getSkillInstructions(name: string): Promise<SkillInstructions> {
+    return this.json(`/plugins/skills/${encodeURIComponent(name)}/instructions`, {
+      headers: this.headers(),
+    });
   }
 
   /**
