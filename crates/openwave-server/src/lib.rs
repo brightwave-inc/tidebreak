@@ -35,7 +35,7 @@ mod exec_write_snapshot;
 mod extract;
 mod foreground_prompt;
 mod gateway_runtime;
-mod host_folders;
+pub mod host_folders;
 pub mod logging;
 mod managed_policy;
 mod mcp_config;
@@ -723,6 +723,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -733,7 +734,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None, None).await
+    bind_inner(config, None, mcp_servers, None, None, None, None, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -751,6 +752,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
         None,
         None,
         None,
@@ -777,14 +779,16 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
 
 /// Desktop binding with the native bridges only the product app can provide:
 /// the resolver that turns connected folders into per-invocation local
-/// sandbox grants, and the office-to-PDF converter that renders office
-/// outputs for the model's visual QA loop.
+/// sandbox grants, the office-to-PDF converter that renders office
+/// outputs for the model's visual QA loop, and the host-folder surface
+/// local-app folder bindings dispatch through.
 pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     config: Config,
     client_executor_id: Uuid,
@@ -792,6 +796,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
     host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
@@ -805,6 +810,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         office_converter,
         host_tool_broker,
         local_voice,
+        host_folders,
     )
     .await
 }
@@ -846,6 +852,7 @@ async fn bind_inner(
     office_converter: Option<Arc<dyn openwave_code_execution::HostOfficeConverter>>,
     host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> Result<Server> {
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
@@ -962,6 +969,10 @@ async fn bind_inner(
     if let Some(local_voice) = local_voice {
         state.set_local_voice_runner(local_voice);
     }
+    // The host-folder surface local-app folder bindings dispatch through;
+    // absent everywhere but the desktop, where folder bindings then refuse
+    // to grant (docs/folder-bindings.md).
+    state.host_folders = host_folders;
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();

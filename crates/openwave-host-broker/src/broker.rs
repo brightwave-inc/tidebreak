@@ -32,15 +32,15 @@ use crate::{
     },
     path_policy::RootIdentity,
     protocol::{
-        ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
-        EntryKind, ErrorCode, ErrorResponse, GrantRootCapabilityRequest, GrantRootCapabilityResult,
-        GrantStatementSummary, HelloResult, LookupRegisterRootReceiptRequest,
-        LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
-        LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
-        OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult,
-        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult,
-        ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope, RevokeGrantRequest,
-        RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
+        AppFolderWriteRequest, ControlEnvelope, ControlRequest, ControlResponseEnvelope,
+        ControlResult, DirectoryEntry, EntryKind, ErrorCode, ErrorResponse,
+        GrantRootCapabilityRequest, GrantRootCapabilityResult, GrantStatementSummary, HelloResult,
+        LookupRegisterRootReceiptRequest, LookupRegisterRootReceiptResult,
+        LookupRootAttachmentReceiptRequest, LookupRootAttachmentReceiptResult, OperationEnvelope,
+        OperationRequest, OperationResponseEnvelope, OperationResult, PathRequest,
+        ReadFileBinaryResult, ReadFileResult, RegisterRootReceipt, RegisterRootRequest,
+        RegisterRootResult, ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope,
+        RevokeGrantRequest, RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
         RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
         RootAttachmentMutationResult, RootSummary, UnavailableRootReason, UnavailableRootSummary,
         WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
@@ -334,6 +334,16 @@ impl ControlAudit {
             | ControlRequest::ListApprovedRoots
             | ControlRequest::ListGrantStatements
             | ControlRequest::ListUnavailableRoots => None,
+            // The app-folder trio is consented and recorded server-side: the
+            // app grant names the folder and access level, and dispatch is
+            // admitted there before the broker is reached. The broker-side
+            // audit vocabulary is subject-keyed and local apps have no grant
+            // subject; auditing these under a borrowed subject would
+            // misattribute them. An app-actor audit kind is the recorded
+            // follow-up (docs/folder-bindings.md).
+            ControlRequest::ListAppFolder(_)
+            | ControlRequest::ReadAppFolderFile(_)
+            | ControlRequest::WriteAppFolderFile(_) => None,
             ControlRequest::ResolveExecRoots(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: match request.context.project_id() {
@@ -741,6 +751,37 @@ impl Controller {
             ControlRequest::GrantRootCapability(request) => self
                 .grant_root_capability(request)
                 .map(ControlResult::GrantRootCapability),
+            ControlRequest::ListAppFolder(request) => {
+                let root = {
+                    let state = self.lock_state().map_err(error_response)?;
+                    app_folder_root(&state, request.root_id).map_err(error_response)?
+                };
+                match list_directory(&root, &request.path).map_err(error_response)? {
+                    OperationResult::ListDirectory { entries } => {
+                        Ok(ControlResult::ListAppFolder { entries })
+                    }
+                    _ => Err(error_response(BrokerError::Denied)),
+                }
+            }
+            ControlRequest::ReadAppFolderFile(request) => {
+                let root = {
+                    let state = self.lock_state().map_err(error_response)?;
+                    app_folder_root(&state, request.root_id).map_err(error_response)?
+                };
+                match read_file_binary(&root, &request.path).map_err(error_response)? {
+                    OperationResult::ReadFileBinary(result) => {
+                        Ok(ControlResult::ReadAppFolderFile(result))
+                    }
+                    _ => Err(error_response(BrokerError::Denied)),
+                }
+            }
+            ControlRequest::WriteAppFolderFile(request) => {
+                let root = {
+                    let state = self.lock_state().map_err(error_response)?;
+                    app_folder_root(&state, request.root_id).map_err(error_response)?
+                };
+                write_app_folder_file(&root, request).map_err(error_response)
+            }
         }
     }
 
@@ -2363,6 +2404,65 @@ fn has_physical_root_alias(state: &State, root_id: RootId) -> bool {
         .roots
         .iter()
         .any(|(candidate_id, root)| *candidate_id != root_id && root.root.identity() == identity)
+}
+
+/// The pinned directory of one live registration, for the app-folder trio.
+///
+/// Trusted-host surface: no conversation attachment and no grant lookup
+/// apply — the server-side app grant is the consent gate
+/// (`docs/folder-bindings.md`) — but only a *live* registration answers. A
+/// set-aside or forgotten root is denied, and I/O through the pinned
+/// descriptor means a renamed-and-replaced directory cannot answer either.
+fn app_folder_root(state: &State, root_id: RootId) -> Result<Dir, BrokerError> {
+    state
+        .roots
+        .get(&root_id)
+        .ok_or(BrokerError::Denied)?
+        .root
+        .directory()
+        .try_clone()
+        .map_err(BrokerError::from)
+}
+
+/// One bounded app-folder write, atomic and digest-bound like the agent
+/// write operation, minus its approval and idempotency machinery: there is
+/// no chat to park an approval on, and the server-side dispatch does not
+/// replay — a same-content retry reconciles via the destination check.
+fn write_app_folder_file(
+    root: &Dir,
+    request: AppFolderWriteRequest,
+) -> Result<ControlResult, BrokerError> {
+    let probe = WriteFileRequest {
+        operation_id: OperationId::from_uuid(Uuid::new_v4())
+            .expect("a random v4 uuid is never nil"),
+        root_id: request.root_id,
+        path: request.path.clone(),
+        mode: request.mode,
+        approval: None,
+        content_base64: request.content_base64.clone(),
+        bytes: request.bytes,
+        sha256: request.sha256,
+    };
+    let content = decode_write_content(&probe)?;
+    match atomic_write_connected_file(
+        root,
+        &request.path,
+        &content,
+        request.mode,
+        probe.operation_id,
+    ) {
+        Ok(replaced) => Ok(ControlResult::WriteAppFolderFile {
+            bytes: request.bytes,
+            replaced,
+        }),
+        Err(_error) if destination_matches(root, &request.path, request.bytes, request.sha256) => {
+            Ok(ControlResult::WriteAppFolderFile {
+                bytes: request.bytes,
+                replaced: matches!(request.mode, WriteFileMode::Replace),
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn list_approved_roots(state: &State) -> Result<Vec<RootSummary>, ErrorResponse> {

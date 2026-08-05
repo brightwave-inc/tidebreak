@@ -122,6 +122,29 @@ pub enum ControlRequest {
     /// panel. No operation id — an equivalent live grant makes a retry observe
     /// `granted: false`, so nothing can be minted twice.
     GrantRootCapability(GrantRootCapabilityRequest),
+    /// List one approved root's directory for a local-app folder binding.
+    ///
+    /// The app-folder trio (`ListAppFolder`, `ReadAppFolderFile`,
+    /// `WriteAppFolderFile`) is a trusted-host surface for local apps
+    /// (`docs/folder-bindings.md`): the desktop calls it only after the
+    /// server's app grant admitted the invoke, so consent lives in the app
+    /// grant, not here. The broker still owns the host-level half — the root
+    /// must be a live registration (never a set-aside one), paths are
+    /// re-parsed into the relative grammar, I/O goes through the pinned
+    /// descriptor so a renamed-and-replaced directory cannot answer, and
+    /// every transfer respects the same byte bounds as agent operations.
+    /// No conversation attachment applies: an app is profile-scoped.
+    ListAppFolder(AppFolderPathRequest),
+    /// Read one file under an approved root for a local-app folder binding,
+    /// as bounded opaque bytes. See [`ControlRequest::ListAppFolder`].
+    ReadAppFolderFile(AppFolderPathRequest),
+    /// Write one file under an approved root for a local-app folder binding.
+    ///
+    /// Unlike the agent write operation there is no per-replacement approval
+    /// object: the standing `read_write` app grant is the write consent, at
+    /// folder granularity, checked server-side before dispatch. See
+    /// [`ControlRequest::ListAppFolder`].
+    WriteAppFolderFile(AppFolderWriteRequest),
 }
 
 /// Strict payload for a native-picker root registration.
@@ -135,6 +158,41 @@ pub struct RegisterRootRequest {
     pub conversation_id: Uuid,
     pub path: PathBuf,
     pub consent_method: ConsentMethod,
+}
+
+/// One approved root and a path under it, for the app-folder read surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppFolderPathRequest {
+    pub root_id: RootId,
+    pub path: RelativePath,
+}
+
+/// One bounded app-folder write: content bound to its digest, like the agent
+/// write operation, minus the approval object (the app grant is the standing
+/// consent, enforced server-side).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppFolderWriteRequest {
+    pub root_id: RootId,
+    pub path: RelativePath,
+    pub mode: WriteFileMode,
+    pub content_base64: String,
+    pub bytes: usize,
+    pub sha256: [u8; 32],
+}
+
+impl std::fmt::Debug for AppFolderWriteRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppFolderWriteRequest")
+            .field("root_id", &self.root_id)
+            .field("path", &self.path)
+            .field("mode", &self.mode)
+            .field("content_base64", &"[redacted]")
+            .field("bytes", &self.bytes)
+            .finish()
+    }
 }
 
 /// Trusted product projection to intersect with live broker authority.
@@ -387,6 +445,9 @@ pub enum ControlResult {
     RevokeRoot(RevokeRootResult),
     RevokeGrant(RevokeGrantResult),
     GrantRootCapability(GrantRootCapabilityResult),
+    ListAppFolder { entries: Vec<DirectoryEntry> },
+    ReadAppFolderFile(ReadFileBinaryResult),
+    WriteAppFolderFile { bytes: usize, replaced: bool },
 }
 
 /// One currently authorized host root for native local execution.

@@ -333,6 +333,36 @@ async fn folder_bindings_grant_and_fail_closed_when_the_folder_disconnects() {
         async fn approved_roots(&self) -> openwave_core::Result<Vec<ApprovedFolder>> {
             Ok(self.0.lock().unwrap().clone())
         }
+
+        // The consent surface never dispatches I/O; a fake that fails loudly
+        // if it ever does keeps this test about the grant object.
+        async fn list_folder(
+            &self,
+            _root: openwave_core::id::HostRootId,
+            _path: &str,
+        ) -> Result<Vec<crate::host_folders::FolderEntry>, crate::host_folders::FolderOpError>
+        {
+            panic!("the grant surface must not dispatch folder I/O")
+        }
+
+        async fn read_file(
+            &self,
+            _root: openwave_core::id::HostRootId,
+            _path: &str,
+        ) -> Result<Vec<u8>, crate::host_folders::FolderOpError> {
+            panic!("the grant surface must not dispatch folder I/O")
+        }
+
+        async fn write_file(
+            &self,
+            _root: openwave_core::id::HostRootId,
+            _path: &str,
+            _content: &[u8],
+            _replace: bool,
+        ) -> Result<crate::host_folders::FolderWriteReceipt, crate::host_folders::FolderOpError>
+        {
+            panic!("the grant surface must not dispatch folder I/O")
+        }
     }
 
     let (dir, store) = temp_db_store("folder-grant.db").await;

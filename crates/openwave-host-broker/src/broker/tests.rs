@@ -1,5 +1,5 @@
 use super::*;
-use crate::WriteApproval;
+use crate::{AppFolderPathRequest, WriteApproval};
 
 #[derive(Default)]
 struct CollectingAudit {
@@ -3585,4 +3585,133 @@ fn pending_write_recovery_never_replays_an_ambiguous_native_result() {
             })
         ));
     }
+}
+
+/// The app-folder trio (docs/folder-bindings.md in the product repo) is a
+/// trusted-host surface with the broker's host-level half intact: only a
+/// live registration answers, transfers keep the byte bounds, and writes are
+/// digest-bound and mode-checked — while no conversation context applies at
+/// all, because consent lives in the caller's app grant.
+#[test]
+fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
+    let (_temp, broker, root) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let registered = register(
+        &controller,
+        GrantSubject::conversation(conversation).unwrap(),
+        conversation,
+        root,
+        OperationId::new(),
+    );
+    let root_id = registered.root.root_id;
+    let control = |request: ControlRequest| {
+        unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request,
+        }))
+    };
+
+    // Listing the root and reading a file need no conversation context.
+    let ControlResult::ListAppFolder { entries } =
+        control(ControlRequest::ListAppFolder(AppFolderPathRequest {
+            root_id,
+            path: RelativePath::root(),
+        }))
+        .unwrap()
+    else {
+        panic!("unexpected control result")
+    };
+    assert!(entries
+        .iter()
+        .any(|entry| entry.name == "note.txt" && entry.kind == EntryKind::File));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.name == "reports" && entry.kind == EntryKind::Directory));
+
+    let ControlResult::ReadAppFolderFile(read) =
+        control(ControlRequest::ReadAppFolderFile(AppFolderPathRequest {
+            root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }))
+        .unwrap()
+    else {
+        panic!("unexpected control result")
+    };
+    assert_eq!(
+        BASE64.decode(read.content_base64).unwrap(),
+        b"hello from broker"
+    );
+
+    // Writes are digest-bound and mode-checked: create lands, a same-content
+    // create retry reconciles, a different-content create refuses, and
+    // replace replaces.
+    let write = |mode: WriteFileMode, bytes: &[u8]| {
+        control(ControlRequest::WriteAppFolderFile(AppFolderWriteRequest {
+            root_id,
+            path: RelativePath::parse("app-state.json").unwrap(),
+            mode,
+            content_base64: BASE64.encode(bytes),
+            bytes: bytes.len(),
+            sha256: Sha256::digest(bytes).into(),
+        }))
+    };
+    let ControlResult::WriteAppFolderFile { bytes, replaced } =
+        write(WriteFileMode::Create, b"{\"cards\":1}").unwrap()
+    else {
+        panic!("unexpected control result")
+    };
+    assert_eq!((bytes, replaced), (11, false));
+    let ControlResult::WriteAppFolderFile { replaced, .. } =
+        write(WriteFileMode::Create, b"{\"cards\":1}").unwrap()
+    else {
+        panic!("unexpected control result")
+    };
+    assert!(!replaced, "a same-content create retry reconciles");
+    assert_eq!(
+        write(WriteFileMode::Create, b"{\"cards\":2}")
+            .unwrap_err()
+            .code,
+        ErrorCode::AlreadyExists
+    );
+    let ControlResult::WriteAppFolderFile { replaced, .. } =
+        write(WriteFileMode::Replace, b"{\"cards\":2}").unwrap()
+    else {
+        panic!("unexpected control result")
+    };
+    assert!(replaced);
+
+    // A mismatched digest refuses before any I/O.
+    assert_eq!(
+        control(ControlRequest::WriteAppFolderFile(AppFolderWriteRequest {
+            root_id,
+            path: RelativePath::parse("tampered.json").unwrap(),
+            mode: WriteFileMode::Create,
+            content_base64: BASE64.encode(b"x"),
+            bytes: 1,
+            sha256: [0; 32],
+        }))
+        .unwrap_err()
+        .code,
+        ErrorCode::InvalidRequest
+    );
+
+    // Revoking the registration closes the whole surface: the registration
+    // is the host-level gate, and nothing else answers for it.
+    revoke(
+        &controller,
+        OperationId::new(),
+        GrantSubject::conversation(conversation).unwrap(),
+        root_id,
+    );
+    assert_eq!(
+        control(ControlRequest::ReadAppFolderFile(AppFolderPathRequest {
+            root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }))
+        .unwrap_err()
+        .code,
+        ErrorCode::Denied
+    );
 }

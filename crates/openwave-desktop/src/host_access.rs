@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use openwave_core::{ChatId, Store};
 use openwave_host_broker::{
-    Capability, ControlRequest, ControlResult, ExecutionContext, GrantSubject, OperationEnvelope,
-    OperationRequest, OperationResult, ResolveExecRootsRequest, RootId, RootSummary,
+    AppFolderPathRequest, AppFolderWriteRequest, Capability, ControlRequest, ControlResult,
+    ExecutionContext, GrantSubject, OperationEnvelope, OperationRequest, OperationResult,
+    RelativePath, ResolveExecRootsRequest, RootId, RootSummary, WriteFileMode,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -188,6 +189,189 @@ impl openwave_server::code_execution::ExecFolderGrantResolver for DesktopExecFol
                 })
             })
             .collect()
+    }
+}
+
+/// The desktop's host-folder surface for local-app folder bindings: the
+/// server's optional seam (docs/folder-bindings.md), implemented over the
+/// broker sidecar's app-folder control surface.
+///
+/// The server has already enforced the app grant — pin, coverage, access
+/// level, fingerprint — before any call lands here; this bridge carries
+/// opaque root ids and folder-relative paths to the broker, which owns the
+/// host-level half (live registration, pinned descriptors, byte bounds).
+pub(crate) struct DesktopHostFolders {
+    app: AppHandle,
+}
+
+impl DesktopHostFolders {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+
+    fn broker(&self) -> State<'_, HostAccess> {
+        self.app.state::<HostAccess>()
+    }
+}
+
+/// The broker's safe error vocabulary folded into the seam's closed one —
+/// codes only, never broker message text, so nothing host-shaped can reach
+/// an app frame.
+fn folder_op_error(
+    error: crate::broker::BrokerClientError,
+) -> openwave_server::host_folders::FolderOpError {
+    use openwave_server::host_folders::FolderOpError;
+
+    match error {
+        crate::broker::BrokerClientError::Broker { code, .. } => match code {
+            openwave_host_broker::ErrorCode::Denied
+            | openwave_host_broker::ErrorCode::InvalidRoot => FolderOpError::NotConnected,
+            openwave_host_broker::ErrorCode::NotFound => FolderOpError::NotFound,
+            openwave_host_broker::ErrorCode::InvalidRequest => FolderOpError::InvalidPath,
+            openwave_host_broker::ErrorCode::TooLarge => FolderOpError::TooLarge,
+            openwave_host_broker::ErrorCode::AlreadyExists => FolderOpError::WrongMode,
+            _ => FolderOpError::Failed,
+        },
+        _ => FolderOpError::Failed,
+    }
+}
+
+fn folder_relative_path(
+    path: &str,
+) -> Result<RelativePath, openwave_server::host_folders::FolderOpError> {
+    RelativePath::parse(path).map_err(|_| openwave_server::host_folders::FolderOpError::InvalidPath)
+}
+
+#[async_trait::async_trait]
+impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
+    async fn approved_roots(
+        &self,
+    ) -> openwave_core::Result<Vec<openwave_server::host_folders::ApprovedFolder>> {
+        let result = self
+            .broker()
+            .broker
+            .control(ControlRequest::ListApprovedRoots)
+            .await
+            .map_err(|error| openwave_core::AgentError::config(error.to_string()))?;
+        let ControlResult::ListApprovedRoots { roots } = result else {
+            return Err(openwave_core::AgentError::config(
+                "host broker returned an invalid folder listing",
+            ));
+        };
+        Ok(roots
+            .into_iter()
+            .filter_map(|root| {
+                let root_id = openwave_core::HostRootId::from_uuid(root.root_id.as_uuid()).ok()?;
+                Some(openwave_server::host_folders::ApprovedFolder {
+                    root_id,
+                    display_name: root.display_name,
+                })
+            })
+            .collect())
+    }
+
+    async fn list_folder(
+        &self,
+        root: openwave_core::HostRootId,
+        path: &str,
+    ) -> Result<
+        Vec<openwave_server::host_folders::FolderEntry>,
+        openwave_server::host_folders::FolderOpError,
+    > {
+        use openwave_server::host_folders::FolderOpError;
+
+        let root_id =
+            RootId::from_uuid(*root.as_uuid()).map_err(|_| FolderOpError::NotConnected)?;
+        let path = folder_relative_path(path)?;
+        let result = self
+            .broker()
+            .broker
+            .control(ControlRequest::ListAppFolder(AppFolderPathRequest {
+                root_id,
+                path,
+            }))
+            .await
+            .map_err(folder_op_error)?;
+        let ControlResult::ListAppFolder { entries } = result else {
+            return Err(FolderOpError::Failed);
+        };
+        Ok(entries
+            .into_iter()
+            .map(|entry| openwave_server::host_folders::FolderEntry {
+                name: entry.name,
+                directory: matches!(entry.kind, openwave_host_broker::EntryKind::Directory),
+            })
+            .collect())
+    }
+
+    async fn read_file(
+        &self,
+        root: openwave_core::HostRootId,
+        path: &str,
+    ) -> Result<Vec<u8>, openwave_server::host_folders::FolderOpError> {
+        use base64::Engine as _;
+
+        use openwave_server::host_folders::FolderOpError;
+
+        let root_id =
+            RootId::from_uuid(*root.as_uuid()).map_err(|_| FolderOpError::NotConnected)?;
+        let path = folder_relative_path(path)?;
+        let result = self
+            .broker()
+            .broker
+            .control(ControlRequest::ReadAppFolderFile(AppFolderPathRequest {
+                root_id,
+                path,
+            }))
+            .await
+            .map_err(folder_op_error)?;
+        let ControlResult::ReadAppFolderFile(result) = result else {
+            return Err(FolderOpError::Failed);
+        };
+        base64::engine::general_purpose::STANDARD
+            .decode(result.content_base64)
+            .map_err(|_| FolderOpError::Failed)
+    }
+
+    async fn write_file(
+        &self,
+        root: openwave_core::HostRootId,
+        path: &str,
+        content: &[u8],
+        replace: bool,
+    ) -> Result<
+        openwave_server::host_folders::FolderWriteReceipt,
+        openwave_server::host_folders::FolderOpError,
+    > {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        use openwave_server::host_folders::FolderOpError;
+
+        let root_id =
+            RootId::from_uuid(*root.as_uuid()).map_err(|_| FolderOpError::NotConnected)?;
+        let path = folder_relative_path(path)?;
+        let result = self
+            .broker()
+            .broker
+            .control(ControlRequest::WriteAppFolderFile(AppFolderWriteRequest {
+                root_id,
+                path,
+                mode: if replace {
+                    WriteFileMode::Replace
+                } else {
+                    WriteFileMode::Create
+                },
+                content_base64: base64::engine::general_purpose::STANDARD.encode(content),
+                bytes: content.len(),
+                sha256: sha2::Sha256::digest(content).into(),
+            }))
+            .await
+            .map_err(folder_op_error)?;
+        let ControlResult::WriteAppFolderFile { bytes, replaced } = result else {
+            return Err(FolderOpError::Failed);
+        };
+        Ok(openwave_server::host_folders::FolderWriteReceipt { bytes, replaced })
     }
 }
 

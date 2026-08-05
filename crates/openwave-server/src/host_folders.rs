@@ -16,18 +16,97 @@ use openwave_core::local_app::FolderAccess;
 /// One host-approved connected folder, projected renderer-safe: the stable
 /// broker root id and its display name, never a path.
 #[derive(Debug, Clone)]
-pub(crate) struct ApprovedFolder {
-    pub(crate) root_id: HostRootId,
-    pub(crate) display_name: String,
+pub struct ApprovedFolder {
+    pub root_id: HostRootId,
+    pub display_name: String,
+}
+
+/// One directory entry under an approved folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderEntry {
+    /// Entry name — a single path segment, never a path.
+    pub name: String,
+    /// Whether the entry is itself a directory.
+    pub directory: bool,
+}
+
+/// The outcome of one bounded app-folder write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderWriteReceipt {
+    /// Bytes written.
+    pub bytes: usize,
+    /// Whether an existing file was replaced.
+    pub replaced: bool,
+}
+
+/// The closed failure vocabulary of app-folder operations.
+///
+/// Renderer-facing: each variant's display text is what an app frame may see,
+/// so no variant ever carries a path, an OS error, or broker internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderOpError {
+    /// The folder is no longer a live registration.
+    NotConnected,
+    /// The path does not name an existing entry.
+    NotFound,
+    /// The path grammar refused (absolute, traversal, or malformed).
+    InvalidPath,
+    /// The file or listing exceeds the host's transfer bound.
+    TooLarge,
+    /// A create found an existing file, or a replace found none.
+    WrongMode,
+    /// Anything else — the host refused or failed, with no detail an app
+    /// frame is entitled to.
+    Failed,
+}
+
+impl std::fmt::Display for FolderOpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotConnected => "the folder is no longer connected",
+            Self::NotFound => "no such file or folder",
+            Self::InvalidPath => "the path is not a valid folder-relative path",
+            Self::TooLarge => "the content exceeds the folder transfer bound",
+            Self::WrongMode => "the file already exists, or there is nothing to replace",
+            Self::Failed => "the folder operation failed",
+        })
+    }
 }
 
 /// The host-folder surface for local-app folder bindings.
+///
+/// Implementations sit over the host broker's app-folder control surface,
+/// which owns the host-level half — live-registration checks, pinned
+/// descriptors, byte bounds. The caller owns the consent half: nothing here
+/// is dispatched until the app grant admitted the invoke.
 #[async_trait]
-pub(crate) trait HostFolders: Send + Sync {
+pub trait HostFolders: Send + Sync {
     /// Every host-approved connected folder, read live per request — never
     /// cached across one — so grant enforcement always judges the
     /// registration a root id resolves to *now*.
     async fn approved_roots(&self) -> openwave_core::Result<Vec<ApprovedFolder>>;
+
+    /// List one directory under an approved folder, within the host's
+    /// listing bounds.
+    async fn list_folder(
+        &self,
+        root: HostRootId,
+        path: &str,
+    ) -> Result<Vec<FolderEntry>, FolderOpError>;
+
+    /// Read one file under an approved folder as bounded opaque bytes.
+    async fn read_file(&self, root: HostRootId, path: &str) -> Result<Vec<u8>, FolderOpError>;
+
+    /// Write one file under an approved folder, atomically, within the
+    /// host's write bound. `replace` selects the create-vs-replace mode; the
+    /// caller has already enforced the grant's access level.
+    async fn write_file(
+        &self,
+        root: HostRootId,
+        path: &str,
+        content: &[u8],
+        replace: bool,
+    ) -> Result<FolderWriteReceipt, FolderOpError>;
 }
 
 /// SHA-256 fingerprint of one folder binding's canonical form, the value an

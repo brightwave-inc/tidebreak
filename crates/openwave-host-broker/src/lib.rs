@@ -30,17 +30,18 @@ pub use id::{
 };
 pub use path_policy::{RootPolicy, RootPolicyError, ValidatedRoot};
 pub use protocol::{
-    ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
-    EntryKind, ErrorCode, ErrorResponse, GrantRootCapabilityRequest, GrantRootCapabilityResult,
-    GrantStatementSummary, HelloResult, LookupRegisterRootReceiptRequest,
-    LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
-    LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
-    OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult, ReadFileResult,
-    RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, ResolveExecRootsRequest,
-    ResolvedExecRoot, Response, ResponseEnvelope, RevokeGrantRequest, RevokeGrantResult,
-    RevokeRootRequest, RevokeRootResult, RootAccess, RootAttachmentMutationKind,
-    RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
-    RootSummary, UnavailableRootReason, UnavailableRootSummary, WriteApproval, WriteFileMode,
-    WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
+    AppFolderPathRequest, AppFolderWriteRequest, ControlEnvelope, ControlRequest,
+    ControlResponseEnvelope, ControlResult, DirectoryEntry, EntryKind, ErrorCode, ErrorResponse,
+    GrantRootCapabilityRequest, GrantRootCapabilityResult, GrantStatementSummary, HelloResult,
+    LookupRegisterRootReceiptRequest, LookupRegisterRootReceiptResult,
+    LookupRootAttachmentReceiptRequest, LookupRootAttachmentReceiptResult, OperationEnvelope,
+    OperationRequest, OperationResponseEnvelope, OperationResult, PathRequest,
+    ReadFileBinaryResult, ReadFileResult, RegisterRootReceipt, RegisterRootRequest,
+    RegisterRootResult, ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope,
+    RevokeGrantRequest, RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
+    RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
+    RootAttachmentMutationResult, RootSummary, UnavailableRootReason, UnavailableRootSummary,
+    WriteApproval, WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
+    PROTOCOL_VERSION,
 };
 pub use relative_path::{RelativePath, RelativePathError};
