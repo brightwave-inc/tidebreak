@@ -3,22 +3,26 @@
 //! A skill is a directory whose `SKILL.md` teaches the model how to do one
 //! kind of work through `exec`: which pinned libraries to install, the
 //! conventions for saving deliverables, and the quality checks to run
-//! before declaring the work done. The host stages each skill file into
-//! `<scratch>/.openwave/skills/<name>/SKILL.md` before a command runs and
+//! before declaring the work done. The directory may also carry a `scripts/`
+//! subdirectory of helper files. The host stages each skill into
+//! `<scratch>/.openwave/skills/<name>/` before a command runs and
 //! advertises only the parsed (name, description) catalog in the operating
 //! prompt; the instruction body reaches the model exclusively through
-//! `read_file`, never through prompt composition.
+//! `read_file`, never through prompt composition, and script bytes never
+//! reach it at all.
 //!
 //! Skills come from two sources: the built-in packages shipped with the
 //! application, and user-authored packages the host loads from a per-install
-//! directory. Both go through the same strict parser, and a name collision
+//! directory. Both go through the same parser, and a name collision
 //! resolves in the built-in's favor so a user package can never shadow
 //! curated instructions.
 //!
-//! Parsing is deliberately strict. A malformed skill is skipped with a
-//! host-side warning instead of shipping a half-understood package: the
-//! catalog line and the staged file must come from the same successfully
-//! validated manifest.
+//! Parsing is strict about everything that reaches the prompt or drives host
+//! behavior, and tolerant only of unknown frontmatter keys in a user package —
+//! the open Agent Skills format carries fields we have no use for. A malformed
+//! skill is skipped with a host-side warning instead of shipping a
+//! half-understood package: the catalog line and the staged files must come
+//! from the same successfully validated manifest.
 
 use std::path::Path;
 
@@ -28,10 +32,14 @@ pub const SKILLS_DIR: &str = ".openwave/skills";
 /// The manifest file every skill package is defined by.
 pub const SKILL_MANIFEST_FILE: &str = "SKILL.md";
 
+/// The optional subdirectory of helper files staged beside the manifest.
+pub const SKILL_SCRIPTS_DIR: &str = "scripts";
+
 const MAX_NAME_BYTES: usize = 64;
 const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_PYTHON_DEPS: usize = 8;
 const MAX_DEP_BYTES: usize = 100;
+const MAX_SKILL_SCRIPTS: usize = 16;
 
 /// A host-provided tool a skill declares it wants, from a closed vocabulary.
 ///
@@ -90,6 +98,19 @@ pub struct LoadedSkill {
     pub package: SkillPackage,
     /// The full `SKILL.md` source, staged verbatim.
     pub manifest: String,
+    /// Helper files from the package's `scripts/` directory, staged verbatim
+    /// beside the manifest. Their bytes never enter prompt composition.
+    pub scripts: Vec<SkillScript>,
+}
+
+/// One helper file staged into a skill's `scripts/` directory.
+#[derive(Debug, Clone)]
+pub struct SkillScript {
+    /// The file's own name; always a single path component.
+    pub name: String,
+    /// The file's bytes, staged verbatim. Scripts are arbitrary text or
+    /// binary payloads the sandbox may run, so they are never decoded here.
+    pub content: Vec<u8>,
 }
 
 /// Why a skill manifest was rejected.
@@ -151,9 +172,18 @@ pub(crate) fn is_pinned_python_dep(dep: &str) -> bool {
 ///
 /// Recognized frontmatter keys are exactly `name`, `description`, and the
 /// optional single-line `deps: { python: ["package==version", ...], host:
-/// ["libreoffice"] }` (either list may be omitted, not both). Anything else —
-/// unknown keys, duplicates, an unpinned dependency, an unknown host tool, a
-/// control character in the description — rejects the whole manifest.
+/// ["libreoffice"] }` (either list may be omitted, not both). Duplicates, an
+/// unpinned dependency, an unknown host tool, or a control character in the
+/// description reject the whole manifest regardless of origin.
+///
+/// Unknown keys split by origin. A [`SkillOrigin::Builtin`] manifest is a
+/// package we ship, so an unrecognized key there is a bug worth failing on. A
+/// [`SkillOrigin::User`] manifest is written against the open Agent Skills
+/// format, which carries keys we have no use for (`license`, `allowed-tools`,
+/// a nested `metadata:` block); those are ignored with a host-side warning,
+/// along with the indented lines that belong to them, so an ordinary published
+/// skill loads unmodified. Nothing ignored reaches the prompt: the catalog is
+/// still built from `name` and `description` alone.
 pub fn parse_skill_manifest(
     source: &str,
     origin: SkillOrigin,
@@ -171,14 +201,23 @@ pub fn parse_skill_manifest(
     let mut name = None;
     let mut description = None;
     let mut deps = None;
+    let tolerant = matches!(origin, SkillOrigin::User);
+    // An ignored key's value may continue over following lines (a YAML block
+    // or list). Those lines carry no key of their own, so tolerating them is
+    // what makes ignoring the key mean ignoring the whole entry.
+    let mut inside_ignored_value = false;
     for line in frontmatter.lines() {
         if line.trim().is_empty() {
             return Err(invalid("blank line inside frontmatter"));
         }
-        let (key, value) = line
-            .split_once(':')
-            .ok_or_else(|| invalid(format!("frontmatter line without a key: {line:?}")))?;
+        let Some((key, value)) = line.split_once(':') else {
+            if tolerant && inside_ignored_value {
+                continue;
+            }
+            return Err(invalid(format!("frontmatter line without a key: {line:?}")));
+        };
         let value = value.trim();
+        inside_ignored_value = false;
         match key {
             "name" => {
                 if name.replace(value).is_some() {
@@ -195,7 +234,13 @@ pub fn parse_skill_manifest(
                     return Err(invalid("duplicate 'deps'"));
                 }
             }
-            other => return Err(invalid(format!("unknown frontmatter key {other:?}"))),
+            other => {
+                if !tolerant {
+                    return Err(invalid(format!("unknown frontmatter key {other:?}")));
+                }
+                tracing::warn!("ignoring unknown frontmatter key {other:?} in a user skill");
+                inside_ignored_value = true;
+            }
         }
     }
 
@@ -386,10 +431,78 @@ pub fn load_skills(source: &Path, origin: SkillOrigin) -> Vec<LoadedSkill> {
             );
             continue;
         }
-        skills.push(LoadedSkill { package, manifest });
+        let Some(scripts) = load_skill_scripts(&entry.path().join(SKILL_SCRIPTS_DIR)) else {
+            tracing::warn!("skipping skill '{directory_name}': its scripts/ exceeds the limits");
+            continue;
+        };
+        skills.push(LoadedSkill {
+            package,
+            manifest,
+            scripts,
+        });
     }
     skills.sort_by(|a, b| a.package.name.cmp(&b.package.name));
     skills
+}
+
+/// Read a skill's optional `scripts/` directory: regular files one level deep,
+/// symlink-safe at every step, sorted by name.
+///
+/// Returns `None` when the directory breaks a bound — more than
+/// [`MAX_SKILL_SCRIPTS`] files, or one larger than the workspace file limit —
+/// so the caller drops the whole package. A half-staged skill whose
+/// instructions reference a script that never arrived fails in the sandbox,
+/// where the model cannot tell a missing helper from a broken one; not
+/// advertising the skill at all is the honest outcome. A missing directory is
+/// simply an empty script set.
+fn load_skill_scripts(source: &Path) -> Option<Vec<SkillScript>> {
+    let is_directory = source
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !is_directory {
+        return Some(Vec::new());
+    }
+    let entries = match std::fs::read_dir(source) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                "skill scripts at {} are unreadable: {error}",
+                source.display()
+            );
+            return None;
+        }
+    };
+    let mut scripts = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let regular_file = entry
+            .path()
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        if !regular_file {
+            // A nested directory or a symlink is not staged; the package's own
+            // files still are.
+            tracing::warn!("skipping skill script '{name}': not a regular file");
+            continue;
+        }
+        let Ok(content) = std::fs::read(entry.path()) else {
+            tracing::warn!("skill script '{name}' is unreadable");
+            return None;
+        };
+        if content.len() > crate::MAX_WORKSPACE_FILE_BYTES {
+            tracing::warn!("skill script '{name}' exceeds the workspace file limit");
+            return None;
+        }
+        scripts.push(SkillScript { name, content });
+        if scripts.len() > MAX_SKILL_SCRIPTS {
+            tracing::warn!("a skill declares more than {MAX_SKILL_SCRIPTS} scripts");
+            return None;
+        }
+    }
+    scripts.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(scripts)
 }
 
 /// The built-in skills plus the user-authored packages under `user_dir`,
@@ -537,6 +650,66 @@ Instructions live here.\n";
         }
     }
 
+    /// Contract: a user package written in the open Agent Skills format —
+    /// unknown scalar keys, a nested block, a list — loads with those fields
+    /// ignored, while the same manifest from a built-in still rejects, because
+    /// an unrecognized key in a package we ship is a defect.
+    #[test]
+    fn unknown_frontmatter_keys_are_ignored_for_user_skills_only() {
+        let published = "---\n\
+name: web-research\n\
+description: Research a topic and write up the findings.\n\
+license: Apache-2.0\n\
+allowed-tools:\n\
+  - Read\n\
+  - Bash\n\
+metadata:\n\
+  version: 1.2.0\n\
+  authors:\n\
+    - someone\n\
+---\n\
+# Web research\n\
+Instructions.\n";
+        let package = parse_skill_manifest(published, SkillOrigin::User).unwrap();
+        assert_eq!(package.name, "web-research");
+        assert_eq!(
+            package.description,
+            "Research a topic and write up the findings."
+        );
+        assert!(parse_skill_manifest(published, SkillOrigin::Builtin).is_err());
+
+        // Tolerance is limited to unknown keys: everything that reaches the
+        // prompt or drives host behavior still rejects a user manifest.
+        for (case, source) in [
+            (
+                "duplicate known key",
+                "---\nname: a\nname: b\ndescription: c\n---\nBody.\n",
+            ),
+            (
+                "control character in description",
+                "---\nname: a\ndescription: b\u{7}c\n---\nBody.\n",
+            ),
+            (
+                "unpinned dependency",
+                "---\nname: a\ndescription: b\ndeps: { python: [\"fpdf2>=2\"] }\n---\nBody.\n",
+            ),
+            (
+                "unknown host tool",
+                "---\nname: a\ndescription: b\ndeps: { host: [\"imagemagick\"] }\n---\nBody.\n",
+            ),
+            (
+                "keyless line before any ignored key",
+                "---\nname: a\njust a line\ndescription: b\n---\nBody.\n",
+            ),
+            ("empty body", "---\nname: a\ndescription: b\n---\n  \n"),
+        ] {
+            assert!(
+                parse_skill_manifest(source, SkillOrigin::User).is_err(),
+                "{case} should be rejected for user skills too"
+            );
+        }
+    }
+
     #[test]
     fn loader_skips_malformed_packages_and_keeps_valid_ones() {
         let source = tempfile::tempdir().unwrap();
@@ -557,6 +730,51 @@ Instructions live here.\n";
         assert_eq!(skills[0].package.name, "pdf-documents");
         assert_eq!(skills[0].package.origin, SkillOrigin::Builtin);
         assert_eq!(skills[0].manifest, VALID);
+        assert!(skills[0].scripts.is_empty());
+    }
+
+    /// Contract: a package's `scripts/` directory is collected verbatim beside
+    /// the manifest, and a package that breaks the staging bounds drops out
+    /// whole rather than reaching the catalog with helpers the sandbox will
+    /// not find.
+    #[test]
+    fn scripts_are_collected_within_bounds_or_the_skill_drops_out() {
+        let source = tempfile::tempdir().unwrap();
+        let skill = source.path().join("pdf-documents");
+        let scripts = skill.join(SKILL_SCRIPTS_DIR);
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(skill.join(SKILL_MANIFEST_FILE), VALID).unwrap();
+        std::fs::write(scripts.join("fill.py"), "print('fill')").unwrap();
+        std::fs::write(scripts.join("build.py"), "print('build')").unwrap();
+        // One level only: a nested directory is not staged, and does not cost
+        // the package its catalog entry.
+        std::fs::create_dir(scripts.join("nested")).unwrap();
+
+        let loaded = load_skills(source.path(), SkillOrigin::Builtin);
+        assert_eq!(
+            loaded[0]
+                .scripts
+                .iter()
+                .map(|script| (script.name.as_str(), script.content.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                ("build.py", b"print('build')".as_slice()),
+                ("fill.py", b"print('fill')".as_slice()),
+            ]
+        );
+
+        std::fs::write(
+            scripts.join("huge.py"),
+            vec![b'x'; crate::MAX_WORKSPACE_FILE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(load_skills(source.path(), SkillOrigin::Builtin).is_empty());
+        std::fs::remove_file(scripts.join("huge.py")).unwrap();
+
+        for index in 0..=MAX_SKILL_SCRIPTS {
+            std::fs::write(scripts.join(format!("extra{index}.py")), "pass").unwrap();
+        }
+        assert!(load_skills(source.path(), SkillOrigin::Builtin).is_empty());
     }
 
     /// Contract: a user package goes through the same strict loader, carries

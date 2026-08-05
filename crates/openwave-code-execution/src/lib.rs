@@ -58,7 +58,7 @@ pub use remote::RemoteSessionPool;
 pub use skills::{
     is_valid_skill_description, is_valid_skill_name, load_skills, merged_skills,
     parse_skill_manifest, HostDep, LoadedSkill, SkillOrigin, SkillPackage, SkillParseError,
-    SKILLS_DIR, SKILL_MANIFEST_FILE,
+    SkillScript, SKILLS_DIR, SKILL_MANIFEST_FILE, SKILL_SCRIPTS_DIR,
 };
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{
