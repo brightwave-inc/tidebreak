@@ -12,6 +12,7 @@
 //! `WS /chats/{id}/events` to watch it — journaled events are replayed on connect
 //! and then streamed live (snapshot → replay → live).
 
+mod agent_run_scratch_reaper;
 mod approval_judge;
 mod approvals;
 mod auth;
@@ -589,6 +590,7 @@ pub struct Server {
     _sandbox_container_run_worker: Option<AbortTask>,
     _sandbox_web_search_worker: AbortTask,
     _sandbox_exec_worker: AbortTask,
+    _agent_run_scratch_reaper: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
     _approval_judge_worker: AbortTask,
@@ -1008,6 +1010,12 @@ async fn bind_inner(
         state.sandbox_attempts.clone(),
         sandbox_exec_worker::SandboxExecWorkerConfig::default(),
     );
+    let agent_run_scratch_reaper = agent_run_scratch_reaper::AgentRunScratchReaper::new(
+        state.store.clone(),
+        code_execution.clone(),
+        state.config.data_dir.join("scratch"),
+        agent_run_scratch_reaper::AgentRunScratchReaperConfig::default(),
+    );
     let sandbox_container_run_worker = {
         let enabled = sandbox_container_admission.enabled();
         sandbox_container_run_worker::SandboxContainerRunWorker::new(
@@ -1038,6 +1046,7 @@ async fn bind_inner(
         sandbox_container_run_worker.map(|worker| tokio::spawn(worker.run()));
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
     let sandbox_exec_worker = tokio::spawn(sandbox_exec_worker.run());
+    let agent_run_scratch_reaper = tokio::spawn(agent_run_scratch_reaper.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
     let approval_judge_worker = tokio::spawn(approval_judge_worker.run());
@@ -1063,6 +1072,7 @@ async fn bind_inner(
         _sandbox_container_run_worker: sandbox_container_run_worker.map(AbortTask),
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
         _sandbox_exec_worker: AbortTask(sandbox_exec_worker),
+        _agent_run_scratch_reaper: AbortTask(agent_run_scratch_reaper),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
         _approval_judge_worker: AbortTask(approval_judge_worker),
