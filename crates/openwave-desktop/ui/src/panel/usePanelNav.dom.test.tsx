@@ -16,7 +16,9 @@ function Harness() {
     <div>
       <button onClick={() => openPanel({ type: "folders" })}>open folders</button>
       <button onClick={() => openPanel({ type: "outputs" })}>open outputs</button>
-      <button onClick={() => openPanel({ type: "apps", appId: "app-1" })}>open app</button>
+      <button onClick={() => openPanel({ type: "outputs", outputId: "out-1" })}>
+        open one output
+      </button>
       <button
         onClick={() => sourceNav.openCitation({ documentId: "doc-2", citationId: "cite-1" })}
       >
@@ -67,11 +69,13 @@ describe("usePanelNav", () => {
   // something else, so opening the detail moves the tab rather than adding one.
   it("updates the tab in place when the panel it holds is addressed again", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?tabs=apps");
+    const { router } = await mount("/c/chat-1?tabs=outputs");
 
-    await user.click(screen.getByText("open app"));
+    await user.click(screen.getByText("open one output"));
 
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "apps.app-1" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "outputs.out-1" }),
+    );
   });
 
   it("opens a citation beside the conversation, keeping what was already open", async () => {

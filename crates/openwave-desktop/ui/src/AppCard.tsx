@@ -1,8 +1,8 @@
 import { LayoutGrid } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 
 import type { ResultEntry } from "@/api";
 import { Button } from "@/components/ui/button";
-import { usePanelNav } from "@/panel/usePanelNav";
 
 /**
  * The cards a phase hangs under itself for the apps it published.
@@ -25,15 +25,15 @@ export function AppCardList({ apps }: { apps: ResultEntry[] }) {
 
 /**
  * One published app: its name, which revision this call published, and the way
- * in. The app opens in the library panel beside the conversation, where its
- * consent sheet already lives — nothing here grants anything.
+ * in. The app opens on its library page, where its consent sheet already
+ * lives — nothing here grants anything.
  *
  * The action is present only when the projection carries the app id; a row
  * rehydrated from a journal written before the id crossed still renders, as
  * the same card without a destination.
  */
 function AppCard({ entry }: { entry: ResultEntry }) {
-  const { openPanel } = usePanelNav();
+  const navigate = useNavigate();
   const appId = entry.targetId;
   return (
     <div className="bg-background flex max-w-full min-w-0 items-center gap-3 rounded-lg border px-4 py-3 text-left shadow-sm">
@@ -54,7 +54,7 @@ function AppCard({ entry }: { entry: ResultEntry }) {
           size="sm"
           variant="outline"
           className="ml-2 shrink-0"
-          onClick={() => openPanel({ type: "apps", appId })}
+          onClick={() => void navigate({ to: "/apps/$appId", params: { appId } })}
           aria-label={`Open app ${entry.label}`}
         >
           Open app

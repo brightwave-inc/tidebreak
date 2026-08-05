@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import type {
@@ -36,8 +36,7 @@ import { ChatView } from "./ChatView";
 import type { RetryableTurn } from "./MessageList";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
-import { AppsPanel } from "./apps/AppsPanel";
-import { PluginsPanel } from "./plugins/PluginsPanel";
+import { AgentsPanel } from "./AgentsPanel";
 import { BackgroundAgentPanel } from "./BackgroundAgentPanel";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
@@ -74,6 +73,8 @@ import { useRefreshSignals } from "./RefreshSignals";
 import { TranscriptVisibilityProvider } from "./TranscriptVisibility";
 import { useTurnLifecycle } from "./TurnLifecycleSignals";
 import { useChatFolderAttachments } from "./useChatFolderAttachments";
+import { useDeliverableCatalog } from "./useDeliverableCatalog";
+import { backgroundAgentSpawnKeys, useAgentRuns } from "./useAgentRuns";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
 
@@ -129,6 +130,30 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const chat = chats.find((candidate) => candidate.id === chatId) ?? null;
   const nativeHost = hasNativeHost();
   const folders = useChatFolderAttachments(chat, nativeHost);
+
+  // The chat's background work and outputs, observed once here and read by the
+  // status chip, the agents table, and the tab strip alike. Subscribed as a
+  // joined key rather than the message list: the route must not re-render on
+  // every streamed token, and the set of spawn steps changes only when one
+  // appears or resolves.
+  const spawnKey = useChatSessionStore((session) =>
+    backgroundAgentSpawnKeys(session.messages).join(","),
+  );
+  const spawnKeys = useMemo(
+    () => (spawnKey ? spawnKey.split(",") : []),
+    [spawnKey],
+  );
+  const agentRuns = useAgentRuns(client, chatId, spawnKeys);
+  const chatAgentRuns = useMemo(
+    () =>
+      agentRuns.runs.filter(
+        (run) =>
+          run.tier === "background" &&
+          spawnKeys.some((key) => run.id === key || run.spawn_call_id === key),
+      ),
+    [agentRuns.runs, spawnKeys],
+  );
+  const deliverables = useDeliverableCatalog(chatId);
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame. The
@@ -671,12 +696,38 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             <FoldersView chat={chat!} />
           </PanelFrame>
         );
-      case "apps":
-        return <AppsPanel panel={panel} />;
-      case "plugins":
-        return <PluginsPanel panel={panel} />;
+      case "agents":
+        return (
+          <AgentsPanel
+            runs={chatAgentRuns}
+            loading={agentRuns.loading}
+            error={agentRuns.error}
+            onRetry={agentRuns.refresh}
+            onOpenRun={(runId) => openPanel({ type: "agent", runId })}
+          />
+        );
       case "agent":
         return <BackgroundAgentPanel chatId={chatId} runId={panel.runId} />;
+    }
+  }
+
+  /**
+   * A tab named after the thing it shows, once the route knows the name: an
+   * output's filename, an agent's task. Until then the strip's type label
+   * stands in.
+   */
+  function tabLabel(panel: PanelContent): string | undefined {
+    switch (panel.type) {
+      case "outputs":
+        return panel.outputId
+          ? deliverables.find((d) => d.outputId === panel.outputId)?.filename
+          : undefined;
+      case "agent":
+        return (
+          chatAgentRuns.find((run) => run.id === panel.runId)?.task ?? undefined
+        );
+      default:
+        return undefined;
     }
   }
 
@@ -686,18 +737,23 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
         <ChatHeaderTitle chat={chat} />
         <ChatStatusChip
-          client={client}
-          chat={chat}
+          outputCount={deliverables.length}
           folders={folders.items}
+          runs={chatAgentRuns}
           onOpenOutputs={() => openPanel({ type: "outputs" })}
           onOpenFolders={() => openPanel({ type: "folders" })}
-          onOpenAgent={(runId) => openPanel({ type: "agent", runId })}
+          onOpenAgents={() => openPanel({ type: "agents" })}
         />
       </header>
       {/* Citations live in the transcript but open into the panel beside it,
           so the way there is provided above both slots. */}
       <SourceNavProvider value={sourceNav}>
-        <PanelLayout layout={layout} renderChat={renderChat} renderPanel={renderPanel} />
+        <PanelLayout
+          layout={layout}
+          tabLabel={tabLabel}
+          renderChat={renderChat}
+          renderPanel={renderPanel}
+        />
       </SourceNavProvider>
     </div>
     </RouteFrame>
