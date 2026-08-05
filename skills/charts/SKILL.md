@@ -1,7 +1,7 @@
 ---
 name: charts
 description: Render charts with matplotlib to PNG (or SVG for vector) in output/ — readable sizing, labels, and legends, inspected before delivery.
-deps: { python: ["matplotlib==3.10.0"] }
+deps: { python: ["matplotlib==3.9.4"] }
 ---
 
 # Charts
@@ -15,7 +15,7 @@ Install the pinned dependency with its own `exec` call — commands have a
 bounded wall clock, and one `pip` invocation per package stays inside it:
 
 ```
-python3 -m pip install --user matplotlib==3.10.0
+python3 -m pip install --user matplotlib==3.9.4
 ```
 
 Installs work only when this chat's network policy allows package managers,
