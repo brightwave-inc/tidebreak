@@ -427,7 +427,7 @@ test("cache warming cannot access production credentials or publish", () => {
     for (const step of downloadCaches) {
       assert.match(
         step,
-        /shared-key: macos-release-cargo-registry-v2-\$\{\{ hashFiles\('Cargo\.lock'\) \}\}/,
+        /shared-key: (?:macos-release-cargo-registry-v2|windows-release-cargo-registry-v1)-\$\{\{ hashFiles\('Cargo\.lock'\) \}\}/,
       );
       assert.match(step, /add-rust-environment-hash-key: "false"/);
       assert.match(step, /cache-targets: false/);
