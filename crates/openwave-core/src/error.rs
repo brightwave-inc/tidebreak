@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::id::OutputId;
 use crate::ProjectId;
 
 /// Shorthand for results across the core crate.
@@ -77,6 +78,17 @@ pub enum AgentError {
     #[error("project {0} not found")]
     ProjectNotFound(ProjectId),
 
+    /// An output creation lost the race for a filename: another live output in
+    /// the same conversation already carries it. The winner's id is carried so
+    /// the loser can address the same document instead of forking it.
+    #[error("output filename `{filename}` is already live in this conversation as {output_id}")]
+    OutputFilenameTaken {
+        /// The contested display filename.
+        filename: String,
+        /// The live output that already holds the name.
+        output_id: OutputId,
+    },
+
     /// A failure reaching the secret store (keychain / KMS).
     #[error("secret error: {0}")]
     Secret(String),
@@ -140,6 +152,7 @@ impl AgentError {
             Self::MissingCredential(_) => "missing_credential",
             Self::Store(_) => "store",
             Self::ProjectNotFound(_) => "not_found",
+            Self::OutputFilenameTaken { .. } => "conflict",
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
             Self::Authentication(_) => "authentication",

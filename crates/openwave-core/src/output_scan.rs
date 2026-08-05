@@ -10,6 +10,13 @@
 //! output identities — it just writes files — and deleting a file from
 //! `output/` never deletes the durable record.
 //!
+//! Two scans can run against one conversation at once — a background run
+//! publishes into its parent while the foreground turn is still writing — so
+//! the snapshot a scan takes of the existing outputs can go stale before it
+//! records anything. The store, not the scan, decides who owns a filename: a
+//! creation that lost that race is told which output won and appends to it,
+//! so a name never ends up on two live records.
+//!
 //! The scan is deliberately non-fatal: a file the host cannot accept (too
 //! large, unreadable, over the revision cap) becomes a note for the model
 //! rather than a failed command.
@@ -162,46 +169,24 @@ async fn record_candidate(
         .find(|output| output.filename == candidate.filename);
 
     if let Some(output) = matched {
-        let current = store
-            .get_output_revision(output.current_revision)
-            .await?
-            .ok_or_else(|| AgentError::Store("current revision is missing".into()))?;
-        if current.sha256 == sha256 && current.byte_len == byte_len {
-            return Ok(OutputSyncEntry {
-                filename: candidate.filename.clone(),
-                output_id: output.id,
-                ordinal: current.ordinal,
-                status: OutputSyncStatus::Unchanged,
-            });
-        }
-        let revision_id = OutputRevisionId::for_call_artifact(call_id, &candidate.filename);
-        publish_revision_bytes(publication, output.id, revision_id, &candidate.content).await?;
-        let updated = store
-            .append_output_revision(
-                output.id,
-                &NewOutputRevision {
-                    id: revision_id,
-                    byte_len,
-                    sha256,
-                    turn_id: None,
-                    producing_run_id: None,
-                    created_at: now,
-                }
-                .with_producer(producer),
-            )
-            .await?;
-        return Ok(OutputSyncEntry {
-            filename: candidate.filename.clone(),
-            output_id: updated.id,
-            ordinal: updated.revision_count,
-            status: OutputSyncStatus::Updated,
-        });
+        return revise_output(
+            store,
+            publication,
+            output.id,
+            call_id,
+            producer,
+            now,
+            candidate,
+            sha256,
+            byte_len,
+        )
+        .await;
     }
 
     let output_id = OutputId::for_call_artifact(call_id, &candidate.filename);
     let revision_id = OutputRevisionId::for_call_artifact(call_id, &candidate.filename);
     publish_revision_bytes(publication, output_id, revision_id, &candidate.content).await?;
-    let created = store
+    let created = match store
         .create_output(&CreateOutput {
             id: output_id,
             chat_id,
@@ -217,12 +202,88 @@ async fn record_candidate(
             }
             .with_producer(producer),
         })
-        .await?;
+        .await
+    {
+        Ok(created) => created,
+        // Another scan created this filename between our snapshot and this
+        // write. The store picked the winner; publish onto it rather than
+        // forking a second live output that answers to the same name.
+        Err(AgentError::OutputFilenameTaken { output_id, .. }) => {
+            return revise_output(
+                store,
+                publication,
+                output_id,
+                call_id,
+                producer,
+                now,
+                candidate,
+                sha256,
+                byte_len,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
     Ok(OutputSyncEntry {
         filename: candidate.filename.clone(),
         output_id: created.id,
         ordinal: created.revision_count,
         status: OutputSyncStatus::Created,
+    })
+}
+
+/// Land a scanned file on an output that already exists, appending a revision
+/// unless the bytes already match the current one.
+#[allow(clippy::too_many_arguments)]
+async fn revise_output(
+    store: &dyn Store,
+    publication: &Dir,
+    output_id: OutputId,
+    call_id: CallId,
+    producer: RevisionProducer,
+    now: DateTime<Utc>,
+    candidate: &ScanCandidate,
+    sha256: [u8; 32],
+    byte_len: u64,
+) -> Result<OutputSyncEntry> {
+    let output = store
+        .get_output(output_id)
+        .await?
+        .filter(|output| output.deleted_at.is_none())
+        .ok_or_else(|| AgentError::Store(format!("output {output_id} is no longer live")))?;
+    let current = store
+        .get_output_revision(output.current_revision)
+        .await?
+        .ok_or_else(|| AgentError::Store("current revision is missing".into()))?;
+    if current.sha256 == sha256 && current.byte_len == byte_len {
+        return Ok(OutputSyncEntry {
+            filename: candidate.filename.clone(),
+            output_id: output.id,
+            ordinal: current.ordinal,
+            status: OutputSyncStatus::Unchanged,
+        });
+    }
+    let revision_id = OutputRevisionId::for_call_artifact(call_id, &candidate.filename);
+    publish_revision_bytes(publication, output.id, revision_id, &candidate.content).await?;
+    let updated = store
+        .append_output_revision(
+            output.id,
+            &NewOutputRevision {
+                id: revision_id,
+                byte_len,
+                sha256,
+                turn_id: None,
+                producing_run_id: None,
+                created_at: now,
+            }
+            .with_producer(producer),
+        )
+        .await?;
+    Ok(OutputSyncEntry {
+        filename: candidate.filename.clone(),
+        output_id: updated.id,
+        ordinal: updated.revision_count,
+        status: OutputSyncStatus::Updated,
     })
 }
 

@@ -5671,8 +5671,11 @@ mod tests {
     #[tokio::test]
     async fn output_writeback_filename_resolves_to_the_newest_live_output() {
         let (_db, store, chat, turn_id, lease_token) = output_writeback_fixture().await;
+        // A retracted `report.md` frees the name for a later one. Only one live
+        // output can hold it, and that is the one the checkpoint must resolve.
         let older = Utc::now() - chrono::Duration::minutes(10);
-        create_named_output(&store, chat.id, "report.md", older).await;
+        let retracted = create_named_output(&store, chat.id, "report.md", older).await;
+        store.delete_output(retracted, older).await.unwrap();
         let newest = create_named_output(&store, chat.id, "report.md", Utc::now()).await;
 
         let root_id = uuid::Uuid::new_v4();

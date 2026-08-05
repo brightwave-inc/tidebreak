@@ -690,6 +690,82 @@ mod output_scan {
     }
 
     #[tokio::test]
+    async fn concurrent_scans_of_one_filename_land_on_a_single_output() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let conversation = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(store);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+        // A foreground turn and a background run, each writing `report.md` in
+        // its own workspace and publishing into the same conversation.
+        let mut tasks = Vec::new();
+        for (index, bytes) in [b"# Foreground".as_slice(), b"# Background".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let workspace = tempfile::tempdir().unwrap();
+            write_output_file(workspace.path(), "report.md", bytes);
+            let workspace_dir = open_scratch(workspace.path());
+            let publication = open_scratch(conversation.path());
+            let store = store.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                let _keep = workspace;
+                barrier.wait().await;
+                sync_output_directory(
+                    store.as_ref(),
+                    &workspace_dir,
+                    &publication,
+                    chat.id,
+                    CallId::new(),
+                    RevisionProducer::Turn(TurnId::new()),
+                    at(index as i64),
+                )
+                .await
+                .unwrap()
+            }));
+        }
+        let syncs: Vec<_> = futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+
+        // Whoever won, the conversation holds exactly one `report.md`, both
+        // scans addressed it, and the loser's bytes became its second revision
+        // rather than a second live record under the same name.
+        let live = store
+            .find_outputs_by_filename(chat.id, "report.md")
+            .await
+            .unwrap();
+        assert_eq!(live.len(), 1, "concurrent scans forked the filename");
+        let output = &live[0];
+        assert_eq!(output.revision_count, 2);
+        for sync in &syncs {
+            assert!(sync.notes.is_empty(), "{:?}", sync.notes);
+            assert_eq!(sync.entries.len(), 1);
+            assert_eq!(sync.entries[0].output_id, output.id);
+        }
+        let mut statuses: Vec<_> = syncs.iter().map(|sync| sync.entries[0].status).collect();
+        statuses.sort_by_key(|status| format!("{status:?}"));
+        assert_eq!(
+            statuses,
+            vec![OutputSyncStatus::Created, OutputSyncStatus::Updated]
+        );
+
+        // Both revisions' bytes are readable where the record says they are.
+        for revision in store.list_output_revisions(output.id).await.unwrap() {
+            let relative = output_revision_relative_path(output.id, revision.id);
+            assert_eq!(
+                std::fs::read(conversation.path().join(&relative))
+                    .unwrap()
+                    .len() as u64,
+                revision.byte_len
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn unacceptable_files_become_notes_without_failing_the_scan() {
         let (_dir, store, chat) = store_with_chat().await;
         let scratch = tempfile::tempdir().unwrap();

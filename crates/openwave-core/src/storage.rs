@@ -1667,6 +1667,11 @@ pub trait Store: Send + Sync {
     /// and supplies their exact length and digest. Reusing `request.id` with
     /// identical content returns the original record so an ambiguous store
     /// response can be retried; reusing it with different content is rejected.
+    ///
+    /// At most one live output per conversation may carry a given filename. A
+    /// creation that finds the name already taken fails with
+    /// [`AgentError::OutputFilenameTaken`] naming the output that holds it, so
+    /// the caller can revise that record instead of forking the name.
     async fn create_output(&self, _request: &CreateOutput) -> Result<OutputRecord> {
         output_storage_unavailable()
     }
@@ -1735,6 +1740,10 @@ pub trait Store: Send + Sync {
     /// output is reversible. Returns `false` only when the output does not
     /// exist; restoring a live output is the same durable outcome, not a
     /// conflict. Nothing about the revision history changes.
+    ///
+    /// A retraction frees the output's filename, so restoring fails with
+    /// [`AgentError::OutputFilenameTaken`] when something else has since
+    /// claimed it — the caller retracts the current holder first.
     async fn restore_output(
         &self,
         _id: OutputId,
