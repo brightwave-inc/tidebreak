@@ -140,7 +140,9 @@ so this is mechanical.
 
 - OAuth-brokered kinds (Drive/Box-style source connectors) — the reserved
   `openwave-connectors` scaffold; a future kind, not part of this epic.
-- Filesystem bindings and their consent posture — #1331.
+- Filesystem bindings and their consent posture — #1331, designed in
+  [folder-bindings.md](folder-bindings.md): folders bind as first-class
+  roots, deliberately not a connected-app kind.
 - ~~Narrowing which MCP transports are app-bindable — #1332, decided once
   REST bindings exist.~~ Decided and done: rather than narrowing by
   transport, MCP tool bindings were retired entirely (see "Bindings key off
