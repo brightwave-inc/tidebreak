@@ -357,7 +357,7 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
         ),
         AppGrantBinding::Folder(binding) => (
             BindingKey::Folder(binding.folder),
-            BindingCapabilities::Folder(binding.access),
+            BindingCapabilities::Folder,
         ),
     }))?;
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
@@ -473,13 +473,31 @@ pub struct AppFolderBinding {
 /// Consent-bearing: the level is part of what the user grants and part of
 /// the binding's fingerprint, so widening `read` to `read_write` always
 /// re-prompts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderAccess {
     /// Listing and bounded reads.
     Read,
     /// Listing, bounded reads, and bounded writes.
     ReadWrite,
+}
+
+/// Hand-written rather than derived: the derive renders the documented
+/// variants as a `oneOf` of `const` entries, a form whose wrapper node has
+/// no `type`, `enum`, or `anyOf` — and provider schema translators (Gemini's
+/// bounded subset) refuse exactly that shape. A plain string enum says the
+/// same thing in the subset every provider speaks.
+impl schemars::JsonSchema for FolderAccess {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FolderAccess".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "enum": ["read", "read_write"],
+        })
+    }
 }
 
 impl FolderAccess {
@@ -513,7 +531,7 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
         ),
         AppBinding::Folder(binding) => (
             BindingKey::Folder(binding.folder),
-            BindingCapabilities::Folder(binding.access),
+            BindingCapabilities::Folder,
         ),
     }))?;
     let json =
@@ -539,7 +557,7 @@ enum BindingKey {
 enum BindingCapabilities<'a> {
     Tools(&'a [String]),
     Operations(&'a [String]),
-    Folder(FolderAccess),
+    Folder,
 }
 
 /// The binding grammar shared by manifests and grants: no duplicate connected
@@ -611,7 +629,7 @@ fn validate_binding_set<'a>(
             }
             // A folder binding carries no capability list; the access level
             // is closed by type and consent-bearing rather than grammatical.
-            BindingCapabilities::Folder(_) => {}
+            BindingCapabilities::Folder => {}
         }
     }
     Ok(())
