@@ -470,11 +470,20 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
         .expect("the explicitly enabled service is constructed");
         let task = tokio::spawn(worker.run());
 
+        // Wait for the run's committed result and a discharged teardown
+        // obligation. The service's maintenance cadence drives pending
+        // teardowns too, so it can issue a directed destroy for the very handle
+        // the driver is already tearing down — destroy is idempotent at the
+        // backend and the sweep is built to run beside live drivers, so the
+        // destroy call count is not a fixed number here. What the service owes
+        // is that the container it provisioned is gone and its obligation is
+        // discharged; the runner-level tests pin the exactly-once destroy on
+        // the drive path, where nothing else is sweeping.
         loop {
             let run = store.get_agent_run(run_id).await.unwrap().unwrap();
-            if run.status == AgentRunStatus::Completed
-                && backend.destroys.load(Ordering::SeqCst) == 1
-            {
+            let torn_down = backend.destroys.load(Ordering::SeqCst) >= 1
+                && store.list_sandbox_teardowns().await.unwrap().is_empty();
+            if run.status == AgentRunStatus::Completed && torn_down {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -482,8 +491,9 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
 
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        // Exactly one container was created for the run, whatever the sweep did
+        // alongside the driver's own teardown.
         assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
-        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
     })
     .await
     .expect("service drive completed within its time bound");
