@@ -85,6 +85,10 @@ function apisWith(grant: AppGrantState): AppsApis {
       body_base64: "e30=",
       is_error: false,
     }),
+    invokeFolder: vi.fn().mockResolvedValue({
+      entries: [{ name: "note.txt", directory: false }],
+      is_error: false,
+    }),
   };
 }
 
@@ -185,6 +189,54 @@ describe("AppDetailView", () => {
           status: 200,
           content_type: "application/json",
           body_base64: "e30=",
+          is_error: false,
+        },
+      },
+      "*",
+    );
+  });
+
+  it("drives one folder operation round trip through the bridge", async () => {
+    const apis = apisWith(GRANTED);
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    const frame = (await screen.findByTitle(
+      "App: Fixture app",
+    )) as HTMLIFrameElement;
+    const contentWindow = frame.contentWindow!;
+    const posted = vi.spyOn(contentWindow, "postMessage");
+
+    // The frame asks for a folder listing; the parent forwards it to the
+    // same invoke route and posts the folder result back verbatim.
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          id: 6,
+          method: "fs/list",
+          params: {
+            folder: "33333333-3333-4333-8333-333333333333",
+            path: "reports",
+          },
+        },
+        source: contentWindow,
+      }),
+    );
+    await waitFor(() => expect(posted).toHaveBeenCalled());
+    expect(apis.invokeFolder).toHaveBeenCalledWith(
+      "app-1",
+      "33333333-3333-4333-8333-333333333333",
+      "list",
+      "reports",
+      undefined,
+      undefined,
+    );
+    expect(posted).toHaveBeenCalledWith(
+      {
+        jsonrpc: "2.0",
+        id: 6,
+        result: {
+          entries: [{ name: "note.txt", directory: false }],
           is_error: false,
         },
       },

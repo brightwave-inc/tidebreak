@@ -42,17 +42,22 @@ pub(super) fn create_app() -> ToolSpec {
         crate::local_app::CREATE_APP_TOOL,
         "Publish a local mini-app the user can reopen from their Apps library: a \
          complete self-contained HTML document plus a manifest naming the app and \
-         pinning the exact capabilities it may call through the host. Each \
-         manifest binding names a rest_api connected app by its id and lists the \
-         declared OpenAPI operationIds it may execute (`operation_ids`); mounted \
-         MCP tools cannot be bound. The configured connected apps and their ids \
-         are listed at the end of this description. The app renders in a \
-         sandboxed frame with no network access; pinned operations run only \
-         after the user grants them. From inside the frame the bundle calls them \
-         by posting JSON-RPC 2.0 to its parent window: `operations/call` with \
-         `{operation_id, parameters?, body?}`, whose result carries the raw \
-         response as `{status, content_type, body_base64}`. Pass \
-         the app_id from an earlier create_app result to publish a new revision \
-         of that app — revisions append, never overwrite.",
+         pinning the exact capabilities it may call through the host. A manifest \
+         binding names either a rest_api connected app by id with the declared \
+         OpenAPI operationIds it may execute (`operation_ids`), or an approved \
+         connected folder by root id with `access: \"read\"` or `\"read_write\"` — \
+         request write access only when the app needs it, since it is a louder \
+         consent. Mounted MCP tools cannot be bound. The available connected apps \
+         and folders and their ids are listed at the end of this description. The \
+         app renders in a sandboxed frame with no network access; pinned \
+         capabilities run only after the user grants them. From inside the frame \
+         the bundle calls them by posting JSON-RPC 2.0 to its parent window: \
+         `operations/call` with `{operation_id, parameters?, body?}`, whose \
+         result carries the raw response as `{status, content_type, \
+         body_base64}`; or `fs/list`, `fs/read`, and `fs/write` with `{folder, \
+         path?, content_base64?, replace?}`, whose results carry `{entries}`, \
+         `{content_base64}`, or `{replaced}` with file bytes base64-encoded both \
+         ways. Pass the app_id from an earlier create_app result to publish a \
+         new revision of that app — revisions append, never overwrite.",
     )
 }

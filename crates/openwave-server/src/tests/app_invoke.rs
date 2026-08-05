@@ -883,3 +883,266 @@ async fn a_widened_manifest_requires_fresh_consent_for_the_new_operations() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// --- Folder bindings ---
+
+use std::collections::BTreeMap as StdBTreeMap;
+use std::sync::Mutex as StdMutex;
+
+use openwave_core::id::HostRootId;
+use openwave_core::local_app::{AppFolderBinding, FolderAccess};
+
+use crate::host_folders::{
+    ApprovedFolder, FolderEntry, FolderOpError, FolderWriteReceipt, HostFolders,
+};
+
+/// An in-memory host-folder seam: one approved root over a flat file map,
+/// honoring the seam's contract (live-registration check, create-vs-replace
+/// modes, closed errors) without a broker.
+struct FakeFolderHost {
+    roots: StdMutex<Vec<ApprovedFolder>>,
+    files: StdMutex<StdBTreeMap<String, Vec<u8>>>,
+}
+
+impl FakeFolderHost {
+    fn live(&self, root: HostRootId) -> bool {
+        self.roots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|approved| approved.root_id == root)
+    }
+}
+
+#[async_trait]
+impl HostFolders for FakeFolderHost {
+    async fn approved_roots(&self) -> openwave_core::Result<Vec<ApprovedFolder>> {
+        Ok(self.roots.lock().unwrap().clone())
+    }
+
+    async fn list_folder(
+        &self,
+        root: HostRootId,
+        _path: &str,
+    ) -> Result<Vec<FolderEntry>, FolderOpError> {
+        if !self.live(root) {
+            return Err(FolderOpError::NotConnected);
+        }
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|name| FolderEntry {
+                name: name.clone(),
+                directory: false,
+            })
+            .collect())
+    }
+
+    async fn read_file(&self, root: HostRootId, path: &str) -> Result<Vec<u8>, FolderOpError> {
+        if !self.live(root) {
+            return Err(FolderOpError::NotConnected);
+        }
+        self.files
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .ok_or(FolderOpError::NotFound)
+    }
+
+    async fn write_file(
+        &self,
+        root: HostRootId,
+        path: &str,
+        content: &[u8],
+        replace: bool,
+    ) -> Result<FolderWriteReceipt, FolderOpError> {
+        if !self.live(root) {
+            return Err(FolderOpError::NotConnected);
+        }
+        let mut files = self.files.lock().unwrap();
+        let existed = files.contains_key(path);
+        if existed && !replace {
+            return Err(FolderOpError::WrongMode);
+        }
+        if !existed && replace {
+            return Err(FolderOpError::WrongMode);
+        }
+        files.insert(path.to_owned(), content.to_vec());
+        Ok(FolderWriteReceipt {
+            bytes: content.len(),
+            replaced: existed,
+        })
+    }
+}
+
+/// Create an app whose current manifest pins exactly one folder at `access`.
+async fn create_folder_app(
+    store: &Arc<dyn Store>,
+    folder: HostRootId,
+    access: FolderAccess,
+) -> AppId {
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Folder fixture".into(),
+                    bindings: vec![AppBinding::Folder(AppFolderBinding { folder, access })],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+    app_id
+}
+
+/// The folder ladder end to end over the API: the pin gates the access level
+/// before the grant is read, an ungranted invoke re-prompts, a granted app
+/// round-trips list/read/write through the seam as opaque base64, the mode
+/// flag is honored, and disconnecting the folder invalidates the grant on
+/// the very next invoke.
+#[tokio::test]
+async fn folder_invokes_walk_the_ladder_and_round_trip_through_the_seam() {
+    use base64::Engine as _;
+
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let (dir, store) = temp_db_store("folder-invoke.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let host = Arc::new(FakeFolderHost {
+        roots: StdMutex::new(vec![ApprovedFolder {
+            root_id: root,
+            display_name: "Notes".into(),
+        }]),
+        files: StdMutex::new(StdBTreeMap::from([(
+            "note.txt".to_owned(),
+            b"hello".to_vec(),
+        )])),
+    });
+    state.host_folders = Some(host.clone());
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+
+    // A read-pinned app: reads and listings work after consent, and a write
+    // refuses at the pin — before the grant is even consulted.
+    let reader = create_folder_app(&store, root, FolderAccess::Read).await;
+    consent(&router, &bearer, reader).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        reader,
+        json!({"folder": root, "op": "read", "path": "note.txt"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["content_base64"], json!(encode(b"hello")));
+    assert_eq!(result["is_error"], json!(false));
+    let response = invoke(
+        &router,
+        &bearer,
+        reader,
+        json!({"folder": root, "op": "list"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        result["entries"],
+        json!([{ "name": "note.txt", "directory": false }])
+    );
+    let response = invoke(
+        &router,
+        &bearer,
+        reader,
+        json!({"folder": root, "op": "write", "path": "new.txt", "content_base64": encode(b"x")}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "not_pinned");
+
+    // A read_write app: ungranted refuses to a re-prompt; granted writes
+    // land with the mode honored; a malformed op never reaches dispatch.
+    let writer = create_folder_app(&store, root, FolderAccess::ReadWrite).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        writer,
+        json!({"folder": root, "op": "write", "path": "state.json", "content_base64": encode(b"{}")}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    consent(&router, &bearer, writer).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        writer,
+        json!({"folder": root, "op": "write", "path": "state.json", "content_base64": encode(b"{}")}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["replaced"], json!(false));
+    let response = invoke(
+        &router,
+        &bearer,
+        writer,
+        json!({"folder": root, "op": "write", "path": "state.json",
+               "content_base64": encode(b"{\"v\":2}"), "replace": true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["replaced"], json!(true));
+    assert_eq!(
+        host.files.lock().unwrap().get("state.json"),
+        Some(&b"{\"v\":2}".to_vec())
+    );
+    let response = invoke(
+        &router,
+        &bearer,
+        writer,
+        json!({"folder": root, "op": "chmod", "path": "state.json"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Disconnecting the folder invalidates every grant naming it on the
+    // next invoke — consent never outlives the registration.
+    host.roots.lock().unwrap().clear();
+    let response = invoke(
+        &router,
+        &bearer,
+        writer,
+        json!({"folder": root, "op": "read", "path": "note.txt"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+}

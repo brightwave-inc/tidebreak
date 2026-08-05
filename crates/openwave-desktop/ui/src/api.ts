@@ -610,6 +610,21 @@ export type AppRestInvokeResult = {
   error?: string;
 };
 
+/**
+ * Result of a granted folder invoke — the `folder` sibling of the other two,
+ * hand-written for the same reason. Exactly one payload half is present per
+ * operation: `entries` for a list, `content_base64` for a read, `replaced`
+ * for a write; failures are `is_error: true` with the host's closed failure
+ * text in `error`.
+ */
+export type AppFolderInvokeResult = {
+  entries?: Array<{ name: string; directory: boolean }>;
+  content_base64?: string;
+  replaced?: boolean;
+  is_error: boolean;
+  error?: string;
+};
+
 export type { AppInvokeRefusalKind };
 
 const APP_INVOKE_REFUSAL_KINDS: readonly AppInvokeRefusalKind[] = [
@@ -1299,6 +1314,27 @@ export class ApiClient {
     if (parameters !== undefined) request.parameters = parameters;
     if (body !== undefined) request.body = body;
     return (await this.postAppInvoke(appId, request)) as AppRestInvokeResult;
+  }
+
+  /**
+   * Execute one folder operation of an app's granted folder binding — the
+   * `folder` sibling of {@link invokeApp}, with the same refusal contract.
+   * File content crosses base64-encoded in both directions; failures come
+   * back as `is_error` results in the host's closed vocabulary.
+   */
+  async invokeAppFolder(
+    appId: string,
+    folder: string,
+    op: "list" | "read" | "write",
+    path?: string,
+    contentBase64?: string,
+    replace?: boolean,
+  ): Promise<AppFolderInvokeResult> {
+    const request: Record<string, unknown> = { folder, op };
+    if (path !== undefined) request.path = path;
+    if (contentBase64 !== undefined) request.content_base64 = contentBase64;
+    if (replace !== undefined) request.replace = replace;
+    return (await this.postAppInvoke(appId, request)) as AppFolderInvokeResult;
   }
 
   /** The shared invoke POST: one route, typed refusals surfaced as errors. */

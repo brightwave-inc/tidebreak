@@ -1574,6 +1574,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         web_search::foreground_extract_tool(extract_store, Arc::new(MemSecrets::default())),
         store,
         dir.path().join("profile-data"),
+        None,
     );
     assert!(
         config.system_prompt.is_none(),

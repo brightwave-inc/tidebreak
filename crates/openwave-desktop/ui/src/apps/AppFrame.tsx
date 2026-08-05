@@ -81,6 +81,26 @@ export function AppFrame({
           throw error;
         }
       },
+      invokeFolder: async (folder, op, path, contentBase64, replace) => {
+        try {
+          return await apis.invokeFolder(
+            appId,
+            folder,
+            op,
+            path,
+            contentBase64,
+            replace,
+          );
+        } catch (error) {
+          if (
+            error instanceof AppInvokeRefusalError &&
+            error.kind === "consent_required"
+          ) {
+            onConsentRequiredRef.current?.();
+          }
+          throw error;
+        }
+      },
     });
     bridgeRef.current = bridge;
     window.addEventListener("message", bridge.handleMessage);
