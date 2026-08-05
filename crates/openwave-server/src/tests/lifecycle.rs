@@ -1035,6 +1035,12 @@ pub(super) async fn post_native_json(
         .unwrap()
 }
 
+/// Park a turn on a client tool call without running the agent loop.
+///
+/// This and the other `park_*_for_route_test` helpers accept a turn and then
+/// claim it straight from the store, which is a scan over the whole queue. The
+/// app under test must therefore have no turn worker running yet, or the two
+/// race for the same queued turn — see `test_app_without_turn_worker`.
 async fn park_client_wait_for_route_test(
     store: &dyn Store,
     chat_id: ChatId,
@@ -1209,7 +1215,7 @@ async fn resolve_parked_client_call(
 
 #[tokio::test]
 async fn user_question_api_is_renderer_safe_exact_and_not_native_claimable() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
     let (turn_id, call) = park_user_questions_for_route_test(&*store, chat.id).await;
@@ -1789,7 +1795,7 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
 
 #[tokio::test]
 async fn pending_chat_prompts_are_cross_chat_opaque_summaries() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let question_chat = make_chat(&router, &bearer).await;
     let (_question_turn_id, question_call) =
@@ -1875,7 +1881,7 @@ async fn pending_chat_prompts_are_cross_chat_opaque_summaries() {
 /// aggregation, not any single branch of it.
 #[tokio::test]
 async fn the_inbox_lists_parked_work_until_its_own_route_resolves_it() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
 
     let question_chat = make_chat(&router, &bearer).await;

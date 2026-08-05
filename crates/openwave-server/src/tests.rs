@@ -1480,6 +1480,32 @@ async fn test_app_with(
     test_app_from_parts(provider, store, dir)
 }
 
+/// The same router with no turn lane behind it.
+///
+/// A test that drives a turn by hand — accepting it and then claiming its
+/// lease straight from the store — has to be that turn's only claimant. A live
+/// `TurnWorker` scans the same queue every few hundred milliseconds, so under
+/// load it can take the queued turn between the accept and the claim, and the
+/// test's claim then finds nothing due. Routes that never run a turn should
+/// use this instead of `test_app`.
+async fn test_app_without_turn_worker() -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    (app(state), token, store, dir)
+}
+
 fn test_app_from_parts(
     provider: Arc<dyn ModelProvider>,
     store: Arc<dyn Store>,
@@ -1612,6 +1638,10 @@ async fn test_app_with_state() -> (
     (app(state.clone()), token, state, store, dir)
 }
 
+/// Admit a background agent run under a turn this test owns outright.
+///
+/// The claim below is a queue scan, so the app under test must not be running
+/// a turn worker — see `test_app_without_turn_worker`.
 async fn admit_sandbox_for_test(
     store: &Arc<dyn Store>,
     chat_id: ChatId,
@@ -1634,7 +1664,7 @@ async fn admit_sandbox_for_test(
         .await
         .unwrap()
         .turn
-        .expect("sandbox test turn should claim");
+        .expect("the hand-driven turn is this test's to claim");
     match store
         .admit_sandbox_agent_run(
             turn.id,

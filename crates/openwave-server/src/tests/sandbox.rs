@@ -94,7 +94,7 @@ async fn create_then_get_and_list() {
 
 #[tokio::test]
 async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let chat: Chat = {
         let response = router
@@ -216,7 +216,7 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
 
 #[tokio::test]
 async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted_files() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
     let other_chat = make_chat(&router, &bearer).await;
@@ -1186,7 +1186,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
 
 #[tokio::test]
 async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let response = router
         .clone()
