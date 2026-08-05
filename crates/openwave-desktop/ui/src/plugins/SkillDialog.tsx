@@ -61,8 +61,9 @@ export function SkillDialog({
     <Dialog open={skill !== null} onOpenChange={onOpenChange}>
       {skill && (
         <DialogContent className="flex max-h-[85vh] max-w-2xl flex-col gap-4">
-          {/* The switch sits with the chrome, clear of the close button. */}
-          <div className="absolute top-2 right-12">
+          {/* Vertically centered on the close button's size-10 hit area, with a
+              comfortable gap to its left. */}
+          <div className="absolute top-4 right-14">
             <Switch
               aria-label={`Enable ${skill.name}`}
               checked={skill.enabled}
@@ -71,7 +72,7 @@ export function SkillDialog({
             />
           </div>
 
-          <div className="flex flex-col gap-2 pr-20">
+          <div className="flex flex-col gap-2 pr-28">
             <div className="grid size-10 place-items-center rounded-lg border bg-muted text-muted-foreground">
               <Sparkles className="size-5" aria-hidden="true" />
             </div>
