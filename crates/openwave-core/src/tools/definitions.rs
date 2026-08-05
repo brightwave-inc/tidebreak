@@ -43,17 +43,15 @@ pub(super) fn create_app() -> ToolSpec {
         "Publish a local mini-app the user can reopen from their Apps library: a \
          complete self-contained HTML document plus a manifest naming the app and \
          pinning the exact capabilities it may call through the host. Each \
-         manifest binding names a connected app by its id and lists either full \
-         mounted tool names (`mcp__{namespace}__{tool}`, for mcp_server apps) or \
-         declared OpenAPI operationIds (`operation_ids`, for rest_api apps) under \
-         it; the configured connected apps and their ids are listed at the end of \
-         this description. The app renders in a sandboxed frame with no network \
-         access; pinned capabilities run only after the user grants them. From \
-         inside the frame the bundle calls them by posting JSON-RPC 2.0 to its \
-         parent window: `tools/call` with `{name, arguments}` for pinned tools, \
-         or `operations/call` with `{operation_id, parameters?, body?}` for \
-         pinned REST operations, whose result carries the raw response as \
-         `{status, content_type, body_base64}`. Pass \
+         manifest binding names a rest_api connected app by its id and lists the \
+         declared OpenAPI operationIds it may execute (`operation_ids`); mounted \
+         MCP tools cannot be bound. The configured connected apps and their ids \
+         are listed at the end of this description. The app renders in a \
+         sandboxed frame with no network access; pinned operations run only \
+         after the user grants them. From inside the frame the bundle calls them \
+         by posting JSON-RPC 2.0 to its parent window: `operations/call` with \
+         `{operation_id, parameters?, body?}`, whose result carries the raw \
+         response as `{status, content_type, body_base64}`. Pass \
          the app_id from an earlier create_app result to publish a new revision \
          of that app — revisions append, never overwrite.",
     )

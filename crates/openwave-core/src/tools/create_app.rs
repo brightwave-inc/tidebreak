@@ -3,10 +3,10 @@
 //!
 //! The tool records a profile-scoped app: an untrusted HTML bundle published
 //! write-once under the profile data directory, paired with a trusted manifest
-//! naming the mounted MCP tools the app may call. Identity follows the output
-//! tools' discipline — the app and revision ids derive from the durable call
-//! id, so a retried call lands on the record it already created instead of
-//! forking a second one.
+//! naming the connected-app operations the app may call. Identity follows the
+//! output tools' discipline — the app and revision ids derive from the durable
+//! call id, so a retried call lands on the record it already created instead
+//! of forking a second one.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,8 +23,8 @@ use crate::connected_app::ConnectedAppKind;
 use crate::error::Result;
 use crate::id::{AppId, AppRevisionId, TurnId};
 use crate::local_app::{
-    mounted_tool_under, publish_app_bundle, validate_app_manifest, AppBinding, AppManifest,
-    AppRecord, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
+    publish_app_bundle, validate_app_manifest, AppBinding, AppManifest, AppRecord, CreateApp,
+    NewAppRevision, MAX_APP_BUNDLE_BYTES,
 };
 use crate::preview::{ResultEntry, ResultEntryKind};
 use crate::storage::Store;
@@ -49,11 +49,10 @@ pub(super) struct Arguments {
     bundle_html: String,
     #[schemars(description = "The app's manifest: its display name and the exact \
                        capabilities it may call, grouped by connected app. Each \
-                       binding names a connected app by id (the tool description \
-                       lists the configured ids) and either the full mounted MCP \
-                       tool names under it (`tools`, for mcp_server apps) or the \
-                       declared OpenAPI operationIds (`operation_ids`, for \
-                       rest_api apps).")]
+                       binding names a rest_api connected app by id (the tool \
+                       description lists the configured ids) and the declared \
+                       OpenAPI operationIds it may execute (`operation_ids`). \
+                       Mounted MCP tools cannot be bound.")]
     manifest: AppManifest,
     #[serde(default)]
     #[schemars(
@@ -99,11 +98,11 @@ impl CreateAppTool {
             .ok_or_else(|| ToolOutput::error("this call is not recorded in this conversation"))
     }
 
-    /// Check that every manifest binding names a configured connected app of
-    /// the kind its vocabulary requires: tools bindings resolve to an
-    /// `mcp_server` record with each pinned name mounted under its namespace;
-    /// operation bindings resolve to a `rest_api` record with each pinned
-    /// `operationId` declared by its ingested catalog.
+    /// Check that every manifest binding names a configured connected app and
+    /// speaks the one live vocabulary: operation bindings resolve to a
+    /// `rest_api` record with each pinned `operationId` declared by its
+    /// ingested catalog. Tools bindings are refused outright — the vocabulary
+    /// is retired (#1332).
     async fn check_bindings(&self, manifest: &AppManifest) -> std::result::Result<(), String> {
         if manifest.bindings.is_empty() {
             return Ok(());
@@ -134,31 +133,24 @@ impl CreateAppTool {
                 });
             };
             match binding {
-                AppBinding::Tools(binding) => {
-                    if app.kind != ConnectedAppKind::McpServer {
-                        return Err(format!(
-                            "connected app {} ({}) is a {} app; only mcp_server apps \
-                             contribute mounted tools — bind its operations with \
-                             `operation_ids` instead",
-                            app.id, app.name, app.kind
-                        ));
-                    }
-                    for tool in &binding.tools {
-                        if mounted_tool_under(&app.name, tool).is_none() {
-                            return Err(format!(
-                                "tool {tool:?} is not mounted under connected app {} — its \
-                                 tools are named `mcp__{}__{{tool}}`",
-                                app.id, app.name
-                            ));
-                        }
-                    }
+                // The tools vocabulary is retired (#1332): MCP was the only
+                // bindable kind when local apps shipped, and REST operations
+                // replaced it as the app-facing surface. The grammar still
+                // parses `tools` (stored manifests carry it), but nothing new
+                // may pin it — refused here with the alternative spelled out.
+                AppBinding::Tools(_) => {
+                    return Err(format!(
+                        "connected app {} ({}) is bound with `tools`, but local apps \
+                         no longer bind mounted MCP tools; bind a rest_api connected \
+                         app's declared operations with `operation_ids` instead",
+                        app.id, app.name
+                    ));
                 }
                 AppBinding::Operations(binding) => {
                     if app.kind != ConnectedAppKind::RestApi {
                         return Err(format!(
                             "connected app {} ({}) is a {} app; only rest_api apps \
-                             contribute operations — bind its mounted tools with \
-                             `tools` instead",
+                             contribute bindable operations",
                             app.id, app.name, app.kind
                         ));
                     }
@@ -505,9 +497,9 @@ mod tests {
         let mut arguments = json!({
             "bundle_html": "<!doctype html><h1>Triage</h1>",
             "manifest": {
-                "name": "Sentry triage",
+                "name": "Issue triage",
                 "bindings": [
-                    { "app": connected, "tools": ["mcp__sentry__list_issues"] }
+                    { "app": connected, "operation_ids": ["listIssues"] }
                 ],
             },
         });
@@ -524,7 +516,7 @@ mod tests {
 
         let first = fixture
             .tool
-            .execute(&ctx, arguments_bound_to(fixture.sentry, None))
+            .execute(&ctx, arguments_bound_to(fixture.issues, None))
             .await
             .unwrap();
         assert!(!first.is_error, "{}", first.content);
@@ -542,7 +534,7 @@ mod tests {
         // forking a second app or a second revision.
         let retried = fixture
             .tool
-            .execute(&ctx, arguments_bound_to(fixture.sentry, None))
+            .execute(&ctx, arguments_bound_to(fixture.issues, None))
             .await
             .unwrap();
         assert!(!retried.is_error, "{}", retried.content);
@@ -552,7 +544,7 @@ mod tests {
         assert_eq!(record.revision_count, 1);
 
         // The same call id must not be able to publish different content.
-        let mut different = arguments_bound_to(fixture.sentry, None);
+        let mut different = arguments_bound_to(fixture.issues, None);
         different["bundle_html"] = json!("<!doctype html><h1>Changed</h1>");
         let refused = fixture.tool.execute(&ctx, different).await.unwrap();
         assert!(refused.is_error);
@@ -563,7 +555,7 @@ mod tests {
             .tool
             .execute(
                 &append_ctx,
-                arguments_bound_to(fixture.sentry, Some(app_id.0)),
+                arguments_bound_to(fixture.issues, Some(app_id.0)),
             )
             .await
             .unwrap();
@@ -579,7 +571,7 @@ mod tests {
             .tool
             .execute(
                 &wrong_ctx,
-                arguments_bound_to(fixture.sentry, Some(missing_app)),
+                arguments_bound_to(fixture.issues, Some(missing_app)),
             )
             .await
             .unwrap();
@@ -598,17 +590,17 @@ mod tests {
     async fn refusals_are_tool_errors_not_panics() {
         let fixture = fixture().await;
 
-        // A manifest pinning a name that could never match a mounted tool.
+        // A manifest pinning an operation id outside the ingest grammar.
         let (_, ctx) = fixture.recorded_call().await;
-        let mut bad_manifest = arguments_bound_to(fixture.sentry, None);
-        bad_manifest["manifest"]["bindings"][0]["tools"] = json!(["list_issues"]);
+        let mut bad_manifest = arguments_bound_to(fixture.issues, None);
+        bad_manifest["manifest"]["bindings"][0]["operation_ids"] = json!(["not an operation id"]);
         let refused = fixture.tool.execute(&ctx, bad_manifest).await.unwrap();
         assert!(refused.is_error);
         assert!(refused.content.contains("invalid app manifest"));
 
         // An oversized bundle is refused before anything is written.
         let (_, ctx) = fixture.recorded_call().await;
-        let mut oversized = arguments_bound_to(fixture.sentry, None);
+        let mut oversized = arguments_bound_to(fixture.issues, None);
         oversized["bundle_html"] = json!("x".repeat(MAX_APP_BUNDLE_BYTES + 1));
         assert!(
             fixture
@@ -624,7 +616,7 @@ mod tests {
             ToolCtx::without_private_scratch(fixture.chat_id, None).with_call_id(CallId::new());
         let refused = fixture
             .tool
-            .execute(&foreign_ctx, arguments_bound_to(fixture.sentry, None))
+            .execute(&foreign_ctx, arguments_bound_to(fixture.issues, None))
             .await
             .unwrap();
         assert!(refused.is_error);
@@ -686,17 +678,26 @@ mod tests {
             refused.content
         );
 
-        // And the mirror image: a tools binding against the rest_api record.
-        let (_, ctx) = fixture.recorded_call().await;
-        let mut tools_on_rest = arguments_bound_to(fixture.issues, None);
-        tools_on_rest["manifest"]["bindings"][0]["tools"] = json!(["mcp__issues__list"]);
-        let refused = fixture.tool.execute(&ctx, tools_on_rest).await.unwrap();
-        assert!(refused.is_error);
-        assert!(
-            refused.content.contains("only mcp_server apps"),
-            "{}",
-            refused.content
-        );
+        // Tools bindings are retired (#1332): refused at the door no matter
+        // which kind of connected app they name, with the live vocabulary
+        // spelled out.
+        for connected in [fixture.sentry, fixture.issues] {
+            let (_, ctx) = fixture.recorded_call().await;
+            let tools_manifest = json!({
+                "bundle_html": "<!doctype html><h1>Triage</h1>",
+                "manifest": {
+                    "name": "Issue triage",
+                    "bindings": [{ "app": connected, "tools": ["mcp__sentry__list_issues"] }],
+                },
+            });
+            let refused = fixture.tool.execute(&ctx, tools_manifest).await.unwrap();
+            assert!(refused.is_error);
+            assert!(
+                refused.content.contains("no longer bind mounted MCP tools"),
+                "{}",
+                refused.content
+            );
+        }
     }
 
     #[tokio::test]
@@ -705,7 +706,7 @@ mod tests {
         let (_, ctx) = fixture.recorded_call().await;
         let output = fixture
             .tool
-            .execute(&ctx, arguments_bound_to(fixture.sentry, None))
+            .execute(&ctx, arguments_bound_to(fixture.issues, None))
             .await
             .unwrap();
         assert!(!output.is_error, "{}", output.content);
@@ -719,7 +720,7 @@ mod tests {
             panic!("one app row per call");
         };
         assert_eq!(row.kind, ResultEntryKind::App);
-        assert_eq!(row.label, "Sentry triage");
+        assert_eq!(row.label, "Issue triage");
         assert_eq!(row.meta.as_deref(), Some("revision 1"));
         // The app id is the row's navigation target, so the card can open the
         // app it just made.
@@ -730,6 +731,6 @@ mod tests {
         // Renderer-safe: an id and a name, never the bundle or the bindings.
         let json = serde_json::to_string(&preview).unwrap();
         assert!(!json.contains("doctype"));
-        assert!(!json.contains("mcp__sentry__list_issues"));
+        assert!(!json.contains("listIssues"));
     }
 }

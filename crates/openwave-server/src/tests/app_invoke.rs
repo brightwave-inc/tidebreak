@@ -1,10 +1,12 @@
-//! `POST /apps/{id}/invoke`: server-side enforcement and MCP dispatch.
+//! `POST /apps/{id}/invoke`: server-side enforcement, the retired MCP tool
+//! surface, and governed REST dispatch.
 
 use super::*;
 
 use openwave_core::id::{AppId, AppRevisionId};
 use openwave_core::local_app::{
-    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision,
+    AppBinding, AppGrant, AppGrantBinding, AppManifest, AppToolsBinding, AppToolsGrantBinding,
+    CreateApp, NewAppRevision,
 };
 use serde_json::json;
 
@@ -200,11 +202,12 @@ async fn invoke(
         .unwrap()
 }
 
-/// The route's whole enforcement ladder, fail-closed at every rung: a missing
-/// or deleted app is 404, an unpinned or non-MCP name is refused before the
-/// gate, and — the fail-closed default — even a perfectly pinned tool on a
-/// mounted, healthy server is refused with `consent_required` until the user
-/// consents, and the external server never sees a `tools/call`.
+/// The route's whole enforcement ladder for the retired tool surface,
+/// fail-closed at every rung: a missing or deleted app is 404, an unpinned or
+/// non-MCP name is refused before the gate, and a pinned tool refuses with
+/// `consent_required` no matter what — including under a tools grant recorded
+/// before the retirement (#1332) — so the external server never sees a
+/// `tools/call`.
 #[tokio::test]
 async fn every_invoke_is_refused_before_dispatch_without_a_grant() {
     let log = Arc::new(ToolServerLog::default());
@@ -234,8 +237,8 @@ async fn every_invoke_is_refused_before_dispatch_without_a_grant() {
             json!({"tool": "read_file"}),
             refusal(StatusCode::FORBIDDEN, "not_pinned"),
         ),
-        // Pinned, mounted, healthy — still refused, because the user never
-        // consented. No grant, no call.
+        // Pinned, mounted, healthy — still refused: the tool surface is
+        // retired, and no consent can open it.
         (
             app_id,
             json!({"tool": "mcp__srv__viewer", "arguments": {"q": "open"}}),
@@ -248,6 +251,34 @@ async fn every_invoke_is_refused_before_dispatch_without_a_grant() {
         let info: AgentErrorInfo = json_body(response).await;
         assert_eq!(info.kind, kind, "{body}");
     }
+
+    // A tools grant recorded before the retirement — planted directly with
+    // the definition's current fingerprint, since the consent route refuses
+    // to record one now — must not keep the legacy surface invokable.
+    let fingerprint =
+        crate::mcp_config::definition_fingerprint(&tool_server_config(address).servers[0]);
+    store
+        .put_app_grant(&AppGrant {
+            app_id,
+            bindings: vec![AppGrantBinding::Tools(AppToolsGrantBinding {
+                app: connected_app_id(&store, "srv").await,
+                tools: vec!["mcp__srv__viewer".into()],
+                fingerprint,
+            })],
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"tool": "mcp__srv__viewer"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
 
     // A soft-deleted app refuses identically to a missing one.
     store.delete_app(app_id, chrono::Utc::now()).await.unwrap();
@@ -265,191 +296,6 @@ async fn every_invoke_is_refused_before_dispatch_without_a_grant() {
         0,
         "no refusal path may reach the external server"
     );
-}
-
-/// The grant lifecycle end to end over the API: consent opens the gate and a
-/// granted invoke round-trips to the external server; revocation closes it on
-/// the very next invoke, and the refusal is `consent_required` — a re-prompt,
-/// not an error.
-#[tokio::test]
-async fn consent_opens_the_gate_and_revocation_closes_it() {
-    let log = Arc::new(ToolServerLog::default());
-    let address = spawn_tool_server(log.clone(), "ok".into(), json!({})).await;
-    let (router, token, store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    put_srv(&router, &bearer, address).await;
-    let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
-
-    consent(&router, &bearer, app_id).await;
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__viewer", "arguments": {"q": "open"}}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let result: serde_json::Value = json_body(response).await;
-    assert_eq!(result["content"], json!("ok"));
-    assert_eq!(log.calls.load(Ordering::SeqCst), 1);
-
-    let revoked = grant_request(&router, &bearer, "DELETE", app_id).await;
-    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__viewer"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let info: AgentErrorInfo = json_body(response).await;
-    assert_eq!(info.kind, "consent_required");
-    assert_eq!(
-        log.calls.load(Ordering::SeqCst),
-        1,
-        "a revoked grant must stop the next call before dispatch"
-    );
-}
-
-/// The property that makes MCP approvals per-call in chats, preserved here
-/// without per-call friction: a Settings edit can swap the process behind a
-/// stable server name, so a reconfigured definition invalidates the grant. The
-/// granted invoke works; after the definition changes the same invoke refuses
-/// with `consent_required` and the state projection flags the server as
-/// changed; a fresh consent re-pins to the new definition.
-#[tokio::test]
-async fn reconfiguring_a_bound_server_invalidates_the_grant() {
-    let log = Arc::new(ToolServerLog::default());
-    let address = spawn_tool_server(log.clone(), "first".into(), json!({})).await;
-    let swapped_log = Arc::new(ToolServerLog::default());
-    let swapped = spawn_tool_server(swapped_log.clone(), "second".into(), json!({})).await;
-    let (router, token, store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    put_srv(&router, &bearer, address).await;
-    let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
-
-    consent(&router, &bearer, app_id).await;
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__viewer"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // The same name now resolves to a different process.
-    put_srv(&router, &bearer, swapped).await;
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__viewer"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let info: AgentErrorInfo = json_body(response).await;
-    assert_eq!(info.kind, "consent_required");
-    assert_eq!(
-        swapped_log.calls.load(Ordering::SeqCst),
-        0,
-        "the swapped-in server must not be reached under the stale grant"
-    );
-    let state = grant_request(&router, &bearer, "GET", app_id).await;
-    let state: serde_json::Value = json_body(state).await;
-    assert_eq!(state["granted"], json!(false));
-    assert_eq!(state["bindings"][0]["definition_changed"], json!(true));
-
-    consent(&router, &bearer, app_id).await;
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__viewer"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(swapped_log.calls.load(Ordering::SeqCst), 1);
-}
-
-/// A revision that widens the manifest exceeds the grant by construction: the
-/// new tool refuses with `consent_required` while the already-granted tool
-/// keeps working, with no widening-specific mechanism anywhere. Re-consent is
-/// computed from the server's current state — the renderer's bare "yes"
-/// cannot name tools — so afterwards the new tool is invokable.
-#[tokio::test]
-async fn a_widened_manifest_requires_fresh_consent_for_the_new_tools() {
-    let log = Arc::new(ToolServerLog::default());
-    let address = spawn_tool_server(log.clone(), "ok".into(), json!({})).await;
-    let (router, token, store, _dir) = test_app().await;
-    let bearer = format!("Bearer {token}");
-    put_srv(&router, &bearer, address).await;
-    let app_id = create_pinned_app(&store, &["mcp__srv__viewer"]).await;
-    consent(&router, &bearer, app_id).await;
-
-    store
-        .append_app_revision(
-            app_id,
-            &NewAppRevision {
-                id: AppRevisionId::new(),
-                manifest: AppManifest {
-                    name: "Invoke fixture".into(),
-                    bindings: vec![AppBinding::Tools(AppToolsBinding {
-                        app: connected_app_id(&store, "srv").await,
-                        tools: vec!["mcp__srv__viewer".into(), "mcp__srv__unpinned".into()],
-                    })],
-                },
-                byte_len: 1,
-                sha256: [0; 32],
-                turn_id: None,
-                producing_run_id: None,
-                chat_id: None,
-                created_at: chrono::Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__unpinned"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let info: AgentErrorInfo = json_body(response).await;
-    assert_eq!(info.kind, "consent_required");
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__viewer"}),
-    )
-    .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "tools within the granted set stay invokable"
-    );
-    let state = grant_request(&router, &bearer, "GET", app_id).await;
-    let state: serde_json::Value = json_body(state).await;
-    assert_eq!(
-        state["granted"],
-        json!(false),
-        "the widened manifest must re-prompt on next open"
-    );
-
-    consent(&router, &bearer, app_id).await;
-    let response = invoke(
-        &router,
-        &bearer,
-        app_id,
-        json!({"tool": "mcp__srv__unpinned"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
 }
 
 async fn dispatch_state(
@@ -917,4 +763,123 @@ async fn consent_conflicts_when_a_pinned_operation_left_the_catalog() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let info: AgentErrorInfo = json_body(response).await;
     assert!(info.message.contains("retiredOp"), "{}", info.message);
+}
+
+/// Revocation closes the gate on the very next invoke, and the refusal is
+/// `consent_required` — a re-prompt, not an error.
+#[tokio::test]
+async fn revocation_closes_the_gate_on_the_next_invoke() {
+    let log = Arc::new(RestCallLog::default());
+    let (router, bearer, store, _dir) = rest_test_app(log.clone()).await;
+    let connected = ConnectedAppId::new();
+    seed_rest_record(&store, connected, "https://api.example.com/v2").await;
+    let app_id = create_operation_app(&store, connected, &["listIssues"]).await;
+
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(log.calls.load(Ordering::SeqCst), 1);
+
+    let revoked = grant_request(&router, &bearer, "DELETE", app_id).await;
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    assert_eq!(
+        log.calls.load(Ordering::SeqCst),
+        1,
+        "a revoked grant must stop the next call before dispatch"
+    );
+}
+
+/// A revision that widens the manifest exceeds the grant by construction: the
+/// new operation refuses with `consent_required` while the already-granted
+/// one keeps working, with no widening-specific mechanism anywhere.
+/// Re-consent is computed from the server's current state — the renderer's
+/// bare "yes" cannot name operations — so afterwards the new operation is
+/// invokable.
+#[tokio::test]
+async fn a_widened_manifest_requires_fresh_consent_for_the_new_operations() {
+    let log = Arc::new(RestCallLog::default());
+    let (router, bearer, store, _dir) = rest_test_app(log.clone()).await;
+    let connected = ConnectedAppId::new();
+    seed_rest_record(&store, connected, "https://api.example.com/v2").await;
+    let app_id = create_operation_app(&store, connected, &["listIssues"]).await;
+    consent(&router, &bearer, app_id).await;
+
+    store
+        .append_app_revision(
+            app_id,
+            &NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "REST fixture".into(),
+                    bindings: vec![AppBinding::Operations(AppOperationsBinding {
+                        app: connected,
+                        operation_ids: vec!["listIssues".into(), "getIssue".into()],
+                    })],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "getIssue", "parameters": {"id": "7"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "operations within the granted set stay invokable"
+    );
+    let state = grant_request(&router, &bearer, "GET", app_id).await;
+    let state: serde_json::Value = json_body(state).await;
+    assert_eq!(
+        state["granted"],
+        json!(false),
+        "the widened manifest must re-prompt on next open"
+    );
+
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"operation_id": "getIssue", "parameters": {"id": "7"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
 }

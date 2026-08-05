@@ -4,7 +4,7 @@ use super::*;
 
 use openwave_core::id::{AppId, AppRevisionId};
 use openwave_core::local_app::{
-    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision,
+    AppBinding, AppManifest, AppOperationsBinding, CreateApp, NewAppRevision,
 };
 use serde_json::json;
 
@@ -17,29 +17,39 @@ async fn library_lists_grant_verdicts_and_deletion_removes_the_row() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
 
-    // A disabled stdio server never spawns but still carries a definition
-    // fingerprint, which is all a grant pins.
-    let put = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/mcp/servers")
-                .header("authorization", &bearer)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"servers": [{
-                        "name": "cmd",
-                        "command": "/usr/local/bin/fixture-mcp",
-                        "enabled": false
-                    }]})
-                    .to_string(),
-                ))
-                .unwrap(),
+    // A configured rest_api record carries a definition fingerprint, which is
+    // all a grant pins — no live endpoint is needed to consent.
+    let connected = openwave_core::id::ConnectedAppId::new();
+    let catalog = crate::openapi_catalog::ingest_openapi_document(
+        json!({
+            "openapi": "3.0.3",
+            "info": { "title": "Issues", "version": "1" },
+            "paths": {
+                "/issues": { "get": { "operationId": "listIssues" } }
+            }
+        })
+        .to_string()
+        .as_bytes(),
+        None,
+    )
+    .unwrap();
+    store
+        .replace_connected_apps(
+            openwave_core::connected_app::ConnectedAppKind::RestApi,
+            &[openwave_core::connected_app::ConnectedApp {
+                id: connected,
+                name: "issues".into(),
+                kind: openwave_core::connected_app::ConnectedAppKind::RestApi,
+                definition: json!({
+                    "base_url": "https://api.example.com/v2",
+                    "catalog": &catalog,
+                }),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }],
         )
         .await
         .unwrap();
-    assert_eq!(put.status(), StatusCode::OK);
 
     let app_id = AppId::new();
     store
@@ -49,9 +59,9 @@ async fn library_lists_grant_verdicts_and_deletion_removes_the_row() {
                 id: AppRevisionId::new(),
                 manifest: AppManifest {
                     name: "Library fixture".into(),
-                    bindings: vec![AppBinding::Tools(AppToolsBinding {
-                        app: connected_app_id(&store, "cmd").await,
-                        tools: vec!["mcp__cmd__doit".into()],
+                    bindings: vec![AppBinding::Operations(AppOperationsBinding {
+                        app: connected,
+                        operation_ids: vec!["listIssues".into()],
                     })],
                 },
                 byte_len: 1,
@@ -82,7 +92,7 @@ async fn library_lists_grant_verdicts_and_deletion_removes_the_row() {
     assert_eq!(listed.status(), StatusCode::OK);
     let body = body_string(listed).await;
     assert!(
-        !body.contains("bindings") && !body.contains("mcp__cmd__doit"),
+        !body.contains("bindings") && !body.contains("listIssues"),
         "the listing must not carry manifest bindings: {body}"
     );
     let library: serde_json::Value = serde_json::from_str(&body).unwrap();

@@ -60,22 +60,25 @@ profiles do not get it (below).
 
 ## Bindings key off the app
 
-A local app's manifest binds capabilities of connected apps. The end-state
-vocabulary is app-first:
+A local app's manifest binds capabilities of connected apps. The vocabulary
+is app-first, and since the tool-binding retirement (#1332) it has exactly
+one live kind:
 
-- `{ app, tools[] }` for `mcp_server` apps — today's `{ server, tools[] }`
-  is the legacy spelling of this, keyed by namespace instead of record id.
 - `{ app, operation_ids[] }` for `rest_api` apps.
+- `{ app, tools[] }` for `mcp_server` apps existed as the founding
+  vocabulary — the only one available when local apps shipped — and is
+  retired: `create_app` refuses to author it, consent conflicts instead of
+  granting it, and the invoke route refuses the tool surface even under a
+  pre-retirement grant. Stored manifests still parse and read as
+  ungrantable. MCP was app-bindable only because it predated REST bindings;
+  once REST landed there was no remaining app-shaped use for a vocabulary
+  whose consentable universe included local stdio processes.
 
 Grants, the consent sheet, the invoke route's refusal ladder, and live
-fingerprint invalidation carry over unchanged; only the pinned vocabulary
-and the per-kind fingerprint differ:
-
-- `mcp_server`: the existing canonical definition form (`v:1`, fields not
-  storage — see below).
-- `rest_api`: SHA-256 over base URL + OpenAPI document hash + credential
-  *reference* + placement. Rotating the credential value behind the same
-  reference does not invalidate consent; repointing the reference does.
+fingerprint invalidation carry over unchanged; the `rest_api` fingerprint is
+SHA-256 over base URL + OpenAPI document hash + credential *reference* +
+placement. Rotating the credential value behind the same reference does not
+invalidate consent; repointing the reference does.
 
 The consent sheet leads with the app's display name ("Sentry") and lists
 pinned capabilities under it — a legibility improvement over leading with
@@ -138,5 +141,7 @@ so this is mechanical.
 - OAuth-brokered kinds (Drive/Box-style source connectors) — the reserved
   `openwave-connectors` scaffold; a future kind, not part of this epic.
 - Filesystem bindings and their consent posture — #1331.
-- Narrowing which MCP transports are app-bindable — #1332, decided once
-  REST bindings exist.
+- ~~Narrowing which MCP transports are app-bindable — #1332, decided once
+  REST bindings exist.~~ Decided and done: rather than narrowing by
+  transport, MCP tool bindings were retired entirely (see "Bindings key off
+  the app" above).
