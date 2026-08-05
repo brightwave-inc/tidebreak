@@ -1183,24 +1183,6 @@ mod tests {
                 }),
             ),
             (
-                "Unicode separators are removed",
-                crate::SANDBOX_WEB_SEARCH_TOOL,
-                json!({"query": "first\u{2028}second\u{2029}third"}),
-                Some(AgentActivityDetail::Search {
-                    query: "firstsecondthird".into(),
-                }),
-            ),
-            (
-                "directional formatting is removed",
-                crate::SANDBOX_EXEC_TOOL,
-                json!({"command": "python3", "args": ["report\u{202e}cod\u{2067}.exe"]}),
-                Some(AgentActivityDetail::Exec {
-                    command: "python3".into(),
-                    args: vec!["reportcod.exe".into()],
-                    exit_code: None,
-                }),
-            ),
-            (
                 "absolute-looking model text remains model text",
                 crate::SANDBOX_EXEC_TOOL,
                 json!({"command": "cat", "args": ["/Users/alice/private.txt"]}),
@@ -1237,13 +1219,36 @@ mod tests {
             );
         }
 
-        // The same predicate guards foreground exact-action previews: a value
-        // needing separator or bidi sanitization must not create a narrow grant.
-        for command in ["line\u{2028}break", "right\u{202e}left"] {
-            assert!(!ToolActionPreview::describes_exactly(
-                "exec",
-                &json!({"command": command})
-            ));
+        // Every separator and bidi-formatting code point guarded by the shared
+        // predicate is exercised through both consumers: background detail is
+        // sanitized, while a foreground exact-action grant is refused.
+        for (case, character) in [
+            ("U+2028", '\u{2028}'),
+            ("U+2029", '\u{2029}'),
+            ("U+202A", '\u{202a}'),
+            ("U+202B", '\u{202b}'),
+            ("U+202C", '\u{202c}'),
+            ("U+202D", '\u{202d}'),
+            ("U+202E", '\u{202e}'),
+            ("U+2066", '\u{2066}'),
+            ("U+2067", '\u{2067}'),
+            ("U+2068", '\u{2068}'),
+            ("U+2069", '\u{2069}'),
+        ] {
+            let arguments = json!({"command": format!("left{character}right")});
+            assert_eq!(
+                AgentActivityDetail::build(crate::SANDBOX_EXEC_TOOL, &arguments),
+                Some(AgentActivityDetail::Exec {
+                    command: "leftright".into(),
+                    args: Vec::new(),
+                    exit_code: None,
+                }),
+                "background detail did not reject {case}"
+            );
+            assert!(
+                !ToolActionPreview::describes_exactly("exec", &arguments),
+                "foreground exactness accepted {case}"
+            );
         }
 
         // An invalid legacy admission can expose at most its leaf, never the
