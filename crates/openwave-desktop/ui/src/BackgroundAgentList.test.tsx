@@ -137,6 +137,23 @@ describe("BackgroundAgentList", () => {
     expect(markup).toEqual("");
   });
 
+  it("settles a declined spawn instead of waiting for a run that cannot arrive", () => {
+    const markup = renderToStaticMarkup(
+      <BackgroundAgentList
+        spawns={[{ callId: "call-denied", status: "denied" }]}
+        runs={[]}
+        loading={false}
+        error={null}
+        onRetry={() => undefined}
+        onCancel={noop}
+        onLoadActivity={noActivity}
+      />,
+    );
+
+    expect(markup).toContain("Declined");
+    expect(markup).not.toContain("Waiting for background agent");
+  });
+
   it("offers Stop on a cancellable run", () => {
     const markup = renderToStaticMarkup(
       <BackgroundAgentList

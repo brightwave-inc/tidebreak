@@ -182,15 +182,34 @@ export function BackgroundAgentList({
               </div>
             );
           })}
-          {unresolvedSpawns.map((spawn) => (
-            <div key={spawn.callId} className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5">
-              <Skeleton className="size-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
-              <Skeleton className="h-4 w-28" aria-hidden="true" />
-              <span className="text-sm text-muted-foreground">
-                {loading ? "Starting background agent" : "Waiting for background agent"}
-              </span>
-            </div>
-          ))}
+          {unresolvedSpawns.map((spawn) =>
+            spawn.status === "denied" ? (
+              // A declined spawn never reaches the sandbox, so no durable run
+              // will ever arrive to replace this row. Settle it here: the
+              // placeholder would otherwise read as work still on its way.
+              <div
+                key={spawn.callId}
+                className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5"
+              >
+                <span
+                  className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass("cancelled"))}
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+                  Background agent
+                </span>
+                <span className="shrink-0 text-xs text-muted-foreground">Declined</span>
+              </div>
+            ) : (
+              <div key={spawn.callId} className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5">
+                <Skeleton className="size-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
+                <Skeleton className="h-4 w-28" aria-hidden="true" />
+                <span className="text-sm text-muted-foreground">
+                  {loading ? "Starting background agent" : "Waiting for background agent"}
+                </span>
+              </div>
+            ),
+          )}
         </div>
       )}
     </section>
