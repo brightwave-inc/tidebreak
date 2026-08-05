@@ -9,6 +9,7 @@ import {
   getAgentRunDotClass,
   RUNNING_AGENT_STATUSES,
 } from "./AgentRunDisplay";
+import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import type { ToolCallStatus } from "./ToolCallCard";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,6 +33,8 @@ type BackgroundAgentListProps = {
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   /** Open one run's dedicated panel beside the conversation. */
   onOpen?: (runId: string) => void;
+  /** Open one file a run submitted, from its pill on the row. */
+  onOpenOutput?: (outputId: string) => void;
 };
 
 /**
@@ -48,6 +51,7 @@ export function BackgroundAgentList({
   onCancel,
   onLoadActivity,
   onOpen,
+  onOpenOutput,
 }: BackgroundAgentListProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const sandboxRuns = runs.filter((run) => run.tier === "background");
@@ -139,6 +143,7 @@ export function BackgroundAgentList({
                         onCancel={onCancel}
                         onLoadActivity={onLoadActivity}
                         onOpen={onOpen}
+                        onOpenOutput={onOpenOutput}
                       />
                     ))}
                   </div>
@@ -173,11 +178,13 @@ function BackgroundAgentRow({
   onCancel,
   onLoadActivity,
   onOpen,
+  onOpenOutput,
 }: {
   run: AgentRun;
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   onOpen?: (runId: string) => void;
+  onOpenOutput?: (outputId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -265,6 +272,14 @@ function BackgroundAgentRow({
           </Button>
         )}
       </div>
+      {run.submitted_outputs.length > 0 && (
+        <div className="mt-2 pl-5">
+          <SubmittedOutputPills
+            outputs={run.submitted_outputs}
+            onOpenOutput={onOpenOutput}
+          />
+        </div>
+      )}
       {expanded && (
         <div id={contentId} className="mt-2 pl-5">
           <AgentActivityTimeline state={activity} />

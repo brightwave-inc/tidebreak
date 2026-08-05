@@ -2186,6 +2186,94 @@ async fn sandbox_tool_checkpoint_is_lease_fenced_and_receipt_idempotent() {
 }
 
 #[tokio::test]
+async fn a_sandbox_run_may_checkpoint_repeatedly_up_to_a_bounded_chain() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+
+    // The whole chain rides every model request, so the count is bounded. Drive
+    // the bound exactly: the run keeps checkpointing until the budget is spent,
+    // then the next park is refused rather than growing the transcript further.
+    for step in 0..crate::MAX_SANDBOX_TOOL_CALLS {
+        let worker_lease = uuid::Uuid::new_v4();
+        assert_eq!(
+            store
+                .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            sandbox.id,
+            "run should be claimable for checkpoint {step}"
+        );
+        let request = SandboxToolCallRequest {
+            id: CallId::new(),
+            agent_run_id: sandbox.id,
+            chat_id: chat.id,
+            provider_id: format!("provider-call-{step}"),
+            name: "web_search".into(),
+            arguments: serde_json::json!({"query": format!("step {step}")}),
+        };
+        assert!(
+            matches!(
+                store
+                    .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+                    .await
+                    .unwrap(),
+                ParkSandboxToolCallOutcome::Parked { .. }
+            ),
+            "checkpoint {step} should park"
+        );
+        let executor_lease = uuid::Uuid::new_v4();
+        store
+            .claim_sandbox_tool_call(request.id, executor_lease, Duration::minutes(2))
+            .await
+            .unwrap();
+        store
+            .resolve_sandbox_tool_call(
+                request.id,
+                executor_lease,
+                &ToolCallResolution::Completed {
+                    result: format!("results {step}"),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let worker_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let over_budget = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: sandbox.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-over".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({"query": "one too many"}),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &over_budget)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::IdentityConflict
+    ));
+    assert_eq!(
+        store
+            .list_sandbox_tool_calls_for_agent_run(sandbox.id)
+            .await
+            .unwrap()
+            .len(),
+        crate::MAX_SANDBOX_TOOL_CALLS
+    );
+}
+
+#[tokio::test]
 async fn cancelling_waiting_sandbox_fences_claimed_tool_work() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

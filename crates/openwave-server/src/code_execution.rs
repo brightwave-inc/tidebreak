@@ -1788,6 +1788,224 @@ impl ConfiguredCodeExecutionProvider {
         }
         Ok(Some(ConfiguredWorkspace { provider }))
     }
+
+    /// Run one command for a background agent run in its own workspace.
+    ///
+    /// A background run is confined to the workspace named by its own identity:
+    /// no folder authority, no conversation attachments, and no write overlay,
+    /// so the only files it can read are the ones its own earlier commands
+    /// wrote. Delegation already bypasses the conversation's approval gate, so
+    /// this path must never be the one that hands a background agent host
+    /// paths. The parent conversation contributes exactly one thing — its
+    /// network policy — because the user chose that policy for this work.
+    pub async fn execute_for_agent_run(
+        &self,
+        chat_id: ChatId,
+        request: CodeExecutionRequest,
+    ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+        if !request.folder_grants.is_empty() {
+            return Err(CodeExecutionError::InvalidRequest(
+                "a background run's execution carries no folder authority".into(),
+            ));
+        }
+        let chat = self
+            .store
+            .get_chat(chat_id)
+            .await
+            .map_err(|_| {
+                CodeExecutionError::Unavailable("conversation storage is unavailable".into())
+            })?
+            .ok_or_else(|| {
+                CodeExecutionError::InvalidRequest("execution conversation does not exist".into())
+            })?;
+        let (kind, provider) = self.resolve(Some(&chat.network_policy)).await?;
+        self.execute_prepared(kind, provider, request, None, chat_id)
+            .await
+    }
+
+    /// Prepare the workspace, run one command, and reconcile its files.
+    ///
+    /// Everything above this point differs between a foreground turn and a
+    /// background run — whose authority the request carries, and whose
+    /// attachments belong in the workspace. From here down the two are the same
+    /// operation against a private workspace. `chat` is the conversation whose
+    /// attachments are materialized and whose write overlay this command joins;
+    /// a background run passes `None` for both. `degradation_chat` is only the
+    /// conversation the one-shot sandbox-degradation notice is deduplicated
+    /// against.
+    async fn execute_prepared(
+        &self,
+        kind: CodeExecutionProviderKind,
+        provider: Box<dyn CodeExecutionProvider>,
+        request: CodeExecutionRequest,
+        chat: Option<ChatId>,
+        degradation_chat: ChatId,
+    ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
+        let skills = self.current_skills();
+        prepare_execution_directories(
+            &host_dir,
+            kind != CodeExecutionProviderKind::Local,
+            self.document_scripts_source.as_deref(),
+            &skills,
+        )
+        .await?;
+        if let (Some(blobs), Some(chat_id)) = (self.blobs.as_deref(), chat) {
+            materialize_chat_attachments(&*self.store, blobs, chat_id, &host_dir).await?;
+        }
+        // A remote sandbox has its own filesystem, but the model is shown one
+        // path vocabulary across the file tools and exec. Stage exactly the
+        // paths the model listed on this call into the workspace before the
+        // command, and pull only output/ and preview/ back out afterwards —
+        // the two directories the host output and preview scans read. The
+        // local provider already runs inside scratch, so nothing is staged
+        // there, but the listed paths are validated identically so a bad path
+        // fails the same way on every provider.
+        let lifecycle = match kind {
+            CodeExecutionProviderKind::Local => None,
+            _ => provider.workspace_lifecycle(),
+        };
+        let Some(lifecycle) = lifecycle else {
+            sync::validate_staged_paths(&host_dir, &request.files).await?;
+            let inspector = chat.and_then(|chat| self.overlay_inspector(chat));
+            let mut response = provider.execute(request).await?;
+            if let Some(inspector) = inspector {
+                response.sync_notes.extend(inspector.notes().await);
+            }
+            // Local exec writes output/ directly into scratch; convert any
+            // office files there so the skill's visual QA loop has a PDF to
+            // render, exactly like the remote pull path below.
+            if response.exit_code == Some(0) && !response.timed_out {
+                response.sync_notes.extend(
+                    openwave_code_execution::render_office_outputs(
+                        self.office_converter.as_deref(),
+                        &host_dir,
+                    )
+                    .await,
+                );
+            }
+            return Ok(response);
+        };
+        // A staging that fails outright fails the execution: a listed path
+        // that does not exist, an over-bound expansion, or an unreachable
+        // workspace would otherwise surface as a baffling not-found inside the
+        // sandbox. Entries a listed directory had to leave behind individually
+        // ride along as notes instead.
+        let mut staged_paths =
+            implicit_staged_paths(self.document_scripts_source.is_some(), !skills.is_empty());
+        staged_paths.extend(request.files.iter().cloned());
+        let mut notes =
+            sync::stage_listed_paths(lifecycle, &request.workspace_id, &host_dir, &staged_paths)
+                .await?
+                .notes;
+        let mut response = provider.execute(request.clone()).await?;
+        // A failed pull keeps the execution's output — the command did run —
+        // and says the host copies are stale instead of failing the call.
+        match sync::pull_result_dirs(lifecycle, &request.workspace_id, &host_dir).await {
+            Ok(pulled) => notes.extend(pulled.notes),
+            Err(error) => notes.push(format!(
+                "output files were not copied back to private scratch: {error}"
+            )),
+        }
+        // The pull just landed any office outputs in host scratch; convert
+        // them there so the model can render page images next call. The
+        // sandbox itself has no LibreOffice — the host is where the converter
+        // lives, for every provider.
+        if response.exit_code == Some(0) && !response.timed_out {
+            notes.extend(
+                openwave_code_execution::render_office_outputs(
+                    self.office_converter.as_deref(),
+                    &host_dir,
+                )
+                .await,
+            );
+        }
+        // A failed command plus an empty or thin staged set usually means the
+        // command's inputs were never listed; one bounded line points there.
+        if response.timed_out || response.exit_code != Some(0) {
+            notes.push(staged_set_note(&request.files));
+        }
+        response.sync_notes.extend(notes);
+        // Degrading is news once. The provider reports it on the execution that
+        // discovered it; a later sandbox rebuild rediscovers the same thing, and
+        // repeating it on every card would be noise rather than information.
+        if response.degraded.is_some()
+            && !self
+                .degradation_reported
+                .lock()
+                .map(|mut reported| reported.insert(degradation_chat))
+                .unwrap_or(false)
+        {
+            response.degraded = None;
+        }
+        Ok(response)
+    }
+
+    /// Publish a background run's `output/` files into its parent conversation.
+    ///
+    /// The run wrote the files and named them; this only records what is there.
+    /// Revisions are attributed to the run rather than to a turn, so a file two
+    /// runs both wrote becomes successive versions of one output, exactly as it
+    /// does when a turn overwrites its own.
+    pub async fn collect_agent_run_outputs(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        chat_id: ChatId,
+        call_id: CallId,
+        run_id: openwave_core::AgentRunId,
+    ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
+        self.publish_output_directory(workspace, chat_id, call_id, RevisionProducer::Run(run_id))
+            .await
+    }
+
+    /// Scan one workspace's `output/` and record what changed as revisions.
+    async fn publish_output_directory(
+        &self,
+        workspace: &ExecutionWorkspaceId,
+        chat_id: ChatId,
+        call_id: CallId,
+        producer: RevisionProducer,
+    ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
+        let scratch_path = self.scratch_root.join(workspace.as_str());
+        let scratch = tokio::task::spawn_blocking(move || {
+            cap_std::fs::Dir::open_ambient_dir(&scratch_path, cap_std::ambient_authority())
+        })
+        .await
+        .map_err(|_| CodeExecutionError::Sandbox("output scan task failed".into()))?
+        .map_err(|_| CodeExecutionError::Sandbox("the private workspace is unavailable".into()))?;
+
+        let sync = openwave_core::sync_output_directory(
+            &*self.store,
+            &scratch,
+            chat_id,
+            call_id,
+            producer,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| {
+            CodeExecutionError::Unavailable(format!("outputs could not be recorded: {error}"))
+        })?;
+        Ok(OutputArtifactScan {
+            entries: sync
+                .entries
+                .into_iter()
+                .map(|entry| OutputArtifactEntry {
+                    filename: entry.filename,
+                    output_id: entry.output_id.to_string(),
+                    ordinal: entry.ordinal,
+                    status: match entry.status {
+                        openwave_core::OutputSyncStatus::Created => OutputArtifactStatus::Created,
+                        openwave_core::OutputSyncStatus::Updated => OutputArtifactStatus::Updated,
+                        openwave_core::OutputSyncStatus::Unchanged => {
+                            OutputArtifactStatus::Unchanged
+                        }
+                    },
+                })
+                .collect(),
+            notes: sync.notes,
+        })
+    }
 }
 
 fn exec_folder_grant_for_turn(
@@ -1874,118 +2092,8 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             request = request.with_folder_grants(grants)?;
         }
-        let host_dir = self.scratch_root.join(request.workspace_id.as_str());
-        let skills = self.current_skills();
-        prepare_execution_directories(
-            &host_dir,
-            kind != CodeExecutionProviderKind::Local,
-            self.document_scripts_source.as_deref(),
-            &skills,
-        )
-        .await?;
-        if let Some(blobs) = self.blobs.as_deref() {
-            let chat_id = request
-                .workspace_id
-                .as_str()
-                .parse::<ChatId>()
-                .map_err(|_| {
-                    CodeExecutionError::InvalidRequest(
-                        "execution workspace does not identify a conversation".into(),
-                    )
-                })?;
-            materialize_chat_attachments(&*self.store, blobs, chat_id, &host_dir).await?;
-        }
-        // A remote sandbox has its own filesystem, but the model is shown one
-        // path vocabulary across the file tools and exec. Stage exactly the
-        // paths the model listed on this call into the workspace before the
-        // command, and pull only output/ and preview/ back out afterwards —
-        // the two directories the host output and preview scans read. The
-        // local provider already runs inside scratch, so nothing is staged
-        // there, but the listed paths are validated identically so a bad path
-        // fails the same way on every provider.
-        let lifecycle = match kind {
-            CodeExecutionProviderKind::Local => None,
-            _ => provider.workspace_lifecycle(),
-        };
-        let Some(lifecycle) = lifecycle else {
-            sync::validate_staged_paths(&host_dir, &request.files).await?;
-            let inspector = request
-                .workspace_id
-                .as_str()
-                .parse::<ChatId>()
-                .ok()
-                .and_then(|chat| self.overlay_inspector(chat));
-            let mut response = provider.execute(request).await?;
-            if let Some(inspector) = inspector {
-                response.sync_notes.extend(inspector.notes().await);
-            }
-            // Local exec writes output/ directly into scratch; convert any
-            // office files there so the skill's visual QA loop has a PDF to
-            // render, exactly like the remote pull path below.
-            if response.exit_code == Some(0) && !response.timed_out {
-                response.sync_notes.extend(
-                    openwave_code_execution::render_office_outputs(
-                        self.office_converter.as_deref(),
-                        &host_dir,
-                    )
-                    .await,
-                );
-            }
-            return Ok(response);
-        };
-        // A staging that fails outright fails the execution: a listed path
-        // that does not exist, an over-bound expansion, or an unreachable
-        // workspace would otherwise surface as a baffling not-found inside the
-        // sandbox. Entries a listed directory had to leave behind individually
-        // ride along as notes instead.
-        let mut staged_paths =
-            implicit_staged_paths(self.document_scripts_source.is_some(), !skills.is_empty());
-        staged_paths.extend(request.files.iter().cloned());
-        let mut notes =
-            sync::stage_listed_paths(lifecycle, &request.workspace_id, &host_dir, &staged_paths)
-                .await?
-                .notes;
-        let mut response = provider.execute(request.clone()).await?;
-        // A failed pull keeps the execution's output — the command did run —
-        // and says the host copies are stale instead of failing the call.
-        match sync::pull_result_dirs(lifecycle, &request.workspace_id, &host_dir).await {
-            Ok(pulled) => notes.extend(pulled.notes),
-            Err(error) => notes.push(format!(
-                "output files were not copied back to private scratch: {error}"
-            )),
-        }
-        // The pull just landed any office outputs in host scratch; convert
-        // them there so the model can render page images next call. The
-        // sandbox itself has no LibreOffice — the host is where the converter
-        // lives, for every provider.
-        if response.exit_code == Some(0) && !response.timed_out {
-            notes.extend(
-                openwave_code_execution::render_office_outputs(
-                    self.office_converter.as_deref(),
-                    &host_dir,
-                )
-                .await,
-            );
-        }
-        // A failed command plus an empty or thin staged set usually means the
-        // command's inputs were never listed; one bounded line points there.
-        if response.timed_out || response.exit_code != Some(0) {
-            notes.push(staged_set_note(&request.files));
-        }
-        response.sync_notes.extend(notes);
-        // Degrading is news once. The provider reports it on the execution that
-        // discovered it; a later sandbox rebuild rediscovers the same thing, and
-        // repeating it on every card would be noise rather than information.
-        if response.degraded.is_some()
-            && !self
-                .degradation_reported
-                .lock()
-                .map(|mut reported| reported.insert(chat_id))
-                .unwrap_or(false)
-        {
-            response.degraded = None;
-        }
-        Ok(response)
+        self.execute_prepared(kind, provider, request, Some(chat_id), chat_id)
+            .await
     }
 
     async fn collect_preview_images(
@@ -2029,46 +2137,8 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                     "execution identity is not owned by this conversation".into(),
                 )
             })?;
-
-        let scratch_path = self.scratch_root.join(workspace.as_str());
-        let scratch = tokio::task::spawn_blocking(move || {
-            cap_std::fs::Dir::open_ambient_dir(&scratch_path, cap_std::ambient_authority())
-        })
-        .await
-        .map_err(|_| CodeExecutionError::Sandbox("output scan task failed".into()))?
-        .map_err(|_| CodeExecutionError::Sandbox("the private workspace is unavailable".into()))?;
-
-        let sync = openwave_core::sync_output_directory(
-            &*self.store,
-            &scratch,
-            chat_id,
-            call_id,
-            RevisionProducer::Turn(turn_id),
-            Utc::now(),
-        )
-        .await
-        .map_err(|error| {
-            CodeExecutionError::Unavailable(format!("outputs could not be recorded: {error}"))
-        })?;
-        Ok(OutputArtifactScan {
-            entries: sync
-                .entries
-                .into_iter()
-                .map(|entry| OutputArtifactEntry {
-                    filename: entry.filename,
-                    output_id: entry.output_id.to_string(),
-                    ordinal: entry.ordinal,
-                    status: match entry.status {
-                        openwave_core::OutputSyncStatus::Created => OutputArtifactStatus::Created,
-                        openwave_core::OutputSyncStatus::Updated => OutputArtifactStatus::Updated,
-                        openwave_core::OutputSyncStatus::Unchanged => {
-                            OutputArtifactStatus::Unchanged
-                        }
-                    },
-                })
-                .collect(),
-            notes: sync.notes,
-        })
+        self.publish_output_directory(workspace, chat_id, call_id, RevisionProducer::Turn(turn_id))
+            .await
     }
 
     // `workspace_lifecycle` stays `None` here on purpose: the capability of

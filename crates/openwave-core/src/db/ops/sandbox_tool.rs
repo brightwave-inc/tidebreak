@@ -1,11 +1,12 @@
 use chrono::Duration;
 use sea_orm::{
-    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
 use crate::agent_tools::{
-    validate_sandbox_read_delegated_file_arguments, SandboxAgentFileResource,
+    validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments,
+    SandboxAgentFileResource, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
     SANDBOX_READ_DELEGATED_FILE_TOOL,
 };
 use crate::error::{AgentError, Result};
@@ -36,6 +37,10 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         || call.agent_run_id != agent_run_id
         || (call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
             && !validate_sandbox_read_delegated_file_arguments(&call.arguments))
+        // Exec arguments are checked here as well as in the executor: the
+        // checkpoint is immutable once parked, so an out-of-bounds command must
+        // never become a durable row the lane can only fail on.
+        || (call.name == SANDBOX_EXEC_TOOL && !validate_sandbox_exec_arguments(&call.arguments))
     {
         return Err(AgentError::Store(
             "invalid sandbox tool checkpoint request".into(),
@@ -94,12 +99,22 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::LeaseLost);
     }
-    let existing_count = entities::sandbox_tool_call::Entity::find()
+    // A run parks checkpoints one at a time: parking releases the lease, and the
+    // worker only regains it once the checkpoint resolves. So an unresolved
+    // sibling means this park came from a worker running on a stale view, and the
+    // chain is bounded because the worker replays all of it on every claim.
+    let siblings = entities::sandbox_tool_call::Entity::find()
         .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(agent_run_id.0))
-        .count(&transaction)
+        .select_only()
+        .column(entities::sandbox_tool_call::Column::Status)
+        .into_tuple::<String>()
+        .all(&transaction)
         .await
         .map_err(store_err)?;
-    if existing_count != 0 {
+    let all_resolved = siblings
+        .iter()
+        .all(|status| status_from_db(status).is_ok_and(SandboxToolCallStatus::is_terminal));
+    if !all_resolved || siblings.len() >= MAX_SANDBOX_TOOL_CALLS {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::IdentityConflict);
     }

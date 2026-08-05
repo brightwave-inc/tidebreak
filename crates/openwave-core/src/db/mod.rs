@@ -1256,6 +1256,16 @@ impl Store for DbStore {
         ops::agent_run::submit_agent_run_result(self, id, lease_token, text).await
     }
 
+    async fn submit_agent_run_submission(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        outputs: &[crate::AgentRunSubmittedOutput],
+        summary: &str,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        ops::agent_run::submit_agent_run_submission(self, id, lease_token, outputs, summary).await
+    }
+
     async fn submit_agent_run_folder_access_proposal(
         &self,
         id: AgentRunId,

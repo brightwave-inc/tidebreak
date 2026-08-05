@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Bot, FileOutput, Square } from "lucide-react";
+import { Bot, Square } from "lucide-react";
 
 import { useApp } from "./AppContext";
 import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
 import { agentRunStatusDetail, RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 import type { AgentRun } from "./api";
+import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import { useAgentRuns } from "./useAgentRuns";
 import { PanelBreadcrumb } from "@/components/PanelHeader";
 import { PanelFrame } from "@/panel/PanelFrame";
@@ -85,9 +86,7 @@ export function BackgroundAgentPanel({
         <BackgroundAgentDetail
           run={run}
           activity={activity}
-          onViewOutput={
-            run.produced_output ? () => openPanel({ type: "outputs" }) : undefined
-          }
+          onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
         />
       ) : agentRuns.error ? (
         <div className="flex items-center justify-between gap-3 p-4 text-sm" role="status">
@@ -118,11 +117,11 @@ export function BackgroundAgentPanel({
 function BackgroundAgentDetail({
   run,
   activity,
-  onViewOutput,
+  onOpenOutput,
 }: {
   run: AgentRun;
   activity: ReturnType<typeof useAgentRunActivity>;
-  onViewOutput?: () => void;
+  onOpenOutput?: (outputId: string) => void;
 }) {
   const live = RUNNING_AGENT_STATUSES.has(run.status);
   const now = useNowWhile(live);
@@ -149,22 +148,11 @@ function BackgroundAgentDetail({
         )}
       </div>
       <div className="mt-3 flex shrink-0 flex-col gap-2 border-b px-4 pb-3 empty:hidden">
-        {onViewOutput && (
-          <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
-            <span className="text-sm text-foreground">
-              This agent produced output.
-            </span>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 shrink-0 gap-1 px-2 text-xs"
-              onClick={onViewOutput}
-            >
-              <FileOutput className="size-3.5" aria-hidden="true" />
-              View output
-            </Button>
-          </div>
+        {run.submitted_outputs.length > 0 && (
+          <SubmittedOutputPills
+            outputs={run.submitted_outputs}
+            onOpenOutput={onOpenOutput}
+          />
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4" aria-live="polite">

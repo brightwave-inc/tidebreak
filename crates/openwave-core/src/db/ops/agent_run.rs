@@ -4,13 +4,15 @@ use sea_orm::{
     NotSet, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
-use crate::agent_tools::SandboxAgentFileResource;
+use crate::agent_tools::{
+    SandboxAgentFileResource, MAX_SANDBOX_DONE_OUTPUTS, MAX_SANDBOX_DONE_SUMMARY_CHARS,
+};
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, TurnId};
 use crate::model::{
     AgentRun, AgentRunCancellationReason, AgentRunExecutionLocation, AgentRunInboxEntry,
-    AgentRunInboxStatus, AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunTier,
-    SandboxAgentAdmission, TurnRunStatus, TurnSteerStatus,
+    AgentRunInboxStatus, AgentRunResult, AgentRunResultPayload, AgentRunStatus,
+    AgentRunSubmittedOutput, AgentRunTier, SandboxAgentAdmission, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::{
     AcceptAgentRunOutcome, AdmitSandboxAgentRunOutcome, FailAgentRunOutcome,
@@ -1517,6 +1519,26 @@ pub(in crate::db) async fn submit_agent_run_result(
     .await
 }
 
+/// Submit a background run's files as its terminal receipt.
+pub(in crate::db) async fn submit_agent_run_submission(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    outputs: &[AgentRunSubmittedOutput],
+    summary: &str,
+) -> Result<Option<SubmitAgentRunResultOutcome>> {
+    submit_agent_run_result_payload(
+        store,
+        id,
+        lease_token,
+        AgentRunResultPayload::Submission {
+            outputs: outputs.to_vec(),
+            summary: summary.to_owned(),
+        },
+    )
+    .await
+}
+
 /// Submit the one typed folder-consent proposal a sandbox may return to its
 /// foreground parent. This is a terminal child result, never a client call.
 pub(in crate::db) async fn submit_agent_run_folder_access_proposal(
@@ -2370,6 +2392,28 @@ fn validate_agent_run_result_payload(payload: &AgentRunResultPayload) -> Result<
             "agent-run result requires 1..={} characters",
             AgentRun::MAX_RESULT_LEN
         ))),
+        AgentRunResultPayload::Submission { outputs, summary } => {
+            if outputs.len() > MAX_SANDBOX_DONE_OUTPUTS {
+                return Err(AgentError::Store(format!(
+                    "agent-run submission carries at most {MAX_SANDBOX_DONE_OUTPUTS} outputs"
+                )));
+            }
+            if summary.trim().is_empty() || summary.chars().count() > MAX_SANDBOX_DONE_SUMMARY_CHARS
+            {
+                return Err(AgentError::Store(format!(
+                    "agent-run submission summary requires 1..={MAX_SANDBOX_DONE_SUMMARY_CHARS} characters"
+                )));
+            }
+            if outputs
+                .iter()
+                .any(|output| crate::validate_portable_filename(&output.filename).is_err())
+            {
+                return Err(AgentError::Store(
+                    "agent-run submission names an invalid filename".into(),
+                ));
+            }
+            Ok(())
+        }
         AgentRunResultPayload::FolderAccessProposal { request } if request.is_well_formed() => {
             Ok(())
         }
@@ -2383,6 +2427,7 @@ fn validate_agent_run_result_payload(payload: &AgentRunResultPayload) -> Result<
 fn agent_run_result_payload_kind(payload: &AgentRunResultPayload) -> &'static str {
     match payload {
         AgentRunResultPayload::FinalText { .. } => "final_text",
+        AgentRunResultPayload::Submission { .. } => "submission",
         AgentRunResultPayload::FolderAccessProposal { .. } => "folder_access_proposal",
         AgentRunResultPayload::Cancelled { .. } => "cancelled",
     }
@@ -2393,6 +2438,12 @@ fn agent_run_result_payload_json(payload: &AgentRunResultPayload) -> Result<Stri
         AgentRunResultPayload::FinalText { text } => serde_json::to_string(&serde_json::json!({
             "text": text,
         })),
+        AgentRunResultPayload::Submission { outputs, summary } => {
+            serde_json::to_string(&serde_json::json!({
+                "outputs": outputs,
+                "summary": summary,
+            }))
+        }
         AgentRunResultPayload::FolderAccessProposal { request } => serde_json::to_string(request),
         AgentRunResultPayload::Cancelled { reason } => serde_json::to_string(&serde_json::json!({
             "reason": reason.as_str(),
@@ -2413,6 +2464,21 @@ fn agent_run_result_payload_from_columns(kind: &str, json: &str) -> Result<Agent
                 AgentError::Store("invalid stored final-text agent-run result payload".into())
             })?;
             AgentRunResultPayload::FinalText { text: payload.text }
+        }
+        "submission" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct SubmissionPayload {
+                outputs: Vec<AgentRunSubmittedOutput>,
+                summary: String,
+            }
+            let payload = serde_json::from_str::<SubmissionPayload>(json).map_err(|_| {
+                AgentError::Store("invalid stored submission agent-run result payload".into())
+            })?;
+            AgentRunResultPayload::Submission {
+                outputs: payload.outputs,
+                summary: payload.summary,
+            }
         }
         "folder_access_proposal" => {
             let request = serde_json::from_str::<RequestFolderAccessArgs>(json).map_err(|_| {
@@ -2447,6 +2513,17 @@ fn agent_run_result_payload_from_columns(kind: &str, json: &str) -> Result<Agent
 fn agent_run_result_display_text(payload: &AgentRunResultPayload) -> String {
     match payload {
         AgentRunResultPayload::FinalText { text } => text.clone(),
+        AgentRunResultPayload::Submission { outputs, summary } => {
+            if outputs.is_empty() {
+                return format!("Produced no files.\n{summary}");
+            }
+            let names = outputs
+                .iter()
+                .map(|output| output.filename.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("Submitted files:\n{names}\n\n{summary}")
+        }
         AgentRunResultPayload::FolderAccessProposal { request } => {
             let hint = match request.folder_hint {
                 Some(RequestedFolderHint::Documents) => "\nPicker hint: Documents",

@@ -1484,6 +1484,13 @@ pub struct AgentRunResult {
 pub enum AgentRunResultPayload {
     /// Ordinary final text from the sandbox model.
     FinalText { text: String },
+    /// Files the run wrote and then submitted as its deliverables.
+    Submission {
+        /// Outputs the run named, in the order it named them.
+        outputs: Vec<AgentRunSubmittedOutput>,
+        /// Bounded prose describing what the run produced.
+        summary: String,
+    },
     /// A sandbox request for its foreground parent to consider folder consent.
     FolderAccessProposal {
         /// Non-authoritative, validated request arguments.
@@ -1494,6 +1501,20 @@ pub enum AgentRunResultPayload {
         /// Stable reason recorded by the cancellation state machine.
         reason: AgentRunCancellationReason,
     },
+}
+
+/// One file a background run submitted as a deliverable.
+///
+/// The filename is the identity the model worked with and the name the user
+/// sees; the output id is the host's resolution of that name against the
+/// conversation's own output record, captured at submission time so a later
+/// rename or delete cannot rewrite what the run claimed to have produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunSubmittedOutput {
+    /// Conversation output the submitted filename resolved to.
+    pub output_id: crate::id::OutputId,
+    /// Filename the run wrote under `output/`, which names the output.
+    pub filename: String,
 }
 
 /// Durable reason a sandbox child was cancelled.

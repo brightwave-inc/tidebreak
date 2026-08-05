@@ -28,7 +28,7 @@ function backgroundRun(
     finished_at: null,
     last_error_code: null,
     activity: null,
-    produced_output: status === "completed",
+    submitted_outputs: [],
     terminal_text: status === "completed" ? `Result from ${id}` : null,
     created_at: "2026-07-27T12:00:00Z",
     updated_at: "2026-07-27T12:00:00Z",

@@ -215,7 +215,7 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
 }
 
 #[tokio::test]
-async fn agent_run_activity_history_is_ordered_renderer_safe_and_flags_a_produced_result() {
+async fn agent_run_activity_history_is_ordered_renderer_safe_and_names_submitted_files() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -274,7 +274,7 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_flags_a_produce
     ));
 
     // Resolving the checkpoint hands the run back for continuation; take it and
-    // commit its terminal result so the snapshot reports a produced result.
+    // submit a file, which is what a produced result is.
     let continuation_lease = uuid::Uuid::new_v4();
     assert_eq!(
         store
@@ -285,13 +285,39 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_flags_a_produce
             .id,
         run.id
     );
+    let submitted = openwave_core::OutputId::new();
     store
-        .submit_agent_run_result(run.id, continuation_lease, "final answer")
+        .create_output(&openwave_core::CreateOutput {
+            id: submitted,
+            chat_id: chat.id,
+            filename: "Q3 revenue.md".into(),
+            kind: openwave_core::DeliverableKind::Text,
+            revision: openwave_core::NewOutputRevision {
+                id: openwave_core::OutputRevisionId::new(),
+                byte_len: 4,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: Some(run.id),
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+    store
+        .submit_agent_run_submission(
+            run.id,
+            continuation_lease,
+            &[openwave_core::AgentRunSubmittedOutput {
+                output_id: submitted,
+                filename: "Q3 revenue.md".into(),
+            }],
+            "wrote the quarterly revenue summary",
+        )
         .await
         .unwrap()
         .expect("completion commits");
 
-    // The run snapshot flags result presence without carrying any payload.
+    // The run snapshot names the submitted files without carrying their bytes.
     let response = router
         .clone()
         .oneshot(
@@ -310,13 +336,16 @@ async fn agent_run_activity_history_is_ordered_renderer_safe_and_flags_a_produce
         .find(|snapshot| snapshot.get("id") == Some(&serde_json::json!(run.id)))
         .expect("sandbox snapshot is returned");
     assert_eq!(
-        snapshot.get("produced_output"),
-        Some(&serde_json::json!(true))
+        snapshot.get("submitted_outputs"),
+        Some(&serde_json::json!([
+            {"output_id": submitted, "filename": "Q3 revenue.md"}
+        ]))
     );
     assert_eq!(snapshot.get("task"), Some(&serde_json::json!("research")));
+    // The names live in the structured field; the prose is the summary alone.
     assert_eq!(
         snapshot.get("terminal_text"),
-        Some(&serde_json::json!("final answer"))
+        Some(&serde_json::json!("wrote the quarterly revenue summary"))
     );
     assert_eq!(snapshot.get("activity"), Some(&serde_json::json!(null)));
 
@@ -946,11 +975,11 @@ async fn parent_turn_cancellation_signals_its_exact_running_child_search() {
     ));
     let active = state
         .sandbox_attempts
-        .register_search(request.id, run.id, search_lease)
+        .register_checkpoint(request.id, run.id, search_lease)
         .expect("register exact search");
     let stale = state
         .sandbox_attempts
-        .register_search(request.id, run.id, uuid::Uuid::new_v4())
+        .register_checkpoint(request.id, run.id, uuid::Uuid::new_v4())
         .expect("register stale search identity");
 
     let response = post_json(

@@ -236,11 +236,22 @@ sequence; reconnecting clients replay the journal, and cursor-based consumers
 can ignore a repeated live publication after commit-response loss.
 
 A background sandbox has no shared conversation, general filesystem, general
-network, or broad host-folder access. It receives one bounded task and has one
-total tool-call budget. Depending on its remaining model-step budget and exact
-admission, it may be offered `web_search`, a sandbox-only
-`request_folder_access` proposal, or the desktop-only
-`read_delegated_file`. The delegated read is available only when the foreground
+network, or broad host-folder access. It receives one bounded task and works
+through a bounded budget of tool-call checkpoints. Depending on its remaining
+model-step budget and exact admission, it may be offered `exec`, `web_search`,
+a sandbox-only `request_folder_access` proposal, or the desktop-only
+`read_delegated_file`.
+
+`exec` runs against a workspace named by the run itself, so concurrently
+delegated siblings never share scratch. It carries no folder authority and
+stages no host paths: delegation already runs outside the conversation's
+approval gate, and the sandbox filesystem is the whole of what a delegated run
+can reach. Files the run leaves under `output/` are published to the parent
+conversation as outputs named by their own filenames — writing the same filename
+again produces the next version of that output rather than a second one. The run
+never names an output identity, and neither does the host.
+
+The delegated read is available only when the foreground
 spawn named one exact `{root_id, relative_path}` that was attached to the chat
 and remains attached. It accepts no model arguments: the sandbox cannot choose
 a root or path, discover neighboring files, or broaden the delegation.

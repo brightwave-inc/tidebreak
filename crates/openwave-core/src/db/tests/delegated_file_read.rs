@@ -332,14 +332,25 @@ async fn delegated_read_checkpoint_and_claim_are_exact_and_lane_isolated() {
         name: "web_search".into(),
         arguments: serde_json::json!({"query": "second tool"}),
     };
-    assert_eq!(
+    assert!(
+        matches!(
+            store
+                .park_agent_run_for_sandbox_tool_call(run.id, next_worker_lease, &second)
+                .await
+                .unwrap(),
+            ParkSandboxToolCallOutcome::Parked { .. }
+        ),
+        "a resolved read does not end the run's checkpoint chain"
+    );
+    // The chain continues, but each checkpoint stays on its own executor lane:
+    // the delegated-file broker never claims search work.
+    assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, next_worker_lease, &second)
+            .claim_delegated_file_read(second.id, uuid::Uuid::new_v4(), Duration::minutes(1))
             .await
             .unwrap(),
-        ParkSandboxToolCallOutcome::IdentityConflict,
-        "one sandbox may checkpoint only one total tool call"
-    );
+        ClaimDelegatedFileReadOutcome::Unavailable
+    ));
 }
 
 #[tokio::test]

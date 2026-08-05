@@ -2218,6 +2218,7 @@ function nonEmptyBounded(value: unknown, maxChars: number): value is string {
 }
 
 const AGENT_ACTIVITY_KINDS = new Set<AgentActivityKind>([
+  "exec",
   "web_search",
   "read_delegated_file",
   "list_connected_folders",

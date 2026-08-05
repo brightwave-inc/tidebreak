@@ -253,8 +253,10 @@ The built-in server registry currently contains:
   turn without creating another chat message. See
   [Durable user questions](user-questions.md).
 
-Depth-one sandbox agents have a separate, smaller surface and one total tool
-call. Besides web search or a typed folder-access proposal, an embedded-desktop
+Depth-one sandbox agents have a separate, smaller surface and a bounded
+checkpoint chain rather than one total tool call: every checkpoint is replayed on
+each claim, so the count is capped as a working budget. Besides web search or a
+typed folder-access proposal, an embedded-desktop
 child may receive `read_delegated_file` when its foreground spawn immutably
 named one exact attached root and relative path. The tool accepts no arguments;
 it cannot browse, choose a path, open a picker, write, or run commands. The

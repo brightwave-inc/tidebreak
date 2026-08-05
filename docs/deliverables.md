@@ -118,33 +118,32 @@ it, and acceptance is a host-side operation the model cannot perform for itself.
 Acceptance changes nothing about export: a person still chooses the destination
 through **Save As…**, and the bytes never leave private app data until then.
 
-## Auto-merging a background agent's result
+## A background agent's own files
 
-A background agent finishes by submitting one immutable text result to its
-foreground parent. That result also becomes conversation output: when the run
-completes, the **host** merges the text into the output record as a durable
-revision. The merge is host-side by construction — it runs on the already
-committed result text, so the sandbox model can neither author, decline, nor
-steer it, and there is no pre-accept prompt. Safety comes from the merge being a
-versioned, revertible output rather than from a human gate.
+A background agent produces nothing by narration. It runs commands in its own
+private workspace, writes deliverables under `output/`, and each file it writes
+there is published to the conversation's output record by the same scan the
+foreground exec path uses — keyed by filename, so writing the same name again
+appends a version rather than forking a second output. The host never authors a
+result document on the run's behalf and never invents a title.
 
-- The merge happens at result-commit time, right after the fenced result
-  transition. Its output and revision identities are derived from the producing
-  run, so an ambiguous submit retry re-runs the merge onto the same record
-  instead of forking a second output. The revision records the background run as
-  its producer, exactly like an accepted binary artifact, so the agent-run
-  surface can correlate a completed run with the output it produced.
-- The merged output is bounded and media-typed like every other deliverable: a
-  text result becomes a `text/markdown` output under the 512 KiB text ceiling,
-  written once at the same revision path a foreground deliverable uses. A folder
-  proposal or a cancellation is not conversation content and is never merged.
-- The merge is best-effort after the result has committed and delivered: a
-  failure to publish never fails a run whose result the parent can already
-  consume.
+- The run finishes by calling `done` with the filenames it wants the reader to
+  receive and a short summary. Submission resolves those names against the
+  conversation's live outputs and records the pair; it creates nothing, so a run
+  cannot submit a file it never wrote.
+- The published revision records the background run as its producer, exactly
+  like an accepted binary artifact, so the agent-run surface can correlate a
+  completed run with the outputs it produced.
+- Submission is bounded: at most 16 filenames and a short summary. The summary
+  is prose beside the files, not a substitute for them.
+- A run that legitimately produced no file submits no filenames; a folder
+  proposal or a cancellation is not conversation content and never becomes an
+  output.
 
 ## Versioning, restore, and delete
 
-Auto-merge and the exec `output/` scan are safe because every published output
+The `output/` scan is safe — for foreground turns and background runs alike —
+because every published output
 is a durable, append-only version history the user can always walk back:
 
 - **Version history.** Each output's detail panel lists its versions once there

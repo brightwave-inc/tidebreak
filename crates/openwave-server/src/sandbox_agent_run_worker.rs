@@ -1,11 +1,16 @@
 //! Execution for durably claimed sandboxed agent runs.
 //!
 //! A sandbox run intentionally is not a second foreground turn. It receives
-//! only its immutable delegated task, may checkpoint one fixed host-owned web
-//! search call, and returns bounded text through the fenced agent-run result
-//! transition.
-//! That keeps the first execution surface small while preserving the same
-//! claim, heartbeat, cancellation, and replay mechanics as other workers.
+//! only its immutable delegated task and a small fixed tool surface — commands
+//! in its own private workspace, a host-owned web search, the one file
+//! explicitly delegated to it — and returns bounded text through the fenced
+//! agent-run result transition. Every tool call is a durable checkpoint
+//! executed by its own lane, so the run holds no lease while it waits.
+//!
+//! Its real product is files: a command that writes under `output/` publishes
+//! that file to the parent conversation as an output named by its own
+//! filename. The run never names an output identity, and neither does the
+//! host.
 
 use std::path::PathBuf;
 #[cfg(test)]
@@ -15,13 +20,15 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use openwave_core::{
-    sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
-    sandbox_web_search_tool_spec, validate_sandbox_read_delegated_file_arguments, AgentConfig,
-    AgentError, AgentRun, AgentRunStatus, CallId, ChatMessage, ChatRequest, ContentBlock,
-    FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, ProviderEvent,
-    RequestFolderAccessArgs, Result, ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall,
-    SandboxToolCallRequest, SandboxToolCallStatus, StopReason, Store, SubmitAgentRunResultOutcome,
-    ToolCallRecord,
+    sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_folder_access_proposal_tool_spec,
+    sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
+    validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments, AgentConfig,
+    AgentError, AgentRun, AgentRunStatus, AgentRunSubmittedOutput, CallId, ChatMessage,
+    ChatRequest, ContentBlock, FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome,
+    ProviderEvent, RequestFolderAccessArgs, Result, ResumeTurnForAgentRunWaitSetOutcome, Role,
+    SandboxToolCall, SandboxToolCallRequest, SandboxToolCallStatus, StopReason, Store,
+    SubmitAgentRunResultOutcome, ToolCallRecord, MAX_SANDBOX_TOOL_CALLS, OUTPUT_LOOKUP_LIMIT,
+    SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -35,9 +42,8 @@ use crate::state::SandboxAttemptGuard;
 /// Deliberately do not inherit the foreground system prompt: it may describe
 /// interactive tools or conversation-wide responsibilities that are outside a
 /// depth-one child run's authority.
-const SANDBOX_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below and return a concise, self-contained result for your parent agent. You cannot access the conversation, filesystem, connected folders, or other agents. You may use at most one tool: web_search when current public-web information is necessary, or request_folder_access only to propose that your foreground parent decide whether to ask the user. The proposal grants no access and cannot open a picker. Otherwise finish directly.";
-const SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below and return a concise, self-contained result for your parent agent. You cannot access the conversation, filesystem, connected folders, or other agents except for the one exact file explicitly delegated to this run. You may use at most one tool: read_delegated_file to read that exact file, web_search when current public-web information is necessary, or request_folder_access only to propose that your foreground parent decide whether to ask the user. The proposal grants no access and cannot open a picker. Otherwise finish directly.";
-const SANDBOX_TOOL_LIMIT: usize = 1;
+const SANDBOX_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain. Use web_search when current public-web information is necessary, and request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker. Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
+const SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents, except for the one exact file explicitly delegated to this run. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain. Use read_delegated_file to read that one delegated file, web_search when current public-web information is necessary, and request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker. Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SandboxAgentRunWorkerConfig {
@@ -508,7 +514,32 @@ impl SandboxAgentRunWorker {
                 provider_id,
                 arguments,
             }) => {
-                self.park_web_search(run, lease_token, provider_id, arguments)
+                self.park_sandbox_tool_call(
+                    run,
+                    lease_token,
+                    provider_id,
+                    openwave_core::SANDBOX_WEB_SEARCH_TOOL,
+                    arguments,
+                    "sandbox web-search checkpoint identity conflict",
+                )
+                .await
+            }
+            Ok(SandboxCompletion::Exec {
+                provider_id,
+                arguments,
+            }) => {
+                self.park_sandbox_tool_call(
+                    run,
+                    lease_token,
+                    provider_id,
+                    SANDBOX_EXEC_TOOL,
+                    arguments,
+                    "sandbox exec checkpoint identity conflict",
+                )
+                .await
+            }
+            Ok(SandboxCompletion::Done { outputs, summary }) => {
+                self.submit_submission(&run, lease_token, &outputs, &summary)
                     .await
             }
             Ok(SandboxCompletion::FolderAccessProposal { request }) => {
@@ -519,8 +550,15 @@ impl SandboxAgentRunWorker {
                 provider_id,
                 arguments,
             }) => {
-                self.park_delegated_file_read(run, lease_token, provider_id, arguments)
-                    .await
+                self.park_sandbox_tool_call(
+                    run,
+                    lease_token,
+                    provider_id,
+                    openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL,
+                    arguments,
+                    "sandbox delegated-file checkpoint identity conflict",
+                )
+                .await
             }
             Err(error) => self.record_failure(&run, lease_token, error).await,
         }
@@ -621,14 +659,8 @@ impl SandboxAgentRunWorker {
             .submit_agent_run_result(id, lease_token, &text)
             .await?
         {
-            Some(SubmitAgentRunResultOutcome::Completed(result))
-            | Some(SubmitAgentRunResultOutcome::Existing(result)) => {
-                // The result is durably committed and delivered to the parent
-                // inbox. Now the host — never the model — records it in the
-                // conversation's output record as a revertible version. The
-                // merge runs on the committed text, so the model that produced
-                // it cannot author, decline, or steer it.
-                self.record_result_output(run, &result).await;
+            Some(SubmitAgentRunResultOutcome::Completed(_))
+            | Some(SubmitAgentRunResultOutcome::Existing(_)) => {
                 Ok(SandboxAgentRunWorkerOutcome::Completed(id))
             }
             None => {
@@ -638,49 +670,78 @@ impl SandboxAgentRunWorker {
         }
     }
 
-    /// Record a completed background run's text result in its conversation's
-    /// outputs.
+    /// Submit the run's own files as its terminal result.
     ///
-    /// This is best-effort after the result has already committed: the merge is
-    /// idempotent on the run's derived output identity, so an ambiguous submit
-    /// retry re-runs it harmlessly, and a failure here never fails a run whose
-    /// result is already delivered. Only a `FinalText` result becomes an output;
-    /// a folder-access proposal or cancellation is not conversation content.
-    async fn record_result_output(&self, run: &AgentRun, result: &openwave_core::AgentRunResult) {
-        let openwave_core::AgentRunResultPayload::FinalText { text } = &result.payload else {
-            return;
+    /// The files already exist as conversation outputs — the run wrote them
+    /// under `output/` and the host published them by filename after the command
+    /// that produced them. Submission only resolves those names to the output
+    /// identities they landed on and records which ones the run offers, so no
+    /// host-authored document is invented on the run's behalf.
+    async fn submit_submission(
+        &self,
+        run: &AgentRun,
+        lease_token: uuid::Uuid,
+        filenames: &[String],
+        summary: &str,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let id = run.id;
+        let outputs = match self.resolve_submitted_outputs(run, filenames).await {
+            Ok(outputs) => outputs,
+            // The model named a file that was never published. That is a model
+            // error, not a host failure: report it the same way as any other
+            // malformed completion so the run's own attempt budget bounds it.
+            Err(error) => return self.record_failure(run, lease_token, error).await,
         };
-        if text.is_empty() {
-            return;
-        }
-        let Some(root) = &self.private_scratch_root else {
-            return;
-        };
-        let scratch = match open_chat_scratch(root, run.chat_id) {
-            Ok(scratch) => scratch,
-            Err(error) => {
-                tracing::warn!(
-                    "could not open scratch to record agent run {} output: {error}",
-                    run.id
-                );
-                return;
-            }
-        };
-        let merge = openwave_core::AgentResultOutputMerge {
-            run_id: run.id,
-            chat_id: run.chat_id,
-            filename: agent_result_filename(run.input.as_deref()),
-            text: text.clone(),
-            created_at: result.submitted_at,
-        };
-        if let Err(error) =
-            openwave_core::merge_agent_run_result(&*self.store, &scratch, &merge).await
+        match self
+            .store
+            .submit_agent_run_submission(id, lease_token, &outputs, summary)
+            .await?
         {
-            tracing::warn!(
-                "could not record agent run {} result in outputs: {error}",
-                run.id
-            );
+            Some(SubmitAgentRunResultOutcome::Completed(_))
+            | Some(SubmitAgentRunResultOutcome::Existing(_)) => {
+                Ok(SandboxAgentRunWorkerOutcome::Completed(id))
+            }
+            None => {
+                self.acknowledge_cancellation_or_lease_loss(id, lease_token)
+                    .await
+            }
         }
+    }
+
+    /// Resolve submitted filenames against the conversation's live outputs.
+    ///
+    /// Matching is by filename because that is the identity the run worked with
+    /// and the only one it ever sees. The newest live output wins, which is the
+    /// same rule the output scan applies when it republishes a filename.
+    async fn resolve_submitted_outputs(
+        &self,
+        run: &AgentRun,
+        filenames: &[String],
+    ) -> Result<Vec<AgentRunSubmittedOutput>> {
+        if filenames.is_empty() {
+            return Ok(vec![]);
+        }
+        let existing = self
+            .store
+            .list_outputs(run.chat_id, OUTPUT_LOOKUP_LIMIT)
+            .await?;
+        filenames
+            .iter()
+            .map(|filename| {
+                existing
+                    .iter()
+                    .find(|output| &output.filename == filename)
+                    .map(|output| AgentRunSubmittedOutput {
+                        output_id: output.id,
+                        filename: filename.clone(),
+                    })
+                    .ok_or_else(|| {
+                        AgentError::msg(format!(
+                            "sandbox agent submitted {filename}, which it never wrote under output/"
+                        ))
+                    })
+            })
+            .collect()
     }
 
     async fn submit_folder_access_proposal(
@@ -705,19 +766,27 @@ impl SandboxAgentRunWorker {
         }
     }
 
-    async fn park_web_search(
+    /// Park one tool call as a durable checkpoint and release the run's lease.
+    ///
+    /// Every sandbox tool that needs an executor parks the same way — only the
+    /// tool name and the conflict message differ — so they share this body
+    /// rather than each carrying its own copy of the crash-recovery reasoning
+    /// below.
+    async fn park_sandbox_tool_call(
         &self,
         run: AgentRun,
         lease_token: uuid::Uuid,
         provider_id: String,
+        name: &str,
         arguments: serde_json::Value,
+        conflict_message: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
         let call = SandboxToolCallRequest {
             id: CallId::new(),
             agent_run_id: run.id,
             chat_id: run.chat_id,
             provider_id,
-            name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+            name: name.into(),
             arguments,
         };
         let outcome = match self
@@ -758,81 +827,8 @@ impl SandboxAgentRunWorker {
                 Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id))
             }
             ParkSandboxToolCallOutcome::IdentityConflict => {
-                self.record_failure(
-                    &run,
-                    lease_token,
-                    AgentError::msg("sandbox web-search checkpoint identity conflict"),
-                )
-                .await
-            }
-            ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
-                self.record_failure(
-                    &run,
-                    lease_token,
-                    AgentError::msg("sandbox delegated resource is unavailable"),
-                )
-                .await
-            }
-            ParkSandboxToolCallOutcome::LeaseLost => {
-                self.acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                self.record_failure(&run, lease_token, AgentError::msg(conflict_message))
                     .await
-            }
-        }
-    }
-
-    async fn park_delegated_file_read(
-        &self,
-        run: AgentRun,
-        lease_token: uuid::Uuid,
-        provider_id: String,
-        arguments: serde_json::Value,
-    ) -> Result<SandboxAgentRunWorkerOutcome> {
-        let call = SandboxToolCallRequest {
-            id: CallId::new(),
-            agent_run_id: run.id,
-            chat_id: run.chat_id,
-            provider_id,
-            name: openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
-            arguments,
-        };
-        let outcome = match self
-            .store
-            .park_agent_run_for_sandbox_tool_call(run.id, lease_token, &call)
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let recovered = self
-                    .store
-                    .list_sandbox_tool_calls_for_agent_run(run.id)
-                    .await?
-                    .into_iter()
-                    .find(|existing| {
-                        existing.park_lease_token == lease_token
-                            && existing.provider_id == call.provider_id
-                            && existing.name == call.name
-                            && existing.arguments == call.arguments
-                    });
-                if let Some(call) = recovered {
-                    self.wake.notify_one();
-                    return Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id));
-                }
-                return Err(error);
-            }
-        };
-        match outcome {
-            ParkSandboxToolCallOutcome::Parked { call, .. }
-            | ParkSandboxToolCallOutcome::Existing { call, .. } => {
-                self.wake.notify_one();
-                Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id))
-            }
-            ParkSandboxToolCallOutcome::IdentityConflict => {
-                self.record_failure(
-                    &run,
-                    lease_token,
-                    AgentError::msg("sandbox delegated-file checkpoint identity conflict"),
-                )
-                .await
             }
             ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
                 self.record_failure(
@@ -897,82 +893,6 @@ impl SandboxAgentRunWorker {
     }
 }
 
-/// Open one conversation's private-scratch directory as a capability root.
-///
-/// This is the same `<scratch root>/<chat id>` directory the desktop reads an
-/// output revision from; the merge writes the revision bytes below it under
-/// `outputs/`. The directory is created and locked to the owner on first use.
-fn open_chat_scratch(
-    root: &std::path::Path,
-    chat_id: openwave_core::ChatId,
-) -> Result<cap_std::fs::Dir> {
-    let path = root.join(chat_id.to_string());
-    std::fs::create_dir_all(&path).map_err(|error| {
-        AgentError::Store(format!(
-            "failed to create chat scratch {}: {error}",
-            path.display()
-        ))
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| {
-                AgentError::Store(format!(
-                    "failed to secure chat scratch {}: {error}",
-                    path.display()
-                ))
-            },
-        )?;
-    }
-    cap_std::fs::Dir::open_ambient_dir(&path, cap_std::ambient_authority()).map_err(|error| {
-        AgentError::Store(format!(
-            "failed to open chat scratch {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-/// Host-derived, portable display filename for a submitted agent result.
-///
-/// The model never names the output, but the task it was given is the closest
-/// thing to a title the host has, and it is what the reader recognises in the
-/// outputs catalog. The record's opaque identity remains the authority, so two
-/// runs given the same task are still two outputs that happen to read alike.
-fn agent_result_filename(task: Option<&str>) -> String {
-    const MAX_TITLE_CHARS: usize = 60;
-
-    let title: String = task
-        .unwrap_or_default()
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        // Portable ASCII only: the name reaches a filesystem on export, and a
-        // task is free-form model-facing prose that can hold anything.
-        .map(|character| match character {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '-' | '_' => character,
-            _ => ' ',
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let title = match title.char_indices().nth(MAX_TITLE_CHARS) {
-        // Cut back to the last whole word so the name ends on something
-        // readable rather than mid-token.
-        Some((cut, _)) => title[..title[..cut].rfind(' ').unwrap_or(cut)].to_string(),
-        None => title,
-    };
-
-    if title.is_empty() {
-        "Agent result.md".to_string()
-    } else {
-        format!("{title}.md")
-    }
-}
-
 fn delegated_file_admission_matches(
     run: &AgentRun,
     admission: &openwave_core::SandboxAgentAdmission,
@@ -997,7 +917,7 @@ async fn sandbox_request(
     store: &dyn Store,
     delegated_file_available: bool,
 ) -> Result<ChatRequest> {
-    if calls.len() > SANDBOX_TOOL_LIMIT {
+    if calls.len() > MAX_SANDBOX_TOOL_CALLS {
         return Err(AgentError::msg("sandbox tool budget exceeded"));
     }
     if config.max_steps == 0 || calls.len().saturating_add(1) > config.max_steps {
@@ -1009,6 +929,7 @@ async fn sandbox_request(
             call.name.as_str(),
             openwave_core::SANDBOX_WEB_SEARCH_TOOL
                 | openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+                | SANDBOX_EXEC_TOOL
         ) || !call.status.is_terminal()
         {
             return Err(AgentError::msg("sandbox checkpoint cannot be resumed"));
@@ -1049,23 +970,33 @@ async fn sandbox_request(
             .into(),
         ),
         messages,
-        // Once a receipt exists, omit the tool definition. This makes the
-        // depth-one sandbox's one-call budget visible to the model and turns a
-        // second call into a deterministic worker error rather than new work.
-        // A tool checkpoint consumes one model completion and a resumed final
-        // completion. Never advertise work that the remaining model budget
-        // cannot consume after its durable receipt arrives.
-        tools: if calls.is_empty() && config.max_steps >= 2 {
+        // A checkpoint costs one model completion now and one more to consume its
+        // receipt, so tools are only advertised while the remaining step budget
+        // can pay for both — never advertise work the budget cannot consume. The
+        // checkpoint count is bounded separately: the whole chain is replayed on
+        // every claim, so it is a working budget rather than an open loop.
+        tools: if calls.len() < MAX_SANDBOX_TOOL_CALLS
+            && calls.len().saturating_add(2) <= config.max_steps
+        {
             let mut tools = vec![
+                sandbox_exec_tool_spec(),
                 sandbox_web_search_tool_spec(),
+                sandbox_done_tool_spec(),
                 sandbox_folder_access_proposal_tool_spec(),
             ];
             if delegated_file_available {
                 tools.push(sandbox_read_delegated_file_tool_spec());
             }
             tools
-        } else if calls.is_empty() && config.max_steps >= 1 {
-            vec![sandbox_folder_access_proposal_tool_spec()]
+        } else if calls.len().saturating_add(1) <= config.max_steps {
+            // Both of these terminate the run in place of a final answer, so
+            // they need no follow-up completion and stay available to the last
+            // step. Submission especially: a run that spent its budget writing
+            // files must still be able to hand them over.
+            vec![
+                sandbox_done_tool_spec(),
+                sandbox_folder_access_proposal_tool_spec(),
+            ]
         } else {
             vec![]
         },
@@ -1081,6 +1012,16 @@ async fn sandbox_request(
 
 enum SandboxCompletion {
     Final(String),
+    /// The run's own files, offered as the deliverables for the task.
+    Done {
+        outputs: Vec<String>,
+        summary: String,
+    },
+    /// One command to run in this run's own private workspace.
+    Exec {
+        provider_id: String,
+        arguments: serde_json::Value,
+    },
     WebSearch {
         provider_id: String,
         arguments: serde_json::Value,
@@ -1102,6 +1043,14 @@ async fn complete_sandbox_task(
         .tools
         .iter()
         .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL);
+    let exec_advertised = request
+        .tools
+        .iter()
+        .any(|tool| tool.name == SANDBOX_EXEC_TOOL);
+    let done_advertised = request
+        .tools
+        .iter()
+        .any(|tool| tool.name == openwave_core::SANDBOX_DONE_TOOL);
     let folder_proposal_advertised = request
         .tools
         .iter()
@@ -1176,6 +1125,40 @@ async fn complete_sandbox_task(
                         return Ok(SandboxCompletion::WebSearch {
                             provider_id,
                             arguments,
+                        });
+                    }
+                    if name == SANDBOX_EXEC_TOOL && exec_advertised {
+                        let arguments = serde_json::from_str(&arguments).map_err(|_| {
+                            AgentError::msg("sandbox agent emitted invalid exec arguments")
+                        })?;
+                        if !validate_sandbox_exec_arguments(&arguments) {
+                            return Err(AgentError::msg(
+                                "sandbox agent emitted invalid exec arguments",
+                            ));
+                        }
+                        return Ok(SandboxCompletion::Exec {
+                            provider_id,
+                            arguments,
+                        });
+                    }
+                    if name == openwave_core::SANDBOX_DONE_TOOL && done_advertised {
+                        let arguments = serde_json::from_str::<serde_json::Value>(&arguments)
+                            .map_err(|_| {
+                                AgentError::msg("sandbox agent emitted invalid done arguments")
+                            })?;
+                        if !openwave_core::validate_sandbox_done_arguments(&arguments) {
+                            return Err(AgentError::msg(
+                                "sandbox agent emitted invalid done arguments",
+                            ));
+                        }
+                        let arguments =
+                            serde_json::from_value::<openwave_core::SandboxDoneArgs>(arguments)
+                                .map_err(|_| {
+                                    AgentError::msg("sandbox agent emitted invalid done arguments")
+                                })?;
+                        return Ok(SandboxCompletion::Done {
+                            outputs: arguments.outputs,
+                            summary: arguments.summary,
                         });
                     }
                     if name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL
@@ -1350,6 +1333,53 @@ mod tests {
                 vec![
                     ProviderEvent::TextDelta {
                         text: "search-informed answer".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// Two searches then a final answer, for the multi-checkpoint chain.
+    #[derive(Default)]
+    struct SearchTwiceThenFinalProvider {
+        requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for SearchTwiceThenFinalProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("sandbox-web-search")
+        }
+
+        async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let call_number = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            let events = if call_number <= 2 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: format!("search_{call_number}"),
+                        name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: format!(r#"{{"query":"OpenWave {call_number}"}}"#),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "answer from two searches".into(),
                     },
                     ProviderEvent::Stop {
                         reason: StopReason::EndTurn,
@@ -1695,10 +1725,16 @@ mod tests {
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0].tools,
+            requests[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
             vec![
-                sandbox_web_search_tool_spec(),
-                sandbox_folder_access_proposal_tool_spec(),
+                SANDBOX_EXEC_TOOL,
+                openwave_core::SANDBOX_WEB_SEARCH_TOOL,
+                openwave_core::SANDBOX_DONE_TOOL,
+                openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
             ]
         );
         assert_eq!(
@@ -1834,12 +1870,106 @@ mod tests {
         );
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert!(requests[1].tools.is_empty());
+        // The last step cannot pay for another receipt, so the checkpointing
+        // tools are withdrawn; submission and the folder-access proposal
+        // terminate the run in place of a final answer and stay available.
+        assert_eq!(
+            requests[1]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                openwave_core::SANDBOX_DONE_TOOL,
+                openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
+            ]
+        );
         assert!(
             matches!(&requests[1].messages[1].content[0], ContentBlock::ToolUse { id, name, input } if id == "search_1" && name == openwave_core::SANDBOX_WEB_SEARCH_TOOL && input == &serde_json::json!({"query":"OpenWave"}))
         );
         assert!(
             matches!(&requests[1].messages[2].content[0], ContentBlock::ToolResult { tool_use_id, content, is_error } if tool_use_id == "search_1" && content == "{\"results\":[]}" && !is_error)
+        );
+    }
+
+    /// A run whose task needs more than one lookup: the checkpoint chain has to
+    /// survive a second park and replay both receipts in order, because the
+    /// worker rebuilds the whole transcript from the database on every claim.
+    #[tokio::test]
+    async fn a_run_checkpoints_more_than_once_and_replays_every_receipt_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        let provider = Arc::new(SearchTwiceThenFinalProvider::default());
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            AgentConfig {
+                model: "sandbox-model".into(),
+                max_steps: 4,
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        let spawn = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+        admit_sandbox(&store, chat.id, spawn, "Research this thoroughly.").await;
+
+        for result in ["{\"results\":[\"first\"]}", "{\"results\":[\"second\"]}"] {
+            let call_id = match worker.run_once().await.unwrap() {
+                SandboxAgentRunWorkerOutcome::ToolCheckpointed(call_id) => call_id,
+                outcome => panic!("unexpected outcome: {outcome:?}"),
+            };
+            assert_eq!(
+                store.get_agent_run(id).await.unwrap().unwrap().status,
+                AgentRunStatus::Waiting
+            );
+            let executor_lease = uuid::Uuid::new_v4();
+            store
+                .claim_sandbox_tool_call(call_id, executor_lease, chrono::Duration::minutes(1))
+                .await
+                .unwrap();
+            store
+                .resolve_sandbox_tool_call(
+                    call_id,
+                    executor_lease,
+                    &ToolCallResolution::Completed {
+                        result: result.into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(id)
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let replayed: Vec<&str> = requests[2]
+            .messages
+            .iter()
+            .filter_map(|message| match message.content.first() {
+                Some(ContentBlock::ToolResult { content, .. }) => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replayed,
+            vec!["{\"results\":[\"first\"]}", "{\"results\":[\"second\"]}"]
         );
     }
 
@@ -1990,11 +2120,13 @@ mod tests {
         store.request_agent_run_cancellation(id).await.unwrap();
         assert_eq!(
             worker
-                .park_web_search(
+                .park_sandbox_tool_call(
                     run,
                     lease,
                     "search_1".into(),
-                    serde_json::json!({"query":"OpenWave"})
+                    openwave_core::SANDBOX_WEB_SEARCH_TOOL,
+                    serde_json::json!({"query":"OpenWave"}),
+                    "sandbox web-search checkpoint identity conflict",
                 )
                 .await
                 .unwrap(),
@@ -2085,6 +2217,110 @@ mod tests {
             worker.fail_wait_set_resume_responses.load(Ordering::SeqCst),
             0
         );
+    }
+
+    /// A run's deliverables are the files it wrote, so submission has exactly two
+    /// jobs: carry the names the model chose through to the parent, and refuse a
+    /// name that never became an output rather than inventing one.
+    #[tokio::test]
+    async fn submitting_files_carries_their_names_and_refuses_a_name_that_was_never_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        let published = openwave_core::OutputId::new();
+        store
+            .create_output(&openwave_core::CreateOutput {
+                id: published,
+                chat_id: chat.id,
+                filename: "Q3 revenue.md".into(),
+                kind: openwave_core::DeliverableKind::Text,
+                revision: openwave_core::NewOutputRevision {
+                    id: openwave_core::OutputRevisionId::new(),
+                    byte_len: 4,
+                    sha256: [0; 32],
+                    turn_id: None,
+                    producing_run_id: None,
+                    created_at: chrono::Utc::now(),
+                },
+            })
+            .await
+            .unwrap();
+
+        let done = |filename: &str| {
+            Arc::new(EventProvider(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "done_1".into(),
+                    name: openwave_core::SANDBOX_DONE_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: serde_json::json!({
+                        "outputs": [filename],
+                        "summary": "Wrote the revenue summary.",
+                    })
+                    .to_string(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]))
+        };
+        let worker = |provider: Arc<EventProvider>| {
+            SandboxAgentRunWorker::new(
+                store.clone(),
+                Arc::new(FixedResolver(provider)),
+                Arc::new(Notify::new()),
+                Arc::new(Notify::new()),
+                Arc::new(EventBus::default()),
+                AgentConfig {
+                    model: "sandbox-model".into(),
+                    ..AgentConfig::default()
+                },
+                None,
+                SandboxAgentRunWorkerConfig::default(),
+            )
+        };
+
+        let call = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
+        admit_sandbox(&store, chat.id, call, "Summarize Q3 revenue.").await;
+        assert_eq!(
+            worker(done("Q3 revenue.md")).run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(id)
+        );
+        let result = store.get_agent_run_result(id).await.unwrap().unwrap();
+        assert!(matches!(
+            &result.payload,
+            openwave_core::AgentRunResultPayload::Submission { outputs, summary }
+                if outputs.len() == 1
+                    && outputs[0].output_id == published
+                    && outputs[0].filename == "Q3 revenue.md"
+                    && summary == "Wrote the revenue summary."
+        ));
+        // The parent reads the filenames, because the files are the result.
+        assert!(result.text.contains("Q3 revenue.md"));
+
+        let unwritten = CallId::new();
+        let unwritten_id = openwave_core::AgentRunId::sandbox_for_spawn_call(unwritten);
+        admit_sandbox(&store, chat.id, unwritten, "Summarize Q4 revenue.").await;
+        assert_eq!(
+            worker(done("Q4 revenue.md")).run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::RetryScheduled(unwritten_id)
+        );
+        assert!(store
+            .get_agent_run_result(unwritten_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -2569,16 +2805,18 @@ mod tests {
         .unwrap();
         assert_eq!(request.system.as_deref(), Some(SANDBOX_SYSTEM_PROMPT));
         assert_eq!(
-            request.tools,
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
             vec![
-                sandbox_web_search_tool_spec(),
-                sandbox_folder_access_proposal_tool_spec(),
+                SANDBOX_EXEC_TOOL,
+                openwave_core::SANDBOX_WEB_SEARCH_TOOL,
+                openwave_core::SANDBOX_DONE_TOOL,
+                openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
             ]
         );
-        assert!(request
-            .tools
-            .iter()
-            .all(|tool| tool.name != openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL));
     }
 
     #[tokio::test]
@@ -2604,8 +2842,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            request.tools,
-            vec![sandbox_folder_access_proposal_tool_spec()]
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                openwave_core::SANDBOX_DONE_TOOL,
+                openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
+            ]
         );
         let provider = Arc::new(EventProvider(vec![
             ProviderEvent::ToolCallStarted {
@@ -2865,29 +3110,6 @@ mod tests {
             openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
         );
         assert_eq!(calls[0].arguments, serde_json::json!({}));
-    }
-
-    /// The task is free-form model-facing prose and the filename reaches a real
-    /// filesystem on export, so the two things this has to get right are that
-    /// nothing unportable survives and that a long task still ends on a word.
-    #[test]
-    fn a_result_filename_is_a_portable_title_drawn_from_the_task() {
-        assert_eq!(
-            agent_result_filename(Some("Summarize the Q3 revenue report")),
-            "Summarize the Q3 revenue report.md"
-        );
-        assert_eq!(
-            agent_result_filename(Some("Read ../etc/passwd: \"now\"\nthen stop")),
-            "Read etc passwd now.md"
-        );
-        assert_eq!(
-            agent_result_filename(Some(
-                "Compare every competitor pricing page and write up where our own tiers sit"
-            )),
-            "Compare every competitor pricing page and write up where.md"
-        );
-        assert_eq!(agent_result_filename(Some("   ")), "Agent result.md");
-        assert_eq!(agent_result_filename(None), "Agent result.md");
     }
 
     fn sandbox_chat() -> Chat {

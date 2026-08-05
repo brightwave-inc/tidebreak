@@ -56,6 +56,7 @@ export function getAgentRunDotClass(status: AgentRunStatus): string {
 export function agentRunStatusDetail(run: AgentRun): string {
   if (run.activity) {
     const activity = {
+      exec: { running: "Running a command", waiting: "Waiting to run a command" },
       web_search: { running: "Searching the web", waiting: "Waiting to search" },
       read_delegated_file: {
         running: "Reading a delegated file",
@@ -104,6 +105,13 @@ const ACTIVITY_HISTORY_LABELS: Record<
   AgentActivityKind,
   Record<AgentActivityOutcome, string>
 > = {
+  exec: {
+    waiting: "Waiting to run a command",
+    running: "Running a command",
+    completed: "Ran a command",
+    failed: "A command failed",
+    cancelled: "Command stopped",
+  },
   web_search: {
     waiting: "Waiting to search the web",
     running: "Searching the web",

@@ -245,7 +245,7 @@ impl SandboxWebSearchWorker {
     ) -> Result<SandboxWebSearchWorkerOutcome> {
         let Some(active_attempt) =
             self.attempts
-                .register_search(call.id, call.agent_run_id, lease_token)
+                .register_checkpoint(call.id, call.agent_run_id, lease_token)
         else {
             return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id));
         };
@@ -970,7 +970,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(attempts.cancel_search(call.id, call.agent_run_id, receipt.executor_lease_token));
+        assert!(attempts.cancel_checkpoint(
+            call.id,
+            call.agent_run_id,
+            receipt.executor_lease_token
+        ));
         assert_eq!(
             execution.await.unwrap().unwrap(),
             SandboxWebSearchWorkerOutcome::LeaseLost(call.id)
@@ -1049,7 +1053,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(attempts.cancel_search(call.id, call.agent_run_id, receipt.executor_lease_token));
+        assert!(attempts.cancel_checkpoint(
+            call.id,
+            call.agent_run_id,
+            receipt.executor_lease_token
+        ));
         assert_eq!(
             execution.await.unwrap().unwrap(),
             SandboxWebSearchWorkerOutcome::LeaseLost(call.id)

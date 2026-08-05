@@ -30,6 +30,14 @@ pub const WEB_EXTRACT_TOOL: &str = "web_extract";
 pub const SANDBOX_WEB_SEARCH_TOOL: &str = WEB_SEARCH_TOOL;
 /// Stable name for the native-executed exact delegated file read.
 pub const SANDBOX_READ_DELEGATED_FILE_TOOL: &str = "read_delegated_file";
+/// Stable name for command execution inside a background run's own workspace.
+///
+/// Deliberately the same name a foreground turn sees: it is the same operation
+/// against the same kind of private workspace, and a model that has learned one
+/// vocabulary should not have to learn a second one when it is delegated work.
+pub const SANDBOX_EXEC_TOOL: &str = "exec";
+/// Stable name for a background run's terminal submission of its own files.
+pub const SANDBOX_DONE_TOOL: &str = "done";
 
 /// Maximum task length in Unicode scalar values advertised to a model.
 ///
@@ -38,6 +46,14 @@ pub const SANDBOX_READ_DELEGATED_FILE_TOOL: &str = "read_delegated_file";
 pub const MAX_SANDBOX_AGENT_TASK_CHARS: usize = 16_000;
 /// Maximum number of depth-one children in one foreground wait request.
 pub const MAX_WAIT_FOR_AGENTS_CHILDREN: usize = TurnAgentRunWaitSet::MAX_CHILDREN;
+/// Maximum host-executed tool checkpoints one sandbox run may accumulate.
+///
+/// A sandbox run's checkpoints form a chain the worker replays in full on every
+/// claim, so the count is bounded rather than open-ended: the whole chain rides
+/// each model request. Real delegated work needs a sequence — search, read,
+/// then several commands to produce a file — so the bound is a working budget,
+/// not the one-call fence it replaced.
+pub const MAX_SANDBOX_TOOL_CALLS: usize = 16;
 /// Maximum web-search query length advertised to a model.
 pub const MAX_WEB_SEARCH_QUERY_CHARS: usize = 400;
 /// Maximum requested web-search result count.
@@ -46,6 +62,26 @@ pub const MAX_WEB_SEARCH_RESULTS: usize = 10;
 pub const MAX_WEB_SEARCH_DOMAINS: usize = 20;
 /// Default result count when a model omits `max_results`.
 pub const DEFAULT_WEB_SEARCH_RESULTS: usize = 5;
+/// Maximum executable length advertised to a sandboxed background agent.
+///
+/// The three sandbox-exec bounds mirror the ones `openwave-code-execution`
+/// enforces at the provider boundary. They are restated here because the schema
+/// a background agent sees is core's to publish, and the executor revalidates
+/// every field before a command runs.
+pub const MAX_SANDBOX_EXEC_COMMAND_BYTES: usize = 1_024;
+/// Maximum argument-vector length advertised to a sandboxed background agent.
+pub const MAX_SANDBOX_EXEC_ARGUMENTS: usize = 128;
+/// Maximum working-directory length advertised to a sandboxed background agent.
+pub const MAX_SANDBOX_EXEC_CWD_BYTES: usize = 1_024;
+/// Maximum number of files one background run may submit through `done`.
+pub const MAX_SANDBOX_DONE_OUTPUTS: usize = 16;
+/// Maximum summary length in Unicode scalar values a submission may carry.
+///
+/// The summary is prose the parent turn reads beside the submitted filenames,
+/// not the deliverable itself. Bounding it well under [`AgentRun::MAX_RESULT_LEN`]
+/// keeps a multi-child wait result inside its own serialized ceiling and keeps
+/// the pressure where it belongs: on the files, not on the description of them.
+pub const MAX_SANDBOX_DONE_SUMMARY_CHARS: usize = 4_000;
 /// Maximum web-extract URL length in bytes advertised to a model.
 ///
 /// `openwave-web-search` holds its fetch-admission URL bound to this value, so
@@ -203,6 +239,84 @@ pub struct WebExtractArgs {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SandboxReadDelegatedFileArgs {}
+
+/// Canonical arguments for one command inside a background run's own workspace.
+///
+/// This is the sandbox presentation of the foreground `exec` contract, narrowed
+/// to what a background run can legitimately ask for: no staged host paths and
+/// no folder authority, because a background run's workspace holds nothing but
+/// what its own earlier commands wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxExecArgs {
+    /// Executable name or path.
+    #[schemars(
+        length(min = 1, max = MAX_SANDBOX_EXEC_COMMAND_BYTES),
+        description = "Executable name or path."
+    )]
+    pub command: String,
+    /// Arguments passed directly to the executable, with no shell parsing.
+    #[serde(default)]
+    #[schemars(
+        length(max = MAX_SANDBOX_EXEC_ARGUMENTS),
+        description = "Arguments passed directly to the executable."
+    )]
+    pub args: Vec<String>,
+    /// Workspace-relative working directory.
+    #[serde(default = "default_sandbox_exec_cwd")]
+    #[schemars(
+        length(min = 1, max = MAX_SANDBOX_EXEC_CWD_BYTES),
+        description = "Workspace-relative working directory (defaults to '.')."
+    )]
+    pub cwd: String,
+}
+
+fn default_sandbox_exec_cwd() -> String {
+    ".".into()
+}
+
+/// Canonical arguments for a background run's terminal submission.
+///
+/// The model names files, not identities: every entry is the filename of a file
+/// the run already wrote under `output/`, which the host published as an output
+/// under that same name. Nothing here creates an output — submission only marks
+/// which of the run's published files are the deliverables the task asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxDoneArgs {
+    /// Filenames of files written under `output/` that answer the task.
+    #[serde(default)]
+    #[schemars(
+        length(max = MAX_SANDBOX_DONE_OUTPUTS),
+        description = "Filenames of files you wrote under output/ that are the deliverables for this task."
+    )]
+    pub outputs: Vec<String>,
+    /// Short prose describing what was produced.
+    #[schemars(
+        length(min = 1, max = MAX_SANDBOX_DONE_SUMMARY_CHARS),
+        description = "Short summary of what you produced and anything the reader should know. Do not restate the file contents here."
+    )]
+    pub summary: String,
+}
+
+impl SandboxDoneArgs {
+    /// Whether every field is within the advertised bounds.
+    ///
+    /// Filenames are checked against the same portable-filename rule the output
+    /// scan applies, so a submission can only ever name something the scan could
+    /// have published.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.outputs.len() <= MAX_SANDBOX_DONE_OUTPUTS
+            && self
+                .outputs
+                .iter()
+                .all(|name| crate::validate_portable_filename(name).is_ok())
+            && self.outputs.iter().collect::<HashSet<_>>().len() == self.outputs.len()
+            && !self.summary.trim().is_empty()
+            && self.summary.chars().count() <= MAX_SANDBOX_DONE_SUMMARY_CHARS
+    }
+}
 
 impl WaitForAgentsArgs {
     /// Whether this proposal has a non-empty, bounded, unique list of IDs.
@@ -410,12 +524,12 @@ pub fn web_extract_tool_spec() -> ToolSpec {
 /// Sandbox-specific presentation of the shared web-search contract.
 ///
 /// The checkpoint worker, not the ordinary tool registry, executes this
-/// definition under its own durable lease. The one-call instruction matches
-/// the sandbox state machine's admission bound.
+/// definition under its own durable lease, which is why the sandbox needs its
+/// own wording at all.
 #[must_use]
 pub fn sandbox_web_search_tool_spec() -> ToolSpec {
     let mut spec = web_search_tool_spec();
-    spec.description = "Search the public web for current information. Use at most once, with a focused query, and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.".into();
+    spec.description = "Search the public web for current information. Use focused queries and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.".into();
     spec
 }
 
@@ -437,6 +551,76 @@ pub fn sandbox_read_delegated_file_tool_spec() -> ToolSpec {
 #[must_use]
 pub fn validate_sandbox_read_delegated_file_arguments(arguments: &Value) -> bool {
     serde_json::from_value::<SandboxReadDelegatedFileArgs>(arguments.clone()).is_ok()
+}
+
+/// Contract for running one command in a background run's private workspace.
+///
+/// The description is where a background agent learns the only way it has to
+/// produce something the user can keep: write the file under `output/`. The
+/// filename becomes the output's name, so the agent names its own deliverables
+/// and the host never invents a title for it.
+#[must_use]
+pub fn sandbox_exec_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<SandboxExecArgs>(
+        SANDBOX_EXEC_TOOL,
+        "Run one executable with an argument vector in this background task's own private \
+         workspace. No shell parses the arguments unless you invoke a shell explicitly (for \
+         example command '/bin/sh' with args ['-c', '…']). The workspace starts empty and is \
+         yours alone: it holds nothing but what your own earlier commands wrote, and you cannot \
+         reach the conversation, the user's files, or any connected folder from it. Save every \
+         deliverable under output/ — each file you write there is published to the user as a \
+         durable output named by its own filename, and writing the same filename again publishes \
+         a new version of that same output. Name those files the way you want the user to see \
+         them. Every command returns bounded stdout and stderr.",
+    )
+}
+
+/// Whether arguments are a bounded, canonical sandbox exec payload.
+#[must_use]
+pub fn validate_sandbox_exec_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<SandboxExecArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+/// Contract by which a background run finishes and submits its own files.
+///
+/// This is the only way a background run says what it produced. There is no
+/// host-side synthesis of a result document: if the run wants the user to keep
+/// something, it writes the file and names it here.
+#[must_use]
+pub fn sandbox_done_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<SandboxDoneArgs>(
+        SANDBOX_DONE_TOOL,
+        "Finish this background task. List the filenames you wrote under output/ that are the \
+         deliverables the task asked for — those files are what the user receives, named exactly \
+         as you named them — and give a short summary of what you produced. Call this only after \
+         the files exist. If the task genuinely produced no file, submit no filenames and say so \
+         in the summary.",
+    )
+}
+
+/// Whether arguments are a bounded, canonical sandbox submission payload.
+#[must_use]
+pub fn validate_sandbox_done_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<SandboxDoneArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+impl SandboxExecArgs {
+    /// Whether every field is within the advertised bounds.
+    ///
+    /// Schema bounds are advisory — a provider may forward anything — so the
+    /// durable checkpoint admission and the executor both check them here. The
+    /// working directory is only bounded in length; the provider owns the
+    /// traversal rules for its own filesystem.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.command.is_empty()
+            && self.command.len() <= MAX_SANDBOX_EXEC_COMMAND_BYTES
+            && self.args.len() <= MAX_SANDBOX_EXEC_ARGUMENTS
+            && !self.cwd.is_empty()
+            && self.cwd.len() <= MAX_SANDBOX_EXEC_CWD_BYTES
+    }
 }
 
 #[cfg(test)]
@@ -695,7 +879,7 @@ mod tests {
         );
         assert_eq!(foreground.input_schema["additionalProperties"], false);
         assert!(foreground.description.contains("exact result URLs"));
-        assert!(sandbox.description.contains("at most once"));
+        assert!(sandbox.description.contains("exact result URLs"));
     }
 
     #[test]

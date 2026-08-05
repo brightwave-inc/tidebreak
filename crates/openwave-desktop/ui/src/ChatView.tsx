@@ -62,6 +62,7 @@ export type ChatViewProps = {
   onRetryTurn?: (turn: RetryableTurn) => void;
   /** Open one background run's panel beside the conversation. */
   onOpenAgentPanel?: (runId: string) => void;
+  onOpenOutput?: (outputId: string) => void;
 };
 
 /**
@@ -93,6 +94,7 @@ export function ChatView({
   onSend,
   onRetryTurn,
   onOpenAgentPanel,
+  onOpenOutput,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
   // Subscribed here rather than in the route above: a keystroke should
@@ -363,6 +365,7 @@ export function ChatView({
           onCancelBackgroundAgentRun={agentRuns.cancel}
           onLoadBackgroundAgentActivity={agentRuns.loadActivity}
           onOpenBackgroundAgent={onOpenAgentPanel}
+          onOpenOutput={onOpenOutput}
           busy={busy}
           streamStalled={streamStalled}
           scrollRef={attachScrollRef}
