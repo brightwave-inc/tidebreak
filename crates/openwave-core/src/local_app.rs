@@ -357,7 +357,7 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
         ),
         AppGrantBinding::Folder(binding) => (
             BindingKey::Folder(binding.folder),
-            BindingCapabilities::Folder(binding.access),
+            BindingCapabilities::Folder,
         ),
     }))?;
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
@@ -531,7 +531,7 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
         ),
         AppBinding::Folder(binding) => (
             BindingKey::Folder(binding.folder),
-            BindingCapabilities::Folder(binding.access),
+            BindingCapabilities::Folder,
         ),
     }))?;
     let json =
@@ -557,7 +557,7 @@ enum BindingKey {
 enum BindingCapabilities<'a> {
     Tools(&'a [String]),
     Operations(&'a [String]),
-    Folder(FolderAccess),
+    Folder,
 }
 
 /// The binding grammar shared by manifests and grants: no duplicate connected
@@ -629,7 +629,7 @@ fn validate_binding_set<'a>(
             }
             // A folder binding carries no capability list; the access level
             // is closed by type and consent-bearing rather than grammatical.
-            BindingCapabilities::Folder(_) => {}
+            BindingCapabilities::Folder => {}
         }
     }
     Ok(())
