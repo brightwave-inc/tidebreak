@@ -4,6 +4,7 @@ import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import type {
   ApiClient,
   GatewayApps,
+  McpCuration,
   McpHealth,
   McpServerDefinition,
   McpServerInfo,
@@ -44,6 +45,7 @@ function emptyServer(index: number): McpServerInfo {
     health: "initializing",
     tool_count: 0,
     diagnostic: null,
+    curated: null,
   };
 }
 
@@ -86,6 +88,32 @@ function chipLabel(health: McpHealth): string {
   }
 }
 
+/**
+ * The two-tier honesty label: "Tested" for a server on the curated list,
+ * "Community" for everything else. A label only — both tiers mount, connect,
+ * and call identically. The server decides the tier from the *saved*
+ * definition, so an unsaved edit keeps the previous row's label until Save.
+ */
+export function McpTierChip({ curated }: { curated: McpCuration | null }) {
+  const tested = curated !== null;
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${
+        tested
+          ? "border-emerald-600/40 text-emerald-700 dark:border-emerald-400/40 dark:text-emerald-400"
+          : "text-muted-foreground"
+      }`}
+      title={
+        tested
+          ? `${curated.display_name} — exercised end to end on ${curated.tested_on}. ${curated.notes}`
+          : "Not on OpenWave's tested list. It still mounts and runs; we have not driven this server ourselves."
+      }
+    >
+      {tested ? "Tested" : "Community"}
+    </span>
+  );
+}
+
 function transportOf(server: McpServerInfo): Transport {
   if (server.gateway_endpoint !== null) return "gateway";
   return server.url !== null ? "http" : "stdio";
@@ -114,7 +142,13 @@ function transportFields(transport: "stdio" | "http"): Partial<McpServerInfo> {
 }
 
 function definition(server: McpServerInfo): McpServerDefinition {
-  const { health: _, tool_count: __, diagnostic: ___, ...value } = server;
+  const {
+    health: _,
+    tool_count: __,
+    diagnostic: ___,
+    curated: ____,
+    ...value
+  } = server;
   return value;
 }
 
@@ -192,6 +226,7 @@ export function McpPanel({
             health: mount.health,
             tool_count: mount.tool_count,
             diagnostic: mount.diagnostic,
+            curated: mount.curated,
           },
         ];
       });
@@ -584,6 +619,8 @@ export function McpPanel({
                       "Save the configuration to verify this server."
                 }
               />
+
+              <McpTierChip curated={server.curated} />
 
               <div className="flex items-center justify-between gap-4">
                 <div className="flex-1">

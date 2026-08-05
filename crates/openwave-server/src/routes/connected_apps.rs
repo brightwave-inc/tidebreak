@@ -22,6 +22,7 @@ use crate::connected_apps::{
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::mcp_config::McpHealth;
+use crate::mcp_curated::McpCuration;
 use crate::openapi_catalog::{
     enumerate_openapi_operations, ingest_openapi_document, sha256_hex, MAX_OPENAPI_DOCUMENT_BYTES,
 };
@@ -65,6 +66,11 @@ pub enum ConnectedAppInfo {
         /// remote-authored descriptions — the consent sheet's posture.
         tools: Vec<String>,
         diagnostic: Option<String>,
+        /// The curated-list entry this server matched, when OpenWave has
+        /// exercised it end to end. `null` is the community tier: mounted and
+        /// usable, just not something we have driven ourselves. A label, not
+        /// a gate — nothing about the mount changes either way.
+        curated: Option<McpCuration>,
         /// The gateway MCP endpoint slug this record mounts, when it is
         /// gateway-backed rather than a local stdio/HTTP definition.
         gateway_endpoint: Option<String>,
@@ -551,6 +557,7 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
                 health: server.health,
                 tool_count: server.tool_count,
                 diagnostic: server.diagnostic,
+                curated: server.curated,
                 gateway_endpoint,
                 gateway_apps,
                 used_by_app_count: used_by.get(&id).copied().unwrap_or(0),

@@ -631,6 +631,13 @@ name: string, health: McpHealth, tool_count: number,
  */
 tools: Array<string>, diagnostic: string | null, 
 /**
+ * The curated-list entry this server matched, when OpenWave has
+ * exercised it end to end. `null` is the community tier: mounted and
+ * usable, just not something we have driven ourselves. A label, not
+ * a gate — nothing about the mount changes either way.
+ */
+curated: McpCuration | null, 
+/**
  * The gateway MCP endpoint slug this record mounts, when it is
  * gateway-backed rather than a local stdio/HTTP definition.
  */
@@ -1086,6 +1093,30 @@ allow_local_mcp_servers: boolean, };
 export type ManagedPolicySource = "os" | "provisioned" | "unmanaged";
 
 /**
+ * The curated-registry entry a configured server matched, projected to the
+ * renderer beside the server's health.
+ *
+ * Presence *is* the tier: a server with a curation is "tested", a server
+ * without one is "community". One field cannot disagree with itself the way
+ * a separate boolean and a separate record could.
+ */
+export type McpCuration = { 
+/**
+ * The curated list's own name for the server, which need not match the
+ * namespace the reader configured it under.
+ */
+display_name: string, 
+/**
+ * `YYYY-MM-DD` the entry was last exercised end to end.
+ */
+tested_on: string, 
+/**
+ * One sentence on what was exercised, for the reader deciding how much
+ * the badge is worth.
+ */
+notes: string, };
+
+/**
  * Renderer-safe connection lifecycle.
  */
 export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";
@@ -1138,7 +1169,14 @@ gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, }
  * One renderer-safe server projection. Resolved `env_from` values and child
  * process details are intentionally absent.
  */
-export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, name: string, command: string | null, args: Array<string>, 
+export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, 
+/**
+ * The curated-list entry this definition matches, when OpenWave has
+ * exercised the server end to end. `null` means community: mounted and
+ * usable, just not something we have driven ourselves. Derived from the
+ * definition on every read, never stored.
+ */
+curated: McpCuration | null, name: string, command: string | null, args: Array<string>, 
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never

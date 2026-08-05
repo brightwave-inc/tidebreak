@@ -38,6 +38,7 @@ mod gateway_runtime;
 pub mod logging;
 mod managed_policy;
 mod mcp_config;
+mod mcp_curated;
 mod model_registry;
 mod model_roles;
 /// OpenAPI ingest into the bounded operation catalog a `rest_api` connected

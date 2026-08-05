@@ -63,6 +63,15 @@ the process boundary. MCP approvals cannot be remembered for the chat. A server
 definition can change behind a stable namespace, so reusing a name-based grant
 would silently widen its authority.
 
+## Tested and community servers
+
+Each configured server carries one of two labels in Settings: **Tested** when
+it matches OpenWave's curated list of servers we have exercised end to end, and
+**Community** otherwise. The label gates nothing — both tiers mount, connect,
+and call identically. See
+[Tested and community MCP servers](mcp-tested-servers.md) for what the tested
+claim covers and how a server earns an entry.
+
 ## Health and refresh
 
 Settings reports `initializing`, `healthy`, `degraded`, `reconnecting`, or
