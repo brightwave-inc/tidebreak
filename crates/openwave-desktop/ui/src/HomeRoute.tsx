@@ -292,7 +292,10 @@ export function HomeRoute() {
           {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
               fills the composer rather than sending, the way it does in a chat. */}
-          <WelcomeState onSelectPrompt={setDraft} />
+          <WelcomeState
+            onSelectPrompt={setDraft}
+            executionConfigClient={client}
+          />
         </div>
 
         <div className="z-10 mx-auto w-full max-w-3xl pb-2">
