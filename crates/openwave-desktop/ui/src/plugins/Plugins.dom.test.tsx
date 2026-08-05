@@ -57,16 +57,36 @@ function catalogWith(
   };
 }
 
+const SKILL_BODY = "Use this skill when authoring Word documents.";
+
+function apisWith(overrides: Partial<PluginsApis> = {}): PluginsApis {
+  return {
+    list: vi.fn().mockResolvedValue(CATALOG),
+    setEnabled: vi.fn(),
+    instructions: vi
+      .fn()
+      .mockImplementation(async (name: string) => ({ name, instructions: SKILL_BODY })),
+    ...overrides,
+  };
+}
+
 /** Drives the real catalog hook so a toggle exercises the whole round trip. */
 function ListHarness({ apis }: { apis: PluginsApis }) {
   const state = usePluginCatalog(apis);
-  return <PluginsView state={state} onOpen={() => {}} />;
+  return (
+    <PluginsView state={state} loadInstructions={apis.instructions} onOpen={() => {}} />
+  );
 }
 
 function DetailHarness({ apis }: { apis: PluginsApis }) {
   const state = usePluginCatalog(apis);
   return (
-    <PluginDetailView pluginId="documents" state={state} onBack={() => {}} />
+    <PluginDetailView
+      pluginId="documents"
+      state={state}
+      loadInstructions={apis.instructions}
+      onBack={() => {}}
+    />
   );
 }
 
@@ -77,10 +97,7 @@ afterEach(() => {
 
 describe("Plugins library", () => {
   it("gates a disabled plugin's member switches without clearing their own flags", async () => {
-    const apis: PluginsApis = {
-      list: vi.fn().mockResolvedValue(CATALOG),
-      setEnabled: vi.fn(),
-    };
+    const apis = apisWith();
     render(<DetailHarness apis={apis} />);
 
     // The bundle is off, so no member can run whatever its own flag says —
@@ -99,10 +116,9 @@ describe("Plugins library", () => {
   });
 
   it("ungates the members once the plugin's own toggle round trip lands", async () => {
-    const apis: PluginsApis = {
-      list: vi.fn().mockResolvedValue(CATALOG),
+    const apis = apisWith({
       setEnabled: vi.fn().mockResolvedValue(catalogWith({ documents: true })),
-    };
+    });
     render(<DetailHarness apis={apis} />);
 
     fireEvent.click(
@@ -125,10 +141,7 @@ describe("Plugins library", () => {
       ...catalogWith({ documents: true }),
       skills: [{ ...CATALOG.skills[0]!, enabled: false }],
     };
-    const apis: PluginsApis = {
-      list: vi.fn().mockResolvedValue(CATALOG),
-      setEnabled: vi.fn().mockResolvedValue(reconciled),
-    };
+    const apis = apisWith({ setEnabled: vi.fn().mockResolvedValue(reconciled) });
     render(<ListHarness apis={apis} />);
 
     const bundle = await screen.findByRole("switch", { name: "Enable Documents" });
@@ -144,10 +157,9 @@ describe("Plugins library", () => {
   });
 
   it("puts a failed toggle back where it was", async () => {
-    const apis: PluginsApis = {
-      list: vi.fn().mockResolvedValue(CATALOG),
+    const apis = apisWith({
       setEnabled: vi.fn().mockRejectedValue(new Error("offline")),
-    };
+    });
     render(<ListHarness apis={apis} />);
 
     const skill = await screen.findByRole("switch", { name: "Enable my-notes" });
@@ -163,11 +175,25 @@ describe("Plugins library", () => {
     });
   });
 
+  it("opens a skill's own instructions from its row", async () => {
+    const apis = apisWith();
+    render(<DetailHarness apis={apis} />);
+
+    // The row body — not the switch beside it — opens the skill.
+    fireEvent.click(await screen.findByRole("button", { name: /docx/ }));
+
+    // The dialog shows the staged instruction body, fetched on open.
+    expect(await screen.findByText(SKILL_BODY)).toBeInTheDocument();
+    expect(apis.instructions).toHaveBeenCalledWith("docx");
+    // Its switch is the same gated control the row has: the bundle is off.
+    // (The modal hides the page behind it, so this is the dialog's own.)
+    expect(screen.getByRole("switch", { name: "Enable docx" })).toBeDisabled();
+  });
+
   it("explains an installation with nothing in it", async () => {
-    const apis: PluginsApis = {
+    const apis = apisWith({
       list: vi.fn().mockResolvedValue({ plugins: [], skills: [] }),
-      setEnabled: vi.fn(),
-    };
+    });
     render(<ListHarness apis={apis} />);
 
     expect(await screen.findByText("No plugins installed")).toBeInTheDocument();

@@ -1,5 +1,5 @@
-import { ChevronRight, Puzzle } from "lucide-react";
-import type { ReactNode } from "react";
+import { ChevronRight, Puzzle, Sparkles } from "lucide-react";
+import { useState, type ReactNode } from "react";
 
 import type { PluginInfo, PluginSkillInfo } from "@/api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
@@ -13,7 +13,9 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Switch } from "@/components/ui/switch";
+import type { PluginsApis } from "./pluginsApis";
 import { capabilityShortLabel, categoryIcon } from "./pluginVocabulary";
+import { SkillDialog } from "./SkillDialog";
 import type { PluginCatalogState } from "./usePluginCatalog";
 
 /**
@@ -30,18 +32,26 @@ import type { PluginCatalogState } from "./usePluginCatalog";
  */
 export function PluginsView({
   state,
+  loadInstructions,
   onOpen,
 }: {
   state: PluginCatalogState;
-  /** Navigate to the `plugins.{slug}` panel contract. */
+  loadInstructions: PluginsApis["instructions"];
+  /** Navigate to the bundle's own page. */
   onOpen: (pluginId: string) => void;
 }) {
   const { catalog, loading, error, reload, setEnabled } = state;
+  const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
   const yourSkills = catalog?.skills.filter((skill) => skill.origin === "user") ?? [];
   const otherSkills =
     catalog?.skills.filter((skill) => skill.origin !== "user") ?? [];
   const isEmpty =
     catalog !== null && catalog.plugins.length === 0 && catalog.skills.length === 0;
+  // The dialog re-reads its skill from the fresh catalog, so its switch moves
+  // with the toggle round trip instead of freezing at the row that opened it.
+  const shownSkill = openSkill
+    ? (catalog?.skills.find((skill) => skill.name === openSkill.name) ?? openSkill)
+    : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -107,7 +117,12 @@ export function PluginsView({
             title="Your skills"
             description="Skills you wrote, loaded from your data directory. They stand on their own rather than belonging to a bundle."
           >
-            <SkillList skills={yourSkills} setEnabled={setEnabled} label="Your skills" />
+            <SkillList
+              skills={yourSkills}
+              setEnabled={setEnabled}
+              label="Your skills"
+              onOpenSkill={setOpenSkill}
+            />
           </Section>
         )}
 
@@ -116,10 +131,27 @@ export function PluginsView({
             title="Other skills"
             description="Installed skills that no bundle claims."
           >
-            <SkillList skills={otherSkills} setEnabled={setEnabled} label="Other skills" />
+            <SkillList
+              skills={otherSkills}
+              setEnabled={setEnabled}
+              label="Other skills"
+              onOpenSkill={setOpenSkill}
+            />
           </Section>
         )}
       </div>
+
+      <SkillDialog
+        skill={shownSkill}
+        gated={false}
+        onOpenChange={(open) => {
+          if (!open) setOpenSkill(null);
+        }}
+        onToggle={(skill, enabled) =>
+          setEnabled({ plugins: {}, skills: { [skill.name]: enabled } })
+        }
+        loadInstructions={loadInstructions}
+      />
     </div>
   );
 }
@@ -204,24 +236,35 @@ function SkillList({
   skills,
   setEnabled,
   label,
+  onOpenSkill,
 }: {
   skills: PluginSkillInfo[];
   setEnabled: PluginCatalogState["setEnabled"];
   label: string;
+  onOpenSkill: (skill: PluginSkillInfo) => void;
 }) {
   return (
     <ul className="flex flex-col gap-1" aria-label={label}>
       {skills.map((skill) => (
         <li
           key={skill.name}
-          className="flex items-center gap-3 rounded-md p-2 transition-colors"
+          className="hover:bg-muted flex items-center gap-3 rounded-md p-2 transition-colors"
         >
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="truncate text-sm font-medium">{skill.name}</span>
-            <span className="text-muted-foreground line-clamp-2 text-xs">
-              {skill.description}
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
+            onClick={() => onOpenSkill(skill)}
+          >
+            <span className="text-muted-foreground grid size-7 shrink-0 place-items-center rounded-md border bg-muted">
+              <Sparkles className="size-3.5" aria-hidden="true" />
             </span>
-          </div>
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="truncate text-sm font-medium">{skill.name}</span>
+              <span className="text-muted-foreground line-clamp-2 text-xs">
+                {skill.description}
+              </span>
+            </span>
+          </button>
           <Switch
             aria-label={`Enable ${skill.name}`}
             checked={skill.enabled}

@@ -31,11 +31,13 @@ export function PluginsPage({ pluginId }: { pluginId?: string }) {
           <PluginDetailView
             pluginId={pluginId}
             state={state}
+            loadInstructions={apis.instructions}
             onBack={() => void navigate({ to: "/plugins" })}
           />
         ) : (
           <PluginsView
             state={state}
+            loadInstructions={apis.instructions}
             onOpen={(id) =>
               void navigate({ to: "/plugins/$pluginId", params: { pluginId: id } })
             }
