@@ -1174,7 +1174,7 @@ fn classify_gemini_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::ChatMessage;
+    use openwave_core::provider::{ChatMessage, MessageReasoning};
     use openwave_core::tool::{Tool, ToolSpec};
     use openwave_core::{
         ask_user_questions_tool_spec, create_app_tool_spec, exit_plan_mode_tool_spec,
@@ -1430,7 +1430,7 @@ mod tests {
                         input: json!({"path": "two"}),
                     },
                 ],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
             ChatMessage {
                 role: Role::User,
@@ -1439,7 +1439,7 @@ mod tests {
                     content: "one".into(),
                     is_error: false,
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
             ChatMessage {
                 role: Role::User,
@@ -1448,7 +1448,7 @@ mod tests {
                     content: "boom".into(),
                     is_error: true,
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
         ];
         let body = build_request_json(&request(messages)).unwrap();
@@ -1519,7 +1519,7 @@ mod tests {
                 },
                 ContentBlock::Image { image },
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }]);
         req.images.insert(
             image.blob_id,
@@ -1538,7 +1538,7 @@ mod tests {
         let req = request(vec![ChatMessage {
             role: Role::User,
             content: vec![ContentBlock::Image { image: png_ref(9) }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }]);
         let err = build_request_json(&req).unwrap_err();
         assert!(err.to_string().contains("no hydrated bytes"), "{err}");

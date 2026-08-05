@@ -15,6 +15,7 @@ use crate::model::{
     ChatRootAttachment, Message, OwnerId, PermissionMode, ReasoningEffort, Role,
     RootAttachmentOrigin, ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
+use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
     ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
@@ -1042,6 +1043,7 @@ pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) ->
         seq: Set(seq),
         role: Set(role_to_db(message.role).to_string()),
         content: Set(message.content.clone()),
+        reasoning: Set(reasoning_to_db(&message.reasoning)),
         turn_lease_token: Set(None),
         created_at: Set(message.created_at),
     };
@@ -1416,8 +1418,29 @@ fn message_from_model(model: entities::message::Model) -> Result<Message> {
         turn_id: TurnId(model.turn_id),
         role: role_from_db(&model.role)?,
         content: model.content,
+        reasoning: reasoning_from_db(model.reasoning),
         created_at: model.created_at,
     })
+}
+
+/// Reasoning as it is stored: absent when there is nothing to replay, so a
+/// message without reasoning writes the same row it always did.
+pub(in crate::db) fn reasoning_to_db(reasoning: &MessageReasoning) -> Option<serde_json::Value> {
+    if reasoning.is_empty() {
+        return None;
+    }
+    serde_json::to_value(reasoning).ok()
+}
+
+/// Reasoning as it is read back.
+///
+/// Replay is an optimization on top of the transcript, so a column this
+/// version cannot parse degrades to no reasoning rather than failing the load
+/// of an otherwise intact conversation.
+pub(in crate::db) fn reasoning_from_db(stored: Option<serde_json::Value>) -> MessageReasoning {
+    stored
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 /// `Role` is persisted as its snake_case name (matching its serde encoding).

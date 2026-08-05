@@ -14,7 +14,8 @@ use crate::storage::{AppendClaimedMessageOutcome, ChatCitationSnapshot, TurnLeas
 
 use super::super::{entities, store_err, DbStore};
 use super::conversation::{
-    next_message_seq_on, reserve_message_identity_on, MESSAGE_IDENTITY_OWNER_MESSAGE,
+    next_message_seq_on, reasoning_to_db, reserve_message_identity_on,
+    MESSAGE_IDENTITY_OWNER_MESSAGE,
 };
 use super::{acquire_chat_write_lock, acquire_turn_write_lock};
 
@@ -58,6 +59,7 @@ pub(in crate::db) async fn append_assistant_message(
         seq: Set(next_message_seq_on(&transaction, message.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(message.content.clone()),
+        reasoning: Set(reasoning_to_db(&message.reasoning)),
         turn_lease_token: Set(None),
         created_at: Set(created_at),
     }
@@ -136,6 +138,7 @@ pub(in crate::db) async fn append_claimed_assistant_message(
         seq: Set(next_message_seq_on(&transaction, message.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(message.content.clone()),
+        reasoning: Set(reasoning_to_db(&message.reasoning)),
         turn_lease_token: Set(Some(lease_token)),
         created_at: Set(created_at),
     }
@@ -177,6 +180,7 @@ where
         || stored.turn_id != message.turn_id.0
         || stored.role != "assistant"
         || stored.content != message.content
+        || stored.reasoning != reasoning_to_db(&message.reasoning)
         || stored.turn_lease_token != turn_lease_token
         || stored.created_at != created_at
     {

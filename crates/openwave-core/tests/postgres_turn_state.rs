@@ -15,12 +15,12 @@ use openwave_core::{
     DeleteProjectOutcome, DocumentId, DocumentSourceBlob, DocumentSourceUpsert, DocumentUpsert,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
-    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
-    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Role, RootAttachmentChangeAction,
-    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    SandboxSpawnCheckpointRequest, SpawnSandboxAgentResult, StopReason, Store,
-    SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    MessageReasoning, ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project,
+    ProjectId, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
+    Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, SandboxSpawnCheckpointRequest, SpawnSandboxAgentResult, StopReason,
+    Store, SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
     ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
     TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer, ASK_USER_QUESTIONS_TOOL,
 };
@@ -106,6 +106,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         chat_id: chat.id,
         turn_id: TurnId::new(),
         role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
         content: "standalone".into(),
         created_at: nanosecond_created_at,
     };
@@ -151,6 +152,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
         content: format!(":cit[answer]{{doc={} lines=1-1}}", document_id.0),
         created_at: completed_at,
     };
@@ -859,6 +861,7 @@ async fn postgres_parent_completion_and_child_admission_form_one_terminal_bounda
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
         content: "race-safe terminal answer".into(),
         created_at: utc_now_at_postgres_precision().max(turn.updated_at),
     };
@@ -2366,6 +2369,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         chat_id: next_chat.id,
         turn_id: next.id,
         role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
         content: "postgres completion".into(),
         created_at: delayed_retry_at + Duration::seconds(1),
     };
@@ -2672,6 +2676,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         chat_id: turn_event_chat.id,
         turn_id: turn_event.id,
         role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
         content: "event turn complete".into(),
         created_at: event_claimed_at + Duration::seconds(1),
     };
@@ -2817,6 +2822,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         chat_id: steer_chat.id,
         turn_id: steer_turn.id,
         role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
         content: "postgres candidate".into(),
         created_at: Utc::now(),
     };
@@ -2883,6 +2889,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                     chat_id: steer_chat.id,
                     turn_id: steer_turn.id,
                     role: Role::Assistant,
+                    reasoning: MessageReasoning::default(),
                     content: "stale steer completion".into(),
                     created_at: steer_completed_at,
                 },
@@ -2920,6 +2927,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 chat_id: steer_chat.id,
                 turn_id: steer_turn.id,
                 role: Role::Assistant,
+                reasoning: MessageReasoning::default(),
                 content: "fresh steer completion".into(),
                 created_at: fresh_completed_at,
             },
@@ -3017,6 +3025,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 chat_id: registry_message_chat.id,
                 turn_id: registry_message_turn.id,
                 role: Role::Assistant,
+                reasoning: MessageReasoning::default(),
                 content: "shared postgres identity".into(),
                 created_at: Utc::now(),
             })

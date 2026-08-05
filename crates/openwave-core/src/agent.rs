@@ -50,8 +50,8 @@ use crate::model::{
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
-    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, RefusalDetails,
-    RefusalOutcome, StopReason, Usage,
+    ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
+    ReasoningOrigin, RefusalDetails, RefusalOutcome, StopReason, Usage,
 };
 use crate::semantic_checkpoint::{
     ContextCheckpoint, ContextCheckpointPayloadV1, SaveContextCheckpointOutcome,
@@ -1079,6 +1079,9 @@ struct AssistantCandidate {
     message_id: MessageId,
     content: String,
     citations: Vec<AssistantCitationInput>,
+    /// The step's reasoning, bound to the route that produced it. Rides the
+    /// durable message so a later turn can replay it to the same model.
+    reasoning: MessageReasoning,
 }
 
 impl AssistantCandidate {
@@ -1091,6 +1094,7 @@ impl AssistantCandidate {
             turn_id,
             role: Role::Assistant,
             content: self.content.clone(),
+            reasoning: self.reasoning.clone(),
             created_at: Utc::now(),
         }
     }
@@ -1595,6 +1599,12 @@ impl Agent {
                             message_id,
                             content: parsed.content,
                             citations: parsed.citations,
+                            // A cancel can cut the stream between reasoning
+                            // blocks, and a provider that validates replay
+                            // checks the prefix against what it generated. A
+                            // partial set is not that, so this message keeps
+                            // none.
+                            reasoning: MessageReasoning::default(),
                         };
                         let message = candidate.message(message_id, chat.id, turn_id);
                         if publish_terminal {
@@ -1666,6 +1676,10 @@ impl Agent {
                 message_id: candidate_message_id,
                 content: parsed.content,
                 citations: parsed.citations,
+                reasoning: MessageReasoning::captured(
+                    self.reasoning_origin(),
+                    std::mem::take(&mut reasoning),
+                ),
             };
             let text = &candidate.content;
             let refusal = refused.then(|| {
@@ -1762,10 +1776,12 @@ impl Agent {
                     role: Role::Assistant,
                     content: blocks,
                     // The step's reasoning rides its assistant message for the
-                    // rest of the turn. A steer, cancel, or broken stream
-                    // discarded `reasoning` along with the step before here,
-                    // so nothing partial ever reaches the transcript.
-                    reasoning: std::mem::take(&mut reasoning),
+                    // rest of the turn, and rides the durable message the
+                    // candidate writes so a later turn can replay it too. A
+                    // steer, cancel, or broken stream discarded `reasoning`
+                    // along with the step before here, so nothing partial ever
+                    // reaches the transcript.
+                    reasoning: candidate.reasoning.clone(),
                 });
             }
 
@@ -2166,7 +2182,7 @@ impl Agent {
             // next step never sees a request it cannot account for.
             transcript.push(ChatMessage {
                 role: Role::User,
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
                 content: calls
                     .iter()
                     .zip(outputs)
@@ -2779,7 +2795,7 @@ impl Agent {
                 content: vec![ContentBlock::Text {
                     text: msg.content.clone(),
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             });
             events.send(AgentEvent::UserSteered {
                 message_id,
@@ -2822,7 +2838,7 @@ impl Agent {
                 content: vec![ContentBlock::Text {
                     text: steer.content.clone(),
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             });
             events.send_committed(event_ordinal, event)?;
         }
@@ -3516,7 +3532,7 @@ impl Agent {
                         content: output.content,
                         is_error: true,
                     }],
-                    reasoning: Vec::new(),
+                    reasoning: MessageReasoning::default(),
                 });
                 continue;
             }
@@ -3589,7 +3605,7 @@ impl Agent {
             });
             transcript.push(ChatMessage {
                 role: Role::User,
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
                 content: tool_result_blocks(
                     call.provider_id,
                     self.tool_result_for_model(&output.content, call.call_id),
@@ -3600,6 +3616,17 @@ impl Agent {
             });
         }
         Ok(())
+    }
+
+    /// The route this agent's turns run on, for attributing reasoning blocks.
+    ///
+    /// Both halves matter: a block is minted by one model on one provider and
+    /// is only valid as input back to that pair.
+    fn reasoning_origin(&self) -> ReasoningOrigin {
+        ReasoningOrigin {
+            provider: self.config.provider.clone(),
+            model: self.config.model.clone(),
+        }
     }
 
     async fn persist(
@@ -3617,6 +3644,7 @@ impl Agent {
                 turn_id,
                 role,
                 content: content.to_string(),
+                reasoning: MessageReasoning::default(),
                 created_at: Utc::now(),
             })
             .await?;
@@ -4135,7 +4163,7 @@ fn rebuild_transcript_with_boundary(
                 push_tool_batch(
                     &mut out,
                     &batches[batch_i],
-                    text,
+                    text.is_some().then_some(*message),
                     max_result_bytes,
                     image_input,
                 );
@@ -4152,8 +4180,14 @@ fn rebuild_transcript_with_boundary(
                     );
                     batch_i += 1;
                 }
-            } else if let Some(text) = text {
-                out.push(ChatMessage::text(Role::Assistant, text.to_string()));
+            } else if text.is_some() {
+                out.push(ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: message.content.clone(),
+                    }],
+                    reasoning: message.reasoning.clone(),
+                });
             }
         } else {
             out.push(user_message_with_attachments(
@@ -4290,7 +4324,7 @@ fn user_message_with_attachments(
     ChatMessage {
         role: message.role,
         content,
-        reasoning: Vec::new(),
+        reasoning: MessageReasoning::default(),
     }
 }
 
@@ -4479,12 +4513,15 @@ fn batch_tool_calls(tool_calls: &[ToolCallRecord]) -> Vec<Vec<&ToolCallRecord>> 
 fn push_tool_batch(
     out: &mut Vec<ChatMessage>,
     batch: &[&ToolCallRecord],
-    assistant_text: Option<&str>,
+    assistant: Option<&Message>,
     max_result_bytes: usize,
     image_input: bool,
 ) {
     let mut blocks: Vec<ContentBlock> = Vec::new();
-    if let Some(text) = assistant_text.filter(|t| !t.is_empty()) {
+    if let Some(text) = assistant
+        .map(|message| message.content.as_str())
+        .filter(|text| !text.is_empty())
+    {
         blocks.push(ContentBlock::Text {
             text: text.to_string(),
         });
@@ -4500,9 +4537,14 @@ fn push_tool_batch(
         out.push(ChatMessage {
             role: Role::Assistant,
             content: blocks,
-            // Rebuilt from the store, which holds no reasoning: replaying
-            // nothing is the valid degradation.
-            reasoning: Vec::new(),
+            // The step's reasoning was persisted with its prose preamble, so
+            // it comes back here. A step that wrote no preamble has no message
+            // row to have carried any, and replaying nothing is the valid
+            // degradation. Whether these blocks actually go on the wire is the
+            // adapter's call: they replay only to the route that minted them.
+            reasoning: assistant
+                .map(|message| message.reasoning.clone())
+                .unwrap_or_default(),
         });
     }
     let results: Vec<ContentBlock> = batch
@@ -4530,7 +4572,7 @@ fn push_tool_batch(
         out.push(ChatMessage {
             role: Role::User,
             content: results,
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         });
     }
 }
@@ -4824,7 +4866,7 @@ mod tests {
             self.seen.lock().unwrap().push(
                 req.messages
                     .iter()
-                    .flat_map(|message| message.reasoning.iter().cloned())
+                    .flat_map(|message| message.reasoning.blocks().to_vec())
                     .collect(),
             );
             let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -4835,6 +4877,9 @@ mod tests {
                             "thinking": "plan: read the note first",
                             "signature": "sig-1",
                         }),
+                    },
+                    ProviderEvent::TextDelta {
+                        text: "checking the note".into(),
                     },
                     ProviderEvent::ToolCallStarted {
                         index: 0,
@@ -6997,10 +7042,11 @@ mod tests {
 
     /// A reasoning block streamed on one step must ride the step's assistant
     /// message — verbatim and whole — into the next step's request, and must
-    /// stay in-memory: nothing about it reaches the durable record, so a turn
-    /// rebuilt from the store degrades to sending no reasoning.
+    /// survive the turn: it is persisted with that message, so a later turn
+    /// rebuilt from the store still carries it. Whether it goes on the wire is
+    /// then the adapter's call — see the router's replay gate.
     #[tokio::test]
-    async fn reasoning_blocks_ride_later_steps_of_the_same_turn() {
+    async fn reasoning_blocks_survive_the_turn_that_produced_them() {
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
         let db = tempfile::tempdir().unwrap();
@@ -7055,13 +7101,40 @@ mod tests {
             "thinking": "plan: read the note first",
             "signature": "sig-1",
         });
-        let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), 2, "one tool step, then the answer step");
-        assert!(seen[0].is_empty(), "nothing to replay on the first call");
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "one tool step, then the answer step");
+            assert!(seen[0].is_empty(), "nothing to replay on the first call");
+            assert_eq!(
+                seen[1],
+                vec![block.clone()],
+                "the block reaches the next step exactly as streamed"
+            );
+        }
+
+        // A second turn on a fresh agent over the same store is the reload:
+        // every message comes back off disk.
+        let reloaded = Agent::new(
+            Arc::new(ReasoningRecordingProvider {
+                calls: AtomicUsize::new(1),
+                seen: seen.clone(),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
+                ..Default::default()
+            },
+        );
+        let (tx, rx) = unbounded();
+        reloaded.run_turn(&chat, "and again", &tx).await.unwrap();
+        drop(tx);
+        let _: Vec<AgentEvent> = rx.collect().await;
         assert_eq!(
-            seen[1],
+            seen.lock().unwrap()[2],
             vec![block],
-            "the block reaches the next step exactly as streamed"
+            "the persisted block comes back on the rebuilt transcript"
         );
     }
 
@@ -10036,6 +10109,7 @@ mod tests {
                 chat_id,
                 turn_id: TurnId::new(),
                 role: Role::User,
+                reasoning: Default::default(),
                 content: format!(
                     "OLD PREFIX: choose the durable SQLite path. {}",
                     "historical detail ".repeat(1_200)
@@ -10047,6 +10121,7 @@ mod tests {
                 chat_id,
                 turn_id: TurnId::new(),
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "OLD ASSISTANT: SQLite is confirmed; source:decision-doc.".into(),
                 created_at: Utc::now(),
             },
@@ -10055,6 +10130,7 @@ mod tests {
                 chat_id,
                 turn_id: TurnId::new(),
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "RECENT USER: keep this exchange raw.".into(),
                 created_at: Utc::now(),
             },
@@ -10063,6 +10139,7 @@ mod tests {
                 chat_id,
                 turn_id: TurnId::new(),
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "RECENT ASSISTANT: this is the newest completed exchange.".into(),
                 created_at: Utc::now(),
             },
@@ -10424,6 +10501,7 @@ mod tests {
             chat_id: chat.id,
             turn_id: TurnId::new(),
             role: Role::User,
+            reasoning: Default::default(),
             content: "old decision ".repeat(1_000),
             created_at: Utc::now(),
         };
@@ -10548,7 +10626,7 @@ mod tests {
                     name: "read_file".into(),
                     input: serde_json::json!({"path": "decision.md"}),
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
             ChatMessage {
                 role: Role::User,
@@ -10557,7 +10635,7 @@ mod tests {
                     content: "the durable decision".into(),
                     is_error: false,
                 }],
-                reasoning: Vec::new(),
+                reasoning: MessageReasoning::default(),
             },
             ChatMessage::text(Role::User, "Continue from the decision."),
         ];
@@ -11859,6 +11937,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "compare these".into(),
                 created_at: t0,
             },
@@ -11867,6 +11946,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "and this one?".into(),
                 created_at: t1,
             },
@@ -11943,6 +12023,7 @@ mod tests {
             chat_id: chat,
             turn_id: turn,
             role: Role::User,
+            reasoning: Default::default(),
             content: "summarize this file".into(),
             created_at,
         };
@@ -12056,6 +12137,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "read it".into(),
                 created_at: t0,
             },
@@ -12064,6 +12146,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "looking…".into(),
                 created_at: t1,
             },
@@ -12251,6 +12334,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "go".into(),
                 created_at: t0,
             },
@@ -12259,6 +12343,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "done".into(),
                 created_at: t2,
             },
@@ -12306,6 +12391,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "hi".into(),
                 created_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
             },
@@ -12314,6 +12400,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::Tool,
+                reasoning: Default::default(),
                 content: "legacy".into(),
                 created_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
             },
@@ -12322,6 +12409,7 @@ mod tests {
                 chat_id: chat,
                 turn_id: turn,
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "bye".into(),
                 created_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
             },

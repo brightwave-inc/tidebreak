@@ -34,6 +34,86 @@ impl std::fmt::Display for ProviderId {
     }
 }
 
+/// The exact model route that produced a set of reasoning blocks.
+///
+/// A reasoning block is minted by one model on one provider and is only valid
+/// as input back to that same route. `provider` mirrors [`ChatRequest::provider`]
+/// — `None` means the host let the router pick, in which case the model name
+/// determines the route and comparing models alone is enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningOrigin {
+    /// The explicit provider route, if the host pinned one.
+    pub provider: Option<ProviderId>,
+    /// The model that generated the blocks.
+    pub model: String,
+}
+
+/// A message's opaque reasoning blocks, bound to the route that minted them.
+///
+/// The blocks are provider values kept in emission order and kept whole — a
+/// message replays either all of them or none, because a provider that
+/// validates replay (Anthropic) rejects rearranged, edited, or partially
+/// dropped reasoning. They stay a `Vec`: a provider may emit several in one
+/// step, and flattening them into one block would lose both the count and the
+/// per-block signatures.
+///
+/// The origin travels with the blocks so a consumer can tell whether they are
+/// valid input for the request it is about to send. Blocks and origin are set
+/// together by [`MessageReasoning::captured`] and are private so they cannot
+/// drift apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReasoning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<ReasoningOrigin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blocks: Vec<Value>,
+}
+
+impl MessageReasoning {
+    /// Blocks captured from a live stream on `origin`'s route.
+    ///
+    /// An empty block list carries no origin: there is nothing to attribute.
+    pub fn captured(origin: ReasoningOrigin, blocks: Vec<Value>) -> Self {
+        if blocks.is_empty() {
+            return Self::default();
+        }
+        Self {
+            origin: Some(origin),
+            blocks,
+        }
+    }
+
+    /// Whether there is anything to replay.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// The blocks, whatever route they came from.
+    pub fn blocks(&self) -> &[Value] {
+        &self.blocks
+    }
+
+    /// The route that minted the blocks, if any were captured.
+    pub fn origin(&self) -> Option<&ReasoningOrigin> {
+        self.origin.as_ref()
+    }
+
+    /// The blocks, but only when they are valid input for this exact route.
+    ///
+    /// A block minted by another provider — or by another model on the same
+    /// provider — is foreign input, so a mismatch yields nothing rather than
+    /// failing: switching models mid-conversation is ordinary, and sending no
+    /// reasoning is always a valid request shape.
+    pub fn replayable_for(&self, provider: Option<&ProviderId>, model: &str) -> &[Value] {
+        match &self.origin {
+            Some(origin) if origin.provider.as_ref() == provider && origin.model == model => {
+                &self.blocks
+            }
+            _ => &[],
+        }
+    }
+}
+
 /// One piece of a message. Assistant messages carry text (and, when the model
 /// calls tools, `ToolUse` blocks); tool results come back as `ToolResult`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,19 +163,14 @@ pub struct ChatMessage {
     /// The ordered content blocks.
     pub content: Vec<ContentBlock>,
     /// Reasoning blocks the model produced in the step this message came
-    /// from, captured from the live stream for verbatim replay on the later
-    /// steps of the same turn.
+    /// from, for verbatim replay on a later request to the same route.
     ///
-    /// A side channel, not content: serde never reads or writes it, so no
-    /// stored transcript or wire request changes shape. The blocks are opaque
-    /// provider values kept in emission order and kept whole — a message
-    /// replays either all of them or none, because a provider that validates
-    /// replay (Anthropic) rejects rearranged, edited, or partially dropped
-    /// reasoning. Only an assistant message built from a live provider stream
-    /// carries any; a message rebuilt from the store has none and degrades to
-    /// sending no reasoning, which is always a valid shape.
+    /// A side channel, not content: serde never reads or writes it here, so no
+    /// wire request changes shape. Replay is gated on the origin recorded with
+    /// the blocks — see [`MessageReasoning::replayable_for`] — because a block
+    /// from another provider or another model is not valid input.
     #[serde(default, skip)]
-    pub reasoning: Vec<Value>,
+    pub reasoning: MessageReasoning,
 }
 
 impl ChatMessage {
@@ -104,7 +179,7 @@ impl ChatMessage {
         Self {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         }
     }
 }

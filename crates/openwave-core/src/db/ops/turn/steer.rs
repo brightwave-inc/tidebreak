@@ -14,7 +14,7 @@ use super::super::super::{entities, store_err, DbStore};
 use super::super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
     conversation::{
-        append_event_on, next_message_seq_on, reserve_message_identity_on,
+        append_event_on, next_message_seq_on, reasoning_to_db, reserve_message_identity_on,
         transfer_steer_message_identity_on, MESSAGE_IDENTITY_OWNER_MESSAGE,
         MESSAGE_IDENTITY_OWNER_STEER,
     },
@@ -430,6 +430,7 @@ pub(in crate::db) async fn apply_turn_steer(
             seq: Set(next_message_seq_on(&transaction, preceding.chat_id).await?),
             role: Set("assistant".into()),
             content: Set(preceding.content.clone()),
+            reasoning: Set(reasoning_to_db(&preceding.reasoning)),
             turn_lease_token: Set(Some(lease_token)),
             created_at: Set(preceding_created_at),
         };
@@ -461,6 +462,7 @@ pub(in crate::db) async fn apply_turn_steer(
         seq: Set(next_message_seq_on(&transaction, ChatId(steer.chat_id)).await?),
         role: Set("user".into()),
         content: Set(steer.content.clone()),
+        reasoning: Set(None),
         turn_lease_token: Set(Some(lease_token)),
         created_at: Set(now),
     };

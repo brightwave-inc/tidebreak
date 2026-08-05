@@ -437,6 +437,7 @@ pub(crate) enum Message {
     Seq,
     Role,
     Content,
+    Reasoning,
     TurnLeaseToken,
     CreatedAt,
 }

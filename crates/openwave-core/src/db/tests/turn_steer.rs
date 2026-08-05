@@ -74,6 +74,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
         turn_id: Set(claimed.id.0),
         seq: Set(2),
         role: Set("user".into()),
+        reasoning: Default::default(),
         content: Set("change course".into()),
         turn_lease_token: Set(None),
         created_at: Set(now),
@@ -119,6 +120,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
         turn_id: Set(claimed.id.0),
         seq: Set(3),
         role: Set("user".into()),
+        reasoning: Default::default(),
         content: Set("mismatched identity".into()),
         turn_lease_token: Set(None),
         created_at: Set(now),
@@ -229,6 +231,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: format!(
             "candidate before steer :cit[candidate]{{doc={} lines=1-1}}",
             document.id
@@ -315,6 +318,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "final answer".into(),
         created_at: completed_at,
     };
@@ -394,6 +398,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "generated from revision one".into(),
         created_at: stale_after_apply_at,
     };
@@ -416,6 +421,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: format!("fresh final :cit[answer]{{doc={} lines=1-1}}", document.id),
         created_at: fresh_completed_at,
     };
@@ -583,6 +589,7 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
             chat_id: chat.id,
             turn_id: turn.id,
             role: Role::User,
+            reasoning: Default::default(),
             content: "already used".into(),
             created_at: Utc::now(),
         })
@@ -758,6 +765,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
         chat_id: chat.id,
         turn_id: turn.id,
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "stale completion".into(),
         created_at: stale_output_at,
     };
@@ -813,6 +821,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
                 chat_id: chat.id,
                 turn_id: turn.id,
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "fresh completion".into(),
                 created_at: completed_at,
             },
@@ -958,6 +967,7 @@ async fn concurrent_message_and_steer_reserve_one_shared_identity() {
                 chat_id: message_chat.id,
                 turn_id: message_turn.id,
                 role: Role::Assistant,
+                reasoning: Default::default(),
                 content: "shared identity".into(),
                 created_at: Utc::now(),
             })
@@ -1274,6 +1284,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
         turn_id: Set(turn.id.0),
         seq: Set(2),
         role: Set("assistant".into()),
+        reasoning: Default::default(),
         content: Set("occupy identity".into()),
         turn_lease_token: Set(None),
         created_at: Set(Utc::now()),

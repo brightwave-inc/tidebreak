@@ -17,6 +17,7 @@ async fn store_with_messages() -> (tempfile::TempDir, DbStore, Chat, Message, Me
         chat_id: chat.id,
         turn_id: TurnId::new(),
         role: Role::User,
+        reasoning: Default::default(),
         content: "Choose SQLite for local development.".into(),
         created_at: at(0),
     };
@@ -25,6 +26,7 @@ async fn store_with_messages() -> (tempfile::TempDir, DbStore, Chat, Message, Me
         chat_id: chat.id,
         turn_id: TurnId::new(),
         role: Role::Assistant,
+        reasoning: Default::default(),
         content: "The local database choice is SQLite.".into(),
         created_at: at(1),
     };

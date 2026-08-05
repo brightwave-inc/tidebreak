@@ -635,7 +635,7 @@ fn map_stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::ChatMessage;
+    use openwave_core::provider::{ChatMessage, MessageReasoning};
     use openwave_core::tool::ToolSpec;
     use openwave_core::ReasoningEffort;
 
@@ -812,7 +812,7 @@ mod tests {
                     input: json!({"path": "a"}),
                 },
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
@@ -839,7 +839,7 @@ mod tests {
                     is_error: true,
                 },
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let mut out = Vec::new();
         extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
@@ -1134,7 +1134,7 @@ mod tests {
                 },
                 ContentBlock::Image { image },
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
 
         let mut out = Vec::new();
@@ -1155,7 +1155,7 @@ mod tests {
         let msg = ChatMessage {
             role: Role::User,
             content: vec![ContentBlock::Image { image: png_ref(9) }],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
         let mut out = Vec::new();
         let err = extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap_err();
@@ -1180,7 +1180,7 @@ mod tests {
                 },
                 ContentBlock::Image { image },
             ],
-            reasoning: Vec::new(),
+            reasoning: MessageReasoning::default(),
         };
 
         let mut out = Vec::new();

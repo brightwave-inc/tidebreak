@@ -837,6 +837,7 @@ mod tests {
                 chat_id,
                 turn_id,
                 role: Role::User,
+                reasoning: Default::default(),
                 content: "run git status in ~/code/openwave".to_owned(),
                 created_at: at(0),
             }],
