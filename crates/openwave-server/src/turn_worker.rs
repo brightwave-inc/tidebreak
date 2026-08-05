@@ -146,6 +146,7 @@ pub(crate) fn freeze_foreground_turn_surface(
         base_agent_config,
         &[],
         &[],
+        &[],
         &openwave_core::NetworkPolicy::default(),
         crate::code_execution::DEFAULT_TIMEOUT_MS,
         false,
@@ -160,6 +161,7 @@ fn freeze_foreground_turn_surface_with_folders(
     base_agent_config: &AgentConfig,
     exec_folders: &[crate::code_execution::ResolvedExecFolderGrant],
     skills: &[openwave_code_execution::SkillPackage],
+    plugins: &[openwave_code_execution::PluginPackage],
     network_policy: &openwave_core::NetworkPolicy,
     exec_timeout_ms: u64,
     offline_package_cache: bool,
@@ -171,6 +173,7 @@ fn freeze_foreground_turn_surface_with_folders(
         &tools.specs_for_surface(true, plan_mode),
         exec_folders,
         skills,
+        plugins,
         network_policy,
         exec_timeout_ms,
         offline_package_cache,
@@ -597,16 +600,16 @@ impl TurnWorker {
             },
             None => Vec::new(),
         };
-        let skills = match self.exec_folder_context.as_ref() {
+        let (skills, plugins) = match self.exec_folder_context.as_ref() {
             Some(provider) => {
                 // The prompt's skill catalog directs the model to read each
                 // staged SKILL.md before its first exec, so the workspace has
                 // to be staged now — waiting for the first exec to stage it
                 // loses that race and the read fails with not-found.
                 provider.stage_turn_workspace(chat.id).await;
-                provider.skill_catalog()
+                (provider.skill_catalog(), provider.plugin_catalog())
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
         let offline_package_cache = match self.exec_folder_context.as_ref() {
             Some(provider) => provider.offline_package_cache_ready().await,
@@ -625,6 +628,7 @@ impl TurnWorker {
             &self.agent_config,
             &exec_folders,
             &skills,
+            &plugins,
             &chat.network_policy,
             exec_timeout_ms,
             offline_package_cache,

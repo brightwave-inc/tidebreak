@@ -910,6 +910,10 @@ pub struct ConfiguredCodeExecutionProvider {
     /// staging so an added or edited skill is picked up on the next turn
     /// without a restart. `None` disables user skills entirely.
     user_skills_dir: Option<PathBuf>,
+    /// Built-in plugins validated once at configuration against the built-in
+    /// skills, grouping them in the prompt catalog. Empty when no plugin tree
+    /// is configured, which leaves every skill standalone.
+    plugins: Arc<Vec<openwave_code_execution::LoadedPlugin>>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     /// Host-provided office-to-PDF converter feeding the model's visual QA
     /// loop. `None` (headless embeddings) degrades to an honest sync note.
@@ -1111,6 +1115,7 @@ impl ConfiguredCodeExecutionProvider {
             document_scripts_source: None,
             skills: Arc::new(Vec::new()),
             user_skills_dir: None,
+            plugins: Arc::new(Vec::new()),
             folder_grant_resolver: None,
             office_converter: None,
             host_tool_broker: None,
@@ -1179,6 +1184,21 @@ impl ConfiguredCodeExecutionProvider {
         self
     }
 
+    /// Load the built-in plugins that group the built-in skills in the prompt
+    /// catalog. Call after [`Self::with_skills`]: membership is resolved
+    /// against the skills already loaded, and a plugin naming one that is not
+    /// there is skipped (with a warning) rather than grouping nothing.
+    #[must_use]
+    pub fn with_plugins(mut self, source: Option<PathBuf>) -> Self {
+        self.plugins = Arc::new(
+            source
+                .as_deref()
+                .map(|source| openwave_code_execution::load_plugins(source, &self.skills))
+                .unwrap_or_default(),
+        );
+        self
+    }
+
     /// Install the per-install directory user-authored skill packages are
     /// loaded from. The directory is created here (best effort) so the user
     /// has a place to drop a skill; its contents are re-read at each staging,
@@ -1211,6 +1231,15 @@ impl ConfiguredCodeExecutionProvider {
         self.current_skills()
             .into_iter()
             .map(|skill| skill.package)
+            .collect()
+    }
+
+    /// The bundles the catalog groups skills under. User skills are claimed by
+    /// no plugin and stay standalone.
+    pub(crate) fn plugin_catalog(&self) -> Vec<openwave_code_execution::PluginPackage> {
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.package.clone())
             .collect()
     }
 

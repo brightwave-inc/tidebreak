@@ -150,6 +150,12 @@ const REQUIRED_SKILLS: [&str; 5] = [
     "word-documents",
 ];
 
+/// The plugins those skills are grouped into. Boot requires all three: a
+/// plugin that fails to load takes its skills out of the grouped catalog
+/// silently, which is exactly the kind of drift a packaged build should not
+/// ship.
+const REQUIRED_PLUGINS: [&str; 3] = ["charts", "documents", "spreadsheets"];
+
 fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let directory = app
         .path()
@@ -162,6 +168,53 @@ fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         }
     }
     Ok(directory)
+}
+
+fn exec_plugins_dir(app: &tauri::AppHandle, skills_dir: &Path) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("app resource dir: {error}"))?
+        .join("plugins");
+    verify_required_plugins(skills_dir, &directory)?;
+    Ok(directory)
+}
+
+/// Load both bundled trees the way the server will and check that the required
+/// plugins are present and together cover every required skill.
+///
+/// Loading is what is checked, not file presence: a manifest that parses but
+/// names a skill that did not load is skipped by the loader, and the resulting
+/// gap would otherwise appear only as an ungrouped catalog at runtime.
+fn verify_required_plugins(skills_dir: &Path, plugins_dir: &Path) -> Result<(), String> {
+    let skills = openwave_code_execution::load_skills(
+        skills_dir,
+        openwave_code_execution::SkillOrigin::Builtin,
+    );
+    let plugins = openwave_code_execution::load_plugins(plugins_dir, &skills);
+    let loaded: Vec<&str> = plugins
+        .iter()
+        .map(|plugin| plugin.package.name.as_str())
+        .collect();
+    for name in REQUIRED_PLUGINS {
+        if !loaded.contains(&name) {
+            return Err(format!(
+                "bundled plugin '{name}' is missing or failed to load from {}; loaded: {loaded:?}",
+                plugins_dir.display()
+            ));
+        }
+    }
+    let mut covered: Vec<&str> = plugins
+        .iter()
+        .flat_map(|plugin| plugin.package.skills.iter().map(String::as_str))
+        .collect();
+    covered.sort_unstable();
+    if covered != REQUIRED_SKILLS {
+        return Err(format!(
+            "bundled plugins cover {covered:?}, but the required document skills are {REQUIRED_SKILLS:?}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -320,6 +373,11 @@ async fn boot_server(
     let mut config = Config::desktop(data_dir.clone());
     config.exec_scripts_dir = Some(exec_scripts_dir(&app)?);
     config.exec_skills_dir = Some(exec_skills_dir(&app)?);
+    let skills_dir = config
+        .exec_skills_dir
+        .clone()
+        .expect("skills dir was just set");
+    config.exec_plugins_dir = Some(exec_plugins_dir(&app, &skills_dir)?);
     // The effective identifier — including the debug-build override — keys
     // the macOS managed-preferences (MDM) domain the server reads policy from.
     config.bundle_id = Some(app.config().identifier.clone());
@@ -401,13 +459,14 @@ async fn boot_server(
 
 #[cfg(test)]
 mod bundle_tests {
-    use super::REQUIRED_SKILLS;
+    use super::{verify_required_plugins, REQUIRED_SKILLS};
 
-    /// Packaged-style skill resolution, pinned at test time: the
-    /// `tauri.conf.json` resource map must stage a skills tree into the app
-    /// bundle, and that tree must yield every skill `exec_skills_dir`
-    /// requires. Dropping the resource line or breaking a manifest would
-    /// otherwise surface only as a packaged-app boot failure.
+    /// Packaged-style skill and plugin resolution, pinned at test time: the
+    /// `tauri.conf.json` resource map must stage both trees into the app
+    /// bundle, that skills tree must yield every skill `exec_skills_dir`
+    /// requires, and the plugins tree must group all of them. Dropping a
+    /// resource line or breaking a manifest would otherwise surface only as a
+    /// packaged-app boot failure.
     #[test]
     fn bundled_resources_carry_all_required_skills() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -415,16 +474,20 @@ mod bundle_tests {
             &std::fs::read_to_string(manifest_dir.join("tauri.conf.json")).unwrap(),
         )
         .unwrap();
-        let source = conf["bundle"]["resources"]
+        let resources = conf["bundle"]["resources"]
             .as_object()
-            .expect("tauri.conf.json maps bundle resources")
-            .iter()
-            .find_map(|(source, target)| {
-                (target.as_str() == Some("skills/")).then(|| source.clone())
-            })
-            .expect("tauri.conf.json bundles a skills/ resource");
+            .expect("tauri.conf.json maps bundle resources");
+        let resource = |target: &str| {
+            resources
+                .iter()
+                .find_map(|(source, mapped)| {
+                    (mapped.as_str() == Some(target)).then(|| manifest_dir.join(source))
+                })
+                .unwrap_or_else(|| panic!("tauri.conf.json bundles a {target} resource"))
+        };
+        let skills_dir = resource("skills/");
         let skills = openwave_code_execution::load_skills(
-            &manifest_dir.join(source),
+            &skills_dir,
             openwave_code_execution::SkillOrigin::Builtin,
         );
         let names: Vec<&str> = skills
@@ -432,6 +495,7 @@ mod bundle_tests {
             .map(|skill| skill.package.name.as_str())
             .collect();
         assert_eq!(names, REQUIRED_SKILLS);
+        verify_required_plugins(&skills_dir, &resource("plugins/")).unwrap();
     }
 }
 
