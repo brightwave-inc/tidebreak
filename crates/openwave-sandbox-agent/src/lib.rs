@@ -41,7 +41,7 @@ pub mod model;
 pub mod supervisor;
 pub mod tools;
 
-pub use agent::{run_agent, AgentRunError};
+pub use agent::{run_agent, AgentRunError, STEERING_PREFIX};
 pub use egress::{EgressProxy, EgressProxyConfig};
 pub use exec::{ExecTool, EXEC_TOOL};
 pub use fs::{

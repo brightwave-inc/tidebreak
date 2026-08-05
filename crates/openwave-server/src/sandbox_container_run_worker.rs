@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 
 use crate::resolver::ProviderResolver;
 use crate::sandbox_container_run::{SandboxContainerRunConfig, SandboxContainerRunner};
+use crate::state::SandboxSteerGuard;
 
 /// Service-level polling and maintenance tunables.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +63,7 @@ impl SandboxContainerRunWorker {
         backend: Arc<dyn SandboxBackend>,
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
+        steering: Arc<SandboxSteerGuard>,
         enabled: bool,
         runner_config: SandboxContainerRunConfig,
         config: SandboxContainerRunWorkerConfig,
@@ -75,12 +77,12 @@ impl SandboxContainerRunWorker {
         assert!(!config.maintenance_interval.is_zero());
         assert!(config.candidate_limit > 0);
         assert!(config.max_concurrency > 0);
-        let runner = Arc::new(SandboxContainerRunner::new(
-            store.clone(),
-            backend,
-            resolver,
-            runner_config,
-        ));
+        let runner = Arc::new(
+            SandboxContainerRunner::new(store.clone(), backend, resolver, runner_config)
+                // The same guard the steer route resolves a run against, so an
+                // instruction reaches the connection this worker's driver holds.
+                .with_steering(steering),
+        );
         Some(Self {
             store,
             runner,

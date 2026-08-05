@@ -15,7 +15,7 @@
 //! to attachment: a `call` with no attached host waits for the host to attach.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -99,6 +99,9 @@ struct RunInner {
     init: watch::Sender<Option<crate::init::RunInit>>,
     /// Monotonic activity generation observed by the sandbox idle watchdog.
     activity: watch::Sender<u64>,
+    /// Host-sent steering instructions the agent loop has not consumed yet,
+    /// oldest first and bounded by [`MAX_PENDING_STEERS`].
+    steering: Mutex<VecDeque<String>>,
 }
 
 /// One run-scoped, cloneable sandbox. Every clone shares one event buffer and one
@@ -159,6 +162,7 @@ impl SandboxRun {
                 conn,
                 init,
                 activity,
+                steering: Mutex::new(VecDeque::new()),
             }),
         }
     }
@@ -203,6 +207,37 @@ impl SandboxRun {
             *slot = Some(init);
             true
         });
+    }
+
+    /// Take every host [steering](crate::steer) instruction that has arrived and
+    /// not yet been consumed, oldest first, leaving the queue empty.
+    ///
+    /// The agent loop calls this at a step boundary and folds what it gets into
+    /// the next model step, so an instruction that arrives mid-step lands on the
+    /// step after it. Steering is attached-only: nothing is queued while the host
+    /// is away, and a run nobody steered returns an empty vector.
+    #[must_use]
+    pub fn take_steering(&self) -> Vec<String> {
+        self.inner
+            .steering
+            .lock()
+            .expect("steering lock")
+            .drain(..)
+            .collect()
+    }
+
+    /// Queue one host steering instruction for the agent loop's next step.
+    ///
+    /// Bounded at [`MAX_PENDING_STEERS`](crate::steer::MAX_PENDING_STEERS): a host
+    /// that steers faster than the loop steps drops its *oldest* pending
+    /// instruction rather than growing sandbox memory, because the newest
+    /// guidance is the guidance the user meant.
+    fn deliver_steer(&self, text: String) {
+        let mut steering = self.inner.steering.lock().expect("steering lock");
+        while steering.len() >= crate::steer::MAX_PENDING_STEERS {
+            steering.pop_front();
+        }
+        steering.push_back(text);
     }
 
     /// Emit a bounded progress line, returning its assigned sequence.
@@ -557,6 +592,19 @@ where
                 run.mark_activity();
                 run.deliver_init(init);
             }
+            // Mid-run steering, likewise only over an authenticated connection,
+            // and only from the connection currently installed as the run's live
+            // peer: a superseded socket must not inject guidance for a host that
+            // has already been replaced. An over-bound instruction is dropped
+            // rather than truncated — a conforming host checks the bound before
+            // it writes, so this is a non-conforming peer, and half an
+            // instruction is worse guidance than none.
+            WireFrame::Steer(message) => {
+                if run.is_live(&closed) && message.within_bounds() {
+                    run.mark_activity();
+                    run.deliver_steer(message.text);
+                }
+            }
             // The sandbox originates cancels and requests; it never receives
             // them. Pong is liveness only. Ignore rather than trust peer input.
             WireFrame::Control(
@@ -598,6 +646,7 @@ mod tests {
     use crate::{
         ids::RunId,
         protocol::{AttachRequest, HandshakeResponse},
+        steer::{SteerMessage, MAX_PENDING_STEERS, MAX_STEER_BYTES},
     };
 
     fn run_with(secret: &TransportSecret) -> SandboxRun {
@@ -656,6 +705,71 @@ mod tests {
             "a peer that never attached must not be installed"
         );
         drop(host_side);
+    }
+
+    /// Steering is bounded on the way in and keeps the newest guidance: an
+    /// over-bound instruction is refused rather than truncated, and a host that
+    /// steers faster than the loop steps loses its oldest pending instruction,
+    /// never sandbox memory.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn steering_is_bounded_and_keeps_the_newest_instructions() {
+        let secret = TransportSecret::new("steer-bounds-test");
+        let run = run_with(&secret);
+        let (host_side, sandbox_side) = tokio::io::duplex(128 * 1024);
+        tokio::spawn(super::serve_connection(sandbox_side, run.clone()));
+        let (mut reader, mut writer) = attach(host_side, &secret, EventCursor::START).await;
+
+        let over_bound = "x".repeat(MAX_STEER_BYTES + 1);
+        write_frame(
+            &mut writer,
+            &WireFrame::Steer(SteerMessage::new(over_bound.clone())),
+        )
+        .await
+        .expect("send an over-bound steer");
+        for index in 0..MAX_PENDING_STEERS + 2 {
+            write_frame(
+                &mut writer,
+                &WireFrame::Steer(SteerMessage::new(format!("step {index}"))),
+            )
+            .await
+            .expect("send a steer");
+        }
+        // A ping behind them, answered on the same connection, proves every
+        // steer above was processed before the assertions read the queue.
+        write_frame(
+            &mut writer,
+            &WireFrame::Control(ControlFrame::Ping { nonce: 7 }),
+        )
+        .await
+        .expect("send ping");
+        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut reader))
+            .await
+            .expect("the connection is served")
+            .expect("pong");
+        assert!(matches!(
+            pong,
+            WireFrame::Control(ControlFrame::Pong { nonce: 7 })
+        ));
+
+        let taken = run.take_steering();
+        assert_eq!(
+            taken.len(),
+            MAX_PENDING_STEERS,
+            "the pending queue is capped, got {taken:?}"
+        );
+        assert!(
+            !taken.contains(&over_bound),
+            "an over-bound instruction must be refused, not carried"
+        );
+        assert_eq!(
+            taken.first().map(String::as_str),
+            Some("step 2"),
+            "the oldest pending instructions are what a full queue drops"
+        );
+        assert!(
+            run.take_steering().is_empty(),
+            "taking steering leaves the queue empty"
+        );
     }
 
     /// A superseded peer — still draining its socket after the host reconnected —

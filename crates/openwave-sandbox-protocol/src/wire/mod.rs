@@ -54,7 +54,7 @@ use crate::{
     reverse::{ControlFrame, RequestFrame},
 };
 
-pub use host::{HostConnection, WireClient};
+pub use host::{HostConnection, SteerError, WireClient};
 pub use sandbox::{serve_connection, ReverseOutcome, SandboxRun};
 
 /// How long either side waits for the handshake frame it is owed before it drops
@@ -76,10 +76,18 @@ pub const MAX_FRAME_BYTES: usize = crate::protocol::MAX_FRAME_BYTES;
 
 /// One framed unit on the wire.
 ///
-/// The variants name the four lanes the connection multiplexes plus the two
+/// The variants name the lanes the connection multiplexes plus the two
 /// handshake frames that open it. Each carries one of the protocol's existing
 /// types verbatim; this envelope does not fork their shapes, it only tags which
 /// lane the payload belongs to.
+///
+/// The set is closed, and `deny_unknown_fields` means an unrecognized lane fails
+/// to decode rather than being skipped. That is deliberate: a peer must never
+/// half-understand a connection. Adding a variant is therefore an incompatible
+/// change that bumps [`PROTOCOL_VERSION`](crate::protocol::PROTOCOL_VERSION), and
+/// the exact-equality attach handshake turns a skew into a legible refusal
+/// carrying the peer's own version — an older sandbox image is turned away at
+/// attach, never handed a frame it would drop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "lane",
@@ -114,6 +122,11 @@ pub enum WireFrame {
     /// once the handle has committed on the host. Redelivered on every attach;
     /// the sandbox keeps the first and ignores the rest.
     Init(crate::init::RunInit),
+    /// Host -> sandbox: one mid-run [steering](crate::steer) instruction for a
+    /// live agent loop. Written onto the reserved control queue, so guidance is
+    /// never stuck behind a response or replay backlog, and applied by the
+    /// sandbox at its next step boundary.
+    Steer(crate::steer::SteerMessage),
 }
 
 /// Why a framed read or write stopped.

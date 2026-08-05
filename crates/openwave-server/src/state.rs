@@ -11,7 +11,7 @@ use openwave_core::{
     AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
     FsBlobStore, Profile, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{mpsc, Notify, Semaphore};
 use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
@@ -182,6 +182,12 @@ pub struct AppState {
     /// only let an authenticated cancellation request promptly drop provider
     /// futures owned by this server process.
     pub(crate) sandbox_attempts: Arc<SandboxAttemptGuard>,
+    /// Process-local steering sinks for sandbox-resident runs attached here.
+    ///
+    /// Mid-run steering is delivered over the connection the container driver
+    /// holds, so a run this process is not attached to cannot be steered and
+    /// the request is refused rather than queued.
+    pub(crate) sandbox_steering: Arc<SandboxSteerGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
     pub events: Arc<EventBus>,
     /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
@@ -336,6 +342,7 @@ impl AppState {
             root_attachment_routes_enabled: true,
             active_turns: Arc::new(TurnGuard::default()),
             sandbox_attempts: Arc::new(SandboxAttemptGuard::default()),
+            sandbox_steering: Arc::new(SandboxSteerGuard::default()),
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new(store)),
             local_voice: Arc::new(UnavailableLocalVoiceRunner),
@@ -436,6 +443,104 @@ impl SandboxAttemptGuard {
             return true;
         }
         false
+    }
+}
+
+/// Steering handles for sandbox-resident runs this process currently holds a
+/// live connection to.
+///
+/// Steering a background run is attached-only: the instruction rides the
+/// connection the container driver is holding right now, and there is no durable
+/// queue behind it. Registration is therefore exactly as long as one attached
+/// connection — the driver registers after its attach handshake is accepted and
+/// the RAII handle deregisters when that connection ends — so an absent entry
+/// means "nobody can carry this instruction", which is what the API reports.
+/// Like [`SandboxAttemptGuard`], this map is process-local and never
+/// participates in admission or terminal decisions.
+#[derive(Default)]
+pub(crate) struct SandboxSteerGuard {
+    attached: Mutex<HashMap<(AgentRunId, Uuid), mpsc::Sender<String>>>,
+}
+
+/// Why one steering instruction could not be handed to a live run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SandboxSteerRefusal {
+    /// No connection to the run is live in this process, so nothing can carry
+    /// the instruction. Nothing was queued.
+    NotAttached,
+    /// The run is attached but has not consumed the instructions already sent;
+    /// the caller retries rather than growing an unbounded backlog.
+    Backlogged,
+}
+
+impl SandboxSteerGuard {
+    /// Register the live connection's steering sink for one exact run and lease.
+    ///
+    /// Returns `None` when that identity is already registered, so a superseded
+    /// registration can never displace the live one.
+    pub(crate) fn register(
+        self: &Arc<Self>,
+        agent_run_id: AgentRunId,
+        lease_token: Uuid,
+        sink: mpsc::Sender<String>,
+    ) -> Option<AttachedSandboxRun> {
+        let mut attached = self.attached.lock().unwrap();
+        let identity = (agent_run_id, lease_token);
+        if attached.contains_key(&identity) {
+            return None;
+        }
+        attached.insert(identity, sink);
+        Some(AttachedSandboxRun {
+            guard: Arc::clone(self),
+            agent_run_id,
+            lease_token,
+        })
+    }
+
+    /// Hand `text` to the run's live connection.
+    ///
+    /// Acceptance means a live connection took the instruction, not that the
+    /// agent has read it; the run's own event stream reports when it is applied.
+    ///
+    /// # Errors
+    /// [`SandboxSteerRefusal::NotAttached`] when no connection to the run is
+    /// live here, or [`SandboxSteerRefusal::Backlogged`] when the live one has
+    /// not drained what it was already given.
+    pub(crate) fn steer(
+        &self,
+        agent_run_id: AgentRunId,
+        text: String,
+    ) -> std::result::Result<(), SandboxSteerRefusal> {
+        let attached = self.attached.lock().unwrap();
+        // At most one connection per run is live, but it is keyed by the exact
+        // lease that owns it, which the caller does not (and should not) name.
+        let sink = attached
+            .iter()
+            .find(|((run, _lease), _sink)| *run == agent_run_id)
+            .map(|(_identity, sink)| sink.clone())
+            .ok_or(SandboxSteerRefusal::NotAttached)?;
+        drop(attached);
+        sink.try_send(text).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => SandboxSteerRefusal::Backlogged,
+            mpsc::error::TrySendError::Closed(_) => SandboxSteerRefusal::NotAttached,
+        })
+    }
+}
+
+/// The registration of one attached sandbox-resident run, deregistered on drop.
+pub(crate) struct AttachedSandboxRun {
+    guard: Arc<SandboxSteerGuard>,
+    agent_run_id: AgentRunId,
+    lease_token: Uuid,
+}
+
+impl Drop for AttachedSandboxRun {
+    fn drop(&mut self) {
+        self.guard
+            .attached
+            .lock()
+            .unwrap()
+            .remove(&(self.agent_run_id, self.lease_token));
     }
 }
 

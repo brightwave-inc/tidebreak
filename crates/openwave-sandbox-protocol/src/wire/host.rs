@@ -54,6 +54,18 @@ pub enum ConnectError {
     Transport(#[from] FrameError),
 }
 
+/// Why steering a live run did not reach the sandbox.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SteerError {
+    /// The instruction exceeded [`MAX_STEER_BYTES`](crate::steer::MAX_STEER_BYTES).
+    #[error("the steering instruction exceeded its size bound")]
+    TooLarge,
+    /// The connection closed; an unattached run cannot be steered, and nothing
+    /// is queued for it.
+    #[error("the run is not attached")]
+    Disconnected,
+}
+
 /// The host's live connection to a sandbox.
 ///
 /// Holds the accepted handshake, a receiver for the sandbox's event stream, and
@@ -240,6 +252,33 @@ impl HostConnection {
             .await;
     }
 
+    /// Steer the live run: hand the sandbox one mid-run instruction to fold into
+    /// its agent loop's next model step.
+    ///
+    /// Attached-only by construction — this is a method on a live connection, so
+    /// there is nowhere to leave an instruction for a run that is not attached,
+    /// and nothing is queued on the host's behalf. It rides the reserved control
+    /// lane, so it is not stuck behind a reverse response or a replay backlog.
+    ///
+    /// Acceptance means the instruction was handed to a connection that was live
+    /// when it was written, not that the agent has read it: a connection that
+    /// drops in the same instant loses it, and the caller steers again.
+    ///
+    /// # Errors
+    /// [`SteerError::TooLarge`] past [`MAX_STEER_BYTES`](crate::steer::MAX_STEER_BYTES)
+    /// — refused rather than truncated — or [`SteerError::Disconnected`] once the
+    /// connection has closed.
+    pub async fn send_steer(&self, message: crate::steer::SteerMessage) -> Result<(), SteerError> {
+        if !message.within_bounds() {
+            return Err(SteerError::TooLarge);
+        }
+        self.outbound
+            .control
+            .send(WireFrame::Steer(message))
+            .await
+            .map_err(|_| SteerError::Disconnected)
+    }
+
     /// Start sending host-ownership keepalives over the reserved control lane.
     ///
     /// The first keepalive is immediate, then one is sent every `interval` until
@@ -344,13 +383,15 @@ async fn read_loop<R>(
                     Err(TrySendError::Full(_) | TrySendError::Closed(_)) => break,
                 }
             }
-            // The host answers requests; it never receives responses or another
-            // handshake mid-connection. Ignore rather than trust peer input.
+            // The host answers requests; it never receives responses, another
+            // handshake mid-connection, or its own host -> sandbox frames.
+            // Ignore rather than trust peer input.
             WireFrame::Request(RequestFrame::Response(_))
             | WireFrame::Attach(_)
             | WireFrame::Handshake(_)
             | WireFrame::EventAck { .. }
-            | WireFrame::Init(_) => {}
+            | WireFrame::Init(_)
+            | WireFrame::Steer(_) => {}
         }
     }
 }
