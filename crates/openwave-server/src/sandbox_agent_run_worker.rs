@@ -708,11 +708,14 @@ impl SandboxAgentRunWorker {
         }
     }
 
-    /// Resolve submitted filenames against the conversation's live outputs.
+    /// Resolve submitted filenames against the outputs this run itself wrote.
     ///
     /// Matching is by filename because that is the identity the run worked with
-    /// and the only one it ever sees. The newest live output wins, which is the
-    /// same rule the output scan applies when it republishes a filename.
+    /// and the only one it ever sees, but a name only resolves when some
+    /// revision of the output it lands on was produced by this run. Without
+    /// that scope a run could hand over any file already in the conversation —
+    /// including one the user's own turn produced — and have it presented as
+    /// its work.
     async fn resolve_submitted_outputs(
         &self,
         run: &AgentRun,
@@ -725,23 +728,45 @@ impl SandboxAgentRunWorker {
             .store
             .list_outputs(run.chat_id, OUTPUT_LOOKUP_LIMIT)
             .await?;
-        filenames
+        let mut resolved = Vec::with_capacity(filenames.len());
+        for filename in filenames {
+            // `list_outputs` orders newest-updated first, so the first match
+            // this run wrote is the record its file landed on.
+            let mut output_id = None;
+            for output in existing
+                .iter()
+                .filter(|output| &output.filename == filename)
+            {
+                if self.run_produced_output(run.id, output.id).await? {
+                    output_id = Some(output.id);
+                    break;
+                }
+            }
+            let Some(output_id) = output_id else {
+                return Err(AgentError::msg(format!(
+                    "sandbox agent submitted {filename}, which it never wrote under output/"
+                )));
+            };
+            resolved.push(AgentRunSubmittedOutput {
+                output_id,
+                filename: filename.clone(),
+            });
+        }
+        Ok(resolved)
+    }
+
+    /// Whether any revision of one output was published for this run.
+    async fn run_produced_output(
+        &self,
+        run_id: openwave_core::AgentRunId,
+        output_id: openwave_core::OutputId,
+    ) -> Result<bool> {
+        Ok(self
+            .store
+            .list_output_revisions(output_id)
+            .await?
             .iter()
-            .map(|filename| {
-                existing
-                    .iter()
-                    .find(|output| &output.filename == filename)
-                    .map(|output| AgentRunSubmittedOutput {
-                        output_id: output.id,
-                        filename: filename.clone(),
-                    })
-                    .ok_or_else(|| {
-                        AgentError::msg(format!(
-                            "sandbox agent submitted {filename}, which it never wrote under output/"
-                        ))
-                    })
-            })
-            .collect()
+            .any(|revision| revision.producing_run_id == Some(run_id)))
     }
 
     async fn submit_folder_access_proposal(
@@ -2221,9 +2246,10 @@ mod tests {
 
     /// A run's deliverables are the files it wrote, so submission has exactly two
     /// jobs: carry the names the model chose through to the parent, and refuse a
-    /// name that never became an output rather than inventing one.
+    /// name the run did not produce — whether nothing in the conversation carries
+    /// it, or something does but another writer put it there.
     #[tokio::test]
-    async fn submitting_files_carries_their_names_and_refuses_a_name_that_was_never_published() {
+    async fn submitting_files_carries_their_names_and_refuses_a_name_this_run_did_not_write() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -2235,24 +2261,31 @@ mod tests {
         );
         let chat = sandbox_chat();
         store.create_chat(&chat).await.unwrap();
+        let call = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
         let published = openwave_core::OutputId::new();
-        store
-            .create_output(&openwave_core::CreateOutput {
-                id: published,
+        let seed = |output_id, filename: &str, run: Option<openwave_core::AgentRunId>| {
+            let request = openwave_core::CreateOutput {
+                id: output_id,
                 chat_id: chat.id,
-                filename: "Q3 revenue.md".into(),
+                filename: filename.to_owned(),
                 kind: openwave_core::DeliverableKind::Text,
                 revision: openwave_core::NewOutputRevision {
                     id: openwave_core::OutputRevisionId::new(),
                     byte_len: 4,
                     sha256: [0; 32],
                     turn_id: None,
-                    producing_run_id: None,
+                    producing_run_id: run,
                     created_at: chrono::Utc::now(),
                 },
-            })
-            .await
-            .unwrap();
+            };
+            let store = store.clone();
+            async move { store.create_output(&request).await.unwrap() }
+        };
+        // What this run wrote, and what somebody else's writer left in the same
+        // conversation under a name the run might reach for.
+        seed(published, "Q3 revenue.md", Some(id)).await;
+        seed(openwave_core::OutputId::new(), "Q4 revenue.md", None).await;
 
         let done = |filename: &str| {
             Arc::new(EventProvider(vec![
@@ -2290,8 +2323,6 @@ mod tests {
             )
         };
 
-        let call = CallId::new();
-        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
         admit_sandbox(&store, chat.id, call, "Summarize Q3 revenue.").await;
         assert_eq!(
             worker(done("Q3 revenue.md")).run_once().await.unwrap(),

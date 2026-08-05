@@ -556,6 +556,7 @@ mod output_scan {
         sync_output_directory(
             store,
             scratch,
+            scratch,
             chat_id,
             call_id,
             RevisionProducer::Turn(TurnId::new()),
@@ -808,6 +809,43 @@ mod output_scan {
         assert!(scan.notes[0].contains("not a private workspace directory"));
         assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
     }
+
+    /// A background run writes in its own workspace but publishes into its
+    /// parent conversation. The bytes have to land under the conversation's
+    /// scratch regardless, because that is the only place a reader looks for a
+    /// revision — publishing them beside the file that produced them would
+    /// leave the catalog listing an output nothing can open.
+    #[tokio::test]
+    async fn publishing_from_another_workspace_writes_bytes_under_the_conversation() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let conversation = tempfile::tempdir().unwrap();
+        write_output_file(workspace.path(), "report.md", b"# Report");
+
+        let scan = sync_output_directory(
+            &store,
+            &open_scratch(workspace.path()),
+            &open_scratch(conversation.path()),
+            chat.id,
+            CallId::new(),
+            RevisionProducer::Run(crate::AgentRunId::new()),
+            at(0),
+        )
+        .await
+        .unwrap();
+
+        let output = store
+            .get_output(scan.entries[0].output_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let relative = output_revision_relative_path(output.id, output.current_revision);
+        assert_eq!(
+            std::fs::read(conversation.path().join(&relative)).unwrap(),
+            b"# Report"
+        );
+        assert!(!workspace.path().join(&relative).exists());
+    }
 }
 
 #[cfg(feature = "tools")]
@@ -832,6 +870,7 @@ mod restore {
             std::fs::write(directory.join("report.md"), content).unwrap();
             sync_output_directory(
                 store,
+                &dir,
                 &dir,
                 chat_id,
                 CallId::new(),

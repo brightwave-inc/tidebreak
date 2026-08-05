@@ -1958,7 +1958,30 @@ impl ConfiguredCodeExecutionProvider {
             .await
     }
 
+    /// Open one private scratch directory under the scratch root, creating it
+    /// if a conversation has not needed one yet — a background run can publish
+    /// into a conversation that has never executed anything itself.
+    async fn open_scratch_directory(
+        &self,
+        name: &str,
+    ) -> std::result::Result<cap_std::fs::Dir, CodeExecutionError> {
+        let path = self.scratch_root.join(name);
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&path)?;
+            cap_std::fs::Dir::open_ambient_dir(&path, cap_std::ambient_authority())
+        })
+        .await
+        .map_err(|_| CodeExecutionError::Sandbox("output scan task failed".into()))?
+        .map_err(|_| CodeExecutionError::Sandbox("the private workspace is unavailable".into()))
+    }
+
     /// Scan one workspace's `output/` and record what changed as revisions.
+    ///
+    /// Files are read out of the workspace the command ran in and their bytes
+    /// are published into the owning conversation's own scratch, which is where
+    /// every reader resolves a revision. For a foreground turn those are the
+    /// same directory; a background run's workspace is its own, so the two
+    /// differ and only the publication side follows the conversation.
     async fn publish_output_directory(
         &self,
         workspace: &ExecutionWorkspaceId,
@@ -1966,17 +1989,19 @@ impl ConfiguredCodeExecutionProvider {
         call_id: CallId,
         producer: RevisionProducer,
     ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
-        let scratch_path = self.scratch_root.join(workspace.as_str());
-        let scratch = tokio::task::spawn_blocking(move || {
-            cap_std::fs::Dir::open_ambient_dir(&scratch_path, cap_std::ambient_authority())
-        })
-        .await
-        .map_err(|_| CodeExecutionError::Sandbox("output scan task failed".into()))?
-        .map_err(|_| CodeExecutionError::Sandbox("the private workspace is unavailable".into()))?;
+        let workspace_dir = self.open_scratch_directory(workspace.as_str()).await?;
+        let publication_dir = if workspace.as_str() == chat_id.to_string() {
+            workspace_dir.try_clone().map_err(|_| {
+                CodeExecutionError::Sandbox("the private workspace is unavailable".into())
+            })?
+        } else {
+            self.open_scratch_directory(&chat_id.to_string()).await?
+        };
 
         let sync = openwave_core::sync_output_directory(
             &*self.store,
-            &scratch,
+            &workspace_dir,
+            &publication_dir,
             chat_id,
             call_id,
             producer,

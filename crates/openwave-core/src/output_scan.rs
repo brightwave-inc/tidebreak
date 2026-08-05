@@ -79,15 +79,19 @@ struct ScanCandidate {
     content: Vec<u8>,
 }
 
-/// Scan `output/` under one conversation's private scratch and publish its
-/// files as durable outputs.
+/// Scan `output/` under a workspace and publish its files as durable outputs.
 ///
-/// `scratch` is the exact owning conversation's private scratch directory.
-/// Identities derive from the (call, filename) pair, so an exact retry of the
-/// same call republishes idempotently instead of forking records.
+/// `workspace` is the private scratch the files were written into, and
+/// `publication` is the owning conversation's own private scratch, where
+/// revision bytes live because that is the only place a reader looks for them.
+/// For a foreground turn the two are the same directory; a background run
+/// writes in its own per-run workspace and publishes into its parent
+/// conversation. Identities derive from the (call, filename) pair, so an exact
+/// retry of the same call republishes idempotently instead of forking records.
 pub async fn sync_output_directory(
     store: &dyn Store,
-    scratch: &Dir,
+    workspace: &Dir,
+    publication: &Dir,
     chat_id: ChatId,
     call_id: CallId,
     producer: RevisionProducer,
@@ -96,7 +100,7 @@ pub async fn sync_output_directory(
     let mut sync = OutputDirectorySync::default();
 
     // Reading is blocking capability I/O; keep it off the async runtime.
-    let read_scratch = scratch
+    let read_scratch = workspace
         .try_clone()
         .map_err(|error| AgentError::Store(format!("could not open private scratch: {error}")))?;
     let (candidates, mut read_notes) =
@@ -115,7 +119,14 @@ pub async fn sync_output_directory(
 
     for candidate in candidates {
         match record_candidate(
-            store, scratch, chat_id, call_id, producer, now, &existing, &candidate,
+            store,
+            publication,
+            chat_id,
+            call_id,
+            producer,
+            now,
+            &existing,
+            &candidate,
         )
         .await
         {
@@ -133,7 +144,7 @@ pub async fn sync_output_directory(
 #[allow(clippy::too_many_arguments)]
 async fn record_candidate(
     store: &dyn Store,
-    scratch: &Dir,
+    publication: &Dir,
     chat_id: ChatId,
     call_id: CallId,
     producer: RevisionProducer,
@@ -164,7 +175,7 @@ async fn record_candidate(
             });
         }
         let revision_id = OutputRevisionId::for_call_artifact(call_id, &candidate.filename);
-        publish_revision_bytes(scratch, output.id, revision_id, &candidate.content).await?;
+        publish_revision_bytes(publication, output.id, revision_id, &candidate.content).await?;
         let updated = store
             .append_output_revision(
                 output.id,
@@ -189,7 +200,7 @@ async fn record_candidate(
 
     let output_id = OutputId::for_call_artifact(call_id, &candidate.filename);
     let revision_id = OutputRevisionId::for_call_artifact(call_id, &candidate.filename);
-    publish_revision_bytes(scratch, output_id, revision_id, &candidate.content).await?;
+    publish_revision_bytes(publication, output_id, revision_id, &candidate.content).await?;
     let created = store
         .create_output(&CreateOutput {
             id: output_id,
