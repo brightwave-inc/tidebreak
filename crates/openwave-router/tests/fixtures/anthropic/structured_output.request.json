@@ -1,0 +1,69 @@
+{
+  "body": {
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "content": [
+          {
+            "cache_control": {
+              "type": "ephemeral"
+            },
+            "text": "Summarize the incident.",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "claude-opus-5",
+    "stream": true,
+    "tool_choice": {
+      "name": "incident_summary",
+      "type": "tool"
+    },
+    "tools": [
+      {
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "description": "Return the result of this request. Call this once, with the whole answer in its arguments, and write nothing else.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "affected": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "headline": {
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "low",
+                "high"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "affected",
+            "headline",
+            "severity"
+          ],
+          "type": "object"
+        },
+        "name": "incident_summary"
+      }
+    ]
+  },
+  "headers": {
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "x-api-key": "<redacted>"
+  },
+  "method": "POST",
+  "path": "/v1/messages",
+  "query": null
+}

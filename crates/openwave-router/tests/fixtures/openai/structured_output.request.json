@@ -1,0 +1,64 @@
+{
+  "body": {
+    "input": [
+      {
+        "content": [
+          {
+            "text": "Summarize the incident.",
+            "type": "input_text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "max_output_tokens": 1024,
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+      "effort": "high",
+      "summary": "auto"
+    },
+    "store": false,
+    "stream": true,
+    "text": {
+      "format": {
+        "name": "incident_summary",
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "affected": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "headline": {
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "low",
+                "high"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "affected",
+            "headline",
+            "severity"
+          ],
+          "type": "object"
+        },
+        "strict": true,
+        "type": "json_schema"
+      }
+    }
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/responses",
+  "query": null
+}

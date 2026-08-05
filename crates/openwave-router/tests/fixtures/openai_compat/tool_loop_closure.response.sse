@@ -1,0 +1,14 @@
+data: {"choices":[{"delta":{"content":"a.toml is read. "}}]}
+
+data: {"choices":[{"delta":{"content":"Retrying b.toml."}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_3","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"b.toml\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":412,"completion_tokens":37,"prompt_tokens_details":{"cached_tokens":128}}}
+
+data: [DONE]
+

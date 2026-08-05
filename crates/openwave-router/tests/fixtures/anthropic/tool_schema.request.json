@@ -1,0 +1,98 @@
+{
+  "body": {
+    "max_tokens": 2048,
+    "messages": [
+      {
+        "content": [
+          {
+            "cache_control": {
+              "type": "ephemeral"
+            },
+            "text": "Search for the retry policy.",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "claude-opus-5",
+    "stream": true,
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "text": "Use the tool.",
+        "type": "text"
+      }
+    ],
+    "tool_choice": {
+      "name": "search_documents",
+      "type": "tool"
+    },
+    "tools": [
+      {
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "description": "Search the attached documents.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "filters": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "field": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "field"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "query": {
+              "description": "What to look for.",
+              "type": "string"
+            },
+            "scope": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "project",
+                    "chat"
+                  ],
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search_documents"
+      }
+    ]
+  },
+  "headers": {
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "x-api-key": "<redacted>"
+  },
+  "method": "POST",
+  "path": "/v1/messages",
+  "query": null
+}

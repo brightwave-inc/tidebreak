@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"parts":[{"text":"a.toml is read. "}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Retrying b.toml."},{"functionCall":{"id":"call_3","name":"read_file","args":{"path":"b.toml"}}}]}}]}
+
+data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":412,"cachedContentTokenCount":128,"candidatesTokenCount":37,"thoughtsTokenCount":12}}
+

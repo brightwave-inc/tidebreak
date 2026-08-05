@@ -1,0 +1,31 @@
+{
+  "body": {
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "What changed in this file?"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 1024
+    },
+    "systemInstruction": {
+      "parts": [
+        {
+          "text": "You are a careful assistant."
+        }
+      ]
+    }
+  },
+  "headers": {
+    "content-type": "application/json",
+    "x-goog-api-key": "<redacted>"
+  },
+  "method": "POST",
+  "path": "/v1beta/models/gemini-3.6-flash:streamGenerateContent",
+  "query": "alt=sse"
+}
