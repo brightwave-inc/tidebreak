@@ -1028,6 +1028,7 @@ async fn bind_inner(
         },
     )
     .with_blobs(state.blobs.clone())
+    .with_blob_write_locks(state.blob_writes.clone())
     .with_mcp_runtime(state.mcp.clone())
     .with_exec_folder_context(code_execution.clone());
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()

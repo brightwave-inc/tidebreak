@@ -28,10 +28,11 @@ use tokio::sync::Notify;
 use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
 use crate::chat_titling::ChatTitler;
+use crate::exec_write_snapshot::TurnScratchJournal;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
-use crate::state::TurnGuard;
+use crate::state::{BlobWriteGuard, TurnGuard};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnWorkerConfig {
@@ -96,6 +97,7 @@ pub(crate) struct TurnWorker {
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     tools: Arc<ToolRegistry>,
     blobs: Option<Arc<dyn BlobStore>>,
+    blob_writes: Option<Arc<BlobWriteGuard>>,
     mcp: Option<Arc<McpRuntime>>,
     approvals: Arc<ApprovalBroker>,
     events: Arc<EventBus>,
@@ -365,6 +367,7 @@ impl TurnWorker {
             os_policy,
             tools,
             blobs: None,
+            blob_writes: None,
             mcp: None,
             approvals,
             events,
@@ -386,6 +389,38 @@ impl TurnWorker {
     pub(crate) fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
         self.blobs = Some(blobs);
         self
+    }
+
+    /// Retain the bytes a structured scratch write replaces, so an overwrite in
+    /// private scratch is recoverable the way a folder write-back already is.
+    ///
+    /// Without the blob write guard there is nowhere safe to publish the
+    /// retained copy, so the journal stays off rather than racing the retirer.
+    pub(crate) fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
+        self.blob_writes = Some(blob_writes);
+        self
+    }
+
+    /// Attach this turn's scratch-overwrite journal, when the runtime has the
+    /// durable stores to keep one.
+    fn with_scratch_write_journal(
+        &self,
+        scratch: ToolScratch,
+        folder: PathBuf,
+        chat_id: openwave_core::ChatId,
+        turn_id: TurnId,
+    ) -> ToolScratch {
+        let Some((blobs, blob_writes)) = self.blobs.clone().zip(self.blob_writes.clone()) else {
+            return scratch;
+        };
+        scratch.with_write_journal(Arc::new(TurnScratchJournal::new(
+            self.store.clone(),
+            blobs,
+            blob_writes,
+            folder,
+            chat_id,
+            turn_id,
+        )))
     }
 
     /// Resolve one immutable registry when a turn begins. Runtime MCP changes
@@ -757,7 +792,12 @@ impl TurnWorker {
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {
-                    Ok(scratch) => Some(scratch),
+                    Ok(scratch) => Some(self.with_scratch_write_journal(
+                        scratch,
+                        private_chat_scratch_path(root, chat.id),
+                        chat.id,
+                        turn.id,
+                    )),
                     Err(error) => {
                         eprintln!(
                             "openwave: private scratch unavailable for chat {}: {}",
@@ -2480,6 +2520,15 @@ impl TurnWorker {
     fn publish(&self, chat_id: openwave_core::ChatId, event: SequencedEvent) {
         let _ = self.events.sender(chat_id).send(event);
     }
+}
+
+/// One chat's runtime-only scratch directory under `root`.
+///
+/// The path is derived rather than stored, so the turn worker that journals a
+/// scratch write and the transcript that labels it later agree without either
+/// one persisting a host path.
+pub(crate) fn private_chat_scratch_path(root: &Path, chat_id: openwave_core::ChatId) -> PathBuf {
+    root.join(chat_id.to_string())
 }
 
 /// Derive and create one chat's runtime-only scratch under the private server

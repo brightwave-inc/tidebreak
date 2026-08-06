@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::error::Result;
 use crate::preview::{ResultEntry, ResultEntryKind};
@@ -9,7 +10,10 @@ use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, T
 
 use super::arguments;
 use super::definitions;
-use super::private_scratch::{file_name, is_published_output_path, relative_path, write_utf8_file};
+use super::private_scratch::{
+    file_name, is_published_output_path, journal_path, prior_contents, relative_path,
+    write_utf8_file,
+};
 
 /// `write_file` — atomically write a UTF-8 text file into private scratch.
 pub struct WriteFile;
@@ -65,21 +69,45 @@ impl Tool for WriteFile {
             Ok(workspace) => workspace,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
-        let content = arguments.content.into_bytes();
+        let content = Arc::new(arguments.content.into_bytes());
         let content_len = content.len();
-        let result =
-            tokio::task::spawn_blocking(move || write_utf8_file(&workspace, &path, &content)).await;
+        // What this call is about to destroy, kept before it stops existing.
+        // Only an overwrite has anything to retain, and only a runtime that
+        // offers undo is worth reading for.
+        let journal = ctx.scratch_journal().cloned();
+        let prior = match (&journal, journal_path(&path)) {
+            (Some(_), Some(journal_path)) => {
+                let workspace = Arc::clone(&workspace);
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || prior_contents(&workspace, &path))
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|prior| (journal_path, prior))
+            }
+            _ => None,
+        };
+        let result = {
+            let content = Arc::clone(&content);
+            tokio::task::spawn_blocking(move || write_utf8_file(&workspace, &path, &content)).await
+        };
         match result {
-            Ok(Ok(())) => Ok(ToolOutput::text(format!(
-                "wrote {} bytes to {}",
-                content_len, arguments.path
-            ))
-            .with_entries(vec![ResultEntry::new(
-                ResultEntryKind::File,
-                file_name(&arguments.path),
-            )
-            .with_detail(&arguments.path)
-            .with_meta(crate::preview::format_bytes(content_len as u64))])),
+            Ok(Ok(())) => {
+                if let (Some(journal), Some((journal_path, prior))) = (journal, prior) {
+                    journal
+                        .record_overwrite(&journal_path, prior, &content)
+                        .await;
+                }
+                Ok(
+                    ToolOutput::text(format!("wrote {} bytes to {}", content_len, arguments.path))
+                        .with_entries(vec![ResultEntry::new(
+                            ResultEntryKind::File,
+                            file_name(&arguments.path),
+                        )
+                        .with_detail(&arguments.path)
+                        .with_meta(crate::preview::format_bytes(content_len as u64))]),
+                )
+            }
             Ok(Err(error)) => Ok(ToolOutput::error(format!(
                 "could not write {}: {error}",
                 arguments.path

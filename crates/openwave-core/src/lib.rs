@@ -224,8 +224,9 @@ pub use storage::{
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{
-    input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, Tool, ToolCtx,
-    ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec, ToolUiView,
+    input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, ScratchPriorContents,
+    ScratchWriteJournal, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,
+    ToolUiView,
 };
 #[cfg(feature = "tools")]
 pub use tools::{create_app_tool_spec, CreateAppTool, ListDir, ReadFile, WriteFile};

@@ -31,6 +31,45 @@ use crate::id::{CallId, ChatId, ProjectId};
 pub struct ToolScratch {
     #[cfg(feature = "tools")]
     workspace: Arc<Dir>,
+    #[cfg(feature = "tools")]
+    journal: Option<Arc<dyn ScratchWriteJournal>>,
+}
+
+/// What a private-scratch file held before a structured write replaced it.
+///
+/// A file that was not there at all has no variant here: creating a file
+/// destroys nothing, so there is nothing to retain and no row to write.
+#[derive(Debug)]
+pub enum ScratchPriorContents {
+    /// The prior bytes, small enough to retain.
+    Bytes(Vec<u8>),
+    /// The file was larger than the runtime is willing to retain. It is still
+    /// overwritten; the runtime records that this change cannot be reverted.
+    TooLarge {
+        /// The prior file's length, for the runtime's journal row.
+        byte_len: u64,
+    },
+    /// The file existed but could not be read.
+    Unreadable,
+}
+
+/// Where a private-scratch overwrite's prior bytes are retained.
+///
+/// `write_file` is a structured call that already holds the path and the new
+/// bytes, so keeping what it destroys costs one read — unlike an in-place
+/// mutation from a shell command, which the runtime cannot see. The retention
+/// itself belongs to the embedding runtime, which owns the blob store and the
+/// undo window, so this layer only reports what it replaced.
+#[async_trait]
+pub trait ScratchWriteJournal: Send + Sync {
+    /// Retain what `relative_path` held before this call overwrote it.
+    ///
+    /// `relative_path` is `/`-separated and already validated as scratch
+    /// relative. Called only after the write lands, and only when a file was
+    /// there to replace. Best effort by contract: the write has happened, so a
+    /// runtime that cannot journal it reports that rather than failing the
+    /// call.
+    async fn record_overwrite(&self, relative_path: &str, prior: ScratchPriorContents, next: &[u8]);
 }
 
 impl std::fmt::Debug for ToolScratch {
@@ -49,7 +88,20 @@ impl ToolScratch {
     pub fn from_dir(workspace: Dir) -> Self {
         Self {
             workspace: Arc::new(workspace),
+            journal: None,
         }
+    }
+
+    /// Retain the prior bytes of every overwrite this scratch handle serves.
+    ///
+    /// The journal is per turn, because that is the unit the retained bytes are
+    /// attributed to and expired with, so the runtime attaches it when it pins
+    /// the handle for a turn rather than when it opens the directory.
+    #[cfg(feature = "tools")]
+    #[must_use]
+    pub fn with_write_journal(mut self, journal: Arc<dyn ScratchWriteJournal>) -> Self {
+        self.journal = Some(journal);
+        self
     }
 }
 
@@ -567,6 +619,8 @@ pub struct ToolCtx {
     pub call_id: Option<CallId>,
     #[cfg(feature = "tools")]
     workspace: WorkspaceAccess,
+    #[cfg(feature = "tools")]
+    scratch_journal: Option<Arc<dyn ScratchWriteJournal>>,
 }
 
 #[cfg(feature = "tools")]
@@ -605,6 +659,8 @@ impl ToolCtx {
                 call_id: None,
                 #[cfg(feature = "tools")]
                 workspace: WorkspaceAccess::Unavailable(_error.to_string().into()),
+                #[cfg(feature = "tools")]
+                scratch_journal: None,
             },
         }
     }
@@ -623,6 +679,8 @@ impl ToolCtx {
             call_id: None,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(Arc::new(workspace)),
+            #[cfg(feature = "tools")]
+            scratch_journal: None,
         })
     }
 
@@ -637,6 +695,8 @@ impl ToolCtx {
             chat_id,
             project_id,
             call_id: None,
+            #[cfg(feature = "tools")]
+            scratch_journal: scratch.journal,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(scratch.workspace),
         }
@@ -654,6 +714,8 @@ impl ToolCtx {
             call_id: None,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Unavailable("private scratch is unavailable".into()),
+            #[cfg(feature = "tools")]
+            scratch_journal: None,
         }
     }
 
@@ -673,6 +735,13 @@ impl ToolCtx {
         {
             false
         }
+    }
+
+    /// The per-turn journal that retains what a scratch overwrite destroys, or
+    /// `None` where the runtime offers no undo (legacy CLI and MCP contexts).
+    #[cfg(feature = "tools")]
+    pub(crate) fn scratch_journal(&self) -> Option<&Arc<dyn ScratchWriteJournal>> {
+        self.scratch_journal.as_ref()
     }
 
     #[cfg(feature = "tools")]

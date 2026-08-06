@@ -8,6 +8,9 @@ use cap_fs_ext::OpenOptionsSyncExt;
 use cap_std::fs::OpenOptionsExt;
 use cap_std::fs::{Dir, OpenOptions};
 
+use crate::model::MAX_EXEC_SNAPSHOT_BYTES;
+use crate::tool::ScratchPriorContents;
+
 pub(super) const MAX_READ_FILE_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_ENTRIES: usize = 4_096;
@@ -131,6 +134,46 @@ pub(super) fn list_directory(workspace: &Dir, path: &Path) -> std::result::Resul
     }
     names.sort();
     Ok(names.join("\n"))
+}
+
+/// What `path` holds before a structured write replaces it.
+///
+/// `None` means there is nothing to retain: no such file, or an entry that the
+/// write itself will refuse. The read is bounded by
+/// [`MAX_EXEC_SNAPSHOT_BYTES`], the same ceiling folder write-back retains
+/// under, so one oversized scratch file cannot be copied into the blob store.
+pub(super) fn prior_contents(workspace: &Dir, path: &Path) -> Option<ScratchPriorContents> {
+    let metadata = workspace.symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let byte_len = metadata.len();
+    if byte_len > MAX_EXEC_SNAPSHOT_BYTES {
+        return Some(ScratchPriorContents::TooLarge { byte_len });
+    }
+    let max_bytes = usize::try_from(MAX_EXEC_SNAPSHOT_BYTES).unwrap_or(usize::MAX);
+    Some(read_regular_file_bytes(workspace, path, max_bytes).map_or(
+        ScratchPriorContents::Unreadable,
+        ScratchPriorContents::Bytes,
+    ))
+}
+
+/// The journal's `/`-separated spelling of a validated scratch-relative path.
+///
+/// Undo resolves a journaled path one component at a time, so the recorded form
+/// has to be the one that resolver accepts: no `.` segments, no platform
+/// separators. A path that cannot be spelled that way is not journaled at all
+/// rather than journaled as something undo would later refuse.
+pub(super) fn journal_path(path: &Path) -> Option<String> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => segments.push(segment.to_str()?),
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
 }
 
 pub(super) fn write_utf8_file(workspace: &Dir, path: &Path, content: &[u8]) -> std::io::Result<()> {
