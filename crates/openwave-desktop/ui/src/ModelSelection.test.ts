@@ -24,6 +24,7 @@ const models: ModelInfo[] = [
     key: "openai::shared",
     id: "shared",
     provider: "openai",
+    vendor: null,
     input_modalities: ["text"],
   },
   {
@@ -31,6 +32,7 @@ const models: ModelInfo[] = [
     key: "openai_compatible::shared",
     id: "shared",
     provider: "openai_compatible",
+    vendor: null,
     verification: "unverified",
     input_modalities: ["text"],
   },
@@ -39,6 +41,7 @@ const models: ModelInfo[] = [
     key: "anthropic::unique",
     id: "unique",
     provider: "anthropic",
+    vendor: null,
     input_modalities: ["text"],
   },
 ];

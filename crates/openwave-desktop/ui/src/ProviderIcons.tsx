@@ -97,7 +97,8 @@ export function OpenModelIcon(props: IconProps) {
  *
  * Open-weight models keep their vendor mark regardless of which endpoint serves
  * them, so the same model reached through a gateway and through a compatible
- * endpoint reads as one model rather than two anonymous ones.
+ * endpoint reads as one model rather than two anonymous ones. Callers pass the
+ * row's `vendor` when it has one, falling back to the serving provider.
  */
 export function ProviderIcon({
   modelId,

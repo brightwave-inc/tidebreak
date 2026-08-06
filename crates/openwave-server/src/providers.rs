@@ -469,6 +469,11 @@ pub struct ResolvedModelPolicy {
     pub display_name: String,
     /// Exact provider route.
     pub provider: ProviderKind,
+    /// The vendor whose curated row this model matched, when the routing
+    /// provider is not itself that vendor — a gateway-served model that is
+    /// exactly a curated id. Presentation only (icon and branding); routing
+    /// always uses `provider`.
+    pub vendor: Option<ProviderKind>,
     /// How thoroughly this exact provider/model combination has been exercised.
     pub verification: VerificationTier,
     /// Runtime context reduction limit.
@@ -491,6 +496,7 @@ impl ResolvedModelPolicy {
             id: spec.id.to_owned(),
             display_name: spec.display_name.to_owned(),
             provider: spec.provider,
+            vendor: None,
             verification: spec.verification,
             context_window: spec.context_window,
             max_output_tokens: spec.max_output_tokens,
@@ -498,6 +504,33 @@ impl ResolvedModelPolicy {
             supports_reasoning: spec.supports_reasoning,
             reasoning_efforts: spec.reasoning_efforts.to_vec(),
         }
+    }
+
+    /// Resolve one gateway-entitled model.
+    ///
+    /// A managed gateway serves models by their upstream ids, so an id that is
+    /// exactly a curated one is that curated model reached over a different
+    /// route. Inheriting the curated row's capabilities keeps it from being
+    /// presented as an anonymous unverified endpoint that has lost image input
+    /// and reasoning. What is *not* inherited is the routing provider — the
+    /// gateway still serves the request — nor the limits: the deployment's own
+    /// reported context and output caps are authoritative for that deployment,
+    /// which may be narrower than the upstream model's.
+    ///
+    /// An id with no exact curated match keeps the conservative custom
+    /// treatment.
+    fn gateway_for(model: &CustomModelConfig) -> Self {
+        let mut policy = Self::custom_for(ProviderKind::ModelGateway, model);
+        let Some(spec) = model_registry::find(&model.id) else {
+            return policy;
+        };
+        policy.display_name = spec.display_name.to_owned();
+        policy.vendor = Some(spec.provider);
+        policy.verification = spec.verification;
+        policy.input_modalities = spec.input_modalities.to_vec();
+        policy.supports_reasoning = spec.supports_reasoning;
+        policy.reasoning_efforts = spec.reasoning_efforts.to_vec();
+        policy
     }
 
     fn custom_for(provider: ProviderKind, model: &CustomModelConfig) -> Self {
@@ -509,6 +542,7 @@ impl ResolvedModelPolicy {
                 .clone()
                 .unwrap_or_else(|| model_registry::display_name_for(&model.id)),
             provider,
+            vendor: None,
             verification: VerificationTier::Unverified,
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
@@ -1227,7 +1261,10 @@ pub async fn resolve_model_policy(
         return Ok(models
             .iter()
             .find(|model| model.id == id)
-            .map(|model| ResolvedModelPolicy::custom_for(provider, model)));
+            .map(|model| match provider {
+                ProviderKind::ModelGateway => ResolvedModelPolicy::gateway_for(model),
+                _ => ResolvedModelPolicy::custom_for(provider, model),
+            }));
     }
 
     let config = read_config(store, ProviderKind::OpenaiCompatible).await?;
@@ -1322,7 +1359,10 @@ pub async fn catalog_models(
             _ => Vec::new(),
         };
         models.extend(configured.iter().map(|model| CatalogModel {
-            policy: ResolvedModelPolicy::custom_for(kind, model),
+            policy: match kind {
+                ProviderKind::ModelGateway => ResolvedModelPolicy::gateway_for(model),
+                _ => ResolvedModelPolicy::custom_for(kind, model),
+            },
             available,
         }));
     }
