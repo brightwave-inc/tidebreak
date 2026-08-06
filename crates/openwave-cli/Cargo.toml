@@ -22,6 +22,8 @@ path = "src/main.rs"
 openwave-core = { path = "../openwave-core", default-features = false, features = ["tools"] }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-server = { path = "../openwave-server" }
+# Timestamps on transcript entries and inbox rows.
+chrono = { workspace = true }
 crossterm = { version = "=0.28.1", features = ["event-stream"] }
 futures = { workspace = true }
 # CommonMark parser for committed assistant text; no default features (the

@@ -136,7 +136,9 @@ async fn one_turn(
         match event {
             ClientEvent::TextDelta { text } => printer.text(&text),
             ClientEvent::ToolCallStarted { call_id, name } => printer.tool_started(call_id, name),
-            ClientEvent::ToolCallCompleted { call_id, status } => {
+            ClientEvent::ToolCallCompleted {
+                call_id, status, ..
+            } => {
                 printer.tool_completed(call_id, status);
             }
             ClientEvent::ApprovalRequired {
@@ -146,7 +148,7 @@ async fn one_turn(
                     "approval for {action} rejected: {REJECTION_REASON}"
                 ));
                 if let Err(error) = client
-                    .decide_approval(chat, call_id, false, REJECTION_REASON)
+                    .decide_approval(chat, call_id, false, REJECTION_REASON, None)
                     .await
                 {
                     // A decision that races the approval judge or a cancelled
@@ -156,7 +158,7 @@ async fn one_turn(
             }
             // Neither can be answered without a human. Cancelling is what stops
             // the parked turn from outliving this process.
-            ClientEvent::UserQuestionsAsked | ClientEvent::PlanProposed => {
+            ClientEvent::UserQuestionsAsked { .. } | ClientEvent::PlanProposed { .. } => {
                 printer.finish();
                 eprintln!(
                     "openwave: the turn needs an interactive answer, which print mode cannot \
@@ -165,19 +167,19 @@ async fn one_turn(
                 let _ = client.cancel_turn(chat, turn_id).await;
                 break EXIT_TURN_UNSUCCESSFUL;
             }
-            ClientEvent::TurnCompleted => break 0,
-            ClientEvent::TurnFailed { category } => {
+            ClientEvent::TurnCompleted { .. } => break 0,
+            ClientEvent::TurnFailed { category, .. } => {
                 printer.finish();
                 eprintln!("openwave: turn failed ({category})");
                 break EXIT_TURN_UNSUCCESSFUL;
             }
-            ClientEvent::TurnRefused { refusal } => {
+            ClientEvent::TurnRefused { refusal, .. } => {
                 printer.finish();
                 let category = refusal.category.unwrap_or_else(|| "unspecified".to_owned());
                 eprintln!("openwave: turn refused ({category})");
                 break EXIT_TURN_UNSUCCESSFUL;
             }
-            ClientEvent::TurnCancelled => {
+            ClientEvent::TurnCancelled { .. } => {
                 printer.finish();
                 eprintln!("openwave: turn cancelled");
                 break EXIT_TURN_UNSUCCESSFUL;
@@ -302,6 +304,7 @@ impl Printer {
             ToolCallStatus::Completed => "ok",
             // An unrecognized status reads as a failure: the conservative note.
             ToolCallStatus::Failed | ToolCallStatus::Unknown => "failed",
+            ToolCallStatus::Cancelled => "cancelled",
         };
         self.notice(&format!("tool: {name} {status}"));
     }

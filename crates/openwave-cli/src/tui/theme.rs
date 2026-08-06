@@ -33,6 +33,25 @@ pub const DESTRUCTIVE: Color = Color::Red;
 /// terminal.
 pub const INLINE_CODE: Color = Color::Rgb(86, 182, 194);
 
+/// Agent (assistant) designation. A soft violet — clearly not the user's
+/// accent, clearly not an error. From the desktop's agent-chrome hue family.
+pub const AGENT: Color = Color::Rgb(178, 148, 214);
+
+/// Warning / attention. ANSI yellow, same reasoning as [`SUCCESS`]: the
+/// user's terminal theme owns the exact tone.
+pub const WARNING: Color = Color::Yellow;
+
+/// Selected-row highlight in overlays (chat switcher, agents, pickers). A
+/// very dark cool gray — enough contrast to read as selection without
+/// fighting the foreground.
+pub const SELECTION_BG: Color = Color::Rgb(56, 58, 64);
+
+/// Subtle panel fill behind overlays.
+pub const PANEL_BG: Color = Color::Rgb(32, 33, 36);
+
+/// Border color for cards and overlay panels.
+pub const BORDER: Color = Color::Rgb(64, 66, 72);
+
 /// Code-block token classes for syntax highlighting. Foreground-only by
 /// design: background fills read wrong against arbitrary terminal themes.
 /// Hues follow the One Dark family (the desktop dark theme's spiritual
@@ -84,4 +103,35 @@ pub fn destructive() -> Style {
 /// Inline code within assistant prose.
 pub fn inline_code() -> Style {
     Style::default().fg(INLINE_CODE)
+}
+
+/// Agent designation — the assistant's role label and agent-run markers.
+pub fn agent() -> Style {
+    Style::default().fg(AGENT)
+}
+
+/// Agent designation, bold — the assistant role label.
+pub fn agent_bold() -> Style {
+    agent().add_modifier(Modifier::BOLD)
+}
+
+/// Warning / needs-attention text.
+pub fn warning() -> Style {
+    Style::default().fg(WARNING)
+}
+
+/// The selected row in an overlay list.
+pub fn selected() -> Style {
+    Style::default().bg(SELECTION_BG)
+}
+
+/// Card and overlay borders.
+pub fn border() -> Style {
+    Style::default().fg(BORDER)
+}
+
+/// User designation — the user's role label, same accent family as the
+/// composer marker so the two read as one surface.
+pub fn user() -> Style {
+    accent_bold()
 }
