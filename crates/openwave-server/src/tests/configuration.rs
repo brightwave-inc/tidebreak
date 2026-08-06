@@ -2896,6 +2896,10 @@ async fn stamps_and_surfaces_static_plugin_compatibility() {
             "deploy-skill/scripts/deploy.py",
             b"print('requires external deployment tooling')\n",
         ),
+        // A helper script that shares the standard manifest's name is skill
+        // content, not a package manifest: this archive must still install
+        // through the internal path.
+        ("deploy-skill/scripts/plugin.json", b"{\"tool\": \"config\"}"),
     ]);
     let (router, bearer) = plugin_install_app(
         Arc::new(store),
@@ -2949,6 +2953,234 @@ async fn stamps_and_surfaces_static_plugin_compatibility() {
         .find(|plugin| plugin["name"] == "deploy-reports")
         .unwrap();
     assert_eq!(plugin["compatibility"], installed["compatibility"]);
+}
+
+/// The only manifest schema the standard-format importer accepts.
+const AGENT_PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+
+/// Contract: a package published in the Agent Plugins format
+/// (<https://agent-plugins.org>) is recognized by its root `plugin.json`, its
+/// skills are discovered structurally under `skills/`, and a nonconforming
+/// skill is skipped and reported rather than sinking the package — the
+/// per-component failure grading that specification requires, and the
+/// deliberate difference from the `PLUGIN.md` path, which refuses an import
+/// whose named member does not parse.
+#[tokio::test]
+async fn installs_a_standard_format_plugin_and_skips_nonconforming_skills() {
+    let (dir, store) = temp_db_store("plugin-standard.db").await;
+    let manifest = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_SCHEMA}\", \"name\": \"reporting\", \
+          \"version\": \"0.4.1\", \"license\": \"Apache-2.0\", \
+          \"description\": \"Weekly and monthly reporting skills.\"}}"
+    );
+    let archive = plugin_archive(&[
+        ("reporting-1.0.0/plugin.json", manifest.as_bytes()),
+        (
+            "reporting-1.0.0/skills/weekly-report/SKILL.md",
+            b"---\nname: weekly-report\ndescription: Draft the weekly report.\n---\nInstructions.\n",
+        ),
+        (
+            "reporting-1.0.0/skills/broken-report/SKILL.md",
+            b"---\nname: broken-report\ndescription: Missing its closing fence.\n",
+        ),
+        (
+            "reporting-1.0.0/skills/drafts/notes.md",
+            b"A directory that is not a skill.\n",
+        ),
+        ("reporting-1.0.0/agents/reviewer.md", b"A foreign component.\n"),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/reporting-1.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/reporting-1.0.0.zip",
+                "revision": "1.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = json_body(response).await;
+    assert_eq!(installed["plugin"], "reporting");
+    assert_eq!(
+        installed["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["agents", "skills/broken-report", "skills/drafts"]
+    );
+
+    // The conforming skill installed; the nonconforming sibling did not.
+    assert!(dir.path().join("skills/weekly-report/SKILL.md").is_file());
+    assert!(!dir.path().join("skills/broken-report").exists());
+    let stamp: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("plugins/reporting/.openwave-install.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stamp["source_format"],
+        serde_json::json!({"kind": "agent_plugins", "spec_version": "1.0.0"})
+    );
+
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "reporting")
+        .unwrap();
+    assert_eq!(plugin["origin"], "user");
+    assert_eq!(
+        plugin["description"],
+        "Weekly and monthly reporting skills."
+    );
+    assert_eq!(plugin["category"], "other");
+    assert_eq!(plugin["skills"][0]["name"], "weekly-report");
+    assert_eq!(plugin["skills"].as_array().unwrap().len(), 1);
+}
+
+/// Contract: `$schema` is how the standard selects validation rules, so an
+/// identifier this client does not implement rejects the package whole rather
+/// than being guessed at — and a package name OpenWave cannot address is
+/// refused with a reason instead of being silently rewritten.
+#[tokio::test]
+async fn rejects_standard_packages_this_client_cannot_honour() {
+    for (case, manifest) in [
+        (
+            "unsupported schema version",
+            "{\"$schema\": \"https://agent-plugins.org/schemas/9.9.9/plugin.schema.json\", \
+              \"name\": \"reporting\"}"
+                .to_owned(),
+        ),
+        (
+            // Legal in the standard, which admits `.` in a package name;
+            // OpenWave addresses a plugin by a dot-free slug everywhere.
+            "name OpenWave cannot address",
+            format!(
+                "{{\"$schema\": \"{AGENT_PLUGIN_SCHEMA}\", \"name\": \"io.example.reporting\"}}"
+            ),
+        ),
+    ] {
+        let (dir, store) = temp_db_store("plugin-standard-reject.db").await;
+        let archive = plugin_archive(&[
+            ("pkg/plugin.json", manifest.as_bytes()),
+            (
+                "pkg/skills/weekly-report/SKILL.md",
+                b"---\nname: weekly-report\ndescription: Draft the weekly report.\n---\nBody.\n",
+            ),
+        ]);
+        let (router, bearer) = plugin_install_app(
+            Arc::new(store),
+            dir.path(),
+            FixedPluginArchiveFetcher {
+                expected_url: "https://example.com/reporting-1.0.0.zip".to_owned(),
+                archive: Arc::new(archive),
+            },
+        );
+        let response = post_plugin_install(
+            &router,
+            &bearer,
+            serde_json::json!({
+                "source": {
+                    "kind": "archive",
+                    "url": "https://example.com/reporting-1.0.0.zip",
+                    "revision": "1.0.0"
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{case} should refuse the package"
+        );
+        assert!(!dir.path().join("skills/weekly-report").exists());
+    }
+}
+
+/// Contract: the two violations the standard grades as non-fatal — an unknown
+/// top-level field and a non-object `extensions` — keep the package
+/// installable and are reported, and the data in OpenWave's own extension
+/// namespace reaches the installed manifest. Namespaces this client does not
+/// implement are passed over untouched.
+#[tokio::test]
+async fn standard_manifests_report_ignored_fields_and_carry_our_extension() {
+    let (dir, store) = temp_db_store("plugin-standard-extensions.db").await;
+    let manifest = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_SCHEMA}\", \"name\": \"reporting\", \
+          \"description\": \"Reporting skills.\", \"future-field\": [1, 2], \
+          \"extensions\": {{\
+            \"com.example.other-client\": {{\"whatever\": true}}, \
+            \"io.brightwave.openwave\": {{\
+              \"category\": \"data\", \
+              \"router-preamble\": \"Pick by the reporting cadence the user asked for.\"}}}}}}"
+    );
+    let archive = plugin_archive(&[
+        ("pkg/plugin.json", manifest.as_bytes()),
+        (
+            "pkg/skills/weekly-report/SKILL.md",
+            b"---\nname: weekly-report\ndescription: Draft the weekly report.\n---\nBody.\n",
+        ),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/reporting-1.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/reporting-1.0.0.zip",
+                "revision": "1.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        installed["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["plugin.json#future-field"]
+    );
+
+    let written = std::fs::read_to_string(dir.path().join("plugins/reporting/PLUGIN.md")).unwrap();
+    assert!(
+        written.contains("category: data\n")
+            && written
+                .contains("router-preamble: Pick by the reporting cadence the user asked for.\n"),
+        "our extension data should reach the installed manifest, got {written:?}"
+    );
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "reporting")
+        .unwrap();
+    assert_eq!(plugin["category"], "data");
 }
 
 /// Contract: the catalog reports host-derived badges and enable state,

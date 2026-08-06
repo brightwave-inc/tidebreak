@@ -10,6 +10,7 @@
 //! sandbox. Managed providers run the same direct command contract in a remote
 //! sandbox and share session, idempotency, and bounded-output primitives.
 
+pub mod agent_plugins;
 mod credential;
 mod daytona;
 mod e2b;
@@ -34,6 +35,12 @@ pub mod sync;
 mod tool;
 mod types;
 
+pub use agent_plugins::{
+    is_valid_agent_plugin_name, parse_agent_plugin_manifest, AgentPluginManifest,
+    AgentPluginParseError, IgnoredManifestField, ParsedAgentPluginManifest,
+    AGENT_PLUGIN_MANIFEST_FILE, AGENT_PLUGIN_SCHEMA_ID, AGENT_PLUGIN_SKILLS_DIR,
+    AGENT_PLUGIN_SPEC_VERSION, OPENWAVE_EXTENSION_NAMESPACE,
+};
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
 pub use host_paths::{
@@ -60,7 +67,8 @@ pub use plugins::{
     is_valid_plugin_router_preamble, load_plugins, merged_plugins, parse_plugin_manifest,
     LoadedPlugin, PluginCapability, PluginCategory, PluginCompatibility, PluginCompatibilityIssue,
     PluginCompatibilityStatus, PluginInstallStamp, PluginOrigin, PluginPackage, PluginParseError,
-    PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA, PLUGIN_MANIFEST_FILE,
+    PluginSourceFormat, PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA,
+    PLUGIN_MANIFEST_FILE,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use prompts::{

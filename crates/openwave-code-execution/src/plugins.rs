@@ -90,7 +90,7 @@ pub enum PluginCategory {
 }
 
 impl PluginCategory {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "documents" => Some(Self::Documents),
             "data" => Some(Self::Data),
@@ -205,6 +205,24 @@ impl PluginCompatibility {
     }
 }
 
+/// The packaging format an imported bundle was read from.
+///
+/// Recorded so a later reader can tell a bundle converted from a standard
+/// Agent Plugins package from one whose author wrote `PLUGIN.md` directly, and
+/// which version of that specification the package targeted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PluginSourceFormat {
+    /// An OpenWave `PLUGIN.md` bundle, or a bare Agent Skills package wrapped
+    /// as one. The default, so stamps written before this field existed keep
+    /// reading back as what they are.
+    #[default]
+    PluginManifest,
+    /// A package published in the Agent Plugins format
+    /// (<https://agent-plugins.org>), converted at import.
+    AgentPlugins { spec_version: String },
+}
+
 /// The host-owned metadata persisted beside an imported `PLUGIN.md`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,6 +230,9 @@ pub struct PluginInstallStamp {
     pub schema_version: u32,
     pub source_url: String,
     pub revision: String,
+    /// Absent in stamps written before the importer read standard packages.
+    #[serde(default)]
+    pub source_format: PluginSourceFormat,
     pub compatibility: PluginCompatibility,
 }
 
@@ -587,6 +608,7 @@ fn installed_compatibility(directory: &Path, origin: PluginOrigin) -> PluginComp
         || stamp.source_url.len() > MAX_INSTALL_SOURCE_URL_BYTES
         || stamp.revision.is_empty()
         || stamp.revision.len() > 255
+        || !valid_source_format(&stamp.source_format)
         || !valid_compatibility(&stamp.compatibility)
     {
         tracing::warn!(
@@ -596,6 +618,19 @@ fn installed_compatibility(directory: &Path, origin: PluginOrigin) -> PluginComp
         return PluginCompatibility::unchecked();
     }
     stamp.compatibility
+}
+
+fn valid_source_format(format: &PluginSourceFormat) -> bool {
+    match format {
+        PluginSourceFormat::PluginManifest => true,
+        PluginSourceFormat::AgentPlugins { spec_version } => {
+            !spec_version.is_empty()
+                && spec_version.len() <= 32
+                && spec_version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        }
+    }
 }
 
 fn valid_compatibility(compatibility: &PluginCompatibility) -> bool {

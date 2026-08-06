@@ -6,6 +6,24 @@
 //! never points at that untrusted tree: only the validated manifests and
 //! bounded one-level helper scripts are copied into the install's data
 //! directories, then the ordinary merged loaders re-read those copies.
+//!
+//! Three packaging shapes are accepted, chosen by what the archive actually
+//! contains rather than by anything the request says:
+//!
+//! * a root `plugin.json` — a package in the Agent Plugins standard format
+//!   (<https://agent-plugins.org>), whose components live at the fixed
+//!   locations that specification defines;
+//! * a `PLUGIN.md` — OpenWave's own bundle manifest;
+//! * a lone `SKILL.md` — a bare Agent Skills package, wrapped as a one-skill
+//!   bundle.
+//!
+//! The two manifest formats differ in how strictly a bad member is treated,
+//! and deliberately so. A `PLUGIN.md` *names* its members, so a member that
+//! does not parse means the manifest describes something that is not there and
+//! the whole import is refused. A standard package *discovers* its skills
+//! structurally, and the specification requires a nonconforming one to be
+//! skipped without sinking its siblings, so that is what the standard path
+//! does — with every skip reported in the install response.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
@@ -18,10 +36,12 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use openwave_code_execution::{
-    assess_plugin_compatibility, parse_plugin_manifest, parse_skill_manifest, LoadedSkill,
-    PluginCategory, PluginCompatibility, PluginInstallStamp, PluginOrigin, PluginPackage,
-    SkillOrigin, SkillScript, PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA,
-    PLUGIN_MANIFEST_FILE, SKILL_MANIFEST_FILE, SKILL_SCRIPTS_DIR,
+    assess_plugin_compatibility, is_valid_plugin_name, parse_agent_plugin_manifest,
+    parse_plugin_manifest, parse_skill_manifest, LoadedSkill, PluginCategory, PluginCompatibility,
+    PluginInstallStamp, PluginOrigin, PluginPackage, PluginSourceFormat, SkillOrigin, SkillScript,
+    AGENT_PLUGIN_MANIFEST_FILE, AGENT_PLUGIN_SKILLS_DIR, AGENT_PLUGIN_SPEC_VERSION,
+    PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA, PLUGIN_MANIFEST_FILE,
+    SKILL_MANIFEST_FILE, SKILL_SCRIPTS_DIR,
 };
 use openwave_web_search::{admit_fetch_address, admit_fetch_url};
 use serde::{Deserialize, Serialize};
@@ -36,6 +56,10 @@ const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 1_024;
 const MAX_SKIPPED_MEMBERS: usize = 32;
+/// The one-line bound the internal `PLUGIN.md` grammar holds a description to.
+/// A standard manifest's description is type-checked only, so it is normalized
+/// to this bound at conversion instead of failing the import.
+const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_REDIRECTS: usize = 5;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -540,10 +564,27 @@ fn insert_entry(
     Ok(())
 }
 
+/// Which archive members are worth holding in memory: the manifests both
+/// formats are defined by, and one level of helper scripts.
 fn retain_archive_file(path: &[String]) -> bool {
     path.last()
         .is_some_and(|name| name == PLUGIN_MANIFEST_FILE || name == SKILL_MANIFEST_FILE)
+        || is_package_root_file(path, AGENT_PLUGIN_MANIFEST_FILE)
         || path.iter().any(|component| component == SKILL_SCRIPTS_DIR)
+}
+
+/// Whether `path` is `file` sitting where a standard package's root can be.
+///
+/// That specification puts `plugin.json` at the package root, so the only
+/// candidate positions are the top of the archive and one directory in, which
+/// is what a repository tarball adds. A file with the same basename anywhere
+/// else — a skill's `scripts/plugin.json`, say — is ordinary skill content and
+/// must not be mistaken for a package manifest, or a perfectly good
+/// `PLUGIN.md` bundle would be routed into the wrong format.
+fn is_package_root_file(path: &[String], file: &str) -> bool {
+    path.len() <= 2
+        && path.last().is_some_and(|name| name == file)
+        && !path.iter().any(|component| component == SKILL_SCRIPTS_DIR)
 }
 
 fn strip_common_root(tree: ArchiveTree) -> Result<ArchiveTree, PluginInstallError> {
@@ -587,6 +628,27 @@ fn prepare_tree(
     tree: ArchiveTree,
     source: &ResolvedPluginSource,
 ) -> Result<PreparedPlugin, PluginInstallError> {
+    // Format is decided by what the archive contains. A root `plugin.json`
+    // means the package describes itself in the standard format, and its
+    // components are discovered at that specification's fixed locations
+    // instead of being named by an OpenWave manifest. Only the positions a
+    // package root can occupy count: a skill's helper script that happens to
+    // be named `plugin.json` is skill content, not a manifest.
+    let mut standard_manifests = tree
+        .files
+        .keys()
+        .filter(|path| is_package_root_file(path, AGENT_PLUGIN_MANIFEST_FILE))
+        .cloned()
+        .collect::<Vec<_>>();
+    if standard_manifests.len() > 1 {
+        return Err(PluginInstallError::InvalidPlugin(
+            "archive contains more than one plugin.json".to_owned(),
+        ));
+    }
+    if let Some(manifest_path) = standard_manifests.pop() {
+        return prepare_standard_tree(&tree, source, &manifest_path);
+    }
+
     let mut plugin_manifests = Vec::new();
     let mut skills = Vec::new();
     for (path, bytes) in &tree.files {
@@ -672,7 +734,7 @@ fn prepare_tree(
         parse_plugin_manifest(&manifest, PluginOrigin::User)
             .map_err(|error| PluginInstallError::InvalidPlugin(error.to_string()))?;
         return Ok(PreparedPlugin {
-            stamp: install_stamp(source, compatibility),
+            stamp: install_stamp(source, PluginSourceFormat::PluginManifest, compatibility),
             manifest,
             skills: selected
                 .into_iter()
@@ -713,12 +775,188 @@ fn prepare_tree(
     // the mutable binding is used by the capped helper above.
     skipped.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(PreparedPlugin {
-        stamp: install_stamp(source, compatibility),
+        stamp: install_stamp(source, PluginSourceFormat::PluginManifest, compatibility),
         manifest,
         skills: vec![skill.loaded],
         package,
         skipped,
     })
+}
+
+/// Convert one package published in the Agent Plugins standard format into the
+/// internal bundle shape.
+///
+/// Skills are discovered structurally: every immediate child directory of
+/// `skills/` that holds a regular `SKILL.md` is one skill, with no recursion
+/// below that. A child that does not conform is skipped and reported — the
+/// specification grades a nonconforming skill as a per-skill failure, so it
+/// must not take its siblings or the rest of the package down with it. A
+/// package that yields no skill at all is refused, because an OpenWave bundle
+/// with no members is not a shape the catalog can render.
+fn prepare_standard_tree(
+    tree: &ArchiveTree,
+    source: &ResolvedPluginSource,
+    manifest_path: &[String],
+) -> Result<PreparedPlugin, PluginInstallError> {
+    let root = manifest_path[..manifest_path.len() - 1].to_vec();
+    let bytes = tree
+        .files
+        .get(manifest_path)
+        .expect("the manifest path came from the retained files");
+    let manifest_source = std::str::from_utf8(bytes).map_err(|_| {
+        PluginInstallError::InvalidPlugin(format!("{} is not UTF-8", manifest_path.join("/")))
+    })?;
+    let parsed = parse_agent_plugin_manifest(manifest_source)
+        .map_err(|error| PluginInstallError::InvalidPlugin(error.to_string()))?;
+    let name = parsed.manifest.name;
+    // The standard's package-name grammar admits `.`; OpenWave addresses a
+    // plugin by a dot-free kebab-case slug everywhere from the toggle route to
+    // the installed directory name, so a dotted package is refused with a
+    // reason rather than silently renamed.
+    if !is_valid_plugin_name(&name) {
+        return Err(PluginInstallError::InvalidPlugin(format!(
+            "plugin.json names itself {name:?}; OpenWave installs plugins whose name is a \
+             kebab-case slug of lowercase letters, digits, and single dashes"
+        )));
+    }
+
+    let mut skipped = skipped_foreign_members(tree, &root);
+    // The standard's other component type. Its bytes are not installed by this
+    // importer yet, and a package that ships one should be told so rather than
+    // left to wonder why nothing connected.
+    let mcp_config = prefixed_path(&root, &["mcp.json"]);
+    if tree.paths.contains(&mcp_config) {
+        push_skipped(
+            &mut skipped,
+            mcp_config.join("/"),
+            "component type is outside the instruction-only importer",
+        );
+    }
+    for ignored in &parsed.ignored {
+        push_skipped(
+            &mut skipped,
+            format!("{AGENT_PLUGIN_MANIFEST_FILE}#{}", ignored.field),
+            &ignored.reason,
+        );
+    }
+
+    let skills_root = prefixed_path(&root, &[AGENT_PLUGIN_SKILLS_DIR]);
+    let mut selected: Vec<ParsedSkill> = Vec::new();
+    for child in standard_skill_children(tree, &skills_root) {
+        let directory = prefixed_path(&skills_root, &[child.as_str()]);
+        let manifest = prefixed_path(&directory, &[SKILL_MANIFEST_FILE]);
+        let Some(bytes) = tree.files.get(&manifest) else {
+            push_skipped(
+                &mut skipped,
+                directory.join("/"),
+                "directory has no SKILL.md and is not a skill",
+            );
+            continue;
+        };
+        match parse_archived_skill(tree, &manifest, bytes) {
+            Ok(skill) => selected.push(skill),
+            Err(error) => push_skipped(&mut skipped, directory.join("/"), &error.to_string()),
+        }
+    }
+    if selected.is_empty() {
+        return Err(PluginInstallError::InvalidPlugin(
+            "plugin has no conforming skill under skills/, and skills are the only \
+             component type this importer installs"
+                .to_owned(),
+        ));
+    }
+
+    let compatibility = assess_plugin_compatibility(
+        &selected
+            .iter()
+            .map(|skill| (&skill.loaded.package, skill.has_scripts))
+            .collect::<Vec<_>>(),
+    );
+    let mut package = PluginPackage {
+        display_name: display_name(&name),
+        description: bounded_description(parsed.manifest.description.as_deref(), &name),
+        category: parsed.manifest.category.unwrap_or(PluginCategory::Other),
+        skills: selected
+            .iter()
+            .map(|skill| skill.loaded.package.name.clone())
+            .collect(),
+        // Reusable prompts have no place in the standard format, so unlike the
+        // `PLUGIN.md` path there is nothing here to prune and disclose.
+        prompts: Vec::new(),
+        router_preamble: parsed.manifest.router_preamble,
+        origin: PluginOrigin::User,
+        compatibility: compatibility.clone(),
+        name,
+    };
+    let manifest = canonical_plugin_manifest(&package, "");
+    // The generated manifest goes through the internal parser before any byte
+    // is copied, exactly as the `PLUGIN.md` path does: nothing reaches disk in
+    // a shape the ordinary loader would later reject.
+    package = parse_plugin_manifest(&manifest, PluginOrigin::User)
+        .map_err(|error| PluginInstallError::InvalidPlugin(error.to_string()))?;
+    package.compatibility = compatibility.clone();
+    skipped.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(PreparedPlugin {
+        stamp: install_stamp(
+            source,
+            PluginSourceFormat::AgentPlugins {
+                spec_version: AGENT_PLUGIN_SPEC_VERSION.to_owned(),
+            },
+            compatibility,
+        ),
+        manifest,
+        skills: selected.into_iter().map(|skill| skill.loaded).collect(),
+        package,
+        skipped,
+    })
+}
+
+/// The immediate child directory names under `skills_root`, in name order.
+///
+/// A path one level below the root is a file, not a skill directory, so it is
+/// not a child; discovery never descends past this level.
+fn standard_skill_children(tree: &ArchiveTree, skills_root: &[String]) -> Vec<String> {
+    tree.paths
+        .iter()
+        .filter(|path| path.starts_with(skills_root) && path.len() > skills_root.len() + 1)
+        .map(|path| path[skills_root.len()].clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// One printable, bounded line for a description the standard only type-checks.
+///
+/// A published description may be several sentences long or carry newlines;
+/// the internal manifest grammar accepts exactly one bounded printable line, so
+/// it is normalized here rather than rejected. An absent or whitespace-only
+/// description falls back to a derived line, since the internal parser has no
+/// notion of a bundle without one.
+fn bounded_description(description: Option<&str>, name: &str) -> String {
+    let normalized = description
+        .unwrap_or_default()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut end = MAX_DESCRIPTION_BYTES.min(normalized.len());
+    while end > 0 && !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bounded = normalized[..end].trim_end();
+    if bounded.is_empty() {
+        format!("Skills bundled by the {name} plugin.")
+    } else {
+        bounded.to_owned()
+    }
 }
 
 fn parse_archived_skill(
@@ -829,12 +1067,14 @@ fn display_name(name: &str) -> String {
 
 fn install_stamp(
     source: &ResolvedPluginSource,
+    source_format: PluginSourceFormat,
     compatibility: PluginCompatibility,
 ) -> PluginInstallStamp {
     PluginInstallStamp {
         schema_version: PLUGIN_INSTALL_STAMP_SCHEMA,
         source_url: source.source_url.clone(),
         revision: source.revision.clone(),
+        source_format,
         compatibility,
     }
 }
