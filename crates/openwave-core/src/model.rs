@@ -2867,6 +2867,11 @@ pub struct ToolCallRecord {
     /// references. Absent for historical rows and tools without a rich result.
     #[serde(default)]
     pub result_preview: Option<crate::ToolResultPreview>,
+    /// Provider-native blocks for same-route replay of a provider-executed
+    /// call. Absent for host tools and when the adapter captured nothing
+    /// opaque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<crate::provider::ProviderToolReplay>,
     /// Stable machine-readable failure code, only for `failed`.
     pub error_code: Option<String>,
     /// Bounded diagnostic failure detail, only for `failed`.

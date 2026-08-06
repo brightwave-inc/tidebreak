@@ -102,6 +102,11 @@ Worth writing, and worth defending in review:
 - **Decisions that are easy to reverse by accident** — the model registry's
   honesty invariants, the guard that no model advertises image input before the
   path carries it, the check that the default model is curated and current.
+- **Cross-provider replay stays flatten-on-switch** — see
+  [`docs/model-providers.md`](docs/model-providers.md). Native artifacts are
+  origin-gated; foreign routes get cleartext (or nothing), never a new
+  pairwise translator. New provider-coupled features need a degradation story
+  in the same change.
 - **Reproductions of bugs we actually hit.** These are the highest-value tests
   in the repo.
 - **Behavior, driven end to end.** One test that runs a real turn and reads the

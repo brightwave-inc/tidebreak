@@ -374,6 +374,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
         result_preview: Set(None),
+        provider_replay: Set(None),
         error_code: Set(None),
         error_detail: Set(None),
         approval_status: Set(None),

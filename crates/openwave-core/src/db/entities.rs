@@ -1198,6 +1198,10 @@ pub mod tool_call {
         /// crossed the boundary live. `None` for a call that projected none.
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub result_preview: Option<Json>,
+        /// Provider-native blocks for same-route replay of a provider-executed
+        /// call. `None` for host tools and for providers with nothing opaque.
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub provider_replay: Option<Json>,
         pub error_code: Option<String>,
         pub error_detail: Option<String>,
         pub approval_status: Option<String>,

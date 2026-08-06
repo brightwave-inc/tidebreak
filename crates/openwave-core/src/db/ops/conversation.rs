@@ -1489,6 +1489,7 @@ mod tests {
             status: crate::model::ToolCallStatus::Completed,
             result: Some("model-facing text".into()),
             result_preview: None,
+            provider_replay: None,
             error_code: error_code.map(Into::into),
             error_detail: None,
             client_executor_id: None,

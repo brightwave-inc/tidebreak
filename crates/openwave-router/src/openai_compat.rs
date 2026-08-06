@@ -369,6 +369,7 @@ fn extend_openai_messages(
                 input,
                 output,
                 is_error,
+                replay: _,
             } => Some(provider_executed_tool_call_text(
                 name, input, output, *is_error,
             )),

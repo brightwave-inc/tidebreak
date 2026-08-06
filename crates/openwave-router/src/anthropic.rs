@@ -15,7 +15,8 @@ use base64::Engine as _;
 use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
     provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider, ProviderEvent,
-    ProviderId, RefusalDetails, ResponseFormat, StopReason, ToolChoice, Usage,
+    ProviderId, ProviderToolReplay, ReasoningOrigin, RefusalDetails, ResponseFormat, StopReason,
+    ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
@@ -128,6 +129,10 @@ impl ModelProvider for AnthropicProvider {
         // Only a request that can pause needs its raw blocks kept, and only
         // Anthropic's own server tools pause a turn.
         let continuations_allowed = req.vendor_web_search.is_some();
+        let replay_origin = ReasoningOrigin {
+            provider: req.provider.clone(),
+            model: req.model.clone(),
+        };
         let provider = self.clone();
         let conversation = req.conversation;
         let ceiling = crate::http::timeouts().total_stream;
@@ -136,6 +141,7 @@ impl ModelProvider for AnthropicProvider {
             let mut state = StreamState {
                 output_tool,
                 raw_blocks: continuations_allowed.then(RawAssistantBlocks::default),
+                replay_origin: Some(replay_origin),
                 ..StreamState::default()
             };
             let mut continuations = 0u32;
@@ -329,6 +335,8 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                     &message.content,
                     &req.images,
                     rename_client_web_search,
+                    req.provider.as_ref(),
+                    &req.model,
                 )?,
             }))
         })
@@ -708,10 +716,15 @@ fn claude_generation(model: &str) -> Option<(u32, u32)> {
 ///
 /// `rename_client_web_search` rewrites the name of historical client-style
 /// `web_search` tool calls — see [`PRIOR_WEB_SEARCH_TOOL`].
+///
+/// `provider` and `model` gate native search replay: only blocks minted on
+/// this exact route go back as `server_tool_use` / `web_search_tool_result`.
 fn anthropic_content(
     blocks: &[ContentBlock],
     images: &ImageAttachments,
     rename_client_web_search: bool,
+    provider: Option<&ProviderId>,
+    model: &str,
 ) -> Result<Value> {
     let image_count = blocks
         .iter()
@@ -748,20 +761,31 @@ fn anthropic_content(
                     }
                 }));
             }
-            // A search this or another provider ran server-side. Anthropic's
-            // own `server_tool_use`/`web_search_tool_result` pair is not
-            // retained across turns — replaying it would need the encrypted
-            // content that goes with it — so the block goes back as one line
-            // of prose, which is valid history for any model.
+            // A search this or another provider ran server-side. Same-route
+            // Anthropic searches carry the native pair (encrypted content
+            // included); anything else becomes cleartext prose with titles
+            // and URLs so a model switch still keeps usable history.
             ContentBlock::ProviderExecutedToolCall {
                 name,
                 input,
                 output,
                 is_error,
-            } => out.push(json!({
-                "type": "text",
-                "text": provider_executed_tool_call_text(name, input, output, *is_error),
-            })),
+                replay,
+            } => {
+                if let Some(replay) = replay {
+                    let native = replay.replayable_for(provider, model);
+                    if !native.is_empty() {
+                        for block in native {
+                            out.push(block.clone());
+                        }
+                        continue;
+                    }
+                }
+                out.push(json!({
+                    "type": "text",
+                    "text": provider_executed_tool_call_text(name, input, output, *is_error),
+                }));
+            }
             ContentBlock::ToolUse { id, name, input } if rename_client_web_search => {
                 out.push(json!({
                     "type": "tool_use",
@@ -851,6 +875,9 @@ struct StreamState {
     /// resume it. The stop is then withheld: the turn is not over, and one
     /// finished turn is all a consumer may ever see.
     paused: bool,
+    /// Route that minted this stream's provider-executed calls, so their
+    /// native blocks can be origin-gated on a later request.
+    replay_origin: Option<ReasoningOrigin>,
 }
 
 impl StreamState {
@@ -1069,15 +1096,43 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         .unwrap_or_default();
                     let (output, is_error) = web_search_output(block.get("content"));
                     let input = call.input();
+                    let id = if call.id.is_empty() {
+                        str_at(block, "tool_use_id")
+                    } else {
+                        call.id
+                    };
+                    let name = if call.name.is_empty() {
+                        VENDOR_WEB_SEARCH_TOOL.to_string()
+                    } else {
+                        call.name
+                    };
+                    // Cleartext `output` is for the host; the native pair keeps
+                    // encrypted content for same-route replay after host tools
+                    // force another model step in this turn.
+                    let replay = state.replay_origin.as_ref().map(|origin| {
+                        ProviderToolReplay::captured(
+                            origin.clone(),
+                            vec![
+                                json!({
+                                    "type": "server_tool_use",
+                                    "id": id,
+                                    "name": &name,
+                                    "input": &input,
+                                }),
+                                json!({
+                                    "type": "web_search_tool_result",
+                                    "tool_use_id": id,
+                                    "content": block.get("content").cloned().unwrap_or(Value::Null),
+                                }),
+                            ],
+                        )
+                    });
                     vec![ProviderEvent::ProviderExecutedToolCall {
-                        name: if call.name.is_empty() {
-                            VENDOR_WEB_SEARCH_TOOL.to_string()
-                        } else {
-                            call.name
-                        },
+                        name,
                         input,
                         output,
                         is_error,
+                        replay,
                     }]
                 }
                 _ => Vec::new(),
@@ -1672,11 +1727,28 @@ mod tests {
     }
 
     fn run(events: &[Value]) -> Vec<ProviderEvent> {
-        let mut state = StreamState::default();
+        run_with_origin(events, None)
+    }
+
+    fn run_with_origin(
+        events: &[Value],
+        replay_origin: Option<ReasoningOrigin>,
+    ) -> Vec<ProviderEvent> {
+        let mut state = StreamState {
+            replay_origin,
+            ..StreamState::default()
+        };
         events
             .iter()
             .flat_map(|e| normalize(e, &mut state))
             .collect()
+    }
+
+    fn search_origin(model: &str) -> ReasoningOrigin {
+        ReasoningOrigin {
+            provider: Some(ProviderId::new("anthropic")),
+            model: model.into(),
+        }
     }
 
     #[test]
@@ -2210,7 +2282,14 @@ mod tests {
                 is_error: false,
             },
         ];
-        let shaped = anthropic_content(&blocks, &ImageAttachments::new(), false).unwrap();
+        let shaped = anthropic_content(
+            &blocks,
+            &ImageAttachments::new(),
+            false,
+            Some(&ProviderId::new("anthropic")),
+            "claude-opus-5",
+        )
+        .unwrap();
         assert_eq!(shaped, serde_json::to_value(&blocks).unwrap());
     }
 
@@ -2330,25 +2409,91 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_executed_call_replays_as_one_line_of_prose() {
-        // Anthropic's own server_tool_use/result pair is not retained across
-        // turns, so the block goes back as prose rather than as a shape the
-        // API would reject.
+    fn a_provider_executed_call_without_native_replay_becomes_cleartext_prose() {
+        // No same-route native blocks — foreign provider, missing capture, or
+        // truncated history — so the call goes back as titles/URLs the next
+        // model can still use.
         let mut req = search_request("claude-opus-5");
         req.messages.push(ChatMessage {
             role: Role::Assistant,
             content: vec![ContentBlock::ProviderExecutedToolCall {
                 name: "web_search".into(),
                 input: json!({"query": "rust 2027"}),
-                output: json!({"provider": "anthropic", "results": [{"url": "https://a"}]}),
+                output: json!({
+                    "provider": "anthropic",
+                    "results": [{"title": "A", "url": "https://a"}]
+                }),
                 is_error: false,
+                replay: None,
             }],
             reasoning: MessageReasoning::default(),
         });
         let body = build_request_json(&req).unwrap();
         let block = &body["messages"][1]["content"][0];
         assert_eq!(block["type"], "text");
-        assert_eq!(block["text"], "[web_search: rust 2027 -> 1 results]");
+        assert_eq!(
+            block["text"],
+            "[web_search: rust 2027 -> 1 results]\n- A — https://a"
+        );
+    }
+
+    #[test]
+    fn a_same_route_provider_executed_call_replays_native_blocks() {
+        let origin = search_origin("claude-opus-5");
+        let native = vec![
+            json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": "rust 2027"},
+            }),
+            json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_1",
+                "content": [{
+                    "type": "web_search_result",
+                    "url": "https://a",
+                    "title": "A",
+                    "encrypted_content": "opaque",
+                }],
+            }),
+        ];
+        let mut req = search_request("claude-opus-5");
+        req.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ProviderExecutedToolCall {
+                name: "web_search".into(),
+                input: json!({"query": "rust 2027"}),
+                output: json!({
+                    "provider": "anthropic",
+                    "results": [{"title": "A", "url": "https://a", "snippet": ""}]
+                }),
+                is_error: false,
+                replay: Some(ProviderToolReplay::captured(origin, native.clone())),
+            }],
+            reasoning: MessageReasoning::default(),
+        });
+        let body = build_request_json(&req).unwrap();
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0], native[0]);
+        assert_eq!(content[1]["type"], "web_search_tool_result");
+        assert_eq!(
+            content[1]["content"][0]["encrypted_content"], "opaque",
+            "native encrypted content survives encoding"
+        );
+        // The transcript-tail cache breakpoint lands on the last block; that
+        // is orthogonal to search replay and must not strip the result.
+        assert_eq!(content[1]["cache_control"], json!({"type": "ephemeral"}));
+
+        // A different model on the same provider cannot take those blocks.
+        req.model = "claude-sonnet-5".into();
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(body["messages"][1]["content"][0]["type"], "text");
+        assert!(body["messages"][1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("https://a"));
     }
 
     /// The frames Anthropic sends for one completed server-side search.
@@ -2419,40 +2564,58 @@ mod tests {
             {"type": "web_search_result", "title": "C"},
         ]));
         frames.push(json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}));
-        let out = run(&frames);
+        let origin = search_origin("claude-opus-5");
+        let out = run_with_origin(&frames, Some(origin.clone()));
 
+        let ProviderEvent::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            is_error,
+            replay,
+        } = &out[1]
+        else {
+            panic!("expected provider-executed search: {out:?}");
+        };
+        assert_eq!(name, "web_search");
+        assert_eq!(input, &json!({"query": "rust 2027"}));
         assert_eq!(
-            out,
-            vec![
-                ProviderEvent::TextDelta {
-                    text: "Let me check.".into(),
-                },
-                ProviderEvent::ProviderExecutedToolCall {
-                    name: "web_search".into(),
-                    // The arguments the provider ran, reassembled from the
-                    // same delta mechanism a client tool call uses.
-                    input: json!({"query": "rust 2027"}),
-                    // The host web_search tool's own output shape, so one
-                    // renderer draws both. The encrypted content is gone.
-                    output: json!({
-                        "provider": "anthropic",
-                        "results": [
-                            {
-                                "url": "https://example.com/a",
-                                "title": "A",
-                                "snippet": "",
-                                "metadata": {"page_age": "April 30, 2026"},
-                            },
-                            {"url": "https://example.com/b", "title": "B", "snippet": ""},
-                        ],
-                    }),
-                    is_error: false,
-                },
-                ProviderEvent::Stop {
-                    reason: StopReason::EndTurn,
-                },
-            ]
+            output,
+            &json!({
+                "provider": "anthropic",
+                "results": [
+                    {
+                        "url": "https://example.com/a",
+                        "title": "A",
+                        "snippet": "",
+                        "metadata": {"page_age": "April 30, 2026"},
+                    },
+                    {"url": "https://example.com/b", "title": "B", "snippet": ""},
+                ],
+            })
         );
+        assert!(!*is_error);
+        let replay = replay.as_ref().expect("native replay was captured");
+        assert_eq!(replay.origin(), Some(&origin));
+        assert_eq!(
+            replay.blocks()[0],
+            json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": "rust 2027"},
+            })
+        );
+        assert_eq!(
+            replay.blocks()[1]["content"][0]["encrypted_content"],
+            "opaque-and-enormous"
+        );
+        assert!(matches!(
+            out.last(),
+            Some(ProviderEvent::Stop {
+                reason: StopReason::EndTurn
+            })
+        ));
     }
 
     #[test]
@@ -2463,16 +2626,22 @@ mod tests {
             "type": "web_search_tool_result_error",
             "error_code": "max_uses_exceeded",
         }));
-        let out = run(&frames);
-        assert_eq!(
-            out.last().unwrap(),
-            &ProviderEvent::ProviderExecutedToolCall {
-                name: "web_search".into(),
-                input: json!({"query": "rust 2027"}),
-                output: json!({"error_code": "max_uses_exceeded"}),
-                is_error: true,
-            }
-        );
+        let out = run_with_origin(&frames, Some(search_origin("claude-opus-5")));
+        let ProviderEvent::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            is_error,
+            replay,
+        } = out.last().unwrap()
+        else {
+            panic!("expected failed search: {out:?}");
+        };
+        assert_eq!(name, "web_search");
+        assert_eq!(input, &json!({"query": "rust 2027"}));
+        assert_eq!(output, &json!({"error_code": "max_uses_exceeded"}));
+        assert!(*is_error);
+        assert!(replay.is_some());
 
         // A shape this adapter has not seen is still a search that ran.
         let out = run(&search_frames(json!("surprise")));

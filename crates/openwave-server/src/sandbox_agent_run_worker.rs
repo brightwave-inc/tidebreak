@@ -3536,6 +3536,7 @@ mod tests {
                     input: serde_json::json!({"query": "OpenWave release notes"}),
                     output: serde_json::json!({"results": []}),
                     is_error: false,
+                    replay: None,
                 },
                 ProviderEvent::TextDelta {
                     text: "Nothing new was published.".into(),

@@ -222,7 +222,12 @@ one that does not types it out.
 ### 3. The agent drives model and tool steps
 
 The agent rebuilds a provider transcript from persisted messages and structured
-tool-call records. It then loops for a bounded number of model steps:
+tool-call records. That rebuild is provider-neutral: the journal is the truth,
+and the selected adapter renders it for the current request. Mid-conversation
+model switches and failover depend on that, under the
+[flatten-on-switch](model-providers.md#flatten-on-switch) rule — foreign
+provider-native artifacts become plain content rather than a pairwise
+translation matrix. The agent then loops for a bounded number of model steps:
 
 1. fit the transcript into the model's context window;
 2. call the selected provider and stream its output;

@@ -929,6 +929,7 @@ fn gemini_contents(
                     input,
                     output,
                     is_error,
+                    replay: _,
                 } => parts.push(json!({
                     "text": provider_executed_tool_call_text(name, input, output, *is_error),
                 })),
@@ -1223,6 +1224,7 @@ fn grounding_search_event(metadata: &Value) -> Option<ProviderEvent> {
         input: json!({ "query": queries.join("; ") }),
         output,
         is_error: false,
+        replay: None,
     })
 }
 
@@ -1937,6 +1939,7 @@ mod tests {
                         "attribution_html": "<div>suggestions</div>",
                     }),
                     is_error: false,
+                    replay: None,
                 },
                 ProviderEvent::Stop {
                     reason: StopReason::EndTurn

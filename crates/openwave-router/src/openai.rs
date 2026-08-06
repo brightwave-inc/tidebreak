@@ -269,6 +269,7 @@ fn extend_input(
                 input,
                 output,
                 is_error,
+                replay: _,
             } => {
                 message_parts.push(json!({
                     "type": "input_text",
@@ -339,6 +340,7 @@ fn extend_assistant_input(
                 input,
                 output,
                 is_error,
+                replay: _,
             } => texts.push(provider_executed_tool_call_text(
                 name, input, output, *is_error,
             )),
@@ -606,6 +608,7 @@ fn finish_search(item: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 "error_code": if status.is_empty() { "failed" } else { status },
             }),
             is_error: true,
+            replay: None,
         });
     }
     events
@@ -674,6 +677,7 @@ fn flush_search(state: &mut StreamState) -> Vec<ProviderEvent> {
         // that found nothing rather than as a failure.
         output: json!({ "provider": "openai", "results": search.results }),
         is_error: false,
+        replay: None,
     }]
 }
 
@@ -1045,6 +1049,7 @@ mod tests {
                         ]
                     }),
                     is_error: false,
+                    replay: None,
                 },
                 // A hosted search is not a call anyone answers, so the turn
                 // still ends rather than asking for tool results.
@@ -1077,6 +1082,7 @@ mod tests {
                 input: json!({"query":"rust 2027"}),
                 output: json!({"error_code":"failed"}),
                 is_error: true,
+                replay: None,
             }]
         );
     }

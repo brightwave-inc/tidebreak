@@ -2581,6 +2581,7 @@ impl Agent {
             input,
             output,
             is_error,
+            replay,
         } = block
         else {
             return Ok(());
@@ -2607,6 +2608,7 @@ impl Agent {
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: replay.clone(),
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -2673,6 +2675,7 @@ impl Agent {
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -3101,12 +3104,14 @@ impl Agent {
                     input,
                     output,
                     is_error,
+                    replay,
                 } => {
                     provider_executed.push(ContentBlock::ProviderExecutedToolCall {
                         name,
                         input,
                         output,
                         is_error,
+                        replay,
                     });
                 }
                 ProviderEvent::Stop { reason } => stop_reason = reason,
@@ -5058,12 +5063,36 @@ fn push_tool_batch(
             text: text.to_string(),
         });
     }
+    // Provider-executed searches keep their own result in the block (and any
+    // native replay side channel). Host tools still rebuild as ToolUse pairs
+    // answered by a following user message.
+    let mut host_calls: Vec<&ToolCallRecord> = Vec::new();
     for call in batch {
-        blocks.push(ContentBlock::ToolUse {
-            id: call.provider_id.clone(),
-            name: call.name.clone(),
-            input: call.arguments.clone(),
-        });
+        if is_provider_executed_record(call) {
+            let output = call
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    let truncated = truncate_to_bytes(result, max_result_bytes, Some(call.id))
+                        .unwrap_or_else(|| result.clone());
+                    serde_json::from_str(&truncated).ok()
+                })
+                .unwrap_or_else(|| serde_json::json!({}));
+            blocks.push(ContentBlock::ProviderExecutedToolCall {
+                name: call.name.clone(),
+                input: call.arguments.clone(),
+                output,
+                is_error: call.status != ToolCallStatus::Completed,
+                replay: call.provider_replay.clone(),
+            });
+        } else {
+            blocks.push(ContentBlock::ToolUse {
+                id: call.provider_id.clone(),
+                name: call.name.clone(),
+                input: call.arguments.clone(),
+            });
+            host_calls.push(call);
+        }
     }
     if !blocks.is_empty() {
         out.push(ChatMessage {
@@ -5079,7 +5108,7 @@ fn push_tool_batch(
                 .unwrap_or_default(),
         });
     }
-    let results: Vec<ContentBlock> = batch
+    let results: Vec<ContentBlock> = host_calls
         .iter()
         .flat_map(|call| {
             let Some(content) = call.result.as_ref() else {
@@ -5107,6 +5136,12 @@ fn push_tool_batch(
             reasoning: MessageReasoning::default(),
         });
     }
+}
+
+/// A tool call the provider already finished, identified by the durable id
+/// prefix the agent assigns or by a stored native-replay payload.
+fn is_provider_executed_record(call: &ToolCallRecord) -> bool {
+    call.provider_id.starts_with("provider_executed_") || call.provider_replay.is_some()
 }
 
 fn exec_preview_images(preview: &ToolResultPreview) -> Option<&[ImageRef]> {
@@ -6764,6 +6799,7 @@ mod tests {
             status: ToolCallStatus::Completed,
             result: Some(oversized.clone()),
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -6833,6 +6869,7 @@ mod tests {
                         }],
                     }),
                     is_error: false,
+                    replay: None,
                 },
                 ProviderEvent::TextDelta {
                     text: "here is what I found".into(),
@@ -6928,28 +6965,20 @@ mod tests {
             .as_deref()
             .is_some_and(|result| result.contains("https://www.example.com/notes")));
 
-        // The record is the whole replay mechanism: a later turn rebuilds it
-        // as a tool pair with no knowledge of who ran it.
+        // A later turn rebuilds it as the same provider-executed shape, so
+        // adapters can origin-gate native replay or fall back to cleartext.
         let messages = store.list_messages(chat.id).await.unwrap();
         let rebuilt = rebuild_transcript(&messages, &calls, &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
         let blocks: Vec<&ContentBlock> = rebuilt
             .iter()
             .flat_map(|message| message.content.iter())
             .collect();
-        let use_id = blocks
-            .iter()
-            .find_map(|block| match block {
-                ContentBlock::ToolUse { id, name, .. } if name == crate::WEB_SEARCH_TOOL => {
-                    Some(id.clone())
-                }
-                _ => None,
-            })
-            .expect("the rebuilt transcript replays the search as a tool call");
         assert!(
             blocks.iter().any(|block| matches!(
                 block,
-                ContentBlock::ToolResult { tool_use_id, content, .. }
-                    if *tool_use_id == use_id && content.contains("Release notes")
+                ContentBlock::ProviderExecutedToolCall { name, output, .. }
+                    if name == crate::WEB_SEARCH_TOOL
+                        && output.to_string().contains("Release notes")
             )),
             "the replayed call kept no result: {rebuilt:?}"
         );
@@ -10303,6 +10332,7 @@ mod tests {
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -12185,6 +12215,7 @@ mod tests {
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -12375,6 +12406,7 @@ mod tests {
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -13084,6 +13116,7 @@ mod tests {
             status: ToolCallStatus::Completed,
             result: Some("ok".into()),
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -13137,6 +13170,7 @@ mod tests {
             status: ToolCallStatus::Completed,
             result: Some("ok".into()),
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -13203,6 +13237,7 @@ mod tests {
             status: ToolCallStatus::Completed,
             result: Some(serde_json::to_string(&answer).unwrap()),
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -13283,6 +13318,7 @@ mod tests {
             status: ToolCallStatus::Completed,
             result: Some("data".into()),
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,

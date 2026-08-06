@@ -49,13 +49,25 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
             name,
             input,
             output,
+            replay,
             ..
         } => {
+            let replay_tokens = replay
+                .as_ref()
+                .map(|replay| {
+                    replay
+                        .blocks()
+                        .iter()
+                        .map(|block| estimate_tokens(&block.to_string()))
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
             TOOL_USE_OVERHEAD
                 + TOOL_RESULT_OVERHEAD
                 + estimate_tokens(name)
                 + estimate_tokens(&input.to_string())
                 + estimate_tokens(&output.to_string())
+                + replay_tokens
         }
     }
 }
@@ -575,6 +587,9 @@ fn truncate_block(block: &ContentBlock, target_tokens: usize) -> ContentBlock {
             input,
             output,
             is_error,
+            // Partial native blocks are invalid input for the provider that
+            // minted them, so a shrink drops the replay and keeps cleartext.
+            replay: _,
         } => {
             let fixed = TOOL_USE_OVERHEAD
                 + TOOL_RESULT_OVERHEAD
@@ -588,6 +603,7 @@ fn truncate_block(block: &ContentBlock, target_tokens: usize) -> ContentBlock {
                 input: input.clone(),
                 output: serde_json::json!({ "truncated_output": truncated }),
                 is_error: *is_error,
+                replay: None,
             }
         }
     }

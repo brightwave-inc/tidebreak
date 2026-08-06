@@ -1447,6 +1447,8 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1651,6 +1653,8 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1675,6 +1679,8 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1698,6 +1704,8 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1730,6 +1738,7 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -1849,6 +1858,8 @@ async fn pending_chat_prompts_are_cross_chat_opaque_summaries() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -2150,6 +2161,8 @@ async fn accept_server_tool_call_for_route_test(
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -2761,6 +2774,8 @@ async fn client_execution_api_reconciles_a_known_result_after_exact_lease_expiry
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -2836,6 +2851,8 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,

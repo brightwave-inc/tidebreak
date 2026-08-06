@@ -4720,6 +4720,8 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -8017,6 +8019,8 @@ async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -8128,6 +8132,8 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -8378,6 +8384,8 @@ async fn claimed_sensitive_call_with(
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -9129,6 +9137,8 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -9395,6 +9405,8 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -9528,6 +9540,8 @@ async fn concurrent_client_claim_has_one_sqlite_winner() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,

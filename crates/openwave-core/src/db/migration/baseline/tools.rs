@@ -43,6 +43,7 @@ pub(super) fn tool_call_table() -> TableCreateStatement {
         .col(ColumnDef::new(ToolCall::ResolutionTurnLeaseToken).uuid())
         .col(ColumnDef::new(ToolCall::ApprovalGrantSourceCallId).uuid())
         .col(ColumnDef::new(ToolCall::ResultPreview).json_binary())
+        .col(ColumnDef::new(ToolCall::ProviderReplay).json_binary())
         .col(ColumnDef::new(ToolCall::AutoJudgeStatus).text())
         .col(ColumnDef::new(ToolCall::RawArguments).text())
         .foreign_key(

@@ -1239,6 +1239,8 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1302,6 +1304,8 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,

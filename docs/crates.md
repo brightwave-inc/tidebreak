@@ -70,6 +70,12 @@ contract and does not depend on a concrete backend. Two things define it:
 
 Health-based failover remains planned.
 
+Capability beyond plain chat is tiered: see
+[Model providers and cross-provider replay](model-providers.md). Advanced
+features are designed against Tier-1 providers; other routes stay honestly
+partial via registry flags, and foreign native artifacts flatten on switch
+instead of growing an N² translation layer.
+
 **Depends on:** `openwave-core`.
 
 ---
