@@ -240,9 +240,10 @@ type ExecActivityDetail = Extract<
 
 /**
  * A command step's card: the same collapsed chrome a foreground exec card
- * uses — monospace command, outcome pill, chevron. The body holds only the
- * full unelided command line, because a background run's output is not
- * retained; a failed card starts open so the reader lands on what failed.
+ * uses — monospace command, outcome pill, chevron. The body holds the full
+ * unelided command line and, once the step has settled, the tail of what the
+ * command printed; a failed card starts open so the reader lands on what
+ * failed.
  */
 function ExecActivityCard({
   detail,
@@ -253,6 +254,8 @@ function ExecActivityCard({
 }) {
   const headline = execCommandHeadline(detail.command, detail.args);
   const failed = outcome === "failed";
+  const settled =
+    outcome === "completed" || outcome === "failed" || outcome === "cancelled";
   return (
     <ToolCardShell
       icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
@@ -267,9 +270,20 @@ function ExecActivityCard({
         <pre className="bg-muted text-muted-foreground rounded-md p-2 text-xs break-words whitespace-pre-wrap">
           {headline}
         </pre>
-        <p className="text-muted-foreground px-0.5 text-[11px]">
-          Output isn't retained for background runs.
-        </p>
+        {detail.output ? (
+          <pre className="bg-muted text-muted-foreground rounded-md p-2 text-xs break-words whitespace-pre-wrap">
+            {detail.output}
+          </pre>
+        ) : (
+          // Only a settled step can be said to have printed nothing. While it
+          // is still running, an empty pane would read as a finished command
+          // that said nothing.
+          settled && (
+            <p className="text-muted-foreground px-0.5 text-[11px]">
+              No output captured.
+            </p>
+          )
+        )}
       </div>
     </ToolCardShell>
   );

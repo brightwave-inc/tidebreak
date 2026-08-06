@@ -2326,10 +2326,14 @@ pub enum AgentActivityOutcome {
 /// Built on read from durable sandbox tool calls and their immutable receipts.
 /// `detail` admits bounded model-authored command/argument/query text, which may
 /// repeat anything the child already saw and is not covered by the host-field
-/// non-disclosure guarantee. The only host-derived values are the numeric exit
-/// code parsed from a receipt's first line and the delegated file's leaf name.
-/// Stored result text, full broker paths and root identities, provider
-/// identities, executor leases, and diagnostics are never copied directly.
+/// non-disclosure guarantee. Stored result text is copied in one place only: a
+/// settled `exec` step carries its receipt's bounded tail, because that text is
+/// the command's own output from a private workspace and is what makes a failed
+/// step readable. Web-search and delegated-file results stay server-side. The
+/// other host-derived values are the numeric exit code parsed from a receipt's
+/// first line and the delegated file's leaf name. Full broker paths and root
+/// identities, provider identities, executor leases, and diagnostics are never
+/// copied.
 ///
 /// No separate activity-history shape is persisted. The optional field keeps
 /// the wire additive for older clients and lets calls without derivable detail
@@ -2352,8 +2356,9 @@ pub struct AgentActivityHistoryItem {
 /// not a renderer contract, and are skipped rather than leaked as raw labels.
 /// `delegated_file` is the run's one admission-delegated file identity, when it
 /// had one; only its base name may reach a `read_delegated_file` entry. The
-/// receipt map contains only terminal exec receipts, used solely to recover the
-/// typed exit code from their first line.
+/// receipt map contains only terminal exec receipts, used to recover the typed
+/// exit code from their first line and a bounded tail of what the command
+/// printed.
 fn sandbox_activity_history(
     calls: &[SandboxToolCall],
     delegated_file: Option<&str>,
@@ -2519,14 +2524,16 @@ pub async fn list_agent_runs(
 /// This is the durable companion to the live `activity` field on a run
 /// snapshot: where that field names only the single current checkpoint, this
 /// returns every admitted step in order, each with a coarse terminal outcome
-/// and timestamp. Each entry may add a bounded typed headline — the command and
-/// exit status a settled exec recorded, the query a web search asked, or the
-/// base name of the run's one delegated file. Command, argument, and query text
-/// is model-authored and may repeat information the child already saw; the
-/// boundary guarantee is narrower: stored results and host-only fields are not
-/// copied directly, apart from the typed exit code and admitted leaf name. A
-/// missing, wrong-chat, or foreground run returns `404` rather than revealing
-/// whether an unrelated run identifier exists.
+/// and timestamp. Each entry may add a bounded typed headline — the command,
+/// exit status, and output tail a settled exec recorded, the query a web search
+/// asked, or the base name of the run's one delegated file. Command, argument,
+/// and query text is model-authored and may repeat information the child
+/// already saw. The exec output tail is the one stored result the projection
+/// copies: it is the command's own text from a private workspace. Web-search
+/// and delegated-file results and host-only fields are not copied, apart from
+/// the typed exit code and admitted leaf name. A missing, wrong-chat, or
+/// foreground run returns `404` rather than revealing whether an unrelated run
+/// identifier exists.
 pub async fn list_agent_run_activity(
     store: ScopedStore,
     Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
@@ -2557,9 +2564,9 @@ pub async fn list_agent_run_activity(
     } else {
         None
     };
-    // Exit status lives on the immutable receipts, not the call rows. A
-    // missing receipt — a live step, or a call settled before receipts were
-    // kept — leaves the detail without an exit code rather than failing.
+    // Exit status and the printed tail live on the immutable receipts, not the
+    // call rows. A missing receipt — a live step, or a call settled before
+    // receipts were kept — leaves the detail without them rather than failing.
     let mut receipts = std::collections::HashMap::new();
     for call in &calls {
         if call.name == openwave_core::SANDBOX_EXEC_TOOL && call.status.is_terminal() {

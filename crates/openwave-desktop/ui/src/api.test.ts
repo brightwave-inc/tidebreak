@@ -878,6 +878,32 @@ describe("parseAgentActivityHistory", () => {
           at: "2026-08-05T18:44:00Z",
           detail: { kind: "exec", command: "make", args: [], exit_code: 1.5 },
         },
+        // The captured tail is drawn as a block, so its line breaks are
+        // structure rather than spoofing.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:45:00Z",
+          detail: {
+            kind: "exec",
+            command: "make",
+            args: [],
+            output: "exit: 0\n\nstdout:\nbuilt 3 charts",
+          },
+        },
+        // An escape sequence in that block could repaint the pane, so the
+        // output is dropped while the row it describes survives.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:46:00Z",
+          detail: {
+            kind: "exec",
+            command: "make",
+            args: [],
+            output: "\u001b[2Jexit: 0",
+          },
+        },
       ]),
     ).toEqual([
       {
@@ -905,6 +931,23 @@ describe("parseAgentActivityHistory", () => {
         kind: "exec",
         outcome: "failed",
         at: "2026-08-05T18:44:00Z",
+        detail: { kind: "exec", command: "make", args: [] },
+      },
+      {
+        kind: "exec",
+        outcome: "completed",
+        at: "2026-08-05T18:45:00Z",
+        detail: {
+          kind: "exec",
+          command: "make",
+          args: [],
+          output: "exit: 0\n\nstdout:\nbuilt 3 charts",
+        },
+      },
+      {
+        kind: "exec",
+        outcome: "completed",
+        at: "2026-08-05T18:46:00Z",
         detail: { kind: "exec", command: "make", args: [] },
       },
     ]);
