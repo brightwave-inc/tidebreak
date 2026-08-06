@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use openwave_core::{AgentError, Config, DbStore, Result};
+use openwave_core::{AgentError, Config, DbStore, Profile, Result};
 use serde::{Deserialize, Serialize};
 
 const DATABASE_FILE: &str = "openwave.db";
@@ -48,6 +48,19 @@ pub(super) async fn connect(config: &Config) -> Result<DbStore> {
         DbStore::connect(&database_url).await
     })
     .await
+}
+
+/// Whether this profile's local database already exists, asked *before* the
+/// store is opened — after that the file is there either way.
+///
+/// A profile that keeps no local database file (the shared self-host store)
+/// answers `true`: it has no first-launch notion, and nothing should treat a
+/// server that has been running for a year as freshly installed.
+pub(super) fn store_exists(config: &Config) -> bool {
+    match config.profile {
+        Profile::Desktop => config.data_dir.join(DATABASE_FILE).exists(),
+        _ => true,
+    }
 }
 
 async fn connect_with<C, F>(config: &Config, connector: C) -> Result<DbStore>

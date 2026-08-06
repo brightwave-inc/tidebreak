@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ServerError;
 
-pub(super) const CODE_EXECUTION_SETTING: &str = "code_execution";
+pub(crate) const CODE_EXECUTION_SETTING: &str = "code_execution";
 /// Generous enough for a cold `pip install` that pulls compiled wheels
 /// (lxml, Pillow); 20s proved too tight and cut installs off mid-retry with
 /// empty stderr. Still host-owned: the model cannot request a longer limit.

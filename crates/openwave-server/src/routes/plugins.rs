@@ -363,6 +363,7 @@ pub async fn put_plugins_enabled(
     Json(body): Json<PluginEnableUpdate>,
 ) -> Result<Json<PluginCatalog>, ServerError> {
     let mut flags = read_plugin_enable_state(&*state.store).await;
+    let before = flags.clone();
     for (plugin, enabled) in &body.plugins {
         if !is_valid_plugin_name(plugin) {
             return Err(ServerError::bad_request(format!(
@@ -390,5 +391,21 @@ pub async fn put_plugins_enabled(
     // plugin-sourced server has, so this has to happen on the same write that
     // moved them, not on the next restart.
     state.mcp.reconcile_plugin_servers().await;
+    // Anything that just came live should start becoming real now rather than
+    // mid-conversation: the host tools its manifest needs and the pinned
+    // packages it installs are provisioned in the background. Liveness is
+    // compared rather than the flags themselves, because enabling a bundle
+    // brings its members back without touching a single skill flag. The pass
+    // only spawns work, so the response is not delayed by it.
+    if let Some(exec) = state.code_execution.as_ref() {
+        let live_before = exec.live_skill_names(&before);
+        if exec
+            .live_skill_names(&flags)
+            .iter()
+            .any(|skill| !live_before.contains(skill))
+        {
+            exec.spawn_dependency_provisioning();
+        }
+    }
     get_plugins(State(state)).await
 }

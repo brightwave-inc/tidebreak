@@ -93,6 +93,10 @@ pub struct ConfiguredCodeExecutionProvider {
     /// Whether a host-side cache population pass is running or has succeeded;
     /// cleared again on failure so a later exec can retry.
     package_cache_population: Arc<std::sync::atomic::AtomicBool>,
+    /// Serializes cache population itself, so the exec-time pass and a
+    /// provisioning pass triggered by boot or a plugin enable cannot drive pip
+    /// against the same cache at once.
+    package_cache_lock: Arc<tokio::sync::Mutex<()>>,
     /// Where live sandbox-preparation progress is announced. Installed after
     /// the app's state is assembled, because the bus is built there; execution
     /// works exactly as before until it is.
@@ -228,6 +232,7 @@ impl ConfiguredCodeExecutionProvider {
             write_overlays: Mutex::new(HashMap::new()),
             package_cache_runtime: tokio::sync::OnceCell::new(),
             package_cache_population: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            package_cache_lock: Arc::new(tokio::sync::Mutex::new(())),
             events: OnceLock::new(),
             degradation_reported: Mutex::new(HashSet::new()),
         }
@@ -778,23 +783,7 @@ impl ConfiguredCodeExecutionProvider {
     /// ordinary networked path like any other package.
     fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
         use std::sync::atomic::Ordering;
-        let mut pin_sets = Vec::new();
-        // The baseline set is preinstalled in the managed sandbox image; on
-        // this backend the cache is what makes it available offline, so it is
-        // acquired here regardless of which skills are loaded.
-        let baseline = openwave_code_execution::baseline_python_deps()
-            .iter()
-            .map(|pin| (*pin).to_owned())
-            .collect::<Vec<_>>();
-        if !baseline.is_empty() {
-            pin_sets.push(baseline);
-        }
-        pin_sets.extend(
-            self.skills
-                .iter()
-                .map(|skill| skill.package.python_deps.clone())
-                .filter(|pins| !pins.is_empty()),
-        );
+        let pin_sets = package_cache_pin_sets(self.skills.iter());
         if pin_sets.is_empty() {
             return;
         }
@@ -802,33 +791,84 @@ impl ConfiguredCodeExecutionProvider {
             return;
         }
         let latch = self.package_cache_population.clone();
+        let lock = self.package_cache_lock.clone();
         tokio::spawn(async move {
-            let mut failed = false;
-            // Per-set acquisition: each set's pins resolve as one consistent
-            // closure, and one unresolvable set cannot sink the others'
-            // artifacts.
-            for pins in pin_sets {
-                match cache
-                    .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
-                    .await
-                {
-                    Ok(report) => tracing::info!(
-                        promoted = report.promoted,
-                        refused = report.refused,
-                        invalidated = report.invalidated,
-                        evicted = report.evicted,
-                        "shared package cache population pass finished"
-                    ),
-                    Err(error) => {
-                        failed = true;
-                        tracing::warn!(%error, "shared package cache population failed");
-                    }
-                }
-            }
-            if failed {
+            if !populate_package_cache(&lock, &cache, pin_sets).await {
                 latch.store(false, Ordering::SeqCst);
             }
         });
+    }
+
+    /// Start making the install's enabled dependencies real, in the
+    /// background.
+    ///
+    /// Enabling a plugin is the user saying they want what it does; the host
+    /// tools and pinned packages its skills need should start arriving then,
+    /// not on the first turn that reaches for them. The pass is deterministic
+    /// and host-side — no model drives it — and it returns immediately: every
+    /// piece of work behind it is already fire-and-forget or bounded by the
+    /// broker's own discipline (serialized installs, a remembered failure only
+    /// an explicit retry clears).
+    pub(crate) fn spawn_dependency_provisioning(self: &Arc<Self>) {
+        let provider = self.clone();
+        tokio::spawn(async move { provider.provision_dependencies().await });
+    }
+
+    async fn provision_dependencies(&self) {
+        let installed = self.installed_skills();
+        if installed.is_empty() {
+            return;
+        }
+        let skills = self.enabled_skills(installed).await;
+        if let Some(broker) = self.host_tool_broker.as_deref() {
+            for dep in required_host_deps(&skills) {
+                broker.ensure(dep);
+            }
+        }
+        // Unlike the exec-time pass, no conversation is involved, so there is
+        // no network policy to read: this is a host-side acquisition like the
+        // managed LibreOffice download, wanted by the same enablement that
+        // asked for the skills. Enabled user packages are included for the
+        // same reason — the pins the user switched on are the pins to warm.
+        let Ok(config) = read_config(&*self.store).await else {
+            return;
+        };
+        if config.provider != Some(CodeExecutionProviderKind::Local) {
+            return;
+        }
+        let Some(cache) = self.shared_package_cache().await else {
+            return;
+        };
+        let pin_sets = package_cache_pin_sets(skills.iter());
+        if pin_sets.is_empty() {
+            return;
+        }
+        populate_package_cache(&self.package_cache_lock, &cache, pin_sets).await;
+    }
+
+    /// The skills this install would run right now under `state`: installed,
+    /// minus anything that flag set switches off directly or through the
+    /// bundle that claims it.
+    ///
+    /// Exposed for the enable route, which compares this across the write it
+    /// just made: enabling a *bundle* moves no skill flag, so only liveness
+    /// shows what came on.
+    pub(crate) fn live_skill_names(
+        &self,
+        state: &crate::plugin_state::PluginEnableState,
+    ) -> HashSet<String> {
+        let installed = self.installed_skills();
+        let plugins = self.merged_plugins(&installed, &self.installed_prompts());
+        installed
+            .into_iter()
+            .filter(|skill| {
+                state.skill_enabled(
+                    &skill.package.name,
+                    Self::owning_plugin(&plugins, &skill.package.name),
+                )
+            })
+            .map(|skill| skill.package.name)
+            .collect()
     }
 
     /// Install the native bridge that resolves product root IDs through the
@@ -1480,6 +1520,69 @@ impl ConfiguredCodeExecutionProvider {
             notes: sync.notes,
         })
     }
+}
+
+/// The pin sets one cache-population pass acquires: the baseline set, plus
+/// each skill's own pinned requirements.
+///
+/// The baseline set is preinstalled in the managed sandbox image; on the local
+/// backend the cache is what makes it available offline, so it is acquired
+/// regardless of which skills are loaded. Each skill stays its own set because
+/// a set's pins resolve as one consistent closure, and one unresolvable set
+/// must not sink the others' artifacts.
+fn package_cache_pin_sets<'a>(
+    skills: impl Iterator<Item = &'a openwave_code_execution::LoadedSkill>,
+) -> Vec<Vec<String>> {
+    let mut pin_sets = Vec::new();
+    let baseline = openwave_code_execution::baseline_python_deps()
+        .iter()
+        .map(|pin| (*pin).to_owned())
+        .collect::<Vec<_>>();
+    if !baseline.is_empty() {
+        pin_sets.push(baseline);
+    }
+    pin_sets.extend(
+        skills
+            .map(|skill| skill.package.python_deps.clone())
+            .filter(|pins| !pins.is_empty()),
+    );
+    pin_sets
+}
+
+/// Acquire `pin_sets` into `cache`, one set at a time, and report whether
+/// every set succeeded.
+///
+/// The lock is what keeps two triggers — a boot or plugin-enable provisioning
+/// pass and the exec-time one — from running pip against the same cache
+/// concurrently. Failures are logged and not propagated: a later exec or a
+/// later enable retries, and conversations keep their networked install path
+/// meanwhile.
+async fn populate_package_cache(
+    lock: &tokio::sync::Mutex<()>,
+    cache: &SharedPackageCache,
+    pin_sets: Vec<Vec<String>>,
+) -> bool {
+    let _guard = lock.lock().await;
+    let mut succeeded = true;
+    for pins in pin_sets {
+        match cache
+            .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
+            .await
+        {
+            Ok(report) => tracing::info!(
+                promoted = report.promoted,
+                refused = report.refused,
+                invalidated = report.invalidated,
+                evicted = report.evicted,
+                "shared package cache population pass finished"
+            ),
+            Err(error) => {
+                succeeded = false;
+                tracing::warn!(%error, "shared package cache population failed");
+            }
+        }
+    }
+    succeeded
 }
 
 pub(super) fn exec_folder_grant_for_turn(
