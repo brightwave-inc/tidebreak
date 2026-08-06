@@ -46,6 +46,7 @@ mod model_roles;
 /// app stores and the governed REST executor validates against.
 pub mod openapi_catalog;
 mod pairing;
+mod plugin_install;
 mod plugin_state;
 mod principal;
 mod provider;
@@ -327,6 +328,12 @@ pub fn app(state: AppState) -> Router {
         .route("/connected-apps", get(routes::get_connected_apps))
         // The installed skill/plugin catalog and its enable flags.
         .route("/plugins", get(routes::get_plugins))
+        .route(
+            "/plugins/install",
+            post(routes::post_plugin_install).layer(DefaultBodyLimit::max(
+                plugin_install::MAX_PLUGIN_INSTALL_BODY_BYTES,
+            )),
+        )
         .route(
             "/plugins/enabled",
             axum::routing::put(routes::put_plugins_enabled)

@@ -38,12 +38,32 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::prompts::{is_valid_prompt_name, LoadedPrompt};
 use crate::skills::{is_valid_skill_name, LoadedSkill, SkillPackage};
 
 /// The manifest file every plugin package is defined by.
 pub const PLUGIN_MANIFEST_FILE: &str = "PLUGIN.md";
+
+/// Host-owned metadata written beside an imported plugin manifest.
+///
+/// It is deliberately separate from `PLUGIN.md`: that manifest's closed key
+/// set remains content-authored, while source provenance and compatibility are
+/// facts the importer derives. A hand-authored user plugin without this file
+/// stays loadable, but is reported as unchecked rather than silently receiving
+/// an assurance it never earned.
+pub const PLUGIN_INSTALL_STAMP_FILE: &str = ".openwave-install.json";
+
+/// Current on-disk install-stamp schema.
+pub const PLUGIN_INSTALL_STAMP_SCHEMA: u32 = 1;
+
+const MAX_INSTALL_STAMP_BYTES: usize = 64 * 1024;
+const MAX_INSTALL_SOURCE_URL_BYTES: usize = 2_048;
+// A plugin may carry 16 skills, each with eight Python pins and a scripts/
+// finding: 16 * (8 + 1) = 144. Leave a little schema headroom while keeping a
+// hand-edited stamp sharply bounded.
+const MAX_COMPATIBILITY_ISSUES: usize = 160;
 
 const MAX_NAME_BYTES: usize = 64;
 const MAX_DISPLAY_NAME_BYTES: usize = 64;
@@ -129,6 +149,133 @@ pub enum PluginCapability {
     Mcp,
 }
 
+/// The static sandbox-compatibility conclusion recorded at import time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCompatibilityStatus {
+    /// Every declared Python pin is present in the prepared sandbox image and
+    /// no member carries helper scripts whose external assumptions are opaque
+    /// to the manifest parser.
+    Compatible,
+    /// The plugin can be installed, but one or more static findings need a
+    /// visible disclaimer before a user relies on it.
+    Limited,
+    /// No importer stamp was present or its metadata was invalid. This is the
+    /// honest state for a bundle the user authored or copied by hand.
+    Unchecked,
+}
+
+/// One reason an imported plugin is not statically sandbox-compatible.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginCompatibilityIssue {
+    /// A skill declares an exact Python pin that is not in the prepared
+    /// sandbox image's hash-checked package closure. It may require runtime
+    /// package-manager access instead.
+    MissingSandboxDependency { skill: String, dependency: String },
+    /// A skill ships helper scripts. Their bytes are staged, but static
+    /// manifest inspection cannot prove which binaries, credentials, or
+    /// network access they assume.
+    ScriptsPresent { skill: String },
+}
+
+/// Renderer-safe compatibility disclosure for one plugin.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCompatibility {
+    pub status: PluginCompatibilityStatus,
+    pub issues: Vec<PluginCompatibilityIssue>,
+}
+
+impl PluginCompatibility {
+    #[must_use]
+    pub fn compatible() -> Self {
+        Self {
+            status: PluginCompatibilityStatus::Compatible,
+            issues: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn unchecked() -> Self {
+        Self {
+            status: PluginCompatibilityStatus::Unchecked,
+            issues: Vec::new(),
+        }
+    }
+}
+
+/// The host-owned metadata persisted beside an imported `PLUGIN.md`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginInstallStamp {
+    pub schema_version: u32,
+    pub source_url: String,
+    pub revision: String,
+    pub compatibility: PluginCompatibility,
+}
+
+/// Compare parsed member declarations with the package closure baked into the
+/// prepared sandbox image, and flag opaque helper scripts.
+///
+/// `has_scripts` is supplied separately from `SkillPackage` because scripts
+/// never affect prompt composition and therefore do not belong in that catalog
+/// type. Import is the boundary where both facts are available together.
+#[must_use]
+pub fn assess_plugin_compatibility(skills: &[(&SkillPackage, bool)]) -> PluginCompatibility {
+    let mut issues = Vec::new();
+    for (skill, has_scripts) in skills {
+        for dependency in &skill.python_deps {
+            if !SANDBOX_IMAGE_PYTHON_CLOSURE.contains(&normalized_python_pin(dependency)) {
+                issues.push(PluginCompatibilityIssue::MissingSandboxDependency {
+                    skill: skill.name.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+        if *has_scripts {
+            issues.push(PluginCompatibilityIssue::ScriptsPresent {
+                skill: skill.name.clone(),
+            });
+        }
+    }
+    PluginCompatibility {
+        status: if issues.is_empty() {
+            PluginCompatibilityStatus::Compatible
+        } else {
+            PluginCompatibilityStatus::Limited
+        },
+        issues,
+    }
+}
+
+/// Exact normalized `package==version` pins present in the documents sandbox
+/// image. The requirements file is the image build's source of truth; using it
+/// here prevents a second hand-maintained compatibility list from drifting.
+static SANDBOX_IMAGE_PYTHON_CLOSURE: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
+    include_str!("../../openwave-sandbox-agent/documents-requirements.txt")
+        .lines()
+        .filter_map(|line| {
+            let pin = line.split_whitespace().next()?;
+            pin.contains("==").then(|| normalized_python_pin(pin))
+        })
+        .collect()
+});
+
+fn normalized_python_pin(pin: &str) -> String {
+    let Some((package, version)) = pin.split_once("==") else {
+        return pin.to_ascii_lowercase();
+    };
+    let package = package
+        .chars()
+        .map(|character| match character {
+            '.' | '_' => '-',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect::<String>();
+    format!("{package}=={version}")
+}
+
 /// The badges `plugin` earns from what it actually contains.
 ///
 /// `members` is any set of loaded skill packages; only those the plugin
@@ -198,6 +345,9 @@ pub struct PluginPackage {
     pub router_preamble: Option<String>,
     /// Where the package was loaded from.
     pub origin: PluginOrigin,
+    /// Static sandbox-compatibility disclosure. Imported user bundles read a
+    /// host-owned stamp; hand-authored bundles remain visibly unchecked.
+    pub compatibility: PluginCompatibility,
 }
 
 /// One validated plugin.
@@ -379,6 +529,80 @@ pub fn parse_plugin_manifest(
         prompts,
         router_preamble,
         origin,
+        compatibility: match origin {
+            PluginOrigin::Builtin => PluginCompatibility::compatible(),
+            PluginOrigin::User => PluginCompatibility::unchecked(),
+        },
+    })
+}
+
+fn installed_compatibility(directory: &Path, origin: PluginOrigin) -> PluginCompatibility {
+    if origin == PluginOrigin::Builtin {
+        return PluginCompatibility::compatible();
+    }
+    let path = directory.join(PLUGIN_INSTALL_STAMP_FILE);
+    let regular_file = path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+    if !regular_file {
+        return PluginCompatibility::unchecked();
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) if bytes.len() <= MAX_INSTALL_STAMP_BYTES => bytes,
+        Ok(_) => {
+            tracing::warn!(
+                "plugin install stamp {} exceeds the byte limit",
+                path.display()
+            );
+            return PluginCompatibility::unchecked();
+        }
+        Err(error) => {
+            tracing::warn!(
+                "plugin install stamp {} is unreadable: {error}",
+                path.display()
+            );
+            return PluginCompatibility::unchecked();
+        }
+    };
+    let stamp: PluginInstallStamp = match serde_json::from_slice(&bytes) {
+        Ok(stamp) => stamp,
+        Err(error) => {
+            tracing::warn!(
+                "plugin install stamp {} is invalid: {error}",
+                path.display()
+            );
+            return PluginCompatibility::unchecked();
+        }
+    };
+    if stamp.schema_version != PLUGIN_INSTALL_STAMP_SCHEMA
+        || stamp.source_url.is_empty()
+        || stamp.source_url.len() > MAX_INSTALL_SOURCE_URL_BYTES
+        || stamp.revision.is_empty()
+        || stamp.revision.len() > 255
+        || !valid_compatibility(&stamp.compatibility)
+    {
+        tracing::warn!(
+            "plugin install stamp {} fails the metadata contract",
+            path.display()
+        );
+        return PluginCompatibility::unchecked();
+    }
+    stamp.compatibility
+}
+
+fn valid_compatibility(compatibility: &PluginCompatibility) -> bool {
+    if compatibility.issues.len() > MAX_COMPATIBILITY_ISSUES {
+        return false;
+    }
+    (match compatibility.status {
+        PluginCompatibilityStatus::Compatible => compatibility.issues.is_empty(),
+        PluginCompatibilityStatus::Limited => !compatibility.issues.is_empty(),
+        PluginCompatibilityStatus::Unchecked => false,
+    }) && compatibility.issues.iter().all(|issue| match issue {
+        PluginCompatibilityIssue::MissingSandboxDependency { skill, dependency } => {
+            is_valid_skill_name(skill) && crate::skills::is_pinned_python_dep(dependency)
+        }
+        PluginCompatibilityIssue::ScriptsPresent { skill } => is_valid_skill_name(skill),
     })
 }
 
@@ -492,7 +716,7 @@ pub fn load_plugins(
                 continue;
             }
         };
-        let package = match parse_plugin_manifest(&manifest, origin) {
+        let mut package = match parse_plugin_manifest(&manifest, origin) {
             Ok(package) => package,
             Err(error) => {
                 tracing::warn!("skipping plugin '{directory_name}': {error}");
@@ -506,6 +730,7 @@ pub fn load_plugins(
             );
             continue;
         }
+        package.compatibility = installed_compatibility(&entry.path(), origin);
         if let Some(missing) = package
             .skills
             .iter()
@@ -970,6 +1195,7 @@ router-preamble: Pick by the file the user needs.\n\
                 prompts: Vec::new(),
                 router_preamble: None,
                 origin: PluginOrigin::Builtin,
+                compatibility: PluginCompatibility::compatible(),
             };
             let mut passed: Vec<&SkillPackage> = members;
             passed.push(&outsider);
@@ -993,6 +1219,7 @@ router-preamble: Pick by the file the user needs.\n\
             prompts: Vec::new(),
             router_preamble: None,
             origin: PluginOrigin::Builtin,
+            compatibility: PluginCompatibility::compatible(),
         };
         let derived = derived_capabilities(&everything, &[&both]);
         assert!(!derived.contains(&PluginCapability::LiveControl));

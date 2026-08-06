@@ -925,6 +925,13 @@ pub struct ConfiguredCodeExecutionProvider {
     /// alongside the user skills and prompts they group so an added or edited
     /// bundle appears without a restart. `None` disables user plugins.
     user_plugins_dir: Option<PathBuf>,
+    /// Public-HTTPS archive fetcher used only by explicit plugin installs.
+    /// Injectable in route tests so the contract is driven without live
+    /// internet access.
+    plugin_archive_fetcher: Arc<dyn crate::plugin_install::PluginArchiveFetcher>,
+    /// Serializes filesystem publication and the merged-catalog conflict
+    /// check, so two installs cannot both pass the same preflight.
+    plugin_install_lock: tokio::sync::Mutex<()>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     /// Host-provided office-to-PDF converter feeding the model's visual QA
     /// loop. `None` (headless embeddings) degrades to an honest sync note.
@@ -1130,6 +1137,8 @@ impl ConfiguredCodeExecutionProvider {
             user_prompts_dir: None,
             plugins: Arc::new(Vec::new()),
             user_plugins_dir: None,
+            plugin_archive_fetcher: crate::plugin_install::default_fetcher(),
+            plugin_install_lock: tokio::sync::Mutex::new(()),
             folder_grant_resolver: None,
             office_converter: None,
             host_tool_broker: None,
@@ -1274,6 +1283,15 @@ impl ConfiguredCodeExecutionProvider {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_plugin_archive_fetcher(
+        mut self,
+        fetcher: Arc<dyn crate::plugin_install::PluginArchiveFetcher>,
+    ) -> Self {
+        self.plugin_archive_fetcher = fetcher;
+        self
+    }
+
     /// Install the per-install directory user-authored skill packages are
     /// loaded from. The directory is created here (best effort) so the user
     /// has a place to drop a skill; its contents are re-read at each staging,
@@ -1310,6 +1328,68 @@ impl ConfiguredCodeExecutionProvider {
     /// directory, exactly as [`Self::installed_skills`] does.
     pub(crate) fn installed_plugins(&self) -> Vec<openwave_code_execution::PluginPackage> {
         self.merged_plugins(&self.installed_skills(), &self.installed_prompts())
+    }
+
+    /// Fetch, validate, and publish one instruction-only plugin, then ask the
+    /// ordinary merged loaders whether it survived the existing reserved-name
+    /// and ownership rules. A conflict rolls back only the directories this
+    /// call just created.
+    pub(crate) async fn install_plugin(
+        &self,
+        request: &crate::plugin_install::PluginInstallRequest,
+    ) -> std::result::Result<
+        crate::plugin_install::PluginInstallOutcome,
+        crate::plugin_install::PluginInstallError,
+    > {
+        let _guard = self.plugin_install_lock.lock().await;
+        let plugins_root = self.user_plugins_dir.as_deref().ok_or_else(|| {
+            crate::plugin_install::PluginInstallError::Conflict(
+                "plugin installation is not configured".to_owned(),
+            )
+        })?;
+        let skills_root = self.user_skills_dir.as_deref().ok_or_else(|| {
+            crate::plugin_install::PluginInstallError::Conflict(
+                "plugin skill installation is not configured".to_owned(),
+            )
+        })?;
+        let source = crate::plugin_install::resolve_source(&request.source)?;
+        let archive = self
+            .plugin_archive_fetcher
+            .fetch(&source.archive_url)
+            .await?;
+        let prepared = crate::plugin_install::prepare_plugin(&archive, &source)?;
+        let before = self
+            .installed_plugins()
+            .into_iter()
+            .map(|plugin| plugin.name)
+            .collect::<HashSet<_>>();
+        let files = crate::plugin_install::install_prepared(&prepared, plugins_root, skills_root)?;
+        let after = self.installed_plugins();
+        let accepted = after.iter().any(|plugin| {
+            plugin.name == prepared.package.name
+                && plugin.origin == openwave_code_execution::PluginOrigin::User
+                && plugin.compatibility == prepared.stamp.compatibility
+        });
+        let after_names = after
+            .iter()
+            .map(|plugin| plugin.name.as_str())
+            .collect::<HashSet<_>>();
+        if !accepted
+            || before
+                .iter()
+                .any(|existing| !after_names.contains(existing.as_str()))
+        {
+            crate::plugin_install::rollback_install(&files);
+            return Err(crate::plugin_install::PluginInstallError::Conflict(
+                "a built-in or installed plugin owns this name or one of its members".to_owned(),
+            ));
+        }
+        Ok(crate::plugin_install::PluginInstallOutcome {
+            plugin: prepared.package.name,
+            revision: source.revision,
+            compatibility: prepared.stamp.compatibility,
+            skipped: prepared.skipped,
+        })
     }
 
     /// The same merge against sets the caller has already read.

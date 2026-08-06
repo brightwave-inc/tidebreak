@@ -2694,6 +2694,263 @@ async fn put_plugins_enabled(
         .unwrap()
 }
 
+#[derive(Clone)]
+struct FixedPluginArchiveFetcher {
+    expected_url: String,
+    archive: Arc<Vec<u8>>,
+}
+
+#[async_trait]
+impl crate::plugin_install::PluginArchiveFetcher for FixedPluginArchiveFetcher {
+    async fn fetch(
+        &self,
+        url: &str,
+    ) -> std::result::Result<Vec<u8>, crate::plugin_install::PluginInstallError> {
+        assert_eq!(url, self.expected_url);
+        Ok((*self.archive).clone())
+    }
+}
+
+fn plugin_archive(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write as _;
+
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut archive = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    for (path, content) in files {
+        archive.start_file(path, options).unwrap();
+        archive.write_all(content).unwrap();
+    }
+    archive.finish().unwrap().into_inner()
+}
+
+fn plugin_install_app(
+    store: Arc<dyn Store>,
+    data_dir: &std::path::Path,
+    fetcher: FixedPluginArchiveFetcher,
+) -> (Router, String) {
+    let secrets = Arc::new(MemSecrets::default());
+    let mut state = AppState::new(
+        Config::desktop(data_dir),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    state.code_execution = Some(Arc::new(
+        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            store,
+            secrets,
+            data_dir.join("scratch"),
+        )
+        .with_skills(Some(root.join("skills")))
+        .with_plugins(Some(root.join("plugins")))
+        .with_user_skills(Some(data_dir.join("skills")))
+        .with_user_plugins(Some(data_dir.join("plugins")))
+        .with_plugin_archive_fetcher(Arc::new(fetcher)),
+    ));
+    let token = state.token.clone();
+    (app(state), format!("Bearer {token}"))
+}
+
+async fn post_plugin_install(
+    router: &Router,
+    bearer: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/plugins/install")
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Contract: a standard repository containing one Agent Skills manifest is
+/// fetched at the requested immutable revision, wrapped as a one-skill plugin,
+/// copied into the data directory, and immediately visible through the normal
+/// catalog loader.
+#[tokio::test]
+async fn installs_a_single_skill_plugin_end_to_end() {
+    let (dir, store) = temp_db_store("plugin-install.db").await;
+    let revision = "0123456789abcdef0123456789abcdef01234567";
+    let archive = plugin_archive(&[
+        (
+            "meeting-notes-repo/SKILL.md",
+            b"---\nname: meeting-notes\ndescription: Turn a discussion into concise notes.\nlicense: Apache-2.0\n---\n# Meeting notes\nCapture decisions and actions.\n",
+        ),
+        ("meeting-notes-repo/README.md", b"Published skill."),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: format!(
+                "https://github.com/example/meeting-notes/archive/{revision}.tar.gz"
+            ),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "git",
+                "url": "https://github.com/example/meeting-notes.git",
+                "revision": revision
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = json_body(response).await;
+    assert_eq!(installed["plugin"], "meeting-notes");
+    assert_eq!(installed["compatibility"]["status"], "compatible");
+    assert_eq!(installed["skipped"][0]["path"], "README.md");
+
+    assert!(dir.path().join("plugins/meeting-notes/PLUGIN.md").is_file());
+    assert!(dir.path().join("skills/meeting-notes/SKILL.md").is_file());
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "meeting-notes")
+        .unwrap();
+    assert_eq!(plugin["origin"], "user");
+    assert_eq!(plugin["skills"][0]["name"], "meeting-notes");
+    assert_eq!(plugin["compatibility"]["status"], "compatible");
+}
+
+/// Contract: every declared skill is parsed before publication. One malformed
+/// member rejects the entire bundle, leaving neither the plugin nor the valid
+/// sibling behind as a standalone skill.
+#[tokio::test]
+async fn rejects_the_whole_plugin_when_any_skill_fails_to_parse() {
+    let (dir, store) = temp_db_store("plugin-reject.db").await;
+    let archive = plugin_archive(&[
+        (
+            "bad-plugin/PLUGIN.md",
+            b"---\nname: imported-notes\ndisplay-name: Imported notes\ndescription: Two note-taking skills.\ncategory: other\nskills: [\"good-notes\", \"bad-notes\"]\n---\n",
+        ),
+        (
+            "bad-plugin/skills/good-notes/SKILL.md",
+            b"---\nname: good-notes\ndescription: Valid notes.\n---\nInstructions.\n",
+        ),
+        (
+            "bad-plugin/skills/bad-notes/SKILL.md",
+            b"---\nname: bad-notes\ndescription: Missing its closing fence.\n",
+        ),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/imported-notes-v1.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/imported-notes-v1.0.0.zip",
+                "revision": "v1.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!dir.path().join("plugins/imported-notes").exists());
+    assert!(!dir.path().join("skills/good-notes").exists());
+    assert!(!dir.path().join("skills/bad-notes").exists());
+}
+
+/// Contract: import compares exact declared pins with the prepared image
+/// closure and records scripts as opaque assumptions. The stamp on disk and
+/// the catalog projection must report the same visible limitation.
+#[tokio::test]
+async fn stamps_and_surfaces_static_plugin_compatibility() {
+    let (dir, store) = temp_db_store("plugin-compatibility.db").await;
+    let archive = plugin_archive(&[
+        (
+            "deploy-skill/SKILL.md",
+            b"---\nname: deploy-reports\ndescription: Publish a generated report.\ndeps: { python: [\"not-in-openwave-image==1.2.3\"] }\n---\nRun the helper.\n",
+        ),
+        (
+            "deploy-skill/scripts/deploy.py",
+            b"print('requires external deployment tooling')\n",
+        ),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/deploy-reports-v2.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/deploy-reports-v2.0.0.zip",
+                "revision": "v2.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = json_body(response).await;
+    assert_eq!(installed["compatibility"]["status"], "limited");
+    assert_eq!(
+        installed["compatibility"]["issues"],
+        serde_json::json!([
+            {
+                "kind": "missing_sandbox_dependency",
+                "skill": "deploy-reports",
+                "dependency": "not-in-openwave-image==1.2.3"
+            },
+            {"kind": "scripts_present", "skill": "deploy-reports"}
+        ])
+    );
+
+    let stamp: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            dir.path()
+                .join("plugins/deploy-reports/.openwave-install.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stamp["compatibility"], installed["compatibility"]);
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "deploy-reports")
+        .unwrap();
+    assert_eq!(plugin["compatibility"], installed["compatibility"]);
+}
+
 /// Contract: the catalog reports host-derived badges and enable state,
 /// toggles are a merge patch that survives a restart, and a disabled bundle
 /// gates its members without erasing their own flags — so re-enabling it

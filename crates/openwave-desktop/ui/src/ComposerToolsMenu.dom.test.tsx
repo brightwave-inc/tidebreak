@@ -18,6 +18,7 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     category: "documents",
     origin: "builtin",
     capabilities: [],
+    compatibility: { status: "compatible", issues: [] },
     enabled: false,
     skills: [],
     ...overrides,
