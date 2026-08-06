@@ -426,7 +426,7 @@ mod tests {
             .execute(
                 &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/unused"))
                     .with_call_id(CallId::new()),
-                json!({"command": "pip", "args": ["install", "python-pptx"]}),
+                json!({"command": "pip", "args": ["install", "python-docx"]}),
             )
             .await
             .unwrap();

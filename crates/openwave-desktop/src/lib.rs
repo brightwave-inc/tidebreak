@@ -120,12 +120,15 @@ fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    const REQUIRED_HELPERS: [&str; 5] = [
+    const REQUIRED_HELPERS: [&str; 8] = [
         "_openwave_preview.py",
         "render_pdf.py",
         "extract_pdf_figures.py",
         "render_office.py",
         "analyze_xlsx.py",
+        "office_unpack.py",
+        "office_pack.py",
+        "pptx_clean.py",
     ];
     let directory = app
         .path()

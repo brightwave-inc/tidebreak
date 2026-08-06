@@ -665,11 +665,11 @@ Instructions live here.\n";
     /// the manifest rather than becoming a string nothing can act on.
     #[test]
     fn host_deps_parse_from_the_closed_vocabulary_only() {
-        let combined = "---\nname: presentations\ndescription: Decks.\n\
-                        deps: { python: [\"python-pptx==1.0.2\"], host: [\"libreoffice\"] }\n\
+        let combined = "---\nname: word-documents\ndescription: Docs.\n\
+                        deps: { python: [\"python-docx==1.1.2\"], host: [\"libreoffice\"] }\n\
                         ---\nBody.\n";
         let package = parse_skill_manifest(combined, SkillOrigin::Builtin).unwrap();
-        assert_eq!(package.python_deps, ["python-pptx==1.0.2"]);
+        assert_eq!(package.python_deps, ["python-docx==1.1.2"]);
         assert_eq!(package.host_deps, [HostDep::LibreOffice]);
 
         let host_only =
