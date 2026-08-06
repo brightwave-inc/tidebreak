@@ -200,6 +200,7 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
     spawn_turn_worker(&state);
     let sandbox_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::new(
         state.store.clone(),
+        state.secrets.clone(),
         state.resolver.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
