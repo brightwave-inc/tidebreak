@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
@@ -711,8 +711,8 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 3,
               entries: [
-                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null, targetId: null },
-                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null, targetId: null },
+                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null, targetId: null, url: null },
+                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null, targetId: null, url: null },
               ],
               failures: [],
             },
@@ -768,7 +768,7 @@ describe("mcp app views", () => {
                   detail: "Pages 3, 7",
                   meta: "2 matches",
                   mediaType: "application/pdf",
-                  targetId: null,
+                  targetId: null, url: null,
                 },
               ],
               failures: [],
@@ -815,7 +815,7 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 0,
               entries: [
-                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null, targetId: null },
+                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null, targetId: null, url: null },
               ],
               failures: [
                 { label: "q4.md", error: "file is not valid UTF-8" },
@@ -881,7 +881,7 @@ describe("actionable tool results", () => {
             detail: null,
             meta: "v1 · created",
             mediaType: CHART_MEDIA_TYPE,
-            targetId: "output-2",
+            targetId: "output-2", url: null,
           },
         ],
       },
@@ -921,7 +921,7 @@ describe("actionable tool results", () => {
                   meta: "v1 · created",
                   mediaType:
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                  targetId: "output-1",
+                  targetId: "output-1", url: null,
                 },
               ],
             },
@@ -1064,7 +1064,7 @@ describe("actionable tool results", () => {
                   detail: null,
                   meta: "revision 1",
                   mediaType: null,
-                  targetId: "app-1",
+                  targetId: "app-1", url: null,
                 },
               ],
             },
@@ -1275,5 +1275,90 @@ describe("file attachment chips", () => {
 
     await user.click(screen.getByRole("button", { name: "brief.pdf" }));
     expect(openDocument).toHaveBeenCalledWith("document-1");
+  });
+});
+
+
+describe("web sources", () => {
+  it("names the pages a turn's searches found and opens one externally", async () => {
+    const user = userEvent.setup();
+    const opened: string[] = [];
+    vi.spyOn(window, "open").mockImplementation((url) => {
+      opened.push(String(url));
+      return null;
+    });
+    const found = (host: string) => ({
+      kind: "link" as const,
+      label: `${host} report`,
+      detail: host,
+      meta: null,
+      mediaType: null,
+      targetId: null,
+      url: `https://${host}/report`,
+    });
+
+    render(
+      <MessageList
+        messages={[
+          { id: "u1", role: "user", text: "What happened?" },
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "web_search",
+            status: "completed",
+            result: {
+              tool: "entries",
+              elided: 0,
+              entries: [
+                found("sec.gov"),
+                found("reuters.com"),
+                found("ft.com"),
+                found("wsj.com"),
+                found("bloomberg.com"),
+                found("apnews.com"),
+                // The same page found twice is one source.
+                found("sec.gov"),
+                // A row with no address cannot be opened, so it is not listed.
+                { ...found("example.com"), url: null },
+              ],
+              failures: [],
+            },
+          },
+          {
+            id: "a1",
+            role: "assistant",
+            text: "Here is what I found.",
+            sources: [],
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    const row = screen.getByLabelText("Web sources");
+    expect(within(row).getByText("sec.gov")).toBeInTheDocument();
+    // Six openable pages, five shown: the row says how many it is holding back
+    // rather than quietly dropping them.
+    expect(within(row).queryByText("apnews.com")).not.toBeInTheDocument();
+    expect(within(row).queryByText("example.com")).not.toBeInTheDocument();
+
+    await user.click(within(row).getByRole("button", { name: "+1 more" }));
+    expect(within(row).getByText("apnews.com")).toBeInTheDocument();
+
+    await user.click(within(row).getByRole("button", { name: "sec.gov report" }));
+    expect(opened).toEqual(["https://sec.gov/report"]);
   });
 });

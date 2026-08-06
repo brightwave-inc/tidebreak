@@ -4,6 +4,7 @@ import type {
   ApiClient,
   WebSearchConfigInfo,
   WebSearchCredentialReadiness,
+  WebSearchMode,
   WebSearchProviderKind,
 } from "../api";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,13 @@ import {
   timeoutMsFromSeconds,
 } from "./ProviderFields";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   SettingsError,
   SettingsField,
@@ -31,9 +39,21 @@ const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 60;
  */
 const SEARXNG_PROVIDER: WebSearchProviderKind = "searxng";
 
+/**
+ * The mode choices, in the order they narrow: the default that picks for you,
+ * then each of the two searches on its own, then none at all.
+ */
+const MODE_OPTIONS: { mode: WebSearchMode; label: string }[] = [
+  { mode: "automatic", label: "Automatic" },
+  { mode: "vendor", label: "Model provider (built-in)" },
+  { mode: "host", label: "Configured provider" },
+  { mode: "off", label: "Off" },
+];
+
 export function WebSearchPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
   const [credentials, setCredentials] = useState<WebSearchCredentialReadiness[]>([]);
+  const [mode, setMode] = useState<WebSearchMode>("automatic");
   const [provider, setProvider] = useState<WebSearchProviderKind | "">("");
   const [timeoutSeconds, setTimeoutSeconds] = useState("");
   const [searxngBaseUrl, setSearxngBaseUrl] = useState("");
@@ -60,6 +80,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         if (cancelled) return;
         setConfig(nextConfig);
         setCredentials(nextCredentials.credentials);
+        setMode(nextConfig.mode);
         setProvider(nextConfig.provider ?? "");
         setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
         setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
@@ -100,6 +121,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         setApiKeys((current) => ({ ...current, [credential.provider]: "" }));
       }
       const nextConfig = await client.putWebSearchConfig({
+        mode,
         provider: provider || null,
         timeout_ms: timeout.timeoutMs,
         // An empty field clears the stored address rather than leaving a
@@ -109,6 +131,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       const nextCredentials = await client.listWebSearchCredentials();
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
+      setMode(nextConfig.mode);
       setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       setSearxngBaseUrl(nextConfig.searxng_base_url ?? "");
       toast.success("Saved web-search settings");
@@ -159,6 +182,33 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
             label={state.label}
             description={state.description}
           />
+
+          <SettingsSection
+            title="Search mode"
+            description="Which search a chat gets. Automatic uses your model provider's built-in search when the chat's model supports it, and the provider configured below otherwise."
+          >
+            <SettingsField
+              label="Search mode"
+              hint="Built-in search runs inside the model provider's own infrastructure and is billed through that provider's API key, not through the providers below."
+            >
+              <Select
+                value={mode}
+                disabled={working}
+                onValueChange={(next) => setMode(next as WebSearchMode)}
+              >
+                <SelectTrigger aria-label="Search mode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {MODE_OPTIONS.map((option) => (
+                    <SelectItem key={option.mode} value={option.mode}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </SettingsField>
+          </SettingsSection>
 
           <SettingsSection
             title="Providers"
@@ -279,21 +329,49 @@ function webSearchState(config: WebSearchConfigInfo | null): {
   label: string;
   description: string;
 } {
-  if (!config?.provider) {
+  // The mode decides who searches, so it decides what the verdict is about.
+  // Only the two modes that can reach a host provider report on one.
+  if (config?.mode === "off") {
     return {
       kind: "disabled",
-      label: "Disabled",
-      description: "No web-search provider is selected.",
+      label: "Off",
+      description: "No chat can search the web.",
     };
   }
+  if (config?.mode === "vendor") {
+    return {
+      kind: "ready",
+      label: "Built-in search",
+      description:
+        "Chats search through the model provider. A model without built-in search cannot search at all.",
+    };
+  }
+  if (!config?.provider) {
+    return config?.mode === "automatic"
+      ? {
+          kind: "not-configured",
+          label: "Built-in search only",
+          description:
+            "No provider is selected here, so only models with built-in search can search.",
+        }
+      : {
+          kind: "disabled",
+          label: "Disabled",
+          description: "No web-search provider is selected.",
+        };
+  }
   if (config.available) {
+    const selected =
+      config.provider === SEARXNG_PROVIDER
+        ? `${providerLabel(config.provider)} is selected and pointed at ${config.searxng_base_url}.`
+        : `${providerLabel(config.provider)} is selected and has a saved key.`;
     return {
       kind: "ready",
       label: "Ready",
       description:
-        config.provider === SEARXNG_PROVIDER
-          ? `${providerLabel(config.provider)} is selected and pointed at ${config.searxng_base_url}.`
-          : `${providerLabel(config.provider)} is selected and has a saved key.`,
+        config.mode === "automatic"
+          ? `${selected} Models with built-in search use that instead.`
+          : selected,
     };
   }
   return {
