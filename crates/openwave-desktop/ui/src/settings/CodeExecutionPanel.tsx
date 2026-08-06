@@ -294,6 +294,7 @@ const PROVIDER_SANDBOX_LABEL: Record<
   local: "Local native sandbox",
   e2b: "E2B cloud sandbox",
   daytona: "Daytona cloud sandbox",
+  docker: "Docker container",
 };
 
 type ProviderAvailabilityRow = CodeExecutionConfigInfo["providers"][number];
@@ -314,6 +315,10 @@ const PROVIDER_UNAVAILABLE_SENTENCES: Record<ProviderUnavailableReason, string> 
     missing_sandbox_binary:
       "This host is missing the sandbox binary local execution needs to confine commands.",
     missing_credential: "Add an API key above to make this provider usable.",
+    missing_container_runtime:
+      "No container runtime was found. Install Docker (or a Docker-compatible runtime) to run commands in a container on this machine.",
+    container_runtime_unreachable:
+      "A container runtime is installed but isn't responding. Start it — Docker Desktop, or the daemon on this host — and this becomes usable.",
   };
 
 /**
@@ -507,5 +512,7 @@ function codeExecutionProviderLabel(
       return "E2B";
     case "daytona":
       return "Daytona";
+    case "docker":
+      return "Docker";
   }
 }

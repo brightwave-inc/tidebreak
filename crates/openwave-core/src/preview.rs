@@ -653,6 +653,8 @@ pub enum ExecBackend {
     E2b,
     /// A managed Daytona cloud sandbox.
     Daytona,
+    /// A container on the host's own Docker-compatible runtime.
+    Docker,
 }
 
 /// What a call produced, in a form a human can read.

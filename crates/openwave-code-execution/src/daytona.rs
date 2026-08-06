@@ -17,6 +17,14 @@ use crate::remote::{
     stage_remote_file, with_remote_session, RemoteSandboxAdapter, RemoteSession,
     RemoteSessionError, RemoteSessionPool, RemoteWorkspaceAdapter,
 };
+// Daytona requires a tag or a digest at snapshot registration (it rejects
+// floating refs); the shared pin is a digest, which is where the integrity
+// guarantee lives. The resource declarations travel with it so a sandbox
+// created here and a container run by the Docker backend get the same shape.
+use crate::sandbox_image::{
+    DOCUMENTS_CPU as DOCUMENTS_SNAPSHOT_CPU, DOCUMENTS_DISK_GB as DOCUMENTS_SNAPSHOT_DISK_GB,
+    DOCUMENTS_IMAGE, DOCUMENTS_MEMORY_GB as DOCUMENTS_SNAPSHOT_MEMORY_GB,
+};
 use crate::{
     CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
     CodeExecutionResponse, ExecutionWorkspaceId, SandboxPreparation, SandboxPreparationSink,
@@ -38,25 +46,13 @@ const DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES: usize = 20;
 /// Name of the snapshot the provider registers into the caller's own Daytona
 /// organization for the official OpenWave documents image.
 ///
-/// The name carries the image version so a bumped image registers under a
-/// fresh name rather than silently reusing a stale snapshot — snapshot content
-/// is fixed at registration and Daytona has no notion of re-pulling one.
+/// The snapshot name carries the image version, so a bumped image registers
+/// under a fresh name rather than silently reusing a stale snapshot —
+/// snapshot content is fixed at registration and Daytona has no notion of
+/// re-pulling one. It is rewritten by the pin job in
+/// `.github/workflows/publish-sandbox-image.yml` alongside the shared image
+/// pin in [`crate::sandbox_image`].
 const DOCUMENTS_SNAPSHOT: &str = "openwave-documents-v0.26.0";
-/// The official documents image, pinned by manifest-list digest. Daytona
-/// requires a tag or a digest (it rejects floating refs), and the digest is
-/// where the integrity pin lives.
-///
-/// This pin and [`DOCUMENTS_SNAPSHOT`] are rewritten together by the pin job in
-/// `.github/workflows/publish-sandbox-image.yml` after every image publish,
-/// alongside `PUBLISHED_IMAGE_DIGEST` in `openwave-server`'s `sandbox_docker`.
-const DOCUMENTS_IMAGE: &str = "ghcr.io/brightwave-inc/openwave-sandbox-agent-documents@sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2";
-/// Resources declared for the documents snapshot, and so for every sandbox
-/// created from it. Daytona's own defaults (1 CPU, 1 GB, 3 GB disk) are below
-/// what the image needs on disk once LibreOffice and the document skills'
-/// Python dependencies are unpacked.
-const DOCUMENTS_SNAPSHOT_CPU: u32 = 2;
-const DOCUMENTS_SNAPSHOT_MEMORY_GB: u32 = 4;
-const DOCUMENTS_SNAPSHOT_DISK_GB: u32 = 10;
 /// First registration makes Daytona pull a multi-gigabyte image into its own
 /// infrastructure, so the wait is generous — but still bounded, and it happens
 /// once per organization rather than once per sandbox.

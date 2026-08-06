@@ -41,6 +41,7 @@ const EXEC_BACKEND_LABEL: Record<ExecBackend, string> = {
   local: "Local",
   e2b: "E2B",
   daytona: "Daytona",
+  docker: "Docker",
 };
 
 export type ToolCallStatus =
