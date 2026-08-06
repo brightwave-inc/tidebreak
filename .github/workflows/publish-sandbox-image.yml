@@ -427,25 +427,32 @@ jobs:
               with open(path, "w") as handle:
                   handle.write(source[: match.start()] + replacement + source[match.end() :])
 
-          # Daytona cannot pull an arbitrary ref at sandbox creation, so the
-          # code-execution provider registers the same image as a snapshot in
-          # the user's own organization. Its ref and the version-carrying
-          # snapshot name move with the pin above.
-          path = "crates/openwave-code-execution/src/daytona.rs"
-          with open(path) as handle:
-              source = handle.read()
-          pins = {
-              r'(const DOCUMENTS_SNAPSHOT: &str = ")[^"]*(";)':
-                  f"openwave-documents-{os.environ['IMAGE_TAG']}",
-              r'(const DOCUMENTS_IMAGE: &str = ")[^"]*(";)':
-                  f"{os.environ['DOCUMENTS_REPOSITORY']}@{digest}",
+          # The code-execution crate runs the same image on two backends: the
+          # Docker backend pulls the ref directly, and the Daytona adapter
+          # registers it as a snapshot in the user's own organization because
+          # Daytona cannot pull an arbitrary ref at sandbox creation. The
+          # shared ref and the version-carrying snapshot name move with the
+          # pin above; they live in different files, so each is rewritten
+          # where it is declared.
+          crate_pins = {
+              "crates/openwave-code-execution/src/sandbox_image.rs": {
+                  r'(const DOCUMENTS_IMAGE: &str = ")[^"]*(";)':
+                      f"{os.environ['DOCUMENTS_REPOSITORY']}@{digest}",
+              },
+              "crates/openwave-code-execution/src/daytona.rs": {
+                  r'(const DOCUMENTS_SNAPSHOT: &str = ")[^"]*(";)':
+                      f"openwave-documents-{os.environ['IMAGE_TAG']}",
+              },
           }
-          for pattern, value in pins.items():
-              source, replaced = re.subn(pattern, lambda m: m.group(1) + value + m.group(2), source)
-              if replaced != 1:
-                  sys.exit(f"expected exactly one match for {pattern}, found {replaced}")
-          with open(path, "w") as handle:
-              handle.write(source)
+          for path, pins in crate_pins.items():
+              with open(path) as handle:
+                  source = handle.read()
+              for pattern, value in pins.items():
+                  source, replaced = re.subn(pattern, lambda m: m.group(1) + value + m.group(2), source)
+                  if replaced != 1:
+                      sys.exit(f"expected exactly one match for {pattern} in {path}, found {replaced}")
+              with open(path, "w") as handle:
+                  handle.write(source)
 
           # E2B builds a template from this Dockerfile rather than pulling the
           # ref, so the template definition carries its own copy of the digest

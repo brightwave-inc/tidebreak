@@ -662,7 +662,7 @@ export type CodeExecutionProviderAvailability = { provider: CodeExecutionProvide
 /**
  * A configured code-execution backend.
  */
-export type CodeExecutionProviderKind = "local" | "e2b" | "daytona";
+export type CodeExecutionProviderKind = "local" | "e2b" | "daytona" | "docker";
 
 /**
  * Why a provider cannot execute anything on this host right now.
@@ -672,7 +672,7 @@ export type CodeExecutionProviderKind = "local" | "e2b" | "daytona";
  * surface renders its own copy from the code. Reasons are what the user can
  * act on — install a key, switch provider — never an internal failure detail.
  */
-export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential";
+export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
  * Identifies one profile-scoped connected app — an outside integration
@@ -936,7 +936,7 @@ export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "app
  * are written on this side. A backend the renderer does not know projects as
  * nothing rather than as passthrough text.
  */
-export type ExecBackend = "local" | "e2b" | "daytona";
+export type ExecBackend = "local" | "e2b" | "daytona" | "docker";
 
 /**
  * A way the execution backend ran with less than its intended setup.

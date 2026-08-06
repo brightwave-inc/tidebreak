@@ -1055,7 +1055,12 @@ function isExecDegradation(value: unknown): value is ExecDegradation {
 }
 
 function isExecBackend(value: unknown): value is ExecBackend {
-  return value === "local" || value === "e2b" || value === "daytona";
+  return (
+    value === "local" ||
+    value === "e2b" ||
+    value === "daytona" ||
+    value === "docker"
+  );
 }
 
 /**

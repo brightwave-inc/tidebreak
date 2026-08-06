@@ -39,6 +39,8 @@ pub enum CodeExecutionProviderKind {
     E2b,
     /// A managed Daytona cloud sandbox.
     Daytona,
+    /// A container on the host's own Docker-compatible runtime.
+    Docker,
 }
 
 impl CodeExecutionProviderKind {
@@ -48,6 +50,7 @@ impl CodeExecutionProviderKind {
             Self::Local => "local",
             Self::E2b => "e2b",
             Self::Daytona => "daytona",
+            Self::Docker => "docker",
         }
     }
 }
@@ -76,6 +79,13 @@ pub enum CodeExecutionUnavailableReason {
     MissingSandboxBinary,
     /// A managed provider whose API key slot is empty.
     MissingCredential,
+    /// No container runtime was found on this host. The provider needs a
+    /// Docker-compatible CLI on `PATH`; installing one is what changes this.
+    MissingContainerRuntime,
+    /// A container runtime is installed but its daemon did not answer, so
+    /// nothing can be provisioned yet. Distinct from a missing runtime
+    /// because the fix is different: start the daemon rather than install it.
+    ContainerRuntimeUnreachable,
 }
 
 impl CodeExecutionUnavailableReason {
@@ -85,6 +95,8 @@ impl CodeExecutionUnavailableReason {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::MissingSandboxBinary => "missing_sandbox_binary",
             Self::MissingCredential => "missing_credential",
+            Self::MissingContainerRuntime => "missing_container_runtime",
+            Self::ContainerRuntimeUnreachable => "container_runtime_unreachable",
         }
     }
 
@@ -98,6 +110,10 @@ impl CodeExecutionUnavailableReason {
             }
             Self::MissingSandboxBinary => "the host's native sandbox binary is missing",
             Self::MissingCredential => "no API key is saved for this provider",
+            Self::MissingContainerRuntime => "no container runtime is installed on this host",
+            Self::ContainerRuntimeUnreachable => {
+                "the container runtime is installed but its daemon is not responding"
+            }
         }
     }
 }
