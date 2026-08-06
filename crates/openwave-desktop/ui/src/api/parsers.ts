@@ -742,20 +742,24 @@ export function parsePendingToolApproval(
 
 function parseApprovalGrantRung(value: unknown): ApprovalGrantRung | null {
   if (value === "exact_action" || value === "whole_tool") return value;
-  if (
-    !isRecord(value) ||
-    Object.keys(value).length !== 1 ||
-    !isRecord(value.command_prefix) ||
-    Object.keys(value.command_prefix).length !== 1
-  ) {
-    return null;
+  if (!isRecord(value) || Object.keys(value).length !== 1) return null;
+  if (isRecord(value.command_prefix)) {
+    if (Object.keys(value.command_prefix).length !== 1) return null;
+    const tokens = value.command_prefix.tokens;
+    return typeof tokens === "number" && Number.isInteger(tokens) && tokens > 0
+      ? { command_prefix: { tokens } }
+      : null;
   }
-  const tokens = value.command_prefix.tokens;
-  return typeof tokens === "number" &&
-    Number.isInteger(tokens) &&
-    tokens > 0
-    ? { command_prefix: { tokens } }
-    : null;
+  if (isRecord(value.path_prefix)) {
+    if (Object.keys(value.path_prefix).length !== 1) return null;
+    const segments = value.path_prefix.segments;
+    return typeof segments === "number" &&
+      Number.isInteger(segments) &&
+      segments > 0
+      ? { path_prefix: { segments } }
+      : null;
+  }
+  return null;
 }
 
 /**
