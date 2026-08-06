@@ -83,6 +83,9 @@ export async function convertPresentationToPdf(
   if (response.status === "failed") {
     throw new PresentationConversionError(response.message, response.details);
   }
+  if (typeof response.pdfBase64 !== "string" || response.pdfBase64 === "") {
+    throw new Error("Invalid presentation preview response");
+  }
   return decodeBase64(response.pdfBase64);
 }
 
@@ -212,7 +215,14 @@ function encodeBase64(bytes: Uint8Array): string {
 }
 
 function decodeBase64(value: string): Uint8Array {
-  const binary = atob(value);
+  let binary: string;
+  try {
+    binary = atob(value);
+  } catch {
+    // `atob` rejects malformed input with "The string contains invalid
+    // characters", which says nothing about presentations to whoever reads it.
+    throw new Error("Invalid presentation preview response");
+  }
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
