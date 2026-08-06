@@ -7,6 +7,7 @@
 
 mod app;
 mod client;
+mod markdown;
 mod render;
 mod theme;
 mod wire;
