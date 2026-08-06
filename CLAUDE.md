@@ -13,17 +13,10 @@ React/TypeScript under `crates/openwave-desktop/ui`.
 - **Do not use the `bw` CLI in OpenWave.** It is tooling for the separate Alpha
   repository, not this one; use this repository's documented Cargo, pnpm, and
   GitHub commands instead.
-- **Land work as small, focused PRs — one logical change each.** Don't accumulate
-  a large multi-slice diff on a working branch. Ship a slice, open the PR, move
-  on. Small and reviewable beats big and sprawling.
-- **Stacking PRs on top of one another is encouraged.** When a slice depends on
-  one still in review, branch off that PR's branch and keep going — don't sit
-  idle waiting for the base to merge. Retarget the stacked PR to `main` (and
-  rebase) once its base lands.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
 - **Issues are for deferred or cross-agent work, not for narrating the current
   task.** Open an issue when work is being set aside for later, or when it needs
-  to be visible to *other* sessions — a slice another agent might pick up, or a
+  to be visible to *other* sessions — work another agent might pick up, or a
   claim on contested scope. Work the user is directing interactively in this
   session doesn't need an issue; filing one adds tracking overhead without
   coordinating anyone. If you do pick up substantial parallel-track work, claim
@@ -58,12 +51,12 @@ The conventions:
   every active claim.
 - **A closed issue is not proof the work is done.** Check whether the merged PR
   covered the whole scope, and open a follow-up issue for whatever it left.
-- **If you find your slice already merged by someone else, don't force yours
+- **If you find your work already merged by someone else, don't force yours
   through.** The version that landed first has the floor; rebasing a competing
   design over it reverts reviewed work. Salvage the difference — extra coverage,
   bugs you found — into follow-up issues, and say so when you close yours.
-- **One issue per slice.** Reference it from the PR with `Closes #N` so the merge
-  auto-closes the issue.
+- **Reference the issue from the PR** with `Closes #N` so the merge auto-closes
+  it.
 - **Keep labels current.** Stale state misleads the team — drop `in-progress`
   when you park work (and add `deferred` or `blocked` with a comment saying
   where it stands); treat this as part of the change, not an afterthought.
