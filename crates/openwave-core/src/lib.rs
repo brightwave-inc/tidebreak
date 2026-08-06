@@ -139,7 +139,7 @@ pub use client_tools::{
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBaseline,
-    CompactionTokenBounds, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
+    CompactionTokenBounds, CompactionTokenTracker, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
     DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES, DEFAULT_COMPACTION_TARGET_FRACTION,
     DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };

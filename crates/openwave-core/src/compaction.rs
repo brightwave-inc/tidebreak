@@ -102,13 +102,43 @@ pub struct CompactionTokenBaseline {
     pub loaded_transcript_tokens: usize,
 }
 
-impl CompactionTokenBaseline {
+/// Trigger accounting for one turn, kept uncapped as the turn runs.
+///
+/// In-turn tool results enter the transcript already cut to the model's
+/// feedback budget, so measuring the live transcript alone would under-count
+/// exactly the growth most likely to cross the threshold. Each cap reports
+/// what it removed here, which keeps this turn's accounting on the same
+/// uncapped footing as the loaded history it extends.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionTokenTracker {
+    baseline: CompactionTokenBaseline,
+    elided_tool_result_tokens: usize,
+}
+
+impl CompactionTokenTracker {
+    #[must_use]
+    pub fn new(baseline: CompactionTokenBaseline) -> Self {
+        Self {
+            baseline,
+            elided_tool_result_tokens: 0,
+        }
+    }
+
+    /// Record what the model-facing cap cut from one in-turn tool result.
+    pub fn note_capped_tool_result(&mut self, full: &str, capped: &str) {
+        let elided =
+            context::estimate_tokens(full).saturating_sub(context::estimate_tokens(capped));
+        self.elided_tool_result_tokens = self.elided_tool_result_tokens.saturating_add(elided);
+    }
+
     /// Trigger tokens for the transcript as it stands now.
     #[must_use]
     pub fn trigger_tokens(&self, transcript: &[ChatMessage]) -> usize {
         let live = context::estimate_transcript_tokens(transcript);
-        self.unabridged_history_tokens
-            .saturating_add(live.saturating_sub(self.loaded_transcript_tokens))
+        self.baseline
+            .unabridged_history_tokens
+            .saturating_add(live.saturating_sub(self.baseline.loaded_transcript_tokens))
+            .saturating_add(self.elided_tool_result_tokens)
     }
 }
 
@@ -307,12 +337,12 @@ mod tests {
     #[test]
     fn trigger_tokens_count_history_uncapped_and_in_turn_growth() {
         let loaded = vec![ChatMessage::text(Role::User, "abridged history")];
-        let baseline = CompactionTokenBaseline {
+        let mut tracker = CompactionTokenTracker::new(CompactionTokenBaseline {
             // As if the durable tool results were far larger uncapped.
             unabridged_history_tokens: 10_000,
             loaded_transcript_tokens: context::estimate_transcript_tokens(&loaded),
-        };
-        assert_eq!(baseline.trigger_tokens(&loaded), 10_000);
+        });
+        assert_eq!(tracker.trigger_tokens(&loaded), 10_000);
 
         let mut grown = loaded.clone();
         grown.push(ChatMessage::text(
@@ -321,7 +351,15 @@ mod tests {
         ));
         let growth = context::estimate_transcript_tokens(&grown[1..]);
         assert!(growth > 0);
-        assert_eq!(baseline.trigger_tokens(&grown), 10_000 + growth);
+        assert_eq!(tracker.trigger_tokens(&grown), 10_000 + growth);
+
+        // A tool result capped for the provider body still counts at the
+        // weight it would have had uncapped.
+        let full = "result ".repeat(10_000);
+        let capped = &full[..1_000];
+        tracker.note_capped_tool_result(&full, capped);
+        let elided = context::estimate_tokens(&full) - context::estimate_tokens(capped);
+        assert_eq!(tracker.trigger_tokens(&grown), 10_000 + growth + elided);
     }
 
     #[test]

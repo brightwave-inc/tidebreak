@@ -6,7 +6,7 @@ use futures::StreamExt;
 
 use crate::compaction::{
     self, select_compaction_boundary, CompactionSelection, CompactionSourceBoundary,
-    CompactionTokenBaseline,
+    CompactionTokenBaseline, CompactionTokenTracker,
 };
 use crate::context;
 use crate::error::{AgentError, Result};
@@ -32,7 +32,7 @@ pub(crate) struct CreateContextCheckpoint<'a> {
     pub transcript: &'a [ChatMessage],
     pub source_boundaries: &'a [TranscriptSourceBoundary],
     pub user_texts: &'a [(MessageId, String)],
-    pub token_baseline: CompactionTokenBaseline,
+    pub token_tracker: &'a CompactionTokenTracker,
     pub current: Option<&'a ContextCheckpoint>,
     pub attempted_boundary: &'a mut Option<usize>,
     pub events: &'a super::events::EventSink<'a>,
@@ -139,7 +139,7 @@ impl Agent {
             transcript,
             source_boundaries,
             user_texts,
-            token_baseline,
+            token_tracker,
             current,
             attempted_boundary,
             events,
@@ -152,7 +152,7 @@ impl Agent {
             .config
             .compaction
             .resolve_token_bounds(self.config.context_window);
-        if token_baseline.trigger_tokens(transcript) <= bounds.threshold {
+        if token_tracker.trigger_tokens(transcript) <= bounds.threshold {
             return Ok(None);
         }
 

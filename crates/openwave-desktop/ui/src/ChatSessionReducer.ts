@@ -146,6 +146,9 @@ export function reduceChatSessionEvent(
           ...state,
           busy: true,
           activeTurnId: event.turn_id,
+          // A compaction whose finish event never arrived (disconnect, replay
+          // gap) must not label the next turn as compacting.
+          compacting: false,
           contextTruncationNoted: false,
           assistantBuffer: "",
           markerScrubber: new AssistantSourceMarkerStreamScrubber(),

@@ -525,6 +525,11 @@ describe("terminal events", () => {
     );
     expect(terminal.state.compacting).toBe(false);
     expect(terminal.state.busy).toBe(false);
+
+    // A finish event lost to a disconnect or replay gap must not leak the
+    // label into the next turn.
+    const dangling = play([{ type: "compaction_started" }], finished.state);
+    expect(play([TURN], dangling.state).state.compacting).toBe(false);
   });
 
   it("turn_refused renders a reason even when the model emitted no text", () => {
