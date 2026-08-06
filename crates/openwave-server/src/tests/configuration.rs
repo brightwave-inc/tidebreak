@@ -2797,6 +2797,171 @@ async fn the_plugin_catalog_reports_badges_and_persists_toggles() {
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Contract: a bundle the user wrote in their data directory reaches the
+/// catalog attributed as theirs, the built-in tree keeps the floor when the
+/// two collide, and a flag set against a user bundle outlives the bundle
+/// itself — reinstalling one the user switched off must not quietly switch it
+/// back on.
+#[tokio::test]
+async fn user_plugins_load_from_the_data_directory_and_keep_their_flags() {
+    let (dir, store) = temp_db_store("user-plugins.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+
+    let builtin = tempfile::tempdir().unwrap();
+    let write = |root: &std::path::Path, kind: &str, name: &str, manifest: &str, source: String| {
+        let package = root.join(kind).join(name);
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join(manifest), source).unwrap();
+    };
+    write(
+        builtin.path(),
+        "skills",
+        "charts",
+        "SKILL.md",
+        "---\nname: charts\ndescription: Plots.\n---\nBody.\n".to_owned(),
+    );
+    write(
+        builtin.path(),
+        "plugins",
+        "reporting",
+        "PLUGIN.md",
+        "---\nname: reporting\ndisplay-name: Reporting\ndescription: Status reporting.\n\
+         category: other\nskills: [\"charts\"]\n---\n"
+            .to_owned(),
+    );
+    // The user's own skill, and the bundle that groups it.
+    write(
+        dir.path(),
+        "skills",
+        "meeting-notes",
+        "SKILL.md",
+        "---\nname: meeting-notes\ndescription: How I take notes.\n---\nBody.\n".to_owned(),
+    );
+    let write_notes_bundle = || {
+        write(
+            dir.path(),
+            "plugins",
+            "notes",
+            "PLUGIN.md",
+            "---\nname: notes\ndisplay-name: My notes\ndescription: Notes the way I like them.\n\
+             category: other\nskills: [\"meeting-notes\"]\n---\n"
+                .to_owned(),
+        );
+    };
+    write_notes_bundle();
+    // Shadows a built-in name, and re-claims a skill a built-in bundle owns.
+    // Both are skipped; neither takes the rest of the tree down with it.
+    write(
+        dir.path(),
+        "plugins",
+        "reporting",
+        "PLUGIN.md",
+        "---\nname: reporting\ndisplay-name: Mine\ndescription: Shadows the built-in.\n\
+         category: other\nskills: [\"meeting-notes\"]\n---\n"
+            .to_owned(),
+    );
+    write(
+        dir.path(),
+        "plugins",
+        "poaching",
+        "PLUGIN.md",
+        "---\nname: poaching\ndisplay-name: Poaching\ndescription: Steals a member.\n\
+         category: other\nskills: [\"charts\"]\n---\n"
+            .to_owned(),
+    );
+
+    let user_plugin_app = || {
+        let secrets = Arc::new(MemSecrets::default());
+        let mut state = AppState::new(
+            Config::desktop(dir.path()),
+            store.clone(),
+            Arc::new(FixedResolver(Arc::new(FakeProvider))),
+            secrets.clone(),
+            Arc::new(ToolRegistry::new()),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
+        state.code_execution = Some(Arc::new(
+            crate::code_execution::ConfiguredCodeExecutionProvider::new(
+                store.clone(),
+                secrets,
+                dir.path().join("scratch"),
+            )
+            .with_skills(Some(builtin.path().join("skills")))
+            .with_plugins(Some(builtin.path().join("plugins")))
+            .with_user_skills(Some(dir.path().join("skills")))
+            .with_user_plugins(Some(dir.path().join("plugins"))),
+        ));
+        let token = state.token.clone();
+        (app(state), format!("Bearer {token}"))
+    };
+    let listed = |catalog: &serde_json::Value| {
+        catalog["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|plugin| {
+                (
+                    plugin["name"].as_str().unwrap().to_owned(),
+                    plugin["origin"].as_str().unwrap().to_owned(),
+                    plugin["enabled"].as_bool().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (router, bearer) = user_plugin_app();
+    let catalog = get_plugins(&router, &bearer).await;
+    assert_eq!(
+        listed(&catalog),
+        [
+            ("notes".to_owned(), "user".to_owned(), true),
+            ("reporting".to_owned(), "builtin".to_owned(), true),
+        ],
+        "the user bundle is listed as theirs; neither collision shadows the built-in one"
+    );
+    // Its member is grouped under it rather than left standalone, and the
+    // built-in bundle kept the skill the user tried to re-claim.
+    let notes = &catalog["plugins"].as_array().unwrap()[0];
+    assert_eq!(notes["skills"][0]["name"], "meeting-notes");
+    assert!(catalog["skills"].as_array().unwrap().is_empty());
+
+    // Switch the user bundle off, then uninstall it.
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"notes": false}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    std::fs::remove_dir_all(dir.path().join("plugins/notes")).unwrap();
+
+    let (router, bearer) = user_plugin_app();
+    let catalog = get_plugins(&router, &bearer).await;
+    assert_eq!(
+        listed(&catalog),
+        [("reporting".to_owned(), "builtin".to_owned(), true)],
+        "an uninstalled user bundle is gone from the catalog"
+    );
+    // The skill it used to claim is standalone again rather than lost.
+    assert_eq!(catalog["skills"][0]["name"], "meeting-notes");
+
+    // Reinstalling it does not silently re-enable it: the flag was recorded
+    // against the name, not against the package that happened to be present.
+    write_notes_bundle();
+    let (router, bearer) = user_plugin_app();
+    let catalog = get_plugins(&router, &bearer).await;
+    assert_eq!(
+        listed(&catalog),
+        [
+            ("notes".to_owned(), "user".to_owned(), false),
+            ("reporting".to_owned(), "builtin".to_owned(), true),
+        ]
+    );
+}
+
 /// Contract: reusable prompts reach the client as one flat, attributed list
 /// whose entries a bundle's flag gates, and their bodies come from their own
 /// route. Both halves are wire shape a composer depends on, and the gating is

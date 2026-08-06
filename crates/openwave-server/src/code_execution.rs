@@ -921,6 +921,10 @@ pub struct ConfiguredCodeExecutionProvider {
     /// skills, grouping them in the prompt catalog. Empty when no plugin tree
     /// is configured, which leaves every skill standalone.
     plugins: Arc<Vec<openwave_code_execution::LoadedPlugin>>,
+    /// Per-install directory of user-authored plugin packages, re-read
+    /// alongside the user skills and prompts they group so an added or edited
+    /// bundle appears without a restart. `None` disables user plugins.
+    user_plugins_dir: Option<PathBuf>,
     folder_grant_resolver: Option<Arc<dyn ExecFolderGrantResolver>>,
     /// Host-provided office-to-PDF converter feeding the model's visual QA
     /// loop. `None` (headless embeddings) degrades to an honest sync note.
@@ -1125,6 +1129,7 @@ impl ConfiguredCodeExecutionProvider {
             prompts: Arc::new(Vec::new()),
             user_prompts_dir: None,
             plugins: Arc::new(Vec::new()),
+            user_plugins_dir: None,
             folder_grant_resolver: None,
             office_converter: None,
             host_tool_broker: None,
@@ -1239,10 +1244,33 @@ impl ConfiguredCodeExecutionProvider {
             source
                 .as_deref()
                 .map(|source| {
-                    openwave_code_execution::load_plugins(source, &self.skills, &self.prompts)
+                    openwave_code_execution::load_plugins(
+                        source,
+                        &self.skills,
+                        &self.prompts,
+                        openwave_code_execution::PluginOrigin::Builtin,
+                    )
                 })
                 .unwrap_or_default(),
         );
+        self
+    }
+
+    /// Install the per-install directory user-authored plugin packages are
+    /// loaded from. The directory is created here (best effort) so the user has
+    /// a place to drop a bundle; its contents are re-read on each listing,
+    /// against the user skills and prompts a bundle may claim.
+    #[must_use]
+    pub fn with_user_plugins(mut self, source: Option<PathBuf>) -> Self {
+        if let Some(source) = source.as_deref() {
+            if let Err(error) = std::fs::create_dir_all(source) {
+                tracing::warn!(
+                    "user plugins directory {} could not be created: {error}",
+                    source.display()
+                );
+            }
+        }
+        self.user_plugins_dir = source;
         self
     }
 
@@ -1277,12 +1305,33 @@ impl ConfiguredCodeExecutionProvider {
         openwave_code_execution::merged_skills(&self.skills, self.user_skills_dir.as_deref())
     }
 
-    /// Every installed bundle, before the install's enable flags apply.
+    /// Every installed bundle, before the install's enable flags apply: the
+    /// built-in bundles merged with a fresh read of the user plugins
+    /// directory, exactly as [`Self::installed_skills`] does.
     pub(crate) fn installed_plugins(&self) -> Vec<openwave_code_execution::PluginPackage> {
-        self.plugins
-            .iter()
-            .map(|plugin| plugin.package.clone())
-            .collect()
+        self.merged_plugins(&self.installed_skills(), &self.installed_prompts())
+    }
+
+    /// The same merge against sets the caller has already read.
+    ///
+    /// Membership is resolved against the *installed* skills and prompts, not
+    /// the enabled ones: a bundle whose member the user switched off is still
+    /// the bundle they installed, and dropping it would take the switch that
+    /// turns the member back on off the surface with it.
+    fn merged_plugins(
+        &self,
+        skills: &[openwave_code_execution::LoadedSkill],
+        prompts: &[openwave_code_execution::LoadedPrompt],
+    ) -> Vec<openwave_code_execution::PluginPackage> {
+        openwave_code_execution::merged_plugins(
+            &self.plugins,
+            self.user_plugins_dir.as_deref(),
+            skills,
+            prompts,
+        )
+        .into_iter()
+        .map(|plugin| plugin.package)
+        .collect()
     }
 
     /// Every installed prompt, before the install's enable flags apply: the
@@ -1296,11 +1345,14 @@ impl ConfiguredCodeExecutionProvider {
     }
 
     /// The bundle that claims `skill`, if any.
-    fn owning_plugin(&self, skill: &str) -> Option<&str> {
-        self.plugins
+    fn owning_plugin<'a>(
+        plugins: &'a [openwave_code_execution::PluginPackage],
+        skill: &str,
+    ) -> Option<&'a str> {
+        plugins
             .iter()
-            .find(|plugin| plugin.package.skills.iter().any(|member| member == skill))
-            .map(|plugin| plugin.package.name.as_str())
+            .find(|plugin| plugin.skills.iter().any(|member| member == skill))
+            .map(|plugin| plugin.name.as_str())
     }
 
     /// The install's plugin and skill enable flags.
@@ -1320,15 +1372,22 @@ impl ConfiguredCodeExecutionProvider {
     }
 
     /// Narrow an installed set to what the install's flags leave on.
+    ///
+    /// Ownership is resolved against the merged bundles, so a user bundle
+    /// gates the user skills it claims exactly as a built-in one does.
     async fn enabled_skills(
         &self,
         installed: Vec<openwave_code_execution::LoadedSkill>,
     ) -> Vec<openwave_code_execution::LoadedSkill> {
         let state = self.enable_state().await;
+        let plugins = self.merged_plugins(&installed, &self.installed_prompts());
         installed
             .into_iter()
             .filter(|skill| {
-                state.skill_enabled(&skill.package.name, self.owning_plugin(&skill.package.name))
+                state.skill_enabled(
+                    &skill.package.name,
+                    Self::owning_plugin(&plugins, &skill.package.name),
+                )
             })
             .collect()
     }
@@ -1342,14 +1401,13 @@ impl ConfiguredCodeExecutionProvider {
             .collect()
     }
 
-    /// The bundles the catalog groups skills under. User skills are claimed by
-    /// no plugin and stay standalone.
+    /// The bundles the catalog groups skills under, built-in and user-authored
+    /// alike. A skill no bundle claims stays standalone.
     pub(crate) async fn plugin_catalog(&self) -> Vec<openwave_code_execution::PluginPackage> {
         let state = self.enable_state().await;
-        self.plugins
-            .iter()
-            .filter(|plugin| state.plugin_enabled(&plugin.package.name))
-            .map(|plugin| plugin.package.clone())
+        self.installed_plugins()
+            .into_iter()
+            .filter(|plugin| state.plugin_enabled(&plugin.name))
             .collect()
     }
 

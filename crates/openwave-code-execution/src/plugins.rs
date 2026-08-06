@@ -28,6 +28,10 @@
 //! a plugin naming a skill that isn't there is skipped whole rather than
 //! advertising a group the catalog cannot render.
 //!
+//! User-authored bundles under the data directory load through that same
+//! parser and merge behind the built-in tree — see [`merged_plugins`] for the
+//! precedence rules, which mirror the ones user skills already follow.
+//!
 //! Capability badges follow the same posture from the other direction: they
 //! are derived from what the member skills actually declare, and the closed
 //! key set means a manifest cannot state them at all.
@@ -158,6 +162,21 @@ pub fn derived_capabilities(
     capabilities.into_iter().collect()
 }
 
+/// Which source a validated plugin package was loaded from.
+///
+/// Origin is host-derived from the load path, never from manifest content —
+/// the closed key set has no `origin` key at all — so a user bundle cannot
+/// claim to ship with the app. A management surface uses it to attribute the
+/// bundles the user wrote themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginOrigin {
+    /// Shipped with the application from a trusted resource directory.
+    Builtin,
+    /// Authored by the user in the per-install plugins directory.
+    User,
+}
+
 /// Host-derived bundle entry parsed from a plugin manifest's frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginPackage {
@@ -177,6 +196,8 @@ pub struct PluginPackage {
     /// Optional line emitted above the member skills in the prompt catalog,
     /// telling the model how to choose among them.
     pub router_preamble: Option<String>,
+    /// Where the package was loaded from.
+    pub origin: PluginOrigin,
 }
 
 /// One validated plugin.
@@ -239,7 +260,15 @@ pub fn is_valid_plugin_router_preamble(preamble: &str) -> bool {
 /// slug, a control character in a rendered line — rejects the whole manifest.
 /// The body below the frontmatter is documentation for whoever opens the file;
 /// it is never staged and never reaches the model, so it may be empty.
-pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseError> {
+///
+/// `origin` is supplied by the caller from the path the manifest was read
+/// from. Parsing itself is identical for both origins: a user bundle is held
+/// to exactly the built-in manifest grammar, so a plugin that loads here is one
+/// the catalog can render whoever wrote it.
+pub fn parse_plugin_manifest(
+    source: &str,
+    origin: PluginOrigin,
+) -> Result<PluginPackage, PluginParseError> {
     if source.len() > crate::MAX_WORKSPACE_FILE_BYTES {
         return Err(invalid("manifest exceeds the workspace file limit"));
     }
@@ -349,6 +378,7 @@ pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseE
         skills,
         prompts,
         router_preamble,
+        origin,
     })
 }
 
@@ -401,7 +431,7 @@ fn parse_members(
 }
 
 /// Load every valid plugin under `source`, one directory per plugin, against
-/// the skills and prompts that actually loaded.
+/// the skills and prompts that actually loaded, tagging each with `origin`.
 ///
 /// A plugin is skipped with a warning — never half-applied — when its manifest
 /// is unreadable or rejected, when the directory name disagrees with the
@@ -415,6 +445,7 @@ pub fn load_plugins(
     source: &Path,
     skills: &[LoadedSkill],
     prompts: &[LoadedPrompt],
+    origin: PluginOrigin,
 ) -> Vec<LoadedPlugin> {
     let entries = match std::fs::read_dir(source) {
         Ok(entries) => entries,
@@ -461,7 +492,7 @@ pub fn load_plugins(
                 continue;
             }
         };
-        let package = match parse_plugin_manifest(&manifest) {
+        let package = match parse_plugin_manifest(&manifest, origin) {
             Ok(package) => package,
             Err(error) => {
                 tracing::warn!("skipping plugin '{directory_name}': {error}");
@@ -532,6 +563,75 @@ pub fn load_plugins(
     plugins
 }
 
+/// The built-in plugins plus the user-authored bundles under `user_dir`,
+/// merged into one deterministic catalog.
+///
+/// User bundles go through the same strict loader and the same membership
+/// checks as built-ins, resolved against `skills` and `prompts` — which should
+/// be the *merged* sets, so a user bundle may group the skills the user wrote.
+/// Three rules give the built-in tree the floor, each one a skip-with-warning
+/// so one bad bundle never takes the catalog down:
+///
+/// * a built-in name is reserved: a user bundle claiming it is dropped rather
+///   than shadowing curated grouping;
+/// * a skill a built-in bundle already claims cannot be re-claimed;
+/// * neither can a prompt.
+///
+/// A member that belongs to no built-in bundle is fair game, which is what
+/// lets a user bundle group their own skills. A missing user directory is an
+/// empty user set, not an error. The result is sorted by name.
+#[must_use]
+pub fn merged_plugins(
+    builtins: &[LoadedPlugin],
+    user_dir: Option<&Path>,
+    skills: &[LoadedSkill],
+    prompts: &[LoadedPrompt],
+) -> Vec<LoadedPlugin> {
+    let mut plugins = builtins.to_vec();
+    let Some(dir) = user_dir.filter(|dir| dir.is_dir()) else {
+        return plugins;
+    };
+    let builtin_skills: BTreeSet<&str> = builtins
+        .iter()
+        .flat_map(|plugin| plugin.package.skills.iter().map(String::as_str))
+        .collect();
+    let builtin_prompts: BTreeSet<&str> = builtins
+        .iter()
+        .flat_map(|plugin| plugin.package.prompts.iter().map(String::as_str))
+        .collect();
+    for user_plugin in load_plugins(dir, skills, prompts, PluginOrigin::User) {
+        let package = &user_plugin.package;
+        let name = &package.name;
+        if builtins.iter().any(|plugin| plugin.package.name == *name) {
+            tracing::warn!("skipping user plugin '{name}': a built-in plugin owns that name");
+            continue;
+        }
+        if let Some(taken) = package
+            .skills
+            .iter()
+            .find(|skill| builtin_skills.contains(skill.as_str()))
+        {
+            tracing::warn!(
+                "skipping user plugin '{name}': skill {taken:?} is claimed by a built-in plugin"
+            );
+            continue;
+        }
+        if let Some(taken) = package
+            .prompts
+            .iter()
+            .find(|prompt| builtin_prompts.contains(prompt.as_str()))
+        {
+            tracing::warn!(
+                "skipping user plugin '{name}': prompt {taken:?} is claimed by a built-in plugin"
+            );
+            continue;
+        }
+        plugins.push(user_plugin);
+    }
+    plugins.sort_by(|a, b| a.package.name.cmp(&b.package.name));
+    plugins
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,7 +678,7 @@ router-preamble: Pick by the file the user needs.\n\
 
     #[test]
     fn valid_manifest_parses_into_its_bundle_entry() {
-        let package = parse_plugin_manifest(VALID).unwrap();
+        let package = parse_plugin_manifest(VALID, PluginOrigin::Builtin).unwrap();
         assert_eq!(package.name, "documents");
         assert_eq!(package.display_name, "Documents");
         assert_eq!(package.category, PluginCategory::Documents);
@@ -593,7 +693,9 @@ router-preamble: Pick by the file the user needs.\n\
         let minimal = "---\nname: charts\ndisplay-name: Charts\ndescription: Plots.\n\
                        category: visualization\nskills: [\"charts\"]\n---\n";
         assert_eq!(
-            parse_plugin_manifest(minimal).unwrap().router_preamble,
+            parse_plugin_manifest(minimal, PluginOrigin::Builtin)
+                .unwrap()
+                .router_preamble,
             None
         );
 
@@ -601,7 +703,7 @@ router-preamble: Pick by the file the user needs.\n\
         // the skills-only shape we ship.
         let prompts_only = "---\nname: writing\ndisplay-name: Writing\ndescription: Starters.\n\
                             category: other\nprompts: [\"weekly-update\"]\n---\n";
-        let package = parse_plugin_manifest(prompts_only).unwrap();
+        let package = parse_plugin_manifest(prompts_only, PluginOrigin::Builtin).unwrap();
         assert_eq!(package.skills, [""; 0]);
         assert_eq!(package.prompts, ["weekly-update"]);
     }
@@ -662,7 +764,7 @@ router-preamble: Pick by the file the user needs.\n\
             ),
         ] {
             assert!(
-                parse_plugin_manifest(&source).is_err(),
+                parse_plugin_manifest(&source, PluginOrigin::Builtin).is_err(),
                 "{case} should be rejected"
             );
         }
@@ -725,7 +827,7 @@ router-preamble: Pick by the file the user needs.\n\
         // Directory disagrees with the manifest.
         write_plugin(plugins_dir.path(), "mislabeled", VALID);
 
-        let plugins = load_plugins(plugins_dir.path(), &skills, &prompts);
+        let plugins = load_plugins(plugins_dir.path(), &skills, &prompts, PluginOrigin::Builtin);
         assert_eq!(
             plugins
                 .iter()
@@ -738,6 +840,77 @@ router-preamble: Pick by the file the user needs.\n\
             ["word-documents", "pdf-documents"]
         );
         assert_eq!(plugins[0].package.prompts, ["weekly-update"]);
+    }
+
+    /// Contract: the built-in tree has the floor when user-authored bundles
+    /// merge in. Every rule here is a skip-with-warning that is easy to reverse
+    /// by accident — a shadowed name or a re-claimed member would silently
+    /// re-group curated skills — and origin is host-derived from the load path,
+    /// which is what a management surface attributes the user's own bundles by.
+    #[test]
+    fn user_plugins_merge_behind_the_builtin_tree() {
+        let skills_dir = tempfile::tempdir().unwrap();
+        for name in ["charts", "word-documents", "pdf-documents"] {
+            write_skill(skills_dir.path(), name);
+        }
+        let user_skills_dir = tempfile::tempdir().unwrap();
+        write_skill(user_skills_dir.path(), "meeting-notes");
+        let mut skills = load_skills(skills_dir.path(), SkillOrigin::Builtin);
+        skills.extend(load_skills(user_skills_dir.path(), SkillOrigin::User));
+
+        let builtin_dir = tempfile::tempdir().unwrap();
+        write_plugin(builtin_dir.path(), "documents", VALID);
+        let builtins = load_plugins(builtin_dir.path(), &skills, &[], PluginOrigin::Builtin);
+
+        let user_dir = tempfile::tempdir().unwrap();
+        // Groups the user's own skill: the supported shape, and the only one
+        // that survives here.
+        write_plugin(
+            user_dir.path(),
+            "notes",
+            "---\nname: notes\ndisplay-name: My notes\ndescription: How I take notes.\n\
+             category: other\nskills: [\"meeting-notes\"]\n---\n",
+        );
+        // Reserved: a built-in bundle owns this name.
+        write_plugin(
+            user_dir.path(),
+            "documents",
+            "---\nname: documents\ndisplay-name: Mine\ndescription: Shadows the built-in.\n\
+             category: other\nskills: [\"charts\"]\n---\n",
+        );
+        // Re-claims a skill the built-in 'documents' bundle already owns.
+        write_plugin(
+            user_dir.path(),
+            "poaching",
+            "---\nname: poaching\ndisplay-name: Poaching\ndescription: Steals a member.\n\
+             category: other\nskills: [\"pdf-documents\"]\n---\n",
+        );
+        // Invalid manifests never take the catalog down with them.
+        write_plugin(user_dir.path(), "broken", "not frontmatter at all\n");
+
+        let merged = merged_plugins(&builtins, Some(user_dir.path()), &skills, &[]);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|plugin| (plugin.package.name.as_str(), plugin.package.origin))
+                .collect::<Vec<_>>(),
+            [
+                ("documents", PluginOrigin::Builtin),
+                ("notes", PluginOrigin::User),
+            ]
+        );
+        // The built-in bundle kept both of its members.
+        assert_eq!(
+            merged[0].package.skills,
+            ["word-documents", "pdf-documents"]
+        );
+
+        // A missing user directory is an empty user set, not an error.
+        let missing = user_dir.path().join("does-not-exist");
+        assert_eq!(
+            merged_plugins(&builtins, Some(&missing), &skills, &[]).len(),
+            1
+        );
     }
 
     /// Contract: a badge row is a function of what the member skills declare,
@@ -796,6 +969,7 @@ router-preamble: Pick by the file the user needs.\n\
                 skills: members.iter().map(|skill| skill.name.clone()).collect(),
                 prompts: Vec::new(),
                 router_preamble: None,
+                origin: PluginOrigin::Builtin,
             };
             let mut passed: Vec<&SkillPackage> = members;
             passed.push(&outsider);
@@ -818,6 +992,7 @@ router-preamble: Pick by the file the user needs.\n\
             skills: vec!["both".to_owned()],
             prompts: Vec::new(),
             router_preamble: None,
+            origin: PluginOrigin::Builtin,
         };
         let derived = derived_capabilities(&everything, &[&both]);
         assert!(!derived.contains(&PluginCapability::LiveControl));
@@ -826,7 +1001,8 @@ router-preamble: Pick by the file the user needs.\n\
         // A manifest that tries to declare its own badges is rejected whole.
         assert!(parse_plugin_manifest(
             "---\nname: a\ndisplay-name: A\ndescription: b\ncategory: other\n\
-             skills: [\"c\"]\ncapabilities: [\"network\"]\n---\n"
+             skills: [\"c\"]\ncapabilities: [\"network\"]\n---\n",
+            PluginOrigin::Builtin,
         )
         .is_err());
     }
@@ -845,7 +1021,7 @@ router-preamble: Pick by the file the user needs.\n\
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
             .count();
-        let plugins = load_plugins(&source, &skills, &[]);
+        let plugins = load_plugins(&source, &skills, &[], PluginOrigin::Builtin);
         assert_eq!(
             plugins.len(),
             directories,

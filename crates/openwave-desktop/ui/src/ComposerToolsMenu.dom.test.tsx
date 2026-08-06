@@ -16,6 +16,7 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     display_name: "Documents",
     description: "Writes Word, Excel, and PowerPoint files.",
     category: "documents",
+    origin: "builtin",
     capabilities: [],
     enabled: false,
     skills: [],

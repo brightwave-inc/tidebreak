@@ -57,8 +57,8 @@ pub use package_cache::{
 };
 pub use plugins::{
     derived_capabilities, is_valid_plugin_name, is_valid_plugin_router_preamble, load_plugins,
-    parse_plugin_manifest, LoadedPlugin, PluginCapability, PluginCategory, PluginPackage,
-    PluginParseError, PLUGIN_MANIFEST_FILE,
+    merged_plugins, parse_plugin_manifest, LoadedPlugin, PluginCapability, PluginCategory,
+    PluginOrigin, PluginPackage, PluginParseError, PLUGIN_MANIFEST_FILE,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
 pub use prompts::{

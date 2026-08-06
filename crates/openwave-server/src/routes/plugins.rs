@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 
 use openwave_code_execution::{
     derived_capabilities, is_valid_plugin_name, is_valid_prompt_name, is_valid_skill_name,
-    PluginCapability, PluginCategory, PromptOrigin, PromptPackage, SkillOrigin, SkillPackage,
+    PluginCapability, PluginCategory, PluginOrigin, PromptOrigin, PromptPackage, SkillOrigin,
+    SkillPackage,
 };
 
 use crate::error::ServerError;
@@ -59,6 +60,8 @@ pub struct PluginInfo {
     pub display_name: String,
     pub description: String,
     pub category: PluginCategory,
+    /// Where the bundle was loaded from; host-derived, never claimed.
+    pub origin: PluginOrigin,
     /// What the bundle can do, derived by the host from what it contains.
     /// Never self-declared: a manifest has no key for this.
     pub capabilities: Vec<PluginCapability>,
@@ -163,6 +166,7 @@ pub async fn get_plugins(
             display_name: plugin.display_name,
             description: plugin.description,
             category: plugin.category,
+            origin: plugin.origin,
         });
     }
     let skills = installed

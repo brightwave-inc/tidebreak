@@ -1578,6 +1578,10 @@ export type PluginInfo = {
  */
 name: string, display_name: string, description: string, category: PluginCategory, 
 /**
+ * Where the bundle was loaded from; host-derived, never claimed.
+ */
+origin: PluginOrigin, 
+/**
  * What the bundle can do, derived by the host from what it contains.
  * Never self-declared: a manifest has no key for this.
  */
@@ -1591,6 +1595,16 @@ enabled: boolean,
  * Member skills in manifest order.
  */
 skills: Array<PluginSkillInfo>, };
+
+/**
+ * Which source a validated plugin package was loaded from.
+ *
+ * Origin is host-derived from the load path, never from manifest content —
+ * the closed key set has no `origin` key at all — so a user bundle cannot
+ * claim to ship with the app. A management surface uses it to attribute the
+ * bundles the user wrote themselves.
+ */
+export type PluginOrigin = "builtin" | "user";
 
 /**
  * One reusable prompt, as a picker or a management surface renders it.

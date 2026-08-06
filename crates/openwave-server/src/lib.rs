@@ -928,6 +928,7 @@ async fn bind_inner(
         .with_plugins(config.exec_plugins_dir.clone())
         .with_user_skills(Some(config.user_skills_dir()))
         .with_user_prompts(Some(config.user_prompts_dir()))
+        .with_user_plugins(Some(config.user_plugins_dir()))
         .with_folder_grant_resolver(folder_grant_resolver)
         .with_office_converter(office_converter)
         .with_host_tool_broker(host_tool_broker),
