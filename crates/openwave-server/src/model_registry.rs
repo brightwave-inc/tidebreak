@@ -111,6 +111,15 @@ pub struct ModelSpec {
     pub input_modalities: &'static [InputModality],
     /// Whether the model can produce an internal reasoning stream.
     pub supports_reasoning: bool,
+    /// Whether a turn on this model may enable the provider's own server-side
+    /// web search tool instead of OpenWave's client-side one.
+    ///
+    /// Like the other capability flags, this gates behavior rather than
+    /// display: setting it asserts that the routing adapter for this row's
+    /// provider emits the vendor tool on the request, not merely that the
+    /// vendor documents one. Gateway and custom compatible routes cannot make
+    /// that promise, and the invariant below holds them to it.
+    pub supports_vendor_web_search: bool,
     /// The reasoning-effort levels this model accepts, ascending.
     ///
     /// A single flag cannot describe the range: a model may take `high` and
@@ -149,6 +158,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         // request format. The capability guard below keeps that promise honest.
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         // Claude 4.6 and later reason on an adaptive thinking block, and the
         // Anthropic adapter sends one along with the chat's chosen effort. That
         // generation onward takes `low` through `max`; there is no `none`,
@@ -166,6 +176,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         // Same adaptive-thinking generation as Opus 5 and Sonnet 5.
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
@@ -178,6 +189,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
@@ -189,6 +201,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 64_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         // Haiku 4.5 predates the adaptive switch: it rejects the effort
         // control, so the adapter leaves both off and the picker hides it.
         reasoning_efforts: EFFORT_UNSUPPORTED,
@@ -202,6 +215,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
@@ -213,6 +227,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
@@ -224,6 +239,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
@@ -235,6 +251,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
@@ -246,6 +263,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         // The whole GPT-5 line reasons on a caller-selected effort, which the
         // OpenAI-compatible adapter already sends alongside
         // `max_completion_tokens`. Only the 5.6 generation added `max`.
@@ -260,6 +278,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
@@ -271,6 +290,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
@@ -282,6 +302,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
@@ -293,6 +314,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
@@ -304,6 +326,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     // Gemini rows are intentionally limited to ids currently published by
@@ -319,6 +342,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_HIGH,
     },
     ModelSpec {
@@ -330,6 +354,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_HIGH,
     },
     ModelSpec {
@@ -341,6 +366,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_HIGH,
     },
     ModelSpec {
@@ -352,6 +378,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_HIGH,
     },
 ];
@@ -625,6 +652,22 @@ mod tests {
             find("gpt-5.4-nano").unwrap().reasoning_efforts,
             EFFORT_NONE_TO_XHIGH
         );
+    }
+
+    #[test]
+    fn no_pass_through_route_claims_the_vendor_web_search_tool() {
+        for spec in MODEL_REGISTRY {
+            assert!(
+                !spec.supports_vendor_web_search
+                    || !matches!(
+                        spec.provider,
+                        ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
+                    ),
+                "{} claims a provider-executed web search under `{}`, whose endpoint OpenWave cannot assume implements one",
+                spec.id,
+                spec.provider
+            );
+        }
     }
 
     #[test]

@@ -3185,6 +3185,7 @@ mod image_capability_tests {
         max_output_tokens: 64_000,
         input_modalities: &[InputModality::Text],
         supports_reasoning: false,
+        supports_vendor_web_search: false,
         reasoning_efforts: &[],
     };
 

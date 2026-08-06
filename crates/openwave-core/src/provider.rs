@@ -238,6 +238,32 @@ pub enum ToolChoice {
     },
 }
 
+/// Ask the routing adapter to enable the provider's own server-side web search
+/// tool for this request.
+///
+/// The search runs on the provider's infrastructure: OpenWave advertises no
+/// tool for it, never sees the fetch, and makes no egress of its own, so none
+/// of the host's network policy applies to it. Present means the host decided
+/// the turn may search; absent means it may not.
+///
+/// Adapters that cannot express a vendor search — a route whose endpoint
+/// OpenWave does not control, or a provider with no such tool — must ignore
+/// this and send the request unchanged. Failing the turn over a control the
+/// host offered as an enhancement would trade a working answer for an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorWebSearch {
+    /// Upper bound on searches the provider may run in one turn.
+    pub max_uses: u32,
+}
+
+impl VendorWebSearch {
+    /// Search budget for a turn when the host has no reason to pick another.
+    ///
+    /// Enough for a question that needs following up on its first results,
+    /// while still bounding what one turn can spend.
+    pub const DEFAULT_MAX_USES: u32 = 5;
+}
+
 /// A request for one streamed model completion.
 ///
 /// The struct is constructed as a literal rather than through a builder, so it
@@ -298,6 +324,11 @@ pub struct ChatRequest {
     /// output constraint is the stronger promise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    /// Whether the provider's own web search tool is enabled for this request,
+    /// and the budget it may spend. Absent, the model has no vendor search and
+    /// reaches the web only through the tools OpenWave advertises.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_web_search: Option<VendorWebSearch>,
     /// Pixels for the [`ContentBlock::Image`] blocks in `messages`.
     ///
     /// Hydrated from the blob store for exactly this request. Skipped by serde

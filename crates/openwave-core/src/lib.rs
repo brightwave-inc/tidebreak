@@ -191,7 +191,7 @@ pub use preview::{
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
     ProviderId, ReasoningOrigin, RefusalDetails, RefusalOutcome, ResponseFormat, StopReason,
-    ToolChoice, Usage,
+    ToolChoice, Usage, VendorWebSearch,
 };
 pub use renderer_tool::RendererToolName;
 pub use secret_cache::CachingSecretProvider;
