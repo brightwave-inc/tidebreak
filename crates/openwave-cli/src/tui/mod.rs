@@ -6,7 +6,9 @@
 //! consumes. Logging is file-only: the TUI owns the terminal.
 
 mod app;
+mod composer;
 mod markdown;
+mod overlays;
 mod render;
 mod theme;
 
