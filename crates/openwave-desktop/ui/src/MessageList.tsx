@@ -680,15 +680,17 @@ export function groupMessageItems(
       // live reducer opens empty bubbles at turn-start and resume boundaries,
       // and the hydrated snapshot has no such entries — so a phase split here
       // would merge back when the turn settles, visibly reshuffling the
-      // transcript. Only a bubble *between* activity is swallowed; a trailing
-      // one is the response now streaming in, and stays outside the phase so
+      // transcript. Approval resume cycles can stack several in a row, so the
+      // whole run is swallowed when activity continues past it. A trailing
+      // run is the response now streaming in, and stays outside the phase so
       // gaining its first characters does not move the group boundary.
-      if (
-        isInvisibleAssistant(messages[index]) &&
-        isActivityMessage(messages[index + 1])
-      ) {
-        index += 1;
-        continue;
+      if (isInvisibleAssistant(messages[index])) {
+        let ahead = index + 1;
+        while (isInvisibleAssistant(messages[ahead])) ahead += 1;
+        if (isActivityMessage(messages[ahead])) {
+          index = ahead;
+          continue;
+        }
       }
       break;
     }
