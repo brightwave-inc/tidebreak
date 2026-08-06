@@ -13,6 +13,12 @@ in an exec workspace into concise stdout summaries and bounded images under
 | `office_unpack.py` | Unzip an OOXML package into a directory tree for direct XML edits | Python |
 | `pptx_clean.py` | Check an unpacked PPTX tree for malformed XML and dangling relationships | Python |
 | `office_pack.py` | Zip an unpacked tree back into a valid OOXML file | Python |
+| `calc_uno.py` | Inspect and edit an existing spreadsheet in place (cells, formulas, named ranges) | LibreOffice Calc plus its Python bridge (`python3-uno`) in the sandbox |
+| `xlsx_recalc.py` | Recalculate a workbook and report error cells and numbers stored as text | LibreOffice Calc plus `python3-uno` in the sandbox |
+
+`calc_uno.py` and `xlsx_recalc.py` share their soffice/UNO session plumbing in
+`_openwave_calc.py`, and both must run under the system `python3` — that is the
+interpreter LibreOffice's `uno` module is installed for.
 
 The desktop copies this directory into each exec workspace at
 `.openwave/exec-scripts`. The sandbox image exposes it at

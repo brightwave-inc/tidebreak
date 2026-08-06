@@ -208,11 +208,16 @@ Examples:
 python3 .openwave/exec-scripts/render_pdf.py documents/report.pdf --pages 1-2
 python3 .openwave/exec-scripts/extract_pdf_figures.py documents/report.pdf
 python3 .openwave/exec-scripts/analyze_xlsx.py documents/model.xlsx
+python3 .openwave/exec-scripts/calc_uno.py set-cell documents/model.xlsx Summary B7 '=SUM(B2:B6)'
+python3 .openwave/exec-scripts/xlsx_recalc.py output/model.xlsx
 ```
 
 PDF rendering uses pypdfium2 or pdf2image with Poppler, figure extraction uses
 Poppler, DOCX/PPTX rendering uses LibreOffice, and XLSX analysis uses openpyxl
-and Pillow. The sandbox image includes these tools. Local execution reports a
+and Pillow. Editing an existing spreadsheet in place and recalculating one both
+drive headless LibreOffice Calc over its `uno` Python bridge, which exists in
+the sandbox image and not on a bare host. The sandbox image includes these
+tools. Local execution reports a
 concise command error when the host lacks Python or an underlying renderer; it
 does not download tooling or use an unconfined fallback.
 
