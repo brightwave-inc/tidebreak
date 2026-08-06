@@ -728,6 +728,41 @@ fn is_valid_header_value(value: &str) -> bool {
         .all(|byte| byte == b'\t' || (0x20..0x7f).contains(&byte))
 }
 
+/// A single non-recursive textual pass expanding `${PLUGIN_ROOT}` and
+/// `${PLUGIN_DATA}` in `text`.
+///
+/// The specification allows this expansion in `args`, `env` values, and `cwd`
+/// only — never in `command`, `url`, or `headers` — and requires exactly one
+/// pass: replacement text is never rescanned, so a root whose own path
+/// contains `${PLUGIN_DATA}` cannot expand a second time. Anything that merely
+/// looks like a placeholder (`${HOME}`, a bare `${`, a `$PLUGIN_ROOT` without
+/// braces) is left in place literally rather than being treated as an error or
+/// silently dropped, because the specification's grammar recognizes exactly
+/// two names and says nothing about the rest.
+#[must_use]
+pub fn expand_plugin_placeholders(text: &str, root: &str, data: &str) -> String {
+    let mut expanded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start..];
+        if let Some(tail) = after.strip_prefix(&format!("${{{PLUGIN_ROOT_VARIABLE}}}")) {
+            expanded.push_str(root);
+            rest = tail;
+        } else if let Some(tail) = after.strip_prefix(&format!("${{{PLUGIN_DATA_VARIABLE}}}")) {
+            expanded.push_str(data);
+            rest = tail;
+        } else {
+            // Not a recognized placeholder: emit the `${` literally and keep
+            // scanning after it, so the text passes through unchanged.
+            expanded.push_str("${");
+            rest = &after[2..];
+        }
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
 /// Render a validated configuration back as `mcp.json`.
 ///
 /// The installed copy is regenerated rather than copied so that only entries
@@ -1052,5 +1087,40 @@ mod tests {
             .config
             .servers
             .is_empty());
+    }
+
+    /// Contract: expansion is one pass over the text. Replacement text is
+    /// never rescanned — a root that itself spells a placeholder stays as
+    /// substituted — and anything the grammar does not name survives
+    /// literally instead of vanishing.
+    #[test]
+    fn placeholders_expand_once_and_unknown_ones_stay_literal() {
+        assert_eq!(
+            expand_plugin_placeholders(
+                "${PLUGIN_ROOT}/bin --state ${PLUGIN_DATA}/db",
+                "/pkg/reporting",
+                "/data/reporting"
+            ),
+            "/pkg/reporting/bin --state /data/reporting/db"
+        );
+        // The substituted root spells the other placeholder; a second pass
+        // would expand it, and must not.
+        assert_eq!(
+            expand_plugin_placeholders("${PLUGIN_ROOT}/x", "/${PLUGIN_DATA}", "/data"),
+            "/${PLUGIN_DATA}/x"
+        );
+        for literal in [
+            "${HOME}/x",
+            "$PLUGIN_ROOT",
+            "${PLUGIN_ROOT",
+            "${plugin_root}",
+            "${}",
+        ] {
+            assert_eq!(
+                expand_plugin_placeholders(literal, "/pkg", "/data"),
+                literal,
+                "{literal} should pass through untouched"
+            );
+        }
     }
 }

@@ -26,6 +26,7 @@ const docsServer: McpServerInfo = {
   gateway_endpoint: null,
   request_timeout_ms: 60_000,
   enabled: true,
+  plugin: null,
   health: "healthy",
   tool_count: 3,
   diagnostic: null,

@@ -63,6 +63,11 @@ pub(crate) struct McpRuntime {
     /// Installed after assembly on desktop embeddings (like
     /// `AppState::host_folders`); unset, the roster lists no folders.
     host_folders: std::sync::OnceLock<Arc<dyn crate::host_folders::HostFolders>>,
+    /// The installed-plugin seam bundled MCP servers are derived from.
+    /// Installed after assembly, like the host-folder seam, because the
+    /// code-execution provider that owns the plugin tree is built after this
+    /// runtime. Unset, no plugin contributes servers.
+    plugin_catalog: std::sync::OnceLock<Arc<dyn crate::plugin_mcp::PluginMcpCatalog>>,
     next_epoch: AtomicU64,
 }
 
@@ -88,6 +93,7 @@ impl McpRuntime {
             gateway,
             os_policy,
             host_folders: std::sync::OnceLock::new(),
+            plugin_catalog: std::sync::OnceLock::new(),
             next_epoch: AtomicU64::new(1),
         }
     }
@@ -96,6 +102,45 @@ impl McpRuntime {
     /// approved folders. At most once, at assembly.
     pub(crate) fn set_host_folders(&self, host: Arc<dyn crate::host_folders::HostFolders>) {
         let _ = self.host_folders.set(host);
+    }
+
+    /// Install the installed-plugin seam. At most once, at assembly; the
+    /// startup reconcile that first connects bundled servers runs after it.
+    pub(crate) fn set_plugin_catalog(&self, catalog: Arc<dyn crate::plugin_mcp::PluginMcpCatalog>) {
+        let _ = self.plugin_catalog.set(catalog);
+    }
+
+    /// The plugin-sourced definitions that belong beside `configured` right
+    /// now, read live from the installed tree and the enable flags.
+    ///
+    /// Nothing here is persisted or remembered: the answer is recomputed on
+    /// every reconcile and every replacement, so installing, uninstalling, or
+    /// toggling a plugin needs no second copy of this state to stay in sync.
+    /// Sources are sorted by plugin name so a namespace contest resolves the
+    /// same way on every host regardless of directory iteration order.
+    async fn plugin_definitions(
+        &self,
+        configured: &[McpServerDefinition],
+    ) -> Vec<McpServerDefinition> {
+        let Some(catalog) = self.plugin_catalog.get() else {
+            return Vec::new();
+        };
+        let mut sources = catalog.sources().await;
+        sources.sort_by(|left, right| left.plugin.cmp(&right.plugin));
+        let taken: HashSet<String> = configured
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        let (definitions, skipped) = crate::plugin_mcp::derive_definitions(&sources, &taken);
+        for entry in skipped {
+            tracing::warn!(
+                plugin = %entry.plugin,
+                server = %entry.server,
+                "plugin MCP server was not mounted: {}",
+                entry.reason
+            );
+        }
+        definitions
     }
 
     /// One server's literal environment as stored, by record id. A missing or
@@ -586,6 +631,8 @@ impl McpRuntime {
                 gateway_endpoint: Some(slug.clone()),
                 request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
                 enabled: true,
+                plugin: None,
+                launch: None,
             });
         }
         if servers.len() == before {
@@ -717,7 +764,15 @@ impl McpRuntime {
         // one resolution path, and the file stops being a second home for
         // credentials.
         self.commit_env_values(&mut definitions, &ids).await?;
-        let definitions = definitions;
+        let configured = definitions;
+        // Plugin-sourced servers ride along the same connection pass but are
+        // never part of what is persisted or validated as a candidate: they
+        // are derived from the installed tree, so a replacement that fails
+        // cannot take them down and a replacement that succeeds cannot edit
+        // them.
+        let plugin = self.plugin_definitions(&configured).await;
+        let definitions: Vec<McpServerDefinition> =
+            configured.iter().cloned().chain(plugin).collect();
         let envs = self.resolve_envs(&definitions, &ids).await;
         let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
@@ -740,8 +795,13 @@ impl McpRuntime {
                 // of band (sign-out, revoked entitlement), so its failure
                 // degrades the mount instead of rejecting the candidate —
                 // otherwise a signed-out mount would block every unrelated
-                // settings save until it was deleted.
-                Err(error) if definition.gateway_endpoint.is_some() => {
+                // settings save until it was deleted. A plugin-sourced server
+                // degrades for the same reason from the other direction: it is
+                // not part of the candidate at all, so it must never be able
+                // to fail somebody's settings save.
+                Err(error)
+                    if definition.gateway_endpoint.is_some() || definition.plugin.is_some() =>
+                {
                     // The projected diagnostic is deliberately generic; keep
                     // the real cause in the log (already URL- and
                     // secret-free). The desktop installs no tracing
@@ -779,7 +839,7 @@ impl McpRuntime {
                     ManagedServer {
                         client: None,
                         health: McpHealth::Disabled,
-                        diagnostic: managed_lockdown_diagnostic(definition, lockdown),
+                        diagnostic: disabled_diagnostic(definition, lockdown),
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -803,9 +863,11 @@ impl McpRuntime {
         }
         if persist {
             // Before the new state publishes, while the published set is
-            // still what this replacement diffs against.
-            self.remember_endpoint_unmounts(&definitions).await;
-            self.persist_definitions(&definitions, &ids).await?;
+            // still what this replacement diffs against. Plugin-sourced
+            // definitions are excluded: they are derived, so persisting them
+            // would create a second, staler home for the same facts.
+            self.remember_endpoint_unmounts(&configured).await;
+            self.persist_definitions(&configured, &ids).await?;
         }
         self.publish(definitions, ids, servers).await;
         Ok(())
@@ -844,6 +906,8 @@ impl McpRuntime {
         definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
     ) {
+        let plugin = self.plugin_definitions(&definitions).await;
+        let definitions: Vec<McpServerDefinition> = definitions.into_iter().chain(plugin).collect();
         let envs = self.resolve_envs(&definitions, &ids).await;
         let gateway = &self.gateway;
         let lockdown = self.manual_lockdown().await;
@@ -864,7 +928,7 @@ impl McpRuntime {
                 Ok(None) => ManagedServer {
                     client: None,
                     health: McpHealth::Disabled,
-                    diagnostic: managed_lockdown_diagnostic(definition, lockdown),
+                    diagnostic: disabled_diagnostic(definition, lockdown),
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -901,6 +965,114 @@ impl McpRuntime {
             servers.insert(definition.name.clone(), managed);
         }
         self.publish(definitions, ids, servers).await;
+    }
+
+    /// Bring the plugin-sourced slice of the connection set in line with the
+    /// installed tree and the current enable flags.
+    ///
+    /// Run at startup, after a plugin is installed, and after the enable flags
+    /// change — the three moments the derived set can move. Only the plugin
+    /// slice is touched: a server whose definition is unchanged keeps its live
+    /// connection, one that appeared connects, and one whose plugin was
+    /// switched off or uninstalled is disconnected and its tools unmount.
+    /// User-configured servers are never reconnected by this, so toggling a
+    /// plugin does not churn somebody's stdio child.
+    ///
+    /// Returns whether the published set changed.
+    pub(crate) async fn reconcile_plugin_servers(&self) -> bool {
+        if self.plugin_catalog.get().is_none() {
+            return false;
+        }
+        let _mutation = self.mutation.lock().await;
+        let (configured, live): (Vec<McpServerDefinition>, Vec<McpServerDefinition>) = {
+            let state = self.state.lock().await;
+            state
+                .definitions
+                .iter()
+                .cloned()
+                .partition(|definition| definition.plugin.is_none())
+        };
+        let desired = self.plugin_definitions(&configured).await;
+        if desired == live {
+            return false;
+        }
+        let ids = self.state.lock().await.ids.clone();
+        let lockdown = self.manual_lockdown().await;
+        let gateway = &self.gateway;
+        // Only the entries that are new or changed are connected; the rest
+        // keep the client they already hold.
+        let fresh: Vec<&McpServerDefinition> = desired
+            .iter()
+            .filter(|definition| !live.contains(definition))
+            .collect();
+        let connections = join_all(fresh.iter().map(|definition| async move {
+            if connects(definition, lockdown) {
+                definition
+                    .connect_with_views(gateway, &BTreeMap::new())
+                    .await
+                    .map(Some)
+            } else {
+                Ok(None)
+            }
+        }))
+        .await;
+
+        let mut state = self.state.lock().await;
+        // Everything the desired set does not name goes away, taking its
+        // client — and so its mounted tools — with it.
+        let keep: HashSet<&str> = desired
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .chain(configured.iter().map(|definition| definition.name.as_str()))
+            .collect();
+        state.servers.retain(|name, _| keep.contains(name.as_str()));
+        for (definition, connection) in fresh.into_iter().zip(connections) {
+            let managed = match connection {
+                Ok(Some((client, ui_views))) => ManagedServer {
+                    client: Some(client),
+                    health: McpHealth::Healthy,
+                    diagnostic: None,
+                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    epoch: self.fresh_epoch(),
+                    reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views,
+                },
+                Ok(None) => ManagedServer {
+                    client: None,
+                    health: McpHealth::Disabled,
+                    diagnostic: disabled_diagnostic(definition, lockdown),
+                    reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                    epoch: self.fresh_epoch(),
+                    reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views: HashMap::new(),
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        server = %definition.name,
+                        plugin = ?definition.plugin,
+                        "plugin MCP server connection failed: {error}"
+                    );
+                    ManagedServer {
+                        client: None,
+                        health: McpHealth::Degraded,
+                        diagnostic: Some(connection_diagnostic(definition, &error)),
+                        reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                        epoch: self.fresh_epoch(),
+                        reconnect_lock: Arc::new(Mutex::new(())),
+                        ui_views: HashMap::new(),
+                    }
+                }
+            };
+            state.servers.insert(definition.name.clone(), managed);
+        }
+        state.definitions = configured.into_iter().chain(desired).collect();
+        state.ids = ids;
+        let registry = self.registry_for(&state).await;
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        true
     }
 
     async fn publish(
@@ -1364,4 +1536,24 @@ fn managed_lockdown_diagnostic(
     lockdown: ManualLockdown,
 ) -> Option<String> {
     manual_lockdown_applies(definition, lockdown).then(|| MANAGED_DISABLED_DIAGNOSTIC.to_string())
+}
+
+/// Why a server that is not holding a connection is off.
+///
+/// The managed lockdown comes first: a plugin server the policy covers reads
+/// as locked, exactly like a user-typed manual server, rather than advertising
+/// the transport reason behind it. Otherwise a plugin-sourced entry explains
+/// itself — an `sse` server is listed and inert with the reason, because the
+/// specification keeps that transport optional and silently omitting the entry
+/// would leave nothing to explain the absence.
+fn disabled_diagnostic(
+    definition: &McpServerDefinition,
+    lockdown: ManualLockdown,
+) -> Option<String> {
+    managed_lockdown_diagnostic(definition, lockdown).or_else(|| {
+        definition
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.disabled_reason.clone())
+    })
 }

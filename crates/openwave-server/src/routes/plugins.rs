@@ -232,6 +232,9 @@ pub async fn post_plugin_install(
                 ServerError::internal("plugin files could not be installed")
             }
         })?;
+    // A freshly installed plugin may ship bundled MCP servers; bring them up
+    // now rather than at the next restart.
+    state.mcp.reconcile_plugin_servers().await;
     Ok((StatusCode::CREATED, Json(installed)))
 }
 
@@ -382,5 +385,10 @@ pub async fn put_plugins_enabled(
         ));
     }
     write_plugin_enable_state(&*state.store, &flags).await?;
+    // Enabling a plugin connects its bundled MCP servers and mounts their
+    // tools; disabling one disconnects them. The flags are the only control a
+    // plugin-sourced server has, so this has to happen on the same write that
+    // moved them, not on the next restart.
+    state.mcp.reconcile_plugin_servers().await;
     get_plugins(State(state)).await
 }

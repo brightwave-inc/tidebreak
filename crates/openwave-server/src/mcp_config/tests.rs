@@ -118,6 +118,8 @@ fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: false,
+        plugin: None,
+        launch: None,
     }
 }
 
@@ -135,6 +137,8 @@ fn http_definition(name: &str, url: &str) -> McpServerDefinition {
         gateway_endpoint: None,
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: true,
+        plugin: None,
+        launch: None,
     }
 }
 
@@ -152,6 +156,8 @@ fn gateway_definition(name: &str, slug: &str) -> McpServerDefinition {
         gateway_endpoint: Some(slug.to_string()),
         request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         enabled: true,
+        plugin: None,
+        launch: None,
     }
 }
 
@@ -1375,4 +1381,73 @@ fn debug_projection_redacts_argument_and_literal_environment_values() {
     assert!(!debug.contains("argument-secret"));
     assert!(!debug.contains("literal-secret"));
     assert!(debug.contains("TOKEN"));
+}
+
+/// A plugin catalog with a fixed set of sources, for the runtime tests.
+struct FixedPluginCatalog(Vec<(String, std::path::PathBuf, std::path::PathBuf)>);
+
+#[async_trait::async_trait]
+impl crate::plugin_mcp::PluginMcpCatalog for FixedPluginCatalog {
+    async fn sources(&self) -> Vec<crate::plugin_mcp::PluginMcpSource> {
+        self.0
+            .iter()
+            .map(|(plugin, root, data)| crate::plugin_mcp::PluginMcpSource {
+                plugin: plugin.clone(),
+                root: root.clone(),
+                data: data.clone(),
+                config: openwave_code_execution::PluginMcpConfig {
+                    servers: vec![openwave_code_execution::McpServer {
+                        name: "local".to_owned(),
+                        transport: openwave_code_execution::McpTransport::Stdio(
+                            openwave_code_execution::McpStdioServer {
+                                command: "./serve".to_owned(),
+                                args: Vec::new(),
+                                env: BTreeMap::new(),
+                                cwd: None,
+                            },
+                        ),
+                    }],
+                },
+            })
+            .collect()
+    }
+}
+
+/// Contract: a plugin-sourced server is a manual server as far as managed
+/// policy is concerned. Derived servers bypass `PUT /mcp/servers` entirely,
+/// so if the lockdown were keyed off that route a managed profile could be
+/// handed arbitrary local subprocesses and remote endpoints by installing a
+/// plugin — the exact channel the lockdown exists to close.
+#[tokio::test]
+async fn managed_policy_locks_plugin_sourced_servers_like_manual_ones() {
+    let (runtime, store, directory) = test_runtime().await;
+    let root = directory.path().join("pkg");
+    let data = directory.path().join("data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    runtime.set_plugin_catalog(Arc::new(FixedPluginCatalog(vec![(
+        "toolbox".to_owned(),
+        root,
+        data,
+    )])));
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+
+    assert!(runtime.reconcile_plugin_servers().await);
+    let info = runtime.info().await;
+    assert_eq!(info.servers.len(), 1);
+    assert_eq!(
+        info.servers[0].definition.plugin.as_deref(),
+        Some("toolbox")
+    );
+    assert_eq!(info.servers[0].health, McpHealth::Disabled);
+    assert_eq!(
+        info.servers[0].diagnostic.as_deref(),
+        Some(MANAGED_DISABLED_DIAGNOSTIC),
+        "a plugin server carries the same diagnostic a user-typed one does"
+    );
+    assert_eq!(info.servers[0].tool_count, 0);
+    // Nothing about a derived server reaches durable configuration.
+    assert!(saved_records(&store).await.is_empty());
 }

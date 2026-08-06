@@ -1262,7 +1262,15 @@ bearer_token_env: string | null,
  * resolved from the session at every connection and never enter this
  * type.
  */
-gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, };
+gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, 
+/**
+ * The plugin this server was synthesized from, when it is plugin-sourced.
+ *
+ * Read-only over the API: `PUT /mcp/servers` refuses a body that sets it,
+ * and the runtime rebuilds these entries from the installed plugin tree
+ * rather than from anything a client sends or the store holds.
+ */
+plugin: string | null, };
 
 /**
  * One renderer-safe server projection. Resolved `env_from` values and child
@@ -1310,7 +1318,15 @@ bearer_token_env: string | null,
  * resolved from the session at every connection and never enter this
  * type.
  */
-gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, };
+gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, 
+/**
+ * The plugin this server was synthesized from, when it is plugin-sourced.
+ *
+ * Read-only over the API: `PUT /mcp/servers` refuses a body that sets it,
+ * and the runtime rebuilds these entries from the installed plugin tree
+ * rather than from anything a client sends or the store holds.
+ */
+plugin: string | null, };
 
 export type McpServersInfo = { servers: Array<McpServerInfo>, };
 

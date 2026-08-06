@@ -850,6 +850,8 @@ mod tests {
                 gateway_endpoint: None,
                 request_timeout_ms: 60_000,
                 enabled: true,
+                plugin: None,
+                launch: None,
             }],
         })
         .await

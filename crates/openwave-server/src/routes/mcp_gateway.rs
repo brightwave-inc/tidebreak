@@ -27,6 +27,14 @@ pub async fn get_mcp_servers(
 /// `PUT /mcp/servers` — atomically validate, connect, persist, and publish a
 /// complete replacement set. A failed candidate never changes active tools.
 ///
+/// The body describes the *user-configured* set only. Plugin-sourced servers
+/// are derived from the installed plugin tree and its enable flags, so a body
+/// naming one is refused outright rather than quietly ignored — the reader
+/// sees them in the same list and would otherwise reasonably expect an edit to
+/// land. Omitting them is not a delete: the runtime rebuilds that slice
+/// itself, and a plugin's servers go away when the plugin is switched off or
+/// uninstalled.
+///
 /// On a managed profile the manual transports are locked: a body that adds or
 /// edits a `command` or `url` server is refused with the same stable
 /// `managed_profile` kind the provider lockdown uses, before anything is
@@ -40,6 +48,16 @@ pub async fn put_mcp_servers(
     State(state): State<AppState>,
     Json(body): Json<McpServersConfig>,
 ) -> Result<Json<McpServersInfo>, ServerError> {
+    if let Some(server) = body.servers.iter().find(|server| server.plugin.is_some()) {
+        return Err(ServerError::bad_request_kind(
+            "mcp_plugin_server_read_only",
+            format!(
+                "MCP server {:?} comes from a plugin and cannot be edited here; \
+                 manage it from the plugin that provides it",
+                server.name
+            ),
+        ));
+    }
     // Resolved outside the runtime's mutation lock: a policy that flips
     // between here and the commit skips the admission check, but the commit
     // itself re-reads the lockdown under that lock, so such a definition

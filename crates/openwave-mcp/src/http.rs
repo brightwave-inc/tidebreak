@@ -25,8 +25,50 @@ pub(crate) struct HttpWire {
     /// Prebuilt `Bearer …` header value; kept whole so the raw token never
     /// travels through formatting code that could end up in an error.
     authorization: Option<String>,
+    /// Static headers the connection was configured with, already validated
+    /// and stripped of every name this transport generates itself. Sent on
+    /// every request, and — like the bearer — never logged or echoed into an
+    /// error: a configured header may carry a credential even though the
+    /// source that declared it is not treated as a secret store.
+    configured: reqwest::header::HeaderMap,
     /// Server-assigned session, echoed on every request once issued.
     session_id: Option<String>,
+}
+
+/// The header names this transport generates for itself. A configured header
+/// naming one is dropped rather than merged: the client-generated value wins
+/// on conflict, and `host`/`content-*` belong to the request the transport
+/// builds, not to configuration.
+const RESERVED_HEADERS: [&str; 7] = [
+    "accept",
+    "authorization",
+    "content-length",
+    "content-type",
+    "host",
+    PROTOCOL_VERSION_HEADER,
+    SESSION_ID_HEADER,
+];
+
+/// Turn configured `name: value` pairs into a header map, dropping the names
+/// the transport generates itself.
+///
+/// Errors name only the offending *header name* — never its value.
+pub(crate) fn static_headers(
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<reqwest::header::HeaderMap> {
+    let mut map = reqwest::header::HeaderMap::new();
+    for (name, value) in headers {
+        let lowercase = name.to_ascii_lowercase();
+        if RESERVED_HEADERS.contains(&lowercase.as_str()) {
+            continue;
+        }
+        let name = reqwest::header::HeaderName::from_bytes(lowercase.as_bytes())
+            .map_err(|_| mcp_message("configured MCP header name is not a valid HTTP field"))?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| mcp_message("configured MCP header value is not a valid field value"))?;
+        map.insert(name, value);
+    }
+    Ok(map)
 }
 
 /// Validate a candidate MCP server URL without connecting.
@@ -51,7 +93,11 @@ pub fn validate_http_url(url: &str) -> Result<()> {
 }
 
 impl HttpWire {
-    pub(crate) fn new(url: &str, bearer_token: Option<&str>) -> Result<Self> {
+    pub(crate) fn with_headers(
+        url: &str,
+        bearer_token: Option<&str>,
+        configured: reqwest::header::HeaderMap,
+    ) -> Result<Self> {
         validate_http_url(url)?;
         let url =
             reqwest::Url::parse(url).map_err(|_| mcp_message("external server URL is invalid"))?;
@@ -66,12 +112,16 @@ impl HttpWire {
             client: reqwest::Client::builder()
                 // A credentialed client must not follow redirects: reqwest
                 // strips Authorization cross-host, but a same-host https→http
-                // downgrade would resend the bearer in cleartext.
+                // downgrade would resend the bearer in cleartext. This is also
+                // what keeps configured static headers — which reqwest knows
+                // nothing about and would carry across a hop — from ever
+                // reaching a different origin.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|error| mcp_error("could not build HTTP client", error))?,
             url,
             authorization: bearer_token.map(|token| format!("Bearer {token}")),
+            configured,
             session_id: None,
         })
     }
@@ -150,22 +200,37 @@ impl HttpWire {
             }
             None => self.authorization.clone(),
         };
-        let mut request = self
-            .client
-            .post(self.url.clone())
-            .header(
-                reqwest::header::ACCEPT,
-                "application/json, text/event-stream",
-            )
-            .header(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION)
-            .json(message);
+        // One map, built configured-first and then overwritten by every
+        // client-generated header, so a configured entry can never displace
+        // what this transport says about itself — whatever the builder's
+        // append-vs-replace semantics happen to be.
+        let mut headers = self.configured.clone();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static(PROTOCOL_VERSION_HEADER),
+            reqwest::header::HeaderValue::from_static(PROTOCOL_VERSION),
+        );
         if let Some(authorization) = &authorization {
-            request = request.header(reqwest::header::AUTHORIZATION, authorization);
+            let mut value = reqwest::header::HeaderValue::from_str(authorization)
+                .map_err(|_| mcp_message("external server bearer token is not header-safe"))?;
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         if let Some(session_id) = &self.session_id {
-            request = request.header(SESSION_ID_HEADER, session_id);
+            let value = reqwest::header::HeaderValue::from_str(session_id)
+                .map_err(|_| mcp_message("external server session id is not header-safe"))?;
+            headers.insert(
+                reqwest::header::HeaderName::from_static(SESSION_ID_HEADER),
+                value,
+            );
         }
-        request
+        self.client
+            .post(self.url.clone())
+            .headers(headers)
+            .json(message)
             .send()
             .await
             .map_err(|error| mcp_error("could not reach external server", without_url(error)))
@@ -336,6 +401,7 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{HeaderMap, HeaderName};
 
     #[test]
     fn sse_parser_joins_multi_line_data_and_ignores_other_fields() {
@@ -380,13 +446,38 @@ mod tests {
 
     #[test]
     fn bearer_tokens_must_be_header_safe() {
-        assert!(HttpWire::new("http://127.0.0.1/mcp", Some("token-1")).is_ok());
-        assert!(HttpWire::new("http://127.0.0.1/mcp", None).is_ok());
+        let wire = |token| HttpWire::with_headers("http://127.0.0.1/mcp", token, HeaderMap::new());
+        assert!(wire(Some("token-1")).is_ok());
+        assert!(wire(None).is_ok());
         for token in ["", "line\nbreak", "tab\there"] {
-            assert!(
-                HttpWire::new("http://127.0.0.1/mcp", Some(token)).is_err(),
-                "{token:?} must be rejected"
-            );
+            assert!(wire(Some(token)).is_err(), "{token:?} must be rejected");
         }
+    }
+
+    /// Contract: a configured static header cannot displace one this transport
+    /// generates for itself. A plugin's `mcp.json` declares these headers, so
+    /// an entry named `authorization` would otherwise let a package override
+    /// the credential a gateway mount presents.
+    #[test]
+    fn configured_headers_never_displace_the_transports_own() {
+        let configured = static_headers(&std::collections::BTreeMap::from([
+            ("X-Client".to_owned(), "openwave".to_owned()),
+            ("Authorization".to_owned(), "Bearer smuggled".to_owned()),
+            ("MCP-Session-Id".to_owned(), "hijacked".to_owned()),
+            ("Host".to_owned(), "elsewhere.example".to_owned()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            configured
+                .keys()
+                .map(HeaderName::as_str)
+                .collect::<Vec<_>>(),
+            ["x-client"]
+        );
+        assert!(static_headers(&std::collections::BTreeMap::from([(
+            "not a token".to_owned(),
+            "x".to_owned()
+        )]))
+        .is_err());
     }
 }

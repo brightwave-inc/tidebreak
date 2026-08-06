@@ -47,6 +47,7 @@ mod model_roles;
 pub mod openapi_catalog;
 mod pairing;
 mod plugin_install;
+mod plugin_mcp;
 mod plugin_state;
 mod principal;
 mod provider;
@@ -993,7 +994,20 @@ async fn bind_inner(
         state.mcp.set_host_folders(host.clone());
     }
     state.host_folders = host_folders;
+    // Before `initialize`: a boot-file or persisted replacement derives the
+    // plugin slice in the same pass, so bundled servers come up with
+    // everything else instead of after a second reconcile.
+    state
+        .mcp
+        .set_plugin_catalog(Arc::new(plugin_mcp::InstalledPluginMcpCatalog::new(
+            code_execution.clone(),
+            state.store.clone(),
+            state.config.plugin_data_dir(),
+        )));
     state.mcp.initialize(mcp_servers).await?;
+    // A no-op when `initialize` already derived the slice; the safety net for
+    // the paths that return early (a managed profile ignoring its boot file).
+    state.mcp.reconcile_plugin_servers().await;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
     let blob_retirement_worker = blob_retirement_worker::BlobRetirementWorker::new(
