@@ -698,6 +698,13 @@ async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
                 openwave_code_execution::HostToolStatus::Unavailable("not installed".into())
             }
         }
+
+        async fn managed_root(
+            &self,
+            _tool: openwave_code_execution::HostDep,
+        ) -> Option<std::path::PathBuf> {
+            None
+        }
     }
 
     let (store, _database) = test_store().await;

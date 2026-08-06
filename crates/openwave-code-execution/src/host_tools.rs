@@ -16,6 +16,8 @@
 //! remembered failure that only an explicit retry clears), and `status`
 //! reports the current truth those rules produce.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 
 use crate::skills::HostDep;
@@ -44,4 +46,14 @@ pub trait HostToolBroker: Send + Sync {
 
     /// The current truth about `tool`.
     async fn status(&self, tool: HostDep) -> HostToolStatus;
+
+    /// The host directory a provisioned `tool` is rooted at, for the tools an
+    /// execution backend has to be handed a path to rather than ones the host
+    /// drives itself.
+    ///
+    /// `None` for a tool that does not resolve right now, and for a tool with
+    /// no such root — LibreOffice conversion runs on the host, so nothing
+    /// downstream ever needs its location. A returned path is a host-verified
+    /// managed install; a backend may expose it read-only and nothing more.
+    async fn managed_root(&self, tool: HostDep) -> Option<PathBuf>;
 }

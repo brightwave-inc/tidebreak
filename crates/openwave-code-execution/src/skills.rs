@@ -41,16 +41,28 @@ const MAX_DEPS_PER_LIST: usize = 8;
 const MAX_DEP_BYTES: usize = 100;
 const MAX_SKILL_SCRIPTS: usize = 16;
 
-/// A host-provided tool a skill declares it wants, from a closed vocabulary.
+/// A host-provided tool a skill depends on, from a closed vocabulary.
 ///
 /// Unlike language-package deps — free-form pins the sandbox installs — a host
 /// dep names a capability only the host can provide (a managed install outside
 /// the sandbox). The vocabulary is closed on purpose: an unknown value rejects
 /// the whole manifest rather than parsing into a string nothing can act on.
+///
+/// Not every variant is declarable. [`HostDep::parse`] is the manifest surface
+/// and maps only what a skill author is expected to write; the rest are
+/// host-derived from other parts of the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostDep {
     /// LibreOffice, for converting office documents to renderable PDFs.
     LibreOffice,
+    /// A Node.js runtime, for skills whose npm packages need an interpreter.
+    ///
+    /// Deliberately not parseable from a manifest: a skill declares the npm
+    /// packages it uses, and needing Node to run them follows from that. A
+    /// spellable `"node"` would let one manifest ask for the runtime without
+    /// the packages and another need it without saying so, and the two
+    /// statements could disagree.
+    Node,
 }
 
 impl HostDep {
@@ -662,7 +674,9 @@ Instructions live here.\n";
 
     /// The `host:` list is a closed vocabulary: `libreoffice` parses into its
     /// enum value alongside python pins or alone, and anything else rejects
-    /// the manifest rather than becoming a string nothing can act on.
+    /// the manifest rather than becoming a string nothing can act on. That
+    /// includes host deps the rest of the system derives for itself, which no
+    /// manifest gets to assert.
     #[test]
     fn host_deps_parse_from_the_closed_vocabulary_only() {
         let combined = "---\nname: word-documents\ndescription: Docs.\n\
@@ -682,6 +696,10 @@ Instructions live here.\n";
             (
                 "unknown host tool",
                 "---\nname: a\ndescription: b\ndeps: { host: [\"imagemagick\"] }\n---\nBody.\n",
+            ),
+            (
+                "a host tool no manifest may declare",
+                "---\nname: a\ndescription: b\ndeps: { host: [\"node\"] }\n---\nBody.\n",
             ),
             (
                 "duplicate host tool",
