@@ -10,8 +10,10 @@ import { useRefreshSignals } from "./RefreshSignals";
 import { useChatFolderAttachments } from "./useChatFolderAttachments";
 
 vi.mock("./host", () => ({
+  connectApprovedFolder: vi.fn(),
   connectFolder: vi.fn(),
   disconnectFolder: vi.fn(),
+  listApprovedFolders: vi.fn(),
   listCapabilityConsents: vi.fn(),
   listConnectedFolders: vi.fn(),
 }));
@@ -57,6 +59,7 @@ afterEach(() => {
 
 it("connects and revokes a chat folder through the existing host flow", async () => {
   vi.mocked(host.listCapabilityConsents).mockResolvedValue([]);
+  vi.mocked(host.listApprovedFolders).mockResolvedValue([]);
   vi.mocked(host.listConnectedFolders)
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([

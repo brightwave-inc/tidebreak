@@ -36,6 +36,7 @@ import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
+import { recentChatFiles } from "./ComposerMentions";
 import {
   backgroundAgentSpawnKeys as spawnKeysOf,
   useAgentRuns,
@@ -133,6 +134,22 @@ export function ChatView({
     [messages],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
+  // The files already on this conversation, so `@` can name one instead of
+  // sending the reader back to the picker for a document we are already
+  // holding. Read from the transcript rather than fetched: these are the
+  // attachments of the messages on screen.
+  const composerFiles = useMemo(
+    () => ({
+      ...files,
+      recent: recentChatFiles(
+        messages.flatMap((message) =>
+          message.role === "user" ? [message] : [],
+        ),
+        files.items,
+      ),
+    }),
+    [files, messages],
+  );
 
   const navigate = useNavigate();
   const focusCallId = (useSearch({ strict: false }) as { focus?: string }).focus;
@@ -440,7 +457,7 @@ export function ChatView({
             loadPromptBody: composerPlugins.loadPromptBody,
           }}
           images={composerImages}
-          files={files}
+          files={composerFiles}
           folders={folders}
           voice={voice}
           nativeDropTarget={nativeDropTarget}
