@@ -155,6 +155,20 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         // because a model on the adaptive block always reasons.
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
+    // Second, not first: the built-in default is this provider's first curated
+    // row, and the default stays Opus 5.
+    ModelSpec {
+        id: "claude-fable-5",
+        display_name: "Claude Fable 5",
+        provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        // Same adaptive-thinking generation as Opus 5 and Sonnet 5.
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
     ModelSpec {
         id: "claude-sonnet-5",
         display_name: "Claude Sonnet 5",
