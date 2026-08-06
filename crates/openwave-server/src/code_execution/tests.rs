@@ -1,35 +1,21 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use openwave_code_execution::{
-    resolve_scratch_directory, sync, CodeExecutionError, CodeExecutionProvider,
-    CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
-    CodeExecutionUnavailableReason, DaytonaCredential, DaytonaExecutionProvider, E2BCredential,
-    E2BExecutionProvider, ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId,
-    LocalExecutionProvider, MaterializationPrecondition, MaterializedChangeKind,
-    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan,
-    RejectedChangeReason, RemoteSessionPool, SharedPackageCache, StagedUpload, WorkspaceFilePath,
-    WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink, DAYTONA_CREDENTIAL_KEY,
-    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, E2B_CREDENTIAL_KEY, PACKAGE_CACHE_DIR,
+    CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionUnavailableReason,
+    DaytonaCredential, DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider,
+    ExecFolderAccess, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
+    OutputArtifactStatus, RemoteSessionPool, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
     PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
-    exec_attachment_file_name, BlobStore, CallId, Chat, ChatId, ExecFileRejectionReason,
-    ExecFileRejectionRecord, HostRootId, MessageDocumentAttachment, NetworkPolicy, ProjectId,
-    Result, RevisionProducer, SecretProvider, Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, NetworkPolicy, Result,
+    SecretProvider, Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
-use openwave_egress::{
-    CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
-};
-use serde::{Deserialize, Serialize};
-
-use crate::error::ServerError;
-use crate::exec_write_snapshot::TurnSnapshotSink;
-use crate::state::BlobWriteGuard;
+use openwave_egress::EgressPolicy;
 
 use super::*;
 
