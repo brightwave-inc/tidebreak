@@ -13,6 +13,20 @@ import { TURN_CANCELLED_NOTICE } from "./MessageList";
 
 const NOW = "2026-07-23T12:00:00.000Z";
 
+/** Token counts for a fixture whose subject is not the counts themselves. */
+const NO_USAGE = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
+const TRUNCATED = {
+  type: "context_truncated",
+  original_tokens: 128_000,
+  fitted_tokens: 96_000,
+} as const;
+
 function makeDeps(): ChatSessionDeps {
   let seq = 0;
   return {
@@ -183,7 +197,7 @@ describe("text_delta", () => {
     const mid = play([TURN, { type: "text_delta", text: "Answer :cit[the" }]);
     const done = reduceChatSessionEvent(
       mid.state,
-      framed(mid.state.lastSeq + 1, { type: "turn_completed" }),
+      framed(mid.state.lastSeq + 1, { type: "turn_completed", usage: NO_USAGE }),
       makeDeps(),
     );
     const last = done.state.messages[done.state.messages.length - 1];
@@ -481,7 +495,7 @@ describe("user_steered", () => {
 
 describe("terminal events", () => {
   it("turn_completed resolves the turn and requests hydration", () => {
-    const { state, effects } = play([TURN, { type: "turn_completed" }]);
+    const { state, effects } = play([TURN, { type: "turn_completed", usage: NO_USAGE }]);
     expect(state.busy).toBe(false);
     expect(state.activeTurnId).toBeNull();
     expect(effects).toEqual([
@@ -498,6 +512,7 @@ describe("terminal events", () => {
       {
         type: "turn_refused",
         refusal: { category: "cyber", partial_output: false },
+        usage: NO_USAGE,
       },
     ]);
 
@@ -528,6 +543,7 @@ describe("terminal events", () => {
       {
         type: "turn_refused",
         refusal: { category: "general_harms", partial_output: true },
+        usage: NO_USAGE,
       },
     ]);
 
@@ -562,7 +578,7 @@ describe("terminal events", () => {
         approval: "search_may_share_query_and_excerpts",
         class: "sensitive",
       },
-      { type: "turn_cancelled" },
+      { type: "turn_cancelled", usage: NO_USAGE },
     ]);
     expect(state.busy).toBe(false);
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
@@ -627,6 +643,7 @@ describe("applyTerminalHydration", () => {
       messages: authoritative,
       messageIds: new Set(["srv-1"]),
       lastEventSeq: 0,
+      lastTurnUsage: null,
     });
     expect(behind.lastSeq).toBe(base.lastSeq);
     expect(behind.messages).toEqual(authoritative);
@@ -636,6 +653,7 @@ describe("applyTerminalHydration", () => {
       messages: authoritative,
       messageIds: new Set(["srv-1"]),
       lastEventSeq: 99,
+      lastTurnUsage: null,
     });
     expect(ahead.lastSeq).toBe(99);
   });
@@ -727,15 +745,18 @@ describe("context truncation notice", () => {
   it("inserts one notice above the streaming bubble and keeps the answer whole", () => {
     const { state } = play([
       TURN,
-      { type: "context_truncated" },
+      TRUNCATED,
       { type: "text_delta", text: "the answer" },
-      { type: "context_truncated" },
+      TRUNCATED,
       { type: "text_delta", text: " continues" },
     ]);
-    const notices = state.messages.filter(
-      (m) => m.role === "system" && m.text.includes(NOTICE),
+    const notices = state.messages.flatMap((m) =>
+      m.role === "system" && m.text.includes(NOTICE) ? [m.text] : [],
     );
     expect(notices).toHaveLength(1);
+    // The sizes are the point of the notice: without them a reader cannot
+    // tell a trivial trim from one that dropped most of the conversation.
+    expect(notices[0]).toContain("~128k → ~96k tokens");
     const last = state.messages[state.messages.length - 1];
     expect(last).toMatchObject({
       role: "assistant",
@@ -744,11 +765,11 @@ describe("context truncation notice", () => {
   });
 
   it("resets the once-per-turn dedup at the next turn", () => {
-    const first = play([TURN, { type: "context_truncated" }]);
+    const first = play([TURN, TRUNCATED]);
     const second = play(
       [
         { type: "turn_started", turn_id: "turn-2" },
-        { type: "context_truncated" },
+        TRUNCATED,
       ],
       first.state,
     );
@@ -756,6 +777,76 @@ describe("context truncation notice", () => {
       (m) => m.role === "system" && m.text.includes(NOTICE),
     );
     expect(notices).toHaveLength(2);
+  });
+});
+
+describe("context usage", () => {
+  const USAGE = {
+    input_tokens: 1_000,
+    output_tokens: 500,
+    cache_read_input_tokens: 60_000,
+    cache_creation_input_tokens: 2_500,
+  };
+
+  it("has nothing to report before a turn finishes", () => {
+    const { state } = play([TURN, { type: "text_delta", text: "working" }]);
+    expect(state.lastTurnUsage).toBeNull();
+  });
+
+  it("replaces rather than accumulates across turns and terminal kinds", () => {
+    // Each turn re-sends the conversation, so the latest turn's counts are
+    // the current account of the window. Summing them would count the
+    // transcript once per turn and the meter would run away.
+    const first = play([TURN, { type: "turn_completed", usage: USAGE }]);
+    expect(first.state.lastTurnUsage).toEqual(USAGE);
+
+    const later = { ...USAGE, cache_read_input_tokens: 90_000 };
+    const second = play(
+      [
+        { type: "turn_started", turn_id: "turn-2" },
+        { type: "turn_cancelled", usage: later },
+      ],
+      first.state,
+    );
+    expect(second.state.lastTurnUsage).toEqual(later);
+
+    const refused = { ...USAGE, output_tokens: 12 };
+    const third = play(
+      [
+        { type: "turn_started", turn_id: "turn-3" },
+        {
+          type: "turn_refused",
+          refusal: { category: "cyber", partial_output: false },
+          usage: refused,
+        },
+      ],
+      second.state,
+    );
+    expect(third.state.lastTurnUsage).toEqual(refused);
+  });
+
+  it("hydrates from a snapshot so a reopened chat meters without a new turn", () => {
+    const hydrated = applyTerminalHydration(initialChatSessionState(), {
+      messages: [],
+      messageIds: new Set(),
+      lastEventSeq: 12,
+      lastTurnUsage: USAGE,
+    });
+    expect(hydrated.lastTurnUsage).toEqual(USAGE);
+
+    // A snapshot with no finished turn must not blank a reading the live
+    // stream already established.
+    const live = play(
+      [TURN, { type: "turn_completed", usage: USAGE }],
+      hydrated,
+    ).state;
+    const empty = applyTerminalHydration(live, {
+      messages: [],
+      messageIds: new Set(),
+      lastEventSeq: 20,
+      lastTurnUsage: null,
+    });
+    expect(empty.lastTurnUsage).toEqual(USAGE);
   });
 });
 
@@ -770,6 +861,7 @@ describe("replaying an active turn over a hydrated transcript", () => {
       ],
       messageIds: new Set(["u1", "steer-1"]),
       lastEventSeq: 0,
+      lastTurnUsage: null,
     });
     const { state } = play(
       [

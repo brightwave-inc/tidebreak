@@ -222,6 +222,7 @@ pub async fn restore_output_to_revision(
                  relying on or changing it.",
                 output.filename, target.ordinal, restored.revision_count, output.filename
             ),
+            llm_content: None,
             created_at: now,
         })
         .await;

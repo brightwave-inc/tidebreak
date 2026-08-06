@@ -3,8 +3,8 @@
 use crate::tool::ToolSpec;
 
 use super::{
-    create_app as create_app_tool, list_dir as list_dir_tool, read_file as read_file_tool,
-    write_file as write_file_tool,
+    create_app as create_app_tool, list_dir as list_dir_tool, private_scratch,
+    read_file as read_file_tool, write_file as write_file_tool,
 };
 
 pub(super) const READ_FILE: &str = "read_file";
@@ -14,26 +14,38 @@ pub(super) const WRITE_FILE: &str = "write_file";
 pub(super) fn read_file() -> ToolSpec {
     ToolSpec::for_args::<read_file_tool::Arguments>(
         READ_FILE,
-        "Read a UTF-8 text file, relative to the private scratch directory. Files under \
-         output/ are readable here, but only exec can write them.",
+        format!(
+            "Read a UTF-8 text file, relative to the private scratch directory. Use this, not \
+             an exec command, to read workspace text. Reads up to {} of UTF-8 text; anything \
+             larger or non-text has to be handled by an exec command. Files under output/ are \
+             readable here, but only exec can write them.",
+            crate::preview::format_bytes(private_scratch::MAX_READ_FILE_BYTES as u64)
+        ),
     )
 }
 
 pub(super) fn list_dir() -> ToolSpec {
     ToolSpec::for_args::<list_dir_tool::Arguments>(
         LIST_DIR,
-        "List the entries of a private scratch directory (defaults to the root).",
+        "List the entries of a private scratch directory (defaults to the root). Scratch \
+         holds intermediate work: apart from output/ and preview/, what is listed here \
+         may not still be there in a later command or turn.",
     )
 }
 
 pub(super) fn write_file() -> ToolSpec {
     ToolSpec::for_args::<write_file_tool::Arguments>(
         WRITE_FILE,
-        "Write a UTF-8 text file into private scratch, creating parent directories. \
-         Overwrites an existing file. Scratch files are intermediate work, not \
-         user-visible outputs: output/ is reserved and a write there is refused, \
-         because a user-visible output is published by saving it into output/ from \
-         an exec command.",
+        format!(
+            "Write a UTF-8 text file into private scratch, creating parent directories. Use \
+             this, not an exec command, to write workspace text, up to {}. Overwrites an \
+             existing file in place: the last write wins. Scratch is an ephemeral working \
+             space — anything outside output/ and preview/ is intermediate and may not survive \
+             to a later command or turn. Only output/ is durable, and it is reserved: a write \
+             there is refused, because a user-visible output is published by saving it into \
+             output/ from an exec command, which versions it.",
+            crate::preview::format_bytes(crate::MAX_WRITE_FILE_BYTES as u64)
+        ),
     )
 }
 

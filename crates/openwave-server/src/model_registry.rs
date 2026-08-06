@@ -263,7 +263,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: false,
+        supports_vendor_web_search: true,
         // The whole GPT-5 line reasons on a caller-selected effort, which the
         // OpenAI-compatible adapter already sends alongside
         // `max_completion_tokens`. Only the 5.6 generation added `max`.
@@ -278,7 +278,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: false,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
@@ -290,7 +290,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: false,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
@@ -302,7 +302,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: false,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
@@ -314,7 +314,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: false,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
@@ -326,6 +326,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
+        // The smallest tier is the one OpenAI has consistently left off the
+        // hosted tools, and a request declaring a tool the model does not take
+        // is rejected outright. Left false until the row is exercised against
+        // the live API.
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },

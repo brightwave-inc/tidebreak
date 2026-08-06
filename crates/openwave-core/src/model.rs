@@ -20,6 +20,10 @@ use crate::id::{
     RootAttachmentChangeId, TurnId,
 };
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Maximum number of host roots projected onto one project or conversation.
 ///
 /// The host broker separately bounds and authorizes its live registry. This
@@ -1934,6 +1938,12 @@ pub struct TurnRun {
     /// transcript still shows what the turn was told to use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invoked_skills: Vec<String>,
+    /// Whether any of this turn's user text came from voice transcription.
+    ///
+    /// The boolean is retained for exact idempotency and retry. The explanatory
+    /// note itself lives in the input message's model-only content.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub voice_input_used: bool,
     /// Durable delivery state.
     pub status: TurnRunStatus,
     /// Failure attempts already started. Client-execution resumptions stay
@@ -2304,6 +2314,8 @@ pub struct TurnSteer {
     pub chat_id: ChatId,
     /// Byte-exact user instruction.
     pub content: String,
+    /// Whether the instruction was dictated and transcribed from speech.
+    pub voice_input_used: bool,
     /// Whether delivery should preempt the current model stream.
     pub interrupt: bool,
     /// Durable delivery state.
@@ -2409,6 +2421,15 @@ pub struct Message {
     pub role: Role,
     /// The text body.
     pub content: String,
+    /// The model-facing text body when it intentionally differs from
+    /// [`Self::content`].
+    ///
+    /// The renderer never receives this field. It carries durable per-message
+    /// context such as attachment routes, explicit skill invocation, and voice
+    /// transcription guidance without changing the cache-sensitive operating
+    /// prompt. `None` means the model sees `content` byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_content: Option<String>,
     /// Reasoning blocks this message's step produced, with the route that
     /// minted them.
     ///
@@ -2420,6 +2441,22 @@ pub struct Message {
     pub reasoning: MessageReasoning,
     /// When it was created.
     pub created_at: DateTime<Utc>,
+}
+
+impl Message {
+    /// The text reconstructed into the provider transcript.
+    #[must_use]
+    pub fn content_for_model(&self) -> &str {
+        self.llm_content.as_deref().unwrap_or(&self.content)
+    }
+
+    /// Append context to the model projection without changing what the
+    /// renderer shows.
+    pub(crate) fn append_model_context(&mut self, context: &str) {
+        self.llm_content
+            .get_or_insert_with(|| self.content.clone())
+            .push_str(context);
+    }
 }
 
 /// Maximum number of attachments one message may carry.
@@ -2524,8 +2561,9 @@ impl MessageAttachment {
 /// One source document attached to a persisted message.
 ///
 /// The document remains the authoritative owner of its bytes and decoded text.
-/// Stores project enough of the current document record here to rebuild truthful
-/// model context and an exec workspace without a second lookup per attachment.
+/// Store projections carry enough of the current record to compose durable
+/// model context at acceptance and to describe the attachment to renderer and
+/// execution surfaces later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageDocumentAttachment {
     /// The message this document is attached to.
@@ -2573,6 +2611,126 @@ impl MessageDocumentAttachment {
             return Err("message document attachment source blob is invalid");
         }
         Ok(())
+    }
+}
+
+const MAX_ANNOUNCED_FILES: usize = 8;
+const MAX_ANNOUNCED_IMAGES: usize = 8;
+const VOICE_INPUT_CONTEXT: &str = "[Voice input: The user dictated this message and it was transcribed from speech, so some words may be transcribed incorrectly — especially names, technical terms, homophones, and punctuation. Interpret accordingly, and ask for clarification if a key term seems garbled.]";
+
+/// Build the durable model projection for one user message.
+///
+/// The visible text remains the user's exact input. Host-derived context is
+/// kept in a separate projection so the operating prompt stays stable across
+/// ordinary turn-to-turn changes and the transcript never renders internal
+/// attachment routes or voice guidance.
+pub(crate) fn user_message_llm_content(
+    content: &str,
+    images: &[ImageRef],
+    documents: &[MessageDocumentAttachment],
+    invoked_skills: &[String],
+    voice_input_used: bool,
+) -> Option<String> {
+    if images.is_empty() && documents.is_empty() && invoked_skills.is_empty() && !voice_input_used {
+        return None;
+    }
+
+    let mut sections = vec!["# Important context".to_owned()];
+    if voice_input_used {
+        sections.push(VOICE_INPUT_CONTEXT.to_owned());
+    }
+    if !invoked_skills.is_empty() {
+        sections.push(format!(
+            "The user explicitly invoked these skills for this message: {}. Read each one's `.openwave/skills/<name>/SKILL.md` before doing the work and follow it — these are instructions for this message, not optional catalog entries.",
+            invoked_skills.join(", ")
+        ));
+    }
+    if !images.is_empty() || !documents.is_empty() {
+        sections.push(attachment_context(images, documents));
+    }
+    sections.push("# User message".to_owned());
+    sections.push(content.to_owned());
+    Some(sections.join("\n\n"))
+}
+
+fn attachment_context(images: &[ImageRef], documents: &[MessageDocumentAttachment]) -> String {
+    let mut lines = vec!["<attachments>".to_owned()];
+    for (index, image) in images.iter().take(MAX_ANNOUNCED_IMAGES).enumerate() {
+        lines.push(format!(
+            "image_{}: id={}; media_type={}; byte_size={}; this is image content block {}",
+            index + 1,
+            image.blob_id,
+            image.media_type.as_str(),
+            image.byte_len,
+            index + 1
+        ));
+    }
+    for document in documents.iter().take(MAX_ANNOUNCED_FILES) {
+        let metadata = serde_json::json!({
+            "document_id": document.document_id,
+            "title": document.title.as_deref().unwrap_or("Attachment"),
+            "media_type": document.media_type,
+            "byte_size": document.source_blob.as_ref().map(|blob| blob.byte_len),
+        });
+        lines.push(format!(
+            "file: {}",
+            serde_json::to_string(&metadata).expect("attachment metadata is serializable")
+        ));
+        lines.push(format!("  route: {}", attachment_route(document)));
+    }
+    let omitted = images.len().saturating_sub(MAX_ANNOUNCED_IMAGES)
+        + documents.len().saturating_sub(MAX_ANNOUNCED_FILES);
+    if omitted > 0 {
+        lines.push(format!("{omitted} more attachment(s) omitted."));
+    }
+    lines.push("</attachments>".to_owned());
+    lines.join("\n")
+}
+
+fn attachment_route(document: &MessageDocumentAttachment) -> String {
+    if document.readable {
+        return format!(
+            "readable via read_source(document_id=\"{}\")",
+            document.document_id
+        );
+    }
+    let Some(source_blob) = document.source_blob.as_ref() else {
+        return "raw bytes unavailable because no source blob is retained".to_owned();
+    };
+    if source_blob.byte_len > MAX_EXEC_WORKSPACE_FILE_BYTES as u64 {
+        return format!(
+            "raw bytes not materialized because the file exceeds the \
+             {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
+        );
+    }
+    let path = format!(
+        "documents/{}",
+        exec_attachment_file_name(document.title.as_deref(), document.document_id)
+    );
+    let hint = attachment_script_hint(&document.media_type).map_or_else(String::new, |script| {
+        format!("; helper: python3 .openwave/exec-scripts/{script} {path}")
+    });
+    format!("raw bytes at {path} in the exec workspace{hint}")
+}
+
+fn attachment_script_hint(media_type: &str) -> Option<&'static str> {
+    let media_type = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    match media_type.as_str() {
+        "application/pdf" => Some("render_pdf.py"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/msword"
+        | "application/vnd.ms-powerpoint"
+        | "application/vnd.oasis.opendocument.text"
+        | "application/vnd.oasis.opendocument.presentation" => Some("render_office.py"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        | "application/vnd.ms-excel" => Some("analyze_xlsx.py"),
+        _ => None,
     }
 }
 

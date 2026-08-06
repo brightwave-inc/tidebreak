@@ -43,6 +43,11 @@ pub const MAX_RESULT_VIEW_URI_CHARS: usize = 2 * 1024;
 /// Longest label, detail, or meta string one listed result row carries.
 pub const MAX_RESULT_ENTRY_CHARS: usize = 200;
 
+/// Longest page address one listed result row carries. Carried whole or not at
+/// all, on the same terms as a view reference: a truncated URL opens a
+/// different page than the row names.
+pub const MAX_RESULT_ENTRY_URL_CHARS: usize = 2 * 1024;
+
 /// Most rows a result preview lists before it counts the rest instead.
 pub const MAX_RESULT_ENTRIES: usize = 50;
 
@@ -465,6 +470,21 @@ pub struct ResultEntry {
     /// [`App`]: ResultEntryKind::App
     #[serde(default, alias = "output_id")]
     pub target_id: Option<String>,
+    /// The public page this row opens, when it names one.
+    ///
+    /// The one projected field a click leaves the application with, so it is
+    /// admitted at construction rather than at the click: only `http` and
+    /// `https` survive [`Self::with_web_url`], and a row whose address is
+    /// anything else keeps its title and its domain and simply does not open.
+    /// It rides alongside the domain in `detail` rather than replacing it —
+    /// a column of rows is still told apart by host, not by query string.
+    ///
+    /// Carried because attribution for a search a chat did not run itself is
+    /// only meaningful if the reader can reach the page. `default` because
+    /// retained projections predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
 }
 
 impl ResultEntry {
@@ -478,7 +498,22 @@ impl ResultEntry {
             meta: None,
             media_type: None,
             target_id: None,
+            url: None,
         }
+    }
+
+    /// Point the row at the public page it names.
+    ///
+    /// A non-web address is dropped rather than carried: `javascript:` and
+    /// `file:` must never reach the renderer, let alone the host's opener,
+    /// and the row reads the same without one.
+    #[must_use]
+    pub fn with_web_url(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        if is_web_url(&url) && url.len() <= MAX_RESULT_ENTRY_URL_CHARS {
+            self.url = Some(url);
+        }
+        self
     }
 
     /// Add the secondary hint beside the name.
@@ -917,11 +952,31 @@ fn result_entry(value: &Value) -> Option<ResultEntry> {
         meta: entry_field(value.get("meta")),
         media_type: entry_field(value.get("media_type")),
         target_id: entry_field(value.get("target_id")),
+        url: entry_url(value.get("url")),
     })
 }
 
 fn entry_field(value: Option<&Value>) -> Option<String> {
     clamp(value?.as_str()?, MAX_RESULT_ENTRY_CHARS)
+}
+
+/// The row's page, admitted on the URL's own terms rather than a display
+/// field's: only a web scheme, and whole or not at all.
+fn entry_url(value: Option<&Value>) -> Option<String> {
+    let url = value?.as_str()?;
+    (is_web_url(url) && url.len() <= MAX_RESULT_ENTRY_URL_CHARS).then(|| url.to_owned())
+}
+
+/// Whether a projected address is one a reader may be sent to.
+///
+/// The gate is the scheme and nothing else: this decides what the renderer is
+/// allowed to hand the host's opener, and `javascript:` or `file:` must never
+/// get that far.
+fn is_web_url(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, rest)| {
+        !rest.is_empty()
+            && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+    })
 }
 
 /// Bound one failure row, or drop it.
@@ -1382,6 +1437,44 @@ mod tests {
         // A receipt with nothing readable left carries no output rather than
         // an empty pane.
         assert_eq!(output("  \n\u{1b}\n "), None);
+    }
+
+    /// A row's address is the one projected field that can send a reader out
+    /// of the application, so only a web scheme reaches it — at construction
+    /// and again when a stored projection is read back. A row whose address is
+    /// refused keeps everything else it had.
+    #[test]
+    fn a_result_row_carries_only_an_address_a_reader_may_be_sent_to() {
+        let admitted = |url: &str| {
+            ResultEntry::new(ResultEntryKind::Link, "Report")
+                .with_web_url(url)
+                .url
+        };
+        assert_eq!(
+            admitted("https://sec.gov/report").as_deref(),
+            Some("https://sec.gov/report")
+        );
+        assert!(admitted("HTTP://sec.gov/report").is_some());
+        for refused in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>",
+            "not a url",
+            "https://",
+        ] {
+            assert_eq!(admitted(refused), None, "{refused} must not be carried");
+        }
+
+        // Read back from a stored projection, where the value is whatever the
+        // journal holds rather than whatever the builder allowed.
+        let row = result_entry(&serde_json::json!({
+            "kind": "link",
+            "label": "Report",
+            "url": "javascript:alert(1)",
+        }))
+        .expect("a row survives an address it cannot vouch for");
+        assert_eq!(row.url, None);
+        assert_eq!(row.label, "Report");
     }
 
     /// The exec card lists the durable outputs the command published. Only

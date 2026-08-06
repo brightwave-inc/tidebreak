@@ -808,6 +808,7 @@ mod tests {
                 output_message_id: None,
                 model: "claude-sonnet-4-5".to_owned(),
                 invoked_skills: Vec::new(),
+                voice_input_used: false,
                 status: TurnRunStatus::Failed,
                 attempt_count: 5,
                 max_attempts: 5,
@@ -840,6 +841,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "run git status in ~/code/openwave".to_owned(),
+                llm_content: None,
                 created_at: at(0),
             }],
             events: vec![

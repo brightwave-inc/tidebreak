@@ -28,10 +28,11 @@ use tokio::sync::Notify;
 use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
 use crate::chat_titling::ChatTitler;
+use crate::exec_write_snapshot::TurnScratchJournal;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
-use crate::state::TurnGuard;
+use crate::state::{BlobWriteGuard, TurnGuard};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnWorkerConfig {
@@ -96,6 +97,7 @@ pub(crate) struct TurnWorker {
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     tools: Arc<ToolRegistry>,
     blobs: Option<Arc<dyn BlobStore>>,
+    blob_writes: Option<Arc<BlobWriteGuard>>,
     mcp: Option<Arc<McpRuntime>>,
     approvals: Arc<ApprovalBroker>,
     events: Arc<EventBus>,
@@ -152,7 +154,7 @@ pub(crate) fn freeze_foreground_turn_surface(
         false,
         None,
         false,
-        &[],
+        openwave_core::TurnWebSearch::Host,
     )
 }
 
@@ -168,11 +170,21 @@ fn freeze_foreground_turn_surface_with_folders(
     offline_package_cache: bool,
     office_rendering: Option<bool>,
     plan_mode: bool,
-    invoked_skills: &[String],
+    web_search: openwave_core::TurnWebSearch,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
+    // The prompt describes the capabilities the turn actually has. A vendor
+    // turn still has `web_search` — the provider runs it, but the model names
+    // and uses it the same way — so only the turn that has no search at all
+    // drops the section, and a turn that keeps it keeps the guidance that has
+    // always come with it.
+    let mut specs = tools.specs_for_surface(true, plan_mode);
+    if web_search == openwave_core::TurnWebSearch::Off {
+        specs.retain(|spec| spec.name != openwave_core::WEB_SEARCH_TOOL);
+    }
+    agent_config.web_search = web_search;
     agent_config.system_prompt = Some(crate::foreground_prompt::compose_for_surface(
-        &tools.specs_for_surface(true, plan_mode),
+        &specs,
         exec_folders,
         skills,
         plugins,
@@ -181,7 +193,6 @@ fn freeze_foreground_turn_surface_with_folders(
         offline_package_cache,
         office_rendering,
         plan_mode,
-        invoked_skills,
     ));
     ForegroundTurnSurface {
         tools,
@@ -365,6 +376,7 @@ impl TurnWorker {
             os_policy,
             tools,
             blobs: None,
+            blob_writes: None,
             mcp: None,
             approvals,
             events,
@@ -386,6 +398,38 @@ impl TurnWorker {
     pub(crate) fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
         self.blobs = Some(blobs);
         self
+    }
+
+    /// Retain the bytes a structured scratch write replaces, so an overwrite in
+    /// private scratch is recoverable the way a folder write-back already is.
+    ///
+    /// Without the blob write guard there is nowhere safe to publish the
+    /// retained copy, so the journal stays off rather than racing the retirer.
+    pub(crate) fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
+        self.blob_writes = Some(blob_writes);
+        self
+    }
+
+    /// Attach this turn's scratch-overwrite journal, when the runtime has the
+    /// durable stores to keep one.
+    fn with_scratch_write_journal(
+        &self,
+        scratch: ToolScratch,
+        folder: PathBuf,
+        chat_id: openwave_core::ChatId,
+        turn_id: TurnId,
+    ) -> ToolScratch {
+        let Some((blobs, blob_writes)) = self.blobs.clone().zip(self.blob_writes.clone()) else {
+            return scratch;
+        };
+        scratch.with_write_journal(Arc::new(TurnScratchJournal::new(
+            self.store.clone(),
+            blobs,
+            blob_writes,
+            folder,
+            chat_id,
+            turn_id,
+        )))
     }
 
     /// Resolve one immutable registry when a turn begins. Runtime MCP changes
@@ -629,29 +673,6 @@ impl TurnWorker {
             Some(provider) => provider.current_timeout_ms().await,
             None => crate::code_execution::DEFAULT_TIMEOUT_MS,
         };
-        let surface = freeze_foreground_turn_surface_with_folders(
-            tools,
-            &self.agent_config,
-            &exec_folders,
-            &skills,
-            &plugins,
-            &chat.network_policy,
-            exec_timeout_ms,
-            offline_package_cache,
-            office_rendering,
-            matches!(
-                chat.permission_mode,
-                Some(openwave_core::PermissionMode::Plan)
-            ),
-            &turn.invoked_skills,
-        );
-        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
-            eprintln!(
-                "openwave: turn {} operating_prompt={}",
-                turn.id,
-                crate::foreground_prompt::identity(prompt)
-            );
-        }
         let model_policy = if self.resolver.enforces_model_registry() {
             crate::providers::resolve_model_policy(&*self.store, &turn.model, true).await?
         } else {
@@ -668,6 +689,42 @@ impl TurnWorker {
                     "the turn's model is no longer registered for its provider",
                 )
                 .await;
+        }
+        // Resolved per turn, alongside the model: which search this turn gets
+        // depends on both host policy and the model that is about to run, and
+        // both can change between turns of one chat. A model the registry does
+        // not own claims no vendor search. It is resolved before the surface is
+        // frozen because the surface's prompt has to describe it.
+        let web_search = crate::web_search::resolve_turn_web_search(
+            &*self.store,
+            &*self.secrets,
+            model_policy
+                .as_ref()
+                .is_some_and(|policy| policy.supports_vendor_web_search),
+        )
+        .await?;
+        let surface = freeze_foreground_turn_surface_with_folders(
+            tools,
+            &self.agent_config,
+            &exec_folders,
+            &skills,
+            &plugins,
+            &chat.network_policy,
+            exec_timeout_ms,
+            offline_package_cache,
+            office_rendering,
+            matches!(
+                chat.permission_mode,
+                Some(openwave_core::PermissionMode::Plan)
+            ),
+            web_search,
+        );
+        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
+            eprintln!(
+                "openwave: turn {} operating_prompt={}",
+                turn.id,
+                crate::foreground_prompt::identity(prompt)
+            );
         }
         // Resolved per turn, not at boot, so enabling a provider takes effect on
         // the next turn. `None` is not a failure: background maintenance is
@@ -757,7 +814,12 @@ impl TurnWorker {
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {
-                    Ok(scratch) => Some(scratch),
+                    Ok(scratch) => Some(self.with_scratch_write_journal(
+                        scratch,
+                        private_chat_scratch_path(root, chat.id),
+                        chat.id,
+                        turn.id,
+                    )),
                     Err(error) => {
                         eprintln!(
                             "openwave: private scratch unavailable for chat {}: {}",
@@ -2480,6 +2542,15 @@ impl TurnWorker {
     fn publish(&self, chat_id: openwave_core::ChatId, event: SequencedEvent) {
         let _ = self.events.sender(chat_id).send(event);
     }
+}
+
+/// One chat's runtime-only scratch directory under `root`.
+///
+/// The path is derived rather than stored, so the turn worker that journals a
+/// scratch write and the transcript that labels it later agree without either
+/// one persisting a host path.
+pub(crate) fn private_chat_scratch_path(root: &Path, chat_id: openwave_core::ChatId) -> PathBuf {
+    root.join(chat_id.to_string())
 }
 
 /// Derive and create one chat's runtime-only scratch under the private server

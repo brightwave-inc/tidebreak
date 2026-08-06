@@ -71,6 +71,7 @@ fn output_for(turn: &crate::TurnRun, chat_id: crate::ChatId) -> Message {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "foreground answer".into(),
+        llm_content: None,
         created_at: Utc::now().max(turn.updated_at),
     }
 }

@@ -19,6 +19,7 @@ async fn store_with_messages() -> (tempfile::TempDir, DbStore, Chat, Message, Me
         role: Role::User,
         reasoning: Default::default(),
         content: "Choose SQLite for local development.".into(),
+        llm_content: None,
         created_at: at(0),
     };
     let second = Message {
@@ -28,6 +29,7 @@ async fn store_with_messages() -> (tempfile::TempDir, DbStore, Chat, Message, Me
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "The local database choice is SQLite.".into(),
+        llm_content: None,
         created_at: at(1),
     };
     store.append_message(&first).await.unwrap();

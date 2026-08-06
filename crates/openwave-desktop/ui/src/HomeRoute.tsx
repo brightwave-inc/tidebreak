@@ -241,6 +241,7 @@ export function HomeRoute() {
         images: pendingImages,
         files: pendingFiles,
         skills: pendingSkills,
+        voiceInputUsed: voice.inputUsed,
       });
       // Clear the home draft only once navigation has committed. If it throws,
       // the message lives only in the FirstMessage store with no composer
@@ -285,7 +286,10 @@ export function HomeRoute() {
               Home's starters come from the installed prompt library when it has
               any; otherwise the built-in openers stand. */}
           <WelcomeState
-            onSelectPrompt={setDraft}
+            onSelectPrompt={(prompt) => {
+              setDraft(prompt);
+              voice.resetInputUsed();
+            }}
             executionConfigClient={client}
             promptLibrary={promptLibrary}
           />
@@ -304,10 +308,10 @@ export function HomeRoute() {
             slash={{
               options: composerPlugins.slashOptions,
               invoked: pendingSkills,
-              onInvoke: (name) =>
+              onInvoke: (names) =>
                 composerDraftActions.setSkills(HOME_DRAFT_KEY, [
                   ...pendingSkills,
-                  name,
+                  ...names,
                 ]),
               onRemove: (name) =>
                 composerDraftActions.setSkills(
@@ -379,7 +383,10 @@ export function HomeRoute() {
               disabled: creatingChat,
               onChange: newChat.setNetworkPolicy,
             }}
-            onDraftChange={setDraft}
+            onDraftChange={(next) => {
+              setDraft(next);
+              if (!next.trim()) voice.resetInputUsed();
+            }}
             onSend={startChat}
             onSteer={async () => {}}
             onStop={async () => {}}

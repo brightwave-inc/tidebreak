@@ -561,7 +561,7 @@ describe("retryableTurn", () => {
     ).toBeNull();
   });
 
-  it("carries the failed turn's attachments so the resend is not text-only", () => {
+  it("carries the failed turn's model context so the resend is unchanged", () => {
     const turn = retryableTurn([
       {
         id: "u1",
@@ -578,9 +578,17 @@ describe("retryableTurn", () => {
           },
         ],
       },
-      { id: "f1", role: "turn_failure", category: "rate_limited" },
+      {
+        id: "f1",
+        role: "turn_failure",
+        category: "rate_limited",
+        invokedSkills: ["pdf-documents"],
+        voiceInputUsed: true,
+      },
     ]);
     expect(turn?.images.map((image) => image.attachmentId)).toEqual(["img-1"]);
     expect(turn?.files.map((file) => file.documentId)).toEqual(["doc-1"]);
+    expect(turn?.invokedSkills).toEqual(["pdf-documents"]);
+    expect(turn?.voiceInputUsed).toBe(true);
   });
 });

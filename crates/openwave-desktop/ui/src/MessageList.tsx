@@ -50,6 +50,11 @@ import {
 } from "./TranscriptFileAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 import { WebSearchProviderRequiredCard } from "./WebSearchProviderRequiredCard";
+import {
+  MessageWebSources,
+  collectWebSources,
+  type MessageWebSource,
+} from "./MessageWebSources";
 import { useSourceNav } from "./panel/SourceNav";
 import {
   TurnFailureNotice,
@@ -67,6 +72,8 @@ export type ChatMessage =
       text: string;
       images?: TranscriptImageAttachment[];
       files?: TranscriptFileAttachment[];
+      invokedSkills?: readonly string[];
+      voiceInputUsed?: boolean;
       createdAt?: string;
     }
   | {
@@ -123,6 +130,8 @@ export type ChatMessage =
       role: "turn_failure";
       category: TurnFailureCategory;
       model?: { id: string; provider: ModelInfo["provider"] };
+      invokedSkills?: readonly string[];
+      voiceInputUsed?: boolean;
     }
   | {
       id: string;
@@ -139,6 +148,8 @@ export type RetryableTurn = {
   text: string;
   images: readonly TranscriptImageAttachment[];
   files: readonly TranscriptFileAttachment[];
+  invokedSkills: readonly string[];
+  voiceInputUsed: boolean;
 };
 
 /**
@@ -165,6 +176,9 @@ export function retryableTurn(
       text: message.text,
       images: message.images ?? [],
       files: message.files ?? [],
+      invokedSkills: failure.invokedSkills ?? message.invokedSkills ?? [],
+      voiceInputUsed:
+        failure.voiceInputUsed ?? message.voiceInputUsed ?? false,
     };
   }
   return null;
@@ -566,6 +580,10 @@ export function groupMessageItems(
   // turn, not per transcript: the next turn hitting the same wall is a live
   // prompt again, so a user message clears it.
   let standingCardKeys = new Set<string>();
+  // The pages this turn's searches found, gathered across every activity phase
+  // it passed through and listed once, under the answer they fed. Reset at the
+  // turn boundary: the previous turn's sources are not this answer's.
+  let turnWebSources: MessageWebSource[] = [];
   let index = 0;
   let groupIndex = 0;
   let streamingAssistantId: string | undefined;
@@ -593,16 +611,16 @@ export function groupMessageItems(
       if (message.role === "user") {
         lastTurnStart = items.length;
         standingCardKeys = new Set<string>();
+        turnWebSources = [];
       }
+      const closesTurn =
+        message.role === "assistant" && isTurnClosingAssistant(messages, index);
       items.push(
         <MessageBubble
           key={message.id}
           message={message}
           busy={message.id === streamingAssistantId}
-          sequenceEnd={
-            message.role !== "assistant" ||
-            isTurnClosingAssistant(messages, index)
-          }
+          sequenceEnd={message.role !== "assistant" || closesTurn}
           imageClient={imageClient}
           chatId={chatId}
           changeClient={changeClient}
@@ -611,6 +629,18 @@ export function groupMessageItems(
           }
         />,
       );
+      // A sibling of the bubble rather than part of it: the row is built from
+      // the turn's tool rows, which the bubble knows nothing about, and keeping
+      // it outside leaves the memoized bubble's props untouched.
+      if (closesTurn && turnWebSources.length > 0) {
+        items.push(
+          <MessageWebSources
+            key={`${message.id}-web-sources`}
+            sources={turnWebSources}
+          />,
+        );
+        turnWebSources = [];
+      }
       index += 1;
       continue;
     }
@@ -634,6 +664,13 @@ export function groupMessageItems(
       (entry): entry is ToolMessage =>
         entry.role === "tool" && !parked.has(entry.callId),
     );
+    // Phases accumulate: a turn that searched, answered a little, and searched
+    // again names every page it found under the answer that closes it.
+    for (const source of collectWebSources(activities)) {
+      if (!turnWebSources.some((seen) => seen.url === source.url)) {
+        turnWebSources.push(source);
+      }
+    }
     const cards = surfacedCards(
       phase,
       parked,

@@ -393,6 +393,27 @@ async fn read_rejects_files_over_the_output_limit() {
     assert!(read.content.contains("too large"), "{read:?}");
 }
 
+/// The write cap is a contract the model is told about and routes around, so
+/// it has to refuse rather than truncate, and it has to name the exec/output
+/// path that handles content this size.
+#[tokio::test]
+async fn write_rejects_content_over_the_shared_write_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = "x".repeat(crate::MAX_WRITE_FILE_BYTES + 1);
+
+    let write = WriteFile
+        .execute(
+            &ctx(dir.path()),
+            json!({"path": "big.txt", "content": content}),
+        )
+        .await
+        .unwrap();
+
+    assert!(write.is_error, "{write:?}");
+    assert!(write.content.contains("output"), "{write:?}");
+    assert!(!dir.path().join("big.txt").exists());
+}
+
 #[tokio::test]
 async fn missing_file_is_a_model_facing_error_not_err() {
     let dir = tempfile::tempdir().unwrap();

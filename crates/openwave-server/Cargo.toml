@@ -97,4 +97,4 @@ openwave-sandbox-agent = { path = "../openwave-sandbox-agent" }
 sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "=0.5.3", features = ["util"] }
-tokio-tungstenite = "=0.30.0"
+tokio-tungstenite = { workspace = true }

@@ -275,7 +275,7 @@ fn extraction_output(response: &WebExtractResponse, result: String) -> ToolOutpu
     } else {
         response.title.as_str()
     };
-    let mut entry = ResultEntry::new(ResultEntryKind::Link, label);
+    let mut entry = ResultEntry::new(ResultEntryKind::Link, label).with_web_url(&response.url);
     if let Some(host) = Url::parse(&response.url).ok().and_then(|url| {
         url.host_str()
             .map(|host| host.trim_start_matches("www.").to_owned())
@@ -296,7 +296,7 @@ fn extraction_output(response: &WebExtractResponse, result: String) -> ToolOutpu
 /// and forty characters of query string does that worse than "sec.gov" does.
 /// A URL the parser rejects still gets a row — its title is the result.
 fn page_entry(result: &WebSearchResult) -> ResultEntry {
-    let entry = ResultEntry::new(ResultEntryKind::Link, &result.title);
+    let entry = ResultEntry::new(ResultEntryKind::Link, &result.title).with_web_url(&result.url);
     match Url::parse(&result.url).ok().and_then(|url| {
         url.host_str()
             .map(|host| host.trim_start_matches("www.").to_owned())

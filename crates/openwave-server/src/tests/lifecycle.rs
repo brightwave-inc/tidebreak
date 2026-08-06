@@ -209,6 +209,23 @@ pub(super) async fn steer_turn_with_id(
     content: &str,
     interrupt: bool,
 ) -> StatusCode {
+    steer_turn_with_id_and_voice(
+        router, bearer, chat, steer_id, turn_id, content, interrupt, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn steer_turn_with_id_and_voice(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    steer_id: TurnSteerId,
+    turn_id: TurnId,
+    content: &str,
+    interrupt: bool,
+    voice_input_used: bool,
+) -> StatusCode {
     router
         .clone()
         .oneshot(
@@ -222,7 +239,8 @@ pub(super) async fn steer_turn_with_id(
                         "steer_id": steer_id,
                         "turn_id": turn_id,
                         "content": content,
-                        "interrupt": interrupt
+                        "interrupt": interrupt,
+                        "voice_input_used": voice_input_used,
                     })
                     .to_string(),
                 ))
@@ -341,7 +359,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
         .expect("provider entered before the interrupt steer");
     let steer_id = TurnSteerId::new();
     assert_eq!(
-        steer_turn_with_id(
+        steer_turn_with_id_and_voice(
             &router,
             &bearer,
             chat.id,
@@ -349,18 +367,20 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
             turn_id,
             "change course",
             true,
+            true,
         )
         .await,
         StatusCode::ACCEPTED
     );
     assert_eq!(
-        steer_turn_with_id(
+        steer_turn_with_id_and_voice(
             &router,
             &bearer,
             chat.id,
             steer_id,
             turn_id,
             "change course",
+            true,
             true,
         )
         .await,
@@ -368,13 +388,14 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
         "an exact admission retry is idempotent"
     );
     assert_eq!(
-        steer_turn_with_id(
+        steer_turn_with_id_and_voice(
             &router,
             &bearer,
             chat.id,
             steer_id,
             turn_id,
             "different request data",
+            true,
             true,
         )
         .await,
@@ -439,9 +460,20 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
             ),
         ]
     );
+    assert!(messages[1]
+        .llm_content
+        .as_deref()
+        .is_some_and(|content| content.contains("The user dictated this message")));
     assert!(matches!(
         store
-            .accept_turn_steer(steer_id, turn_id, chat.id, "change course", true)
+            .accept_turn_steer_with_message_context(
+                steer_id,
+                turn_id,
+                chat.id,
+                "change course",
+                true,
+                true,
+            )
             .await
             .unwrap(),
         openwave_core::AcceptTurnSteerOutcome::Existing(openwave_core::TurnSteer {

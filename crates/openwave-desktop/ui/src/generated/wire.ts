@@ -481,7 +481,12 @@ export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId
  * Skills the user explicitly invoked for this turn, in submitted order.
  * Absent for the ordinary turn that invoked none.
  */
-invoked_skills?: Array<string>, finished_at: string, };
+invoked_skills?: Array<string>, 
+/**
+ * Token accounting for the turn, so a freshly opened chat can show
+ * context usage without waiting for the next turn to finish.
+ */
+usage: RendererTurnUsage, voice_input_used: boolean, finished_at: string, };
 
 export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 
@@ -1809,12 +1814,20 @@ action?: ToolActionPreview,
  * withholding it leaves the transcript asserting that something
  * happened without ever showing what.
  */
-result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed", 
+result?: ToolResultPreview, } | { "type": "turn_completed", usage: RendererTurnUsage, } | { "type": "turn_refused", refusal: RendererRefusal, usage: RendererTurnUsage, } | { "type": "turn_failed", 
 /**
  * Why the turn failed, at the only resolution a client can act on.
  * The failure's `kind` and `message` stay internal.
  */
-category: TurnFailureCategory, model?: RendererModelIdentity, } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
+category: TurnFailureCategory, model?: RendererModelIdentity, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated", 
+/**
+ * Estimated transcript tokens before the reduction.
+ */
+original_tokens: number, 
+/**
+ * Estimated transcript tokens after fitting to the budget.
+ */
+fitted_tokens: number, } | { "type": "event_omitted" };
 
 /**
  * One frame on a chat's event socket.
@@ -1855,6 +1868,43 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
 export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "exec" | "create_app" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
+
+/**
+ * A turn's token accounting, as the renderer needs it.
+ *
+ * The four counts are disjoint. Every adapter normalizes to the same split
+ * before the count reaches the journal: `input_tokens` is the *fresh*,
+ * uncached prompt only, and never includes `cache_read_input_tokens` or
+ * `cache_creation_input_tokens`. Anthropic reports that split natively; the
+ * OpenAI, OpenAI-compatible, and Gemini paths all subtract the cached portion
+ * out of the provider's prompt total before filling `input_tokens`. So the
+ * tokens that occupied the model's context for this turn are the plain sum of
+ * all four fields — no term is double-counted and none is missing.
+ *
+ * One caveat a reader of these numbers has to hold: they are the turn's
+ * totals, summed over every model call the agent made, not a snapshot of the
+ * final prompt. A turn that ran ten tool calls re-sent its transcript ten
+ * times, so the sum exceeds what was resident in the window at any one moment.
+ * It is a faithful measure of what the turn cost and a ceiling on what the
+ * window held.
+ */
+export type RendererTurnUsage = { 
+/**
+ * Fresh prompt tokens, excluding both cache figures below.
+ */
+input_tokens: number, 
+/**
+ * Tokens the model generated.
+ */
+output_tokens: number, 
+/**
+ * Prompt tokens served from the provider's cache.
+ */
+cache_read_input_tokens: number, 
+/**
+ * Prompt tokens written to the provider's cache.
+ */
+cache_creation_input_tokens: number, };
 
 /**
  * Non-authoritative, well-known starting location for the native picker.
@@ -1915,7 +1965,22 @@ media_type: string | null,
  * [`Output`]: ResultEntryKind::Output
  * [`App`]: ResultEntryKind::App
  */
-target_id: string | null, };
+target_id: string | null, 
+/**
+ * The public page this row opens, when it names one.
+ *
+ * The one projected field a click leaves the application with, so it is
+ * admitted at construction rather than at the click: only `http` and
+ * `https` survive [`Self::with_web_url`], and a row whose address is
+ * anything else keeps its title and its domain and simply does not open.
+ * It rides alongside the domain in `detail` rather than replacing it —
+ * a column of rows is still told apart by host, not by query string.
+ *
+ * Carried because attribution for a search a chat did not run itself is
+ * only meaningful if the reader can reach the page. `default` because
+ * retained projections predate the field.
+ */
+url?: string, };
 
 /**
  * What one row of a listed result is, which is what picks its icon.
@@ -2306,7 +2371,13 @@ export type VerificationTier = "verified" | "unverified";
  * selection, credential presence, and the configured instance URL — key
  * material never crosses the secret boundary.
  */
-export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, timeout_ms: number, 
+export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, 
+/**
+ * Which search a turn gets. Orthogonal to the fields below, which report
+ * only the host provider's readiness: a vendor turn is unaffected by all
+ * of them.
+ */
+mode: WebSearchMode, timeout_ms: number, 
 /**
  * Whether a key is stored for the selected provider. Always false for a
  * credential-free provider, which has no key slot at all — read
@@ -2330,6 +2401,18 @@ searxng_base_url?: string, };
  * deliberately carries no secret material.
  */
 export type WebSearchCredentialReadiness = { provider: WebSearchProviderKind, has_credential: boolean, };
+
+/**
+ * Which search a turn should use, as the operator chose it.
+ *
+ * The choice is about *who runs the search*, not about which engine: a vendor
+ * search runs inside the model provider's own infrastructure and never touches
+ * this host's providers, credentials, or egress policy. `Automatic` is the
+ * default and the value every configuration written before this existed reads
+ * back as, so an installation that had web search working keeps exactly the
+ * search it had.
+ */
+export type WebSearchMode = "automatic" | "vendor" | "host" | "off";
 
 /**
  * A configured web-search backend. The stable string also selects its secret

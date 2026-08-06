@@ -8,6 +8,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import type {
   ApiClient,
   WebSearchConfigInfo,
@@ -56,6 +57,7 @@ describe("WebSearchPanel", () => {
       has_credential: false,
       available: false,
       timeout_ms: 20_000,
+      mode: "automatic",
     });
 
     render(<WebSearchPanel client={client} />);
@@ -79,6 +81,7 @@ describe("WebSearchPanel", () => {
       "tavily-secret",
     );
     expect(putWebSearchConfig).toHaveBeenCalledWith({
+      mode: "automatic",
       provider: "exa",
       timeout_ms: 30_000,
       searxng_base_url: null,
@@ -96,6 +99,7 @@ describe("WebSearchPanel", () => {
         has_credential: true,
         available: true,
         timeout_ms: 20_000,
+        mode: "automatic",
       },
       [
         { provider: "exa", has_credential: true },
@@ -124,6 +128,7 @@ describe("WebSearchPanel", () => {
       has_credential: false,
       available: false,
       timeout_ms: 20_000,
+      mode: "automatic",
     });
 
     render(<WebSearchPanel client={client} />);
@@ -135,6 +140,7 @@ describe("WebSearchPanel", () => {
 
     await waitFor(() =>
       expect(putWebSearchConfig).toHaveBeenCalledWith({
+        mode: "automatic",
         provider: "searxng",
         timeout_ms: 20_000,
         searxng_base_url: "http://localhost:8888",
@@ -144,12 +150,49 @@ describe("WebSearchPanel", () => {
     expect(screen.queryByLabelText(/SearXNG API key/)).toBeNull();
   });
 
+  // The mode decides who searches at all, so it has to survive a round trip:
+  // a panel that loaded one mode and saved another would silently retarget
+  // every chat's search.
+  it("loads the stored mode and saves the one the user picked", async () => {
+    const user = userEvent.setup();
+    const { client, putWebSearchConfig } = clientFor({
+      provider: "exa",
+      has_credential: true,
+      available: true,
+      timeout_ms: 20_000,
+      mode: "host",
+    });
+
+    render(<WebSearchPanel client={client} />);
+
+    const modeSelect = await screen.findByRole("combobox", {
+      name: "Search mode",
+    });
+    expect(modeSelect).toHaveTextContent("Configured provider");
+
+    await user.click(modeSelect);
+    await user.click(
+      screen.getByRole("option", { name: "Model provider (built-in)" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(putWebSearchConfig).toHaveBeenCalledWith({
+        mode: "vendor",
+        provider: "exa",
+        timeout_ms: 20_000,
+        searxng_base_url: null,
+      }),
+    );
+  });
+
   it("rejects a timeout outside the bounds before touching the server", async () => {
     const { client, putWebSearchConfig } = clientFor({
       provider: "exa",
       has_credential: true,
       available: true,
       timeout_ms: 20_000,
+      mode: "automatic",
     });
 
     render(<WebSearchPanel client={client} />);

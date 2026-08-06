@@ -572,6 +572,7 @@ describe("sending a message", () => {
       [],
       ["doc-1"],
       ["pptx"],
+      true,
     );
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -582,6 +583,7 @@ describe("sending a message", () => {
       attachments: [],
       file_attachments: ["doc-1"],
       invoked_skills: ["pptx"],
+      voice_input_used: true,
     });
   });
 });
@@ -598,6 +600,7 @@ describe("active turn steering", () => {
       "steer-1",
       "change course",
       true,
+      true,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -609,6 +612,7 @@ describe("active turn steering", () => {
       turn_id: "turn-1",
       content: "change course",
       interrupt: true,
+      voice_input_used: true,
     });
   });
 });
@@ -1162,6 +1166,7 @@ describe("parseToolResultPreview closed results", () => {
           meta: "1.2 KB",
           mediaType: "text/markdown",
           targetId: null,
+          url: null,
         },
         {
           kind: "folder",
@@ -1170,6 +1175,7 @@ describe("parseToolResultPreview closed results", () => {
           meta: null,
           mediaType: null,
           targetId: null,
+          url: null,
         },
       ],
       failures: [{ label: "q4.md", error: "unreadable" }],
@@ -1185,6 +1191,30 @@ describe("parseToolResultPreview closed results", () => {
         elided: 0,
       }),
     ).toEqual({ tool: "entries", entries: [], failures: [], elided: 0 });
+  });
+  // A row's address is the only projected field that can send a reader out of
+  // the application, so the renderer re-checks the scheme the server admitted
+  // on. A row whose address it will not vouch for keeps its title and simply
+  // does not open.
+  it("admits only a web address a source row can be opened by", () => {
+    const entries = [
+      { kind: "link", label: "Report", url: "https://sec.gov/report" },
+      { kind: "link", label: "Injected", url: "javascript:alert(1)" },
+      { kind: "link", label: "Local", url: "file:///etc/passwd" },
+      { kind: "link", label: "Malformed", url: "not a url" },
+    ];
+    const preview = parseToolResultPreview({
+      tool: "entries",
+      entries,
+      failures: [],
+      elided: 0,
+    });
+    expect(preview?.tool).toBe("entries");
+    expect(
+      preview?.tool === "entries"
+        ? preview.entries.map((entry) => entry.url)
+        : null,
+    ).toEqual(["https://sec.gov/report", null, null, null]);
   });
 });
 

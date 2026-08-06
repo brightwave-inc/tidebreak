@@ -73,6 +73,7 @@ import {
   type StickyChatDefaults as WireStickyChatDefaults,
   type WebSearchConfigInfo as WireWebSearchConfigInfo,
   type WebSearchCredentialReadiness as WireWebSearchCredentialReadiness,
+  type WebSearchMode as WireWebSearchMode,
   type WebSearchProviderKind as WireWebSearchProviderKind,
   type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
   type PendingOutputWritebackRequest as WirePendingOutputWritebackRequest,
@@ -253,6 +254,9 @@ export type Project = WireProject;
 
 /** The fixed, host-owned search providers supported by this build. */
 export type WebSearchProviderKind = WireWebSearchProviderKind;
+
+/** Which search a chat gets: the model provider's, this host's, or none. */
+export type WebSearchMode = WireWebSearchMode;
 
 /** Non-secret web-search policy and readiness for its selected provider. */
 export type WebSearchConfigInfo = WireWebSearchConfigInfo;
@@ -504,6 +508,12 @@ export type ResultEntry = {
    * an output row the outputs panel, an app row the apps library.
    */
   targetId: string | null;
+  /**
+   * The public page this row opens, when it names one. Re-checked here rather
+   * than trusted: it is the only projected field that can send a reader out of
+   * the application, so a non-web address never reaches the host's opener.
+   */
+  url: string | null;
 };
 
 /** One thing a listed call could not do. */
@@ -1007,6 +1017,7 @@ export class ApiClient {
   }
 
   putWebSearchConfig(body: {
+    mode?: WebSearchMode;
     provider?: WebSearchProviderKind | null;
     timeout_ms?: number;
     // Explicit null clears the configured instance URL; omitting the field
@@ -1784,6 +1795,7 @@ export class ApiClient {
     attachments: readonly string[] = [],
     fileAttachments: readonly string[] = [],
     invokedSkills: readonly string[] = [],
+    voiceInputUsed = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
@@ -1794,6 +1806,7 @@ export class ApiClient {
         attachments,
         file_attachments: fileAttachments,
         invoked_skills: invokedSkills,
+        voice_input_used: voiceInputUsed,
       }),
     });
   }
@@ -1804,11 +1817,18 @@ export class ApiClient {
     steerId: string,
     content: string,
     interrupt = false,
+    voiceInputUsed = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/steer`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ steer_id: steerId, turn_id: turnId, content, interrupt }),
+      body: JSON.stringify({
+        steer_id: steerId,
+        turn_id: turnId,
+        content,
+        interrupt,
+        voice_input_used: voiceInputUsed,
+      }),
     });
   }
 
@@ -2854,7 +2874,34 @@ function parseResultEntry(value: unknown): ResultEntry | null {
   ) {
     return null;
   }
-  return { kind: kind as ResultEntryKind, label, detail, meta, mediaType, targetId };
+  // A row survives an address it cannot vouch for; it simply does not open.
+  const url = isWebUrl(value.url) ? value.url : null;
+  return {
+    kind: kind as ResultEntryKind,
+    label,
+    detail,
+    meta,
+    mediaType,
+    targetId,
+    url,
+  };
+}
+
+/**
+ * Whether a projected address may be handed to the host's external opener.
+ *
+ * The server admits only `http` and `https` into the projection, and this
+ * repeats the check on the way out: the renderer is the last thing standing
+ * between stored text and a browser window.
+ */
+function isWebUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /**

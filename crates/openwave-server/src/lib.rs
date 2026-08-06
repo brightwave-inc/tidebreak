@@ -1036,12 +1036,14 @@ async fn bind_inner(
         },
     )
     .with_blobs(state.blobs.clone())
+    .with_blob_write_locks(state.blob_writes.clone())
     .with_mcp_runtime(state.mcp.clone())
     .with_exec_folder_context(code_execution.clone());
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
         state.store.clone(),
+        state.secrets.clone(),
         state.resolver.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),

@@ -498,6 +498,7 @@ async fn finish_turn_cancellation_inner(
                 seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
                 role: Set("assistant".into()),
                 content: Set(output.content.clone()),
+                llm_content: Set(output.llm_content.clone()),
                 reasoning: Set(reasoning_to_db(&output.reasoning)),
                 turn_lease_token: Set(Some(lease_token)),
                 created_at: Set(canonical_db_timestamp(output.created_at)?),
@@ -536,6 +537,31 @@ async fn finish_turn_cancellation_inner(
             entities::turn_run::Column::OutputMessageId,
             sea_orm::sea_query::Expr::value(Some(message_id)),
         );
+    }
+    // A cancelled turn spent tokens before it stopped, and until now they
+    // reached the journal without ever reaching the row. That left the turn's
+    // durable accounting reading zero for a stopped turn, so anything rebuilt
+    // from storage — the transcript's context usage among them — understated
+    // it. `validate_terminal_usage` above has already established that this
+    // total covers the row's checkpoint, so the write stays monotonic.
+    if let Some(AgentEvent::TurnCancelled { usage }) = terminal_event {
+        cancelled = cancelled
+            .col_expr(
+                entities::turn_run::Column::InputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::OutputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::CacheReadInputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::CacheCreationInputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
+            );
     }
     let cancelled = cancelled
         .filter(entities::turn_run::Column::Id.eq(id.0))

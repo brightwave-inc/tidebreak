@@ -120,6 +120,12 @@ pub struct ChatTerminalTurnSnapshot {
     /// Skills the user explicitly invoked when the turn was accepted, in
     /// submitted order. Empty for a turn that named none.
     pub invoked_skills: Vec<String>,
+    /// Token accounting recorded when the turn resolved. Lets a client that
+    /// opened the chat after the fact show context usage without waiting for
+    /// another turn to run.
+    pub usage: crate::provider::Usage,
+    /// Whether any of the turn's input came from voice transcription.
+    pub voice_input_used: bool,
     pub finished_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -2626,6 +2632,41 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Accept a turn with all renderer-hidden, message-scoped context needed to
+    /// build its durable model projection.
+    ///
+    /// `voice_input_used` is kept separate from the caller-visible content so
+    /// storage can derive the canonical note rather than accepting arbitrary
+    /// model-only text over the wire. Implementations that have not added voice
+    /// metadata can still serve the ordinary false case through the attachment
+    /// method above.
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_turn_with_message_context(
+        &self,
+        id: TurnId,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+        images: &[ImageRef],
+        documents: &[DocumentId],
+        invoked_skills: &[String],
+        voice_input_used: bool,
+    ) -> Result<AcceptTurnOutcome> {
+        if voice_input_used {
+            return turn_storage_unavailable();
+        }
+        self.accept_turn_with_attachments(
+            id,
+            chat_id,
+            model,
+            content,
+            images,
+            documents,
+            invoked_skills,
+        )
+        .await
+    }
+
     /// Perform one durable claim action under a fresh exact lease.
     ///
     /// `lease_token` is the caller's idempotency identity: retrying it while its
@@ -2696,6 +2737,29 @@ pub trait Store: Send + Sync {
         _interrupt: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
         turn_storage_unavailable()
+    }
+
+    /// Accept a steer with renderer-hidden, message-scoped context needed for
+    /// its eventual durable model projection.
+    ///
+    /// `voice_input_used` is kept separate from caller-visible content so the
+    /// store derives the canonical model note. Implementations that do not yet
+    /// persist this metadata can continue serving the ordinary false case.
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_turn_steer_with_message_context(
+        &self,
+        id: TurnSteerId,
+        turn_id: TurnId,
+        chat_id: ChatId,
+        content: &str,
+        interrupt: bool,
+        voice_input_used: bool,
+    ) -> Result<AcceptTurnSteerOutcome> {
+        if voice_input_used {
+            return turn_storage_unavailable();
+        }
+        self.accept_turn_steer(id, turn_id, chat_id, content, interrupt)
+            .await
     }
 
     /// List pending instructions only while the caller owns the exact live lease.

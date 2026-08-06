@@ -3408,6 +3408,12 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
         [vec!["presentations".to_owned()]],
         "the invocation is captured with the turn, not just used to build a prompt"
     );
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(messages[0].content, "build the deck");
+    assert!(messages[0]
+        .llm_content
+        .as_deref()
+        .is_some_and(|content| content.contains("presentations")));
 
     // Switching the skill off makes the same submission a refusal.
     let toggled = put_plugins_enabled(

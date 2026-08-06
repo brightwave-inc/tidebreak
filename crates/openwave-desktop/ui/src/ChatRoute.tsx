@@ -56,6 +56,7 @@ import {
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu } from "./ModelMenu";
+import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -114,6 +115,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
+  const lastTurnUsage = useChatSessionStore((session) => session.lastTurnUsage);
   const [hydrated, setHydrated] = useState(false);
   const files = useComposerAttachments(chatId).files;
   const [attaching, setAttaching] = useState(false);
@@ -174,11 +176,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     if (!chat || !hydrated) return;
     const pending = firstMessageActions.take(chatId);
     if (pending) {
+      if (pending.voiceInputUsed) voice.markInputUsed();
       void sendMessage(
         pending.text,
         pending.images,
         pending.files,
         pending.skills,
+        pending.voiceInputUsed,
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -365,6 +369,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     imageItems: readonly ImageAttachment[] = images.attachments,
     fileItems: readonly ImportedDocument[] = files,
     skillNames: readonly string[] = invokedSkills(),
+    voiceInputUsed = voice.inputUsed,
   ) {
     await postTurn({
       content,
@@ -377,6 +382,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         mediaType: file.mediaType,
       })),
       invokedSkills: skillNames,
+      voiceInputUsed,
       fromComposer: true,
     });
   }
@@ -407,10 +413,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       transcriptImages: [...turn.images],
       documentIds: turn.files.map((file) => file.documentId),
       transcriptFiles: [...turn.files],
-      // A retry resends what the transcript holds, and the transcript does not
-      // yet carry the skills a turn was invoked with — so a retried turn is the
-      // ordinary send, with the composer's own pills left out of it.
-      invokedSkills: [],
+      invokedSkills: turn.invokedSkills,
+      voiceInputUsed: turn.voiceInputUsed,
       fromComposer: false,
     });
   }
@@ -427,6 +431,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     documentIds,
     transcriptFiles,
     invokedSkills: skillNames,
+    voiceInputUsed,
     fromComposer,
   }: {
     content: string;
@@ -435,6 +440,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     documentIds: readonly string[];
     transcriptFiles: readonly TranscriptFileAttachment[];
     invokedSkills: readonly string[];
+    voiceInputUsed: boolean;
     fromComposer: boolean;
   }) {
     if (!chat || !content || busy || deletingChatId !== null) return;
@@ -454,6 +460,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           text: content,
           images: [...transcriptImages],
           files: [...transcriptFiles],
+          voiceInputUsed,
+          invokedSkills: [...skillNames],
           createdAt: new Date().toISOString(),
         },
       ],
@@ -467,6 +475,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         attachments,
         documentIds,
         skillNames,
+        voiceInputUsed,
       );
       // Only once the turn is durably accepted, and only for what the composer
       // actually contributed. A refused send — an image the selected model
@@ -478,6 +487,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         images.clear();
         setComposerFiles(() => []);
         composerDraftActions.setSkills(chatId, []);
+        voice.resetInputUsed();
       }
     } catch (err) {
       // Nothing was accepted, so the message has to go back to where it can be
@@ -523,6 +533,33 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.importSource);
       setAttaching(false);
     }
+  }
+
+  /**
+   * Put a file this conversation already carries back on the next message.
+   *
+   * Nothing is imported: the document is already in the chat's library, so the
+   * message only has to name it again. That is why no size comes with it — the
+   * transcript records what a document is, not how many bytes it was.
+   */
+  function onReattachFile(file: TranscriptFileAttachment) {
+    if (files.some((current) => current.documentId === file.documentId)) return;
+    if (images.attachments.length + files.length >= MAX_IMAGE_ATTACHMENTS) {
+      setAttachError(
+        `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+      );
+      return;
+    }
+    setAttachError(null);
+    setComposerFiles((current) => [
+      ...current,
+      {
+        documentId: file.documentId,
+        displayName: file.name,
+        mediaType: file.mediaType,
+        byteLen: 0,
+      },
+    ]);
   }
 
   function adoptAttached(attached: AttachedFiles) {
@@ -596,9 +633,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   function renderChat(visible: boolean) {
+    // The model selected right now: the reasoning levels it accepts, and the
+    // window the context meter reads against. Switching models mid-chat
+    // re-scales the meter immediately, which is the question being asked.
+    const activeModel = modelForSelection(models, chat!.model);
     // Only the levels the selected model accepts are offerable, and a model
     // that accepts none gets no selector at all.
-    const efforts = modelForSelection(models, chat!.model)?.reasoning_efforts ?? [];
+    const efforts = activeModel?.reasoning_efforts ?? [];
     return (
       <TranscriptVisibilityProvider value={visible}>
         <ChatView
@@ -613,6 +654,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             items: files,
             attaching,
             onAttach: hasNativeHost() ? onAttach : undefined,
+            onReattach: onReattachFile,
             onRemove: (documentId) =>
               setComposerFiles((current) =>
                 current.filter((file) => file.documentId !== documentId),
@@ -620,9 +662,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           }}
           folders={{
             items: folders.items,
+            approved: folders.approved,
             working: folders.working,
             error: folders.error,
             onAttach: nativeHost ? folders.attach : undefined,
+            onConnect: nativeHost ? folders.connectApproved : undefined,
             onRemove: folders.remove,
           }}
           voice={{
@@ -632,6 +676,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onStart: () => void voice.start(),
             onStop: voice.stop,
           }}
+          voiceInputUsed={voice.inputUsed}
+          onVoiceInputAccepted={voice.resetInputUsed}
           nativeDropTarget={
             <DocumentDropTarget
               chatId={chatId}
@@ -658,6 +704,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onRemove: images.remove,
             onRetry: images.retry,
           }}
+          composerContextMeter={
+            <ContextUsageIndicator
+              usage={lastTurnUsage}
+              contextWindow={activeModel?.context_window}
+              modelName={activeModel?.display_name}
+            />
+          }
           composerModelMenu={
             <ModelMenu
               models={models}
@@ -685,8 +738,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             disabled: deletingChatId !== null,
             onChange: onNetworkPolicyChange,
           }}
-          onDraftChange={setComposerDraft}
-          onSelectPrompt={setComposerDraft}
+          onDraftChange={(next) => {
+            setComposerDraft(next);
+            if (!next.trim()) voice.resetInputUsed();
+          }}
+          onSelectPrompt={(prompt) => {
+            setComposerDraft(prompt);
+            voice.resetInputUsed();
+          }}
           onSend={onSend}
           onRetryTurn={retryTurn}
           onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}

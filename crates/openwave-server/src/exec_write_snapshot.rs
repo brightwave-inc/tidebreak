@@ -26,8 +26,8 @@ use openwave_code_execution::{
 };
 use openwave_core::{
     BlobStore, ChatId, DocumentSourceBlob, ExecFileChange, ExecFileRejectionReason,
-    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, Store, TurnId,
-    MAX_EXEC_WORKSPACE_FILE_BYTES,
+    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents,
+    Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -71,6 +71,87 @@ impl TurnSnapshotSink {
         self.store
             .record_exec_file_snapshots(chat_id, turn_id, &files)
             .await
+    }
+}
+
+/// Journals one turn's private-scratch overwrites through the same retained
+/// blob, digest guard, and undo window as folder write-back.
+///
+/// The chat's private scratch is an ordinary absolute directory, so its rows
+/// need nothing the journal does not already carry: the scratch directory is
+/// the folder, the tool's path is the relative path, and undo resolves and
+/// restores it exactly as it does a granted folder's file. Each overwrite
+/// commits on its own, the way a connected-app publication does, because a
+/// structured write has no later write-back step to batch behind.
+pub(crate) struct TurnScratchJournal {
+    sink: TurnSnapshotSink,
+    folder: std::path::PathBuf,
+    chat_id: ChatId,
+    turn_id: TurnId,
+}
+
+impl TurnScratchJournal {
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        blobs: Arc<dyn BlobStore>,
+        blob_writes: Arc<BlobWriteGuard>,
+        folder: std::path::PathBuf,
+        chat_id: ChatId,
+        turn_id: TurnId,
+    ) -> Self {
+        Self {
+            sink: TurnSnapshotSink::new(store, blobs, blob_writes),
+            folder,
+            chat_id,
+            turn_id,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl openwave_core::ScratchWriteJournal for TurnScratchJournal {
+    async fn record_overwrite(
+        &self,
+        relative_path: &str,
+        prior: ScratchPriorContents,
+        next: &[u8],
+    ) {
+        let prior = match prior {
+            ScratchPriorContents::Bytes(bytes) => PriorContents::Bytes(bytes),
+            ScratchPriorContents::TooLarge { byte_len } => PriorContents::TooLarge { byte_len },
+            ScratchPriorContents::Unreadable => PriorContents::Unreadable,
+        };
+        let prepared = self
+            .sink
+            .prepare(StagedChange {
+                folder: &self.folder,
+                relative: relative_path,
+                prior,
+                next: Some(next),
+            })
+            .await;
+        match prepared {
+            // The bytes are already written; the retained copy is what is at
+            // stake here, so a failure costs the undo and nothing else.
+            Ok(prepared) => prepared.applied(),
+            Err(error) => {
+                tracing::error!(
+                    chat = %self.chat_id,
+                    turn = %self.turn_id,
+                    %error,
+                    "could not retain the bytes a scratch write replaced; undo is unavailable"
+                );
+                return;
+            }
+        }
+        if let Err(error) = self.sink.commit(self.chat_id, self.turn_id).await {
+            tracing::error!(
+                chat = %self.chat_id,
+                turn = %self.turn_id,
+                %error,
+                "could not journal a scratch write; undo is unavailable"
+            );
+        }
     }
 }
 
@@ -355,6 +436,7 @@ pub(crate) async fn list_file_change_summaries(
     store: &dyn Store,
     blobs: &dyn BlobStore,
     chat_id: ChatId,
+    scratch_folder: Option<&Path>,
 ) -> openwave_core::Result<std::collections::HashMap<TurnId, Vec<ExecFileChangeSummary>>> {
     let mut by_turn = std::collections::HashMap::<TurnId, Vec<_>>::new();
     for snapshot in store.list_exec_file_snapshots(chat_id).await? {
@@ -362,7 +444,7 @@ pub(crate) async fn list_file_change_summaries(
         by_turn
             .entry(turn_id)
             .or_default()
-            .push(summarize_applied_change(blobs, snapshot).await);
+            .push(summarize_applied_change(blobs, snapshot, scratch_folder).await);
     }
     for rejection in store.list_exec_file_rejections(chat_id).await? {
         by_turn
@@ -370,7 +452,7 @@ pub(crate) async fn list_file_change_summaries(
             .or_default()
             .push(ExecFileChangeSummary {
                 snapshot_id: format!("rejected:{}", rejection.id),
-                folder_name: display_folder_name(&rejection.file.folder_path),
+                folder_name: folder_label(&rejection.file.folder_path, scratch_folder),
                 relative_path: rejection.file.relative_path,
                 classification: ExecFileChangeClassification::Rejected,
                 change: None,
@@ -392,6 +474,7 @@ pub(crate) async fn list_file_change_summaries(
 async fn summarize_applied_change(
     blobs: &dyn BlobStore,
     snapshot: ExecFileSnapshot,
+    scratch_folder: Option<&Path>,
 ) -> ExecFileChangeSummary {
     let change = match snapshot.file.change {
         ExecFileChange::Created => ExecFileChangeKind::Created,
@@ -407,7 +490,7 @@ async fn summarize_applied_change(
     };
     ExecFileChangeSummary {
         snapshot_id: snapshot.id.to_string(),
-        folder_name: display_folder_name(&snapshot.file.folder_path),
+        folder_name: folder_label(&snapshot.file.folder_path, scratch_folder),
         relative_path: snapshot.file.relative_path,
         classification: ExecFileChangeClassification::Applied,
         change: Some(change),
@@ -772,6 +855,21 @@ async fn run_document_helper(
     Err(ExecFilePreviewError::Unavailable)
 }
 
+/// What the transcript calls the folder a change landed in.
+///
+/// The chat's private scratch is a runtime directory named after the chat id,
+/// which is neither a folder the user attached nor a name they would recognize.
+/// It is labelled by what it is instead, and the path stays server-side.
+fn folder_label(folder_path: &str, scratch_folder: Option<&Path>) -> String {
+    if scratch_folder.is_some_and(|scratch| scratch == Path::new(folder_path)) {
+        return SCRATCH_FOLDER_LABEL.to_owned();
+    }
+    display_folder_name(folder_path)
+}
+
+/// How a private-scratch change names its location in the transcript.
+const SCRATCH_FOLDER_LABEL: &str = "Scratch";
+
 fn display_folder_name(folder_path: &str) -> String {
     Path::new(folder_path)
         .file_name()
@@ -1055,9 +1153,10 @@ mod tests {
         drop(blobs);
         let restarted_store = DbStore::connect(&database_url).await.unwrap();
         let restarted_blobs = FsBlobStore::new(&blob_root);
-        let summaries = list_file_change_summaries(&restarted_store, &restarted_blobs, chat.id)
-            .await
-            .unwrap();
+        let summaries =
+            list_file_change_summaries(&restarted_store, &restarted_blobs, chat.id, None)
+                .await
+                .unwrap();
         let files = &summaries[&turn_id];
         assert_eq!(files.len(), 4);
         assert!(files.iter().any(|file| {
@@ -1110,6 +1209,103 @@ mod tests {
             .files
             .iter()
             .all(|file| file.status == ExecFileUndoStatus::AlreadyUndone));
+    }
+
+    /// The reason this journal exists: `write_file` is a structured call, so an
+    /// overwrite it performs restores through exactly the path a folder
+    /// write-back's does — and a create, which destroys nothing, journals
+    /// nothing.
+    #[tokio::test]
+    async fn a_scratch_overwrite_restores_through_the_turn_journal() {
+        use cap_std::ambient_authority;
+        use cap_std::fs::Dir;
+        use openwave_core::{Tool, ToolCtx, ToolScratch, WriteFile};
+
+        let home = tempfile::tempdir().unwrap();
+        let database_url = format!(
+            "sqlite://{}?mode=rwc",
+            home.path().join("openwave.db").display()
+        );
+        let store = Arc::new(DbStore::connect(&database_url).await.unwrap());
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let blobs = Arc::new(FsBlobStore::new(home.path().join("blobs")));
+        let scratch = home.path().join("scratch").join(chat.id.to_string());
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        let turn_id = TurnId::new();
+        let journal = Arc::new(TurnScratchJournal::new(
+            store.clone(),
+            blobs.clone(),
+            Arc::new(BlobWriteGuard::new(home.path().join("blob-locks"))),
+            scratch.clone(),
+            chat.id,
+            turn_id,
+        ));
+        let ctx = ToolCtx::with_private_scratch(
+            chat.id,
+            None,
+            ToolScratch::from_dir(Dir::open_ambient_dir(&scratch, ambient_authority()).unwrap())
+                .with_write_journal(journal),
+        );
+
+        let write = |content: &'static str| {
+            WriteFile.execute(
+                &ctx,
+                serde_json::json!({ "path": "notes/plan.md", "content": content }),
+            )
+        };
+        assert!(!write("first draft").await.unwrap().is_error);
+        assert!(
+            store
+                .list_exec_file_snapshots(chat.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "creating a file destroys nothing and must not retain a copy"
+        );
+        assert!(!write("second draft").await.unwrap().is_error);
+
+        let summaries = list_file_change_summaries(&*store, &*blobs, chat.id, Some(&scratch))
+            .await
+            .unwrap();
+        let files = &summaries[&turn_id];
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, "notes/plan.md");
+        assert_eq!(files[0].folder_name, SCRATCH_FOLDER_LABEL);
+        assert_eq!(files[0].change, Some(ExecFileChangeKind::Overwritten));
+        assert_eq!(files[0].undo, ExecFileUndoAvailability::Available);
+        assert!(files[0]
+            .diff
+            .as_deref()
+            .is_some_and(|diff| diff.contains("-first draft") && diff.contains("+second draft")));
+
+        let outcome = undo_turn_file_changes(&*store, &*blobs, chat.id, turn_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome
+                .files
+                .iter()
+                .map(|file| file.status)
+                .collect::<Vec<_>>(),
+            vec![ExecFileUndoStatus::Restored]
+        );
+        assert_eq!(
+            std::fs::read(scratch.join("notes").join("plan.md")).unwrap(),
+            b"first draft"
+        );
     }
 
     /// The binary-preview contract crosses the durable journal, retained blob,
@@ -1177,7 +1373,7 @@ mod tests {
             .pop()
             .unwrap();
 
-        let summary = list_file_change_summaries(&store, &blobs, chat.id)
+        let summary = list_file_change_summaries(&store, &blobs, chat.id, None)
             .await
             .unwrap();
         assert_eq!(

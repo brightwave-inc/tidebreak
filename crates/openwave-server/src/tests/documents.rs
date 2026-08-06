@@ -32,6 +32,7 @@ async fn an_imported_file_commits_with_its_message_and_replays_as_a_chip() {
                         "turn_id": TurnId::new(),
                         "content": "Summarize this file",
                         "file_attachments": [document_id],
+                        "voice_input_used": true,
                     })
                     .to_string(),
                 ))
@@ -54,6 +55,8 @@ async fn an_imported_file_commits_with_its_message_and_replays_as_a_chip() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let transcript: serde_json::Value = json_body(response).await;
+    assert_eq!(transcript["messages"][0]["content"], "Summarize this file");
+    assert!(transcript["messages"][0].get("llm_content").is_none());
     assert_eq!(
         transcript["messages"][0]["file_attachments"][0],
         serde_json::json!({
@@ -68,6 +71,15 @@ async fn an_imported_file_commits_with_its_message_and_replays_as_a_chip() {
         .unwrap();
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].document_id, document_id);
+    let messages = store.list_messages(chat.id).await.unwrap();
+    let llm_content = messages[0]
+        .llm_content
+        .as_deref()
+        .expect("attachment and voice context should be model-only content");
+    assert!(llm_content.contains("transcribed from speech"));
+    assert!(llm_content.contains(&document_id.to_string()));
+    assert!(llm_content.ends_with("# User message\n\nSummarize this file"));
+    assert!(store.list_turn_runs(chat.id).await.unwrap()[0].voice_input_used);
 }
 
 #[tokio::test]

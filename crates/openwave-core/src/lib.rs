@@ -31,6 +31,19 @@ pub const VERSION: &str = match option_env!("OPENWAVE_VERSION") {
 /// scan is behind.
 pub const OUTPUT_LOOKUP_LIMIT: u64 = 1_000;
 
+/// Largest content a single `write_file` call may write.
+///
+/// One cap for both `write_file` implementations: this crate's host tool and
+/// the sandbox-resident agent's in-container tool
+/// (`openwave_sandbox_agent::fs::MAX_WRITE_BYTES`, which aliases this). A model
+/// that learns the bound from one of them must not be surprised by the other,
+/// so the two cannot be allowed to drift. It lives here, ungated, because the
+/// sandbox agent builds without the `tools` feature the host tool is behind.
+///
+/// Above this, file production belongs in an exec command writing into
+/// `output/`: large content is a program's job, and that path publishes it.
+pub const MAX_WRITE_FILE_BYTES: usize = 1_024 * 1_024;
+
 pub mod agent;
 pub mod agent_tools;
 pub mod approval;
@@ -75,7 +88,7 @@ pub mod user_questions;
 
 pub use agent::{
     Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, ForegroundAgentWaitRequest,
-    SandboxAgentSpawnRequest, ToolRegistry, UtilityModel,
+    SandboxAgentSpawnRequest, ToolRegistry, TurnWebSearch, UtilityModel,
 };
 pub use agent_tools::{
     sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_read_delegated_file_tool_spec,
@@ -224,8 +237,9 @@ pub use storage::{
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{
-    input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, Tool, ToolCtx,
-    ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec, ToolUiView,
+    input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, ScratchPriorContents,
+    ScratchWriteJournal, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,
+    ToolUiView,
 };
 #[cfg(feature = "tools")]
 pub use tools::{create_app_tool_spec, CreateAppTool, ListDir, ReadFile, WriteFile};

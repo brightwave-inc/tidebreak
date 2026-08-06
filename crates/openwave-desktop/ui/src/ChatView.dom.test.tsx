@@ -69,6 +69,8 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       composerPermissionMenu={null}
       composerImages={noImages()}
       files={noFiles()}
+      voiceInputUsed={false}
+      onVoiceInputAccepted={vi.fn()}
       attachError={null}
       onDraftChange={(value) => {
         draftRef.current = value;
@@ -93,6 +95,8 @@ function chatViewProps(overrides: Partial<ChatViewProps> = {}): ChatViewProps {
     composerPermissionMenu: null,
     composerImages: noImages(),
     files: noFiles(),
+    voiceInputUsed: false,
+    onVoiceInputAccepted: vi.fn(),
     attachError: null,
     onDraftChange: vi.fn(),
     onSelectPrompt: vi.fn(),

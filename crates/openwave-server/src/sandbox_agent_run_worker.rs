@@ -27,8 +27,8 @@ use openwave_core::{
     ChatRequest, ContentBlock, FailAgentRunOutcome, MessageReasoning, ModelProvider,
     ParkSandboxToolCallOutcome, ProviderEvent, RequestFolderAccessArgs, Result,
     ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall, SandboxToolCallRequest,
-    SandboxToolCallStatus, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallRecord,
-    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    SandboxToolCallStatus, SecretProvider, StopReason, Store, SubmitAgentRunResultOutcome,
+    ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -37,13 +37,61 @@ use crate::resolver::ProviderResolver;
 use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
 use crate::state::SandboxAttemptGuard;
 
-/// Fixed instruction set for the initial isolated executor.
+/// Fixed instruction set for the initial isolated executor, up to the sentence
+/// that names the run's tools.
 ///
 /// Deliberately do not inherit the foreground system prompt: it may describe
 /// interactive tools or conversation-wide responsibilities that are outside a
 /// depth-one child run's authority.
-const SANDBOX_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain. Use web_search when current public-web information is necessary, and request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker. Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
-const SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents, except for the one exact file explicitly delegated to this run. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain. Use read_delegated_file to read that one delegated file, web_search when current public-web information is necessary, and request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker. Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
+const SANDBOX_PROMPT_PREAMBLE: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain.";
+const SANDBOX_DELEGATED_FILE_PROMPT_PREAMBLE: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents, except for the one exact file explicitly delegated to this run. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain.";
+const SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE: &str =
+    "read_delegated_file to read that one delegated file";
+const SANDBOX_PROMPT_WEB_SEARCH_CLAUSE: &str =
+    "web_search when current public-web information is necessary";
+const SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE: &str = "request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker";
+const SANDBOX_PROMPT_CLOSING: &str = "Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
+
+/// Compose the run's instructions for the surface it actually has.
+///
+/// A vendor-searching run still has `web_search` — the model provider runs it,
+/// but the model names and uses it the same way — so only a run with no search
+/// at all loses the clause, exactly as a foreground turn's prompt does.
+fn sandbox_system_prompt(delegated_file_available: bool, web_search: TurnWebSearch) -> String {
+    let mut clauses = Vec::with_capacity(3);
+    if delegated_file_available {
+        clauses.push(SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE);
+    }
+    if web_search != TurnWebSearch::Off {
+        clauses.push(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE);
+    }
+    clauses.push(SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE);
+    let last = clauses
+        .pop()
+        .expect("folder-access clause is always present");
+    let mut tools = String::from("Use ");
+    for clause in &clauses {
+        tools.push_str(clause);
+        tools.push_str(", ");
+    }
+    if !clauses.is_empty() {
+        tools.push_str("and ");
+    }
+    tools.push_str(last);
+    tools.push('.');
+    let preamble = if delegated_file_available {
+        SANDBOX_DELEGATED_FILE_PROMPT_PREAMBLE
+    } else {
+        SANDBOX_PROMPT_PREAMBLE
+    };
+    format!("{preamble} {tools} {SANDBOX_PROMPT_CLOSING}")
+}
+
+/// Progress lines one step may publish for searches the provider ran itself.
+///
+/// The vendor budget already bounds these; this only keeps a misreporting
+/// adapter from filling the run's observation feed from one step.
+const MAX_PROVIDER_EXECUTED_RECORDS: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SandboxAgentRunWorkerConfig {
@@ -118,6 +166,7 @@ pub(crate) enum SandboxAgentRunWorkerOutcome {
 #[derive(Clone)]
 pub(crate) struct SandboxAgentRunWorker {
     store: Arc<dyn Store>,
+    secrets: Arc<dyn SecretProvider>,
     resolver: Arc<dyn ProviderResolver>,
     wake: Arc<Notify>,
     turn_wake: Arc<Notify>,
@@ -139,6 +188,7 @@ impl SandboxAgentRunWorker {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
@@ -149,6 +199,7 @@ impl SandboxAgentRunWorker {
     ) -> Self {
         Self::with_attempts(
             store,
+            secrets,
             resolver,
             wake,
             turn_wake,
@@ -163,6 +214,7 @@ impl SandboxAgentRunWorker {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_attempts(
         store: Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
@@ -180,6 +232,7 @@ impl SandboxAgentRunWorker {
         assert!(config.max_running_per_chat > 0);
         Self {
             store,
+            secrets,
             resolver,
             wake,
             turn_wake,
@@ -428,7 +481,7 @@ impl SandboxAgentRunWorker {
             }
         };
         let mut agent_config = self.agent_config.clone();
-        if self.resolver.enforces_model_registry() {
+        let supports_vendor_web_search = if self.resolver.enforces_model_registry() {
             let Some(policy) =
                 crate::providers::resolve_model_policy(&*self.store, &model, true).await?
             else {
@@ -436,18 +489,34 @@ impl SandboxAgentRunWorker {
                     "sandbox model is not registered for its provider",
                 ));
             };
+            let supports_vendor_web_search = policy.supports_vendor_web_search;
             crate::providers::apply_model_policy(
                 &mut agent_config,
                 &policy,
                 chat.reasoning_effort,
             )?;
+            supports_vendor_web_search
         } else {
             crate::providers::apply_free_form_model(
                 &mut agent_config,
                 model,
                 chat.reasoning_effort,
             )?;
-        }
+            // A model reached without the registry claims nothing, here as
+            // everywhere else: no row asserts that its adapter emits a
+            // provider-executed search, so this run is not offered one.
+            false
+        };
+        // One host setting governs both surfaces. A background run is the
+        // conversation's own work delegated to a child, so the operator's
+        // single web-search choice decides which search it gets, resolved
+        // against the model that is about to run rather than the boot default.
+        agent_config.web_search = crate::web_search::resolve_turn_web_search(
+            &*self.store,
+            &*self.secrets,
+            supports_vendor_web_search,
+        )
+        .await?;
         let request = sandbox_request(
             &agent_config,
             task,
@@ -515,8 +584,11 @@ impl SandboxAgentRunWorker {
         let SandboxStep {
             narration,
             completion,
+            provider_executed,
         } = step;
-        match completion {
+        let run_id = run.id;
+        let depth = previous_calls.len();
+        let outcome = match completion {
             SandboxCompletion::Final(text) => self.submit_result(&run, lease_token, text).await,
             SandboxCompletion::WebSearch {
                 provider_id,
@@ -571,7 +643,13 @@ impl SandboxAgentRunWorker {
                 )
                 .await
             }
-        }
+        };
+        // Published after the step's own durable transition has committed, for
+        // the same reason narration is: this is observation, and a failure here
+        // must not disturb a transition that already succeeded.
+        self.publish_provider_executed(run_id, depth, &provider_executed)
+            .await;
+        outcome
     }
 
     async fn resolve_provider(
@@ -930,6 +1008,35 @@ impl SandboxAgentRunWorker {
         }
     }
 
+    /// Record the searches the model provider ran inside a step.
+    ///
+    /// A vendor search is finished before this host ever sees it, so there is no
+    /// checkpoint to park and nothing to execute — but the run still did the
+    /// work, and its progress feed is the only place an observer can see what it
+    /// did. The key is the step the search happened in rather than anything the
+    /// provider chose, so a claim that replays the chain and searches again at
+    /// the same depth republishes nothing.
+    async fn publish_provider_executed(
+        &self,
+        run_id: openwave_core::AgentRunId,
+        depth: usize,
+        calls: &[ProviderExecutedCall],
+    ) {
+        for (index, call) in calls.iter().enumerate() {
+            let text = call.progress_line();
+            if let Err(error) = self
+                .store
+                .append_agent_run_progress(run_id, &format!("step:{depth}:tool:{index}"), &text)
+                .await
+            {
+                eprintln!(
+                    "openwave: could not publish provider-executed progress for run \
+                     {run_id}: {error}"
+                );
+            }
+        }
+    }
+
     async fn acknowledge_cancellation_or_lease_loss(
         &self,
         id: openwave_core::AgentRunId,
@@ -1046,14 +1153,10 @@ async fn sandbox_request(
         provider: config.provider.clone(),
         model: config.model.clone(),
         reasoning_model: config.reasoning_model,
-        system: Some(
-            if delegated_file_available {
-                SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT
-            } else {
-                SANDBOX_SYSTEM_PROMPT
-            }
-            .into(),
-        ),
+        system: Some(sandbox_system_prompt(
+            delegated_file_available,
+            config.web_search,
+        )),
         messages,
         // A checkpoint costs one model completion now and one more to consume its
         // receipt, so tools are only advertised while the remaining step budget
@@ -1063,12 +1166,17 @@ async fn sandbox_request(
         tools: if calls.len() < MAX_SANDBOX_TOOL_CALLS
             && calls.len().saturating_add(2) <= config.max_steps
         {
-            let mut tools = vec![
-                sandbox_exec_tool_spec(),
-                sandbox_web_search_tool_spec(),
-                sandbox_done_tool_spec(),
-                sandbox_folder_access_proposal_tool_spec(),
-            ];
+            let mut tools = vec![sandbox_exec_tool_spec()];
+            // The host tool and the provider's own search are one capability
+            // with one name, so the host one is advertised for exactly the runs
+            // the host routed here. A vendor run's searches arrive already
+            // finished and never become checkpoints; an off run is offered no
+            // search at all.
+            if config.web_search == TurnWebSearch::Host {
+                tools.push(sandbox_web_search_tool_spec());
+            }
+            tools.push(sandbox_done_tool_spec());
+            tools.push(sandbox_folder_access_proposal_tool_spec());
             if delegated_file_available {
                 tools.push(sandbox_read_delegated_file_tool_spec());
             }
@@ -1088,6 +1196,13 @@ async fn sandbox_request(
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         reasoning_effort: config.reasoning_effort,
+        // Set for exactly the runs the host routed to the provider's own
+        // search. The budget is per request, and every claim replays the whole
+        // chain, so a resumed run gets the same allowance its earlier steps had.
+        vendor_web_search: match config.web_search {
+            TurnWebSearch::Vendor(vendor) => Some(vendor),
+            TurnWebSearch::Host | TurnWebSearch::Off => None,
+        },
         // Sandbox runs replay text and tool blocks from checkpoints; no path
         // puts an image block in this transcript.
         images: openwave_core::ImageAttachments::new(),
@@ -1106,6 +1221,40 @@ struct SandboxStep {
     /// the run carries nothing here — its result text already says it.
     narration: String,
     completion: SandboxCompletion,
+    /// Searches the model provider ran on its own infrastructure during this
+    /// step, in the order it reported them.
+    ///
+    /// They are already finished when they arrive and their results are inside
+    /// the completion the model is writing, so nothing here executes or replays
+    /// them — a later claim replays only durable checkpoints, and a provider
+    /// that needs the same information again simply searches again.
+    provider_executed: Vec<ProviderExecutedCall>,
+}
+
+/// One tool call the model provider ran itself, as this run records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderExecutedCall {
+    name: String,
+    /// The query the provider ran, when its arguments carry one.
+    query: Option<String>,
+    is_error: bool,
+}
+
+impl ProviderExecutedCall {
+    /// One line of the run's own account of the call, for its progress feed.
+    fn progress_line(&self) -> String {
+        let Self {
+            name,
+            query,
+            is_error,
+        } = self;
+        match (query, is_error) {
+            (Some(query), false) => format!("Ran {name}: {query}"),
+            (None, false) => format!("Ran {name}."),
+            (Some(query), true) => format!("{name} failed: {query}"),
+            (None, true) => format!("{name} failed."),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1161,6 +1310,7 @@ async fn complete_sandbox_task(
     let mut stream = provider.stream(request).await?;
     let mut text = String::new();
     let mut calls = std::collections::BTreeMap::<u32, (String, String, String)>::new();
+    let mut provider_executed = Vec::<ProviderExecutedCall>::new();
     while let Some(event) = stream.next().await {
         match event {
             ProviderEvent::TextDelta { text: delta } => {
@@ -1227,6 +1377,7 @@ async fn complete_sandbox_task(
                                 provider_id,
                                 arguments,
                             },
+                            provider_executed,
                         });
                     }
                     if name == SANDBOX_EXEC_TOOL && exec_advertised {
@@ -1244,6 +1395,7 @@ async fn complete_sandbox_task(
                                 provider_id,
                                 arguments,
                             },
+                            provider_executed,
                         });
                     }
                     if name == openwave_core::SANDBOX_DONE_TOOL && done_advertised {
@@ -1267,6 +1419,7 @@ async fn complete_sandbox_task(
                                 outputs: arguments.outputs,
                                 summary: arguments.summary,
                             },
+                            provider_executed,
                         });
                     }
                     if name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL
@@ -1284,6 +1437,7 @@ async fn complete_sandbox_task(
                         return Ok(SandboxStep {
                             narration: String::new(),
                             completion: SandboxCompletion::FolderAccessProposal { request },
+                            provider_executed,
                         });
                     }
                     if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
@@ -1305,6 +1459,7 @@ async fn complete_sandbox_task(
                                 provider_id,
                                 arguments,
                             },
+                            provider_executed,
                         });
                     }
                     return Err(AgentError::msg(
@@ -1324,6 +1479,7 @@ async fn complete_sandbox_task(
                 return Ok(SandboxStep {
                     narration: String::new(),
                     completion: SandboxCompletion::Final(text),
+                    provider_executed,
                 });
             }
             ProviderEvent::Refusal { details } => {
@@ -1333,6 +1489,28 @@ async fn complete_sandbox_task(
                 return Err(AgentError::Refusal(format!(
                     "sandbox agent model declined the request (category: {category})"
                 )));
+            }
+            // A search the provider already ran. There is nothing to dispatch
+            // and nothing to answer — the results are inside the completion
+            // being written — so the step records it and keeps reading. It is
+            // not a tool call this loop can consume, so it never competes with
+            // the one checkpoint a step may park.
+            ProviderEvent::ProviderExecutedToolCall {
+                name,
+                input,
+                is_error,
+                ..
+            } => {
+                if provider_executed.len() < MAX_PROVIDER_EXECUTED_RECORDS {
+                    provider_executed.push(ProviderExecutedCall {
+                        name,
+                        query: input
+                            .get("query")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                        is_error,
+                    });
+                }
             }
             // Reasoning blocks exist for in-turn replay, which this minimal
             // loop does not do; dropping them degrades to pre-replay behavior.
@@ -1630,6 +1808,30 @@ mod tests {
         }
     }
 
+    /// The sandbox worker resolves web search per run, which reads host
+    /// configuration and, for the automatic mode, whether a host provider has a
+    /// credential. These tests hold none, so an unconfigured host resolves the
+    /// host tool exactly as it did before this was resolved at all.
+    #[derive(Default)]
+    struct NoSecrets;
+
+    #[async_trait]
+    impl SecretProvider for NoSecrets {
+        async fn get_secret(&self, _key: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_secret(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_secrets() -> Arc<dyn SecretProvider> {
+        Arc::new(NoSecrets)
+    }
+
     async fn fixture() -> (
         SandboxAgentRunWorker,
         Arc<dyn Store>,
@@ -1651,6 +1853,7 @@ mod tests {
         let provider = Arc::new(RecordingProvider::default());
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -1861,7 +2064,10 @@ mod tests {
                 "Investigate this in isolation."
             )]
         );
-        assert_eq!(requests[0].system.as_deref(), Some(SANDBOX_SYSTEM_PROMPT));
+        assert_eq!(
+            requests[0].system.as_deref(),
+            Some(sandbox_system_prompt(false, TurnWebSearch::Host).as_str())
+        );
     }
 
     /// Regression: a sandbox child used to run the boot default model and never
@@ -1941,6 +2147,7 @@ mod tests {
         let provider = Arc::new(WebSearchThenFinalProvider::default());
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -2042,6 +2249,7 @@ mod tests {
         let provider = Arc::new(SearchTwiceThenFinalProvider::default());
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -2425,6 +2633,7 @@ mod tests {
         let worker = |provider: Arc<EventProvider>| {
             SandboxAgentRunWorker::new(
                 store.clone(),
+                test_secrets(),
                 Arc::new(FixedResolver(provider)),
                 Arc::new(Notify::new()),
                 Arc::new(Notify::new()),
@@ -2534,6 +2743,7 @@ mod tests {
         ]));
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(provider)),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -2594,6 +2804,7 @@ mod tests {
         let started = Arc::new(Notify::new());
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(Arc::new(BlockingProvider {
                 started: started.clone(),
             }))),
@@ -2657,6 +2868,7 @@ mod tests {
         let first = child("first".into()).await;
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(Arc::new(FailingProvider))),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -2730,6 +2942,7 @@ mod tests {
         let release = Arc::new(Notify::new());
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(DelayedResolver {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -2775,6 +2988,7 @@ mod tests {
         let attempts = Arc::new(SandboxAttemptGuard::default());
         let worker = SandboxAgentRunWorker::with_attempts(
             store.clone(),
+            test_secrets(),
             Arc::new(DropAwareResolver {
                 entered: entered.clone(),
                 dropped: dropped.clone(),
@@ -2825,6 +3039,7 @@ mod tests {
         let attempts = Arc::new(SandboxAttemptGuard::default());
         let worker = SandboxAgentRunWorker::with_attempts(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(Arc::new(DropAwareProvider {
                 started: started.clone(),
                 dropped: dropped.clone(),
@@ -2882,6 +3097,7 @@ mod tests {
         ));
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -2906,6 +3122,7 @@ mod tests {
         let release = Arc::new(Notify::new());
         let worker = SandboxAgentRunWorker::new(
             store,
+            test_secrets(),
             Arc::new(DelayedResolver {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -2968,7 +3185,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(request.system.as_deref(), Some(SANDBOX_SYSTEM_PROMPT));
+        assert_eq!(
+            request.system.as_deref(),
+            Some(sandbox_system_prompt(false, TurnWebSearch::Host).as_str())
+        );
         assert_eq!(
             request
                 .tools
@@ -3057,7 +3277,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             request.system.as_deref(),
-            Some(SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT)
+            Some(sandbox_system_prompt(true, TurnWebSearch::Host).as_str())
         );
         assert_eq!(
             request
@@ -3095,7 +3315,7 @@ mod tests {
             provider: None,
             model: "m".into(),
             reasoning_model: false,
-            system: Some(SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT.into()),
+            system: Some(sandbox_system_prompt(true, TurnWebSearch::Host)),
             messages: vec![ChatMessage::text(Role::User, "task")],
             tools: vec![sandbox_read_delegated_file_tool_spec()],
             max_tokens: Some(100),
@@ -3251,6 +3471,7 @@ mod tests {
         ]));
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
+            test_secrets(),
             Arc::new(FixedResolver(provider)),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -3276,6 +3497,187 @@ mod tests {
             openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
         );
         assert_eq!(calls[0].arguments, serde_json::json!({}));
+    }
+
+    /// Production routing resolves models through the host registry, which is
+    /// what lets a run claim the vendor search its model's adapter emits.
+    struct RegistryResolver(Arc<dyn ModelProvider>);
+
+    #[async_trait]
+    impl ProviderResolver for RegistryResolver {
+        async fn resolve(&self) -> Arc<dyn ModelProvider> {
+            self.0.clone()
+        }
+
+        fn enforces_model_registry(&self) -> bool {
+            true
+        }
+    }
+
+    /// A provider that searches on its own infrastructure and then answers,
+    /// which is the whole shape of a vendor step: the search is reported as
+    /// already finished, and the run never sees a tool call to make.
+    #[derive(Default)]
+    struct VendorSearchProvider {
+        requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for VendorSearchProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("vendor-search")
+        }
+
+        async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.requests.lock().unwrap().push(request);
+            Ok(stream::iter(vec![
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+                    input: serde_json::json!({"query": "OpenWave release notes"}),
+                    output: serde_json::json!({"results": []}),
+                    is_error: false,
+                },
+                ProviderEvent::TextDelta {
+                    text: "Nothing new was published.".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    async fn set_web_search_mode(store: &Arc<dyn Store>, mode: &str) {
+        store
+            .set_setting(
+                "web_search",
+                &serde_json::json!({ "mode": mode, "timeout_ms": 20_000 }),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Freeze the origin turn on an exact model so admission carries it to the
+    /// child, the way a real conversation's selection does.
+    async fn running_turn_on_model(store: &Arc<dyn Store>, chat_id: ChatId, model: &str) {
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat_id, model, "delegate this")
+            .await
+            .unwrap();
+        let now = Utc::now();
+        store
+            .claim_turn_run(uuid::Uuid::new_v4(), now, now + chrono::Duration::hours(1))
+            .await
+            .unwrap()
+            .turn
+            .expect("origin turn should claim");
+    }
+
+    /// A background run resolves web search from the one host setting, exactly
+    /// as a foreground turn does: the vendor route withholds the host tool the
+    /// run would otherwise checkpoint on, sets the request's budget, and keeps
+    /// the searches the provider ran in the run's own progress feed. Nothing
+    /// reaches the host web-search lane, because no checkpoint is parked for it.
+    #[tokio::test]
+    async fn a_vendor_run_searches_through_its_provider_and_parks_no_host_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        set_web_search_mode(&store, "vendor").await;
+        running_turn_on_model(&store, chat.id, "anthropic::claude-opus-5").await;
+        let provider = Arc::new(VendorSearchProvider::default());
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            test_secrets(),
+            Arc::new(RegistryResolver(provider.clone())),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            AgentConfig::default(),
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        let spawn = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+        admit_sandbox(&store, chat.id, spawn, "What shipped this week?").await;
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(id)
+        );
+        let request = {
+            let mut requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            requests.pop().unwrap()
+        };
+        assert_eq!(
+            request.vendor_web_search,
+            Some(openwave_core::VendorWebSearch {
+                max_uses: openwave_core::VendorWebSearch::DEFAULT_MAX_USES,
+            })
+        );
+        assert!(!request
+            .tools
+            .iter()
+            .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL));
+        // The run still has a search and is still told about it; only which side
+        // runs it changed.
+        assert!(request
+            .system
+            .as_deref()
+            .is_some_and(|system| system.contains(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE)));
+        assert!(store
+            .list_sandbox_tool_calls_for_agent_run(id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_sandbox_tool_call_candidates_named(openwave_core::SANDBOX_WEB_SEARCH_TOOL, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let progress = store.list_agent_run_progress(id, 0, 50).await.unwrap();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].text, "Ran web_search: OpenWave release notes");
+    }
+
+    /// The vendor route is a claim about the model's adapter, so a run whose
+    /// model did not resolve through the registry has no vendor search to fall
+    /// back on — and the operator who chose that route asked for no host search
+    /// either. The run gets none, and its prompt stops naming one.
+    #[tokio::test]
+    async fn a_vendor_run_on_an_unregistered_model_gets_no_search_at_all() {
+        let (worker, store, provider, chat, _dir) = fixture().await;
+        set_web_search_mode(&store, "vendor").await;
+        let spawn = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+        admit_sandbox(&store, chat.id, spawn, "What shipped this week?").await;
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(id)
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].vendor_web_search, None);
+        assert!(!requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL));
+        assert!(requests[0]
+            .system
+            .as_deref()
+            .is_some_and(|system| !system.contains(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE)));
     }
 
     fn sandbox_chat() -> Chat {

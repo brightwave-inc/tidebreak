@@ -61,9 +61,14 @@ impl Tool for ExecTool {
                           the call on every provider. Every provider returns bounded \
                           stdout/stderr. Files you save in output/ are published to the user \
                           automatically as durable outputs; output/ and preview/ are copied back \
-                          for you and need never be listed. To update an output you already \
-                          published, save to the same filename in output/ — it becomes a new \
-                          version of the same output in place; you never track output ids. For \
+                          for you and need never be listed. Everything else the command leaves in \
+                          scratch is intermediate and ephemeral: it may not survive to a later \
+                          command or turn, and there is no undo for it. Reach for exec to run a \
+                          program, not to edit workspace text through shell redirection — \
+                          read_file and write_file do that directly and durably. To update an \
+                          output you already published, save to the same filename in output/ — it \
+                          becomes a new version of the same output in place; you never track \
+                          output ids. For \
                           visual review, save up to three PNG, JPEG, or WebP images in preview/; \
                           overview, grid, thumbnail, page, and slide filenames are prioritized; \
                           preview images are for your own review and never become outputs. When \

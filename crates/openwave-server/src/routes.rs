@@ -1887,6 +1887,10 @@ pub struct ChatTerminalTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub invoked_skills: Option<Vec<String>>,
+    /// Token accounting for the turn, so a freshly opened chat can show
+    /// context usage without waiting for the next turn to finish.
+    pub usage: crate::event_projection::RendererTurnUsage,
+    pub voice_input_used: bool,
     pub finished_at: chrono::DateTime<Utc>,
 }
 
@@ -1924,6 +1928,8 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
             file_changes: Vec::new(),
             invoked_skills: (!snapshot.invoked_skills.is_empty())
                 .then_some(snapshot.invoked_skills),
+            usage: snapshot.usage.into(),
+            voice_input_used: snapshot.voice_input_used,
             finished_at: snapshot.finished_at,
         }
     }
@@ -2054,18 +2060,27 @@ pub async fn list_chat_messages(
             Some(snapshot)
         })
         .collect();
-    let mut file_changes_by_turn =
-        match list_file_change_summaries(&*state.store, &*state.blobs, id).await {
-            Ok(summaries) => summaries,
-            Err(error) => {
-                tracing::warn!(
-                    chat = %id,
-                    %error,
-                    "could not load connected-folder change summaries"
-                );
-                std::collections::HashMap::new()
-            }
-        };
+    let mut file_changes_by_turn = match list_file_change_summaries(
+        &*state.store,
+        &*state.blobs,
+        id,
+        Some(&crate::turn_worker::private_chat_scratch_path(
+            &state.config.data_dir.join("scratch"),
+            id,
+        )),
+    )
+    .await
+    {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            tracing::warn!(
+                chat = %id,
+                %error,
+                "could not load connected-folder change summaries"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
@@ -2991,6 +3006,12 @@ pub struct PostMessage {
     /// skill; one that is not refuses the turn rather than being dropped.
     #[serde(default)]
     pub invoked_skills: Vec<String>,
+    /// Whether any of the submitted text came from voice transcription.
+    ///
+    /// The server turns this into canonical model-only guidance; callers cannot
+    /// submit arbitrary hidden prompt text.
+    #[serde(default)]
+    pub voice_input_used: bool,
 }
 
 /// Refuse a turn that invokes a skill the install cannot actually run.
@@ -3279,7 +3300,7 @@ pub async fn post_message(
         require_image_capable_model(&state, &model).await?;
     }
     match store
-        .accept_turn_with_attachments(
+        .accept_turn_with_message_context(
             body.turn_id,
             id,
             &model,
@@ -3287,6 +3308,7 @@ pub async fn post_message(
             &images,
             &documents,
             &body.invoked_skills,
+            body.voice_input_used,
         )
         .await?
     {
@@ -3307,7 +3329,7 @@ pub async fn post_message(
             if existing.chat_id == id
                 && matches!(
                     store
-                        .accept_turn_with_attachments(
+                        .accept_turn_with_message_context(
                             body.turn_id,
                             id,
                             &existing.model,
@@ -3315,6 +3337,7 @@ pub async fn post_message(
                             &images,
                             &documents,
                             &body.invoked_skills,
+                            body.voice_input_used,
                         )
                         .await?,
                     AcceptTurnOutcome::Existing(_)
@@ -3349,6 +3372,9 @@ pub struct SteerBody {
     /// waits for the next step boundary.
     #[serde(default)]
     pub interrupt: bool,
+    /// Whether the instruction was dictated and transcribed from speech.
+    #[serde(default)]
+    pub voice_input_used: bool,
 }
 
 /// `POST /chats/{id}/steer` — durably enqueue an instruction for an active turn.
@@ -3377,12 +3403,13 @@ pub async fn post_steer(
     }
     store.require_chat(id).await?;
     match store
-        .accept_turn_steer(
+        .accept_turn_steer_with_message_context(
             body.steer_id,
             body.turn_id,
             id,
             &body.content,
             body.interrupt,
+            body.voice_input_used,
         )
         .await?
     {

@@ -6,6 +6,14 @@ import {
 } from "./ChatTranscriptPresentation";
 import { refusalCopy, TURN_CANCELLED_NOTICE } from "./MessageList";
 
+/** Token counts for a fixture whose subject is not the counts themselves. */
+const NO_USAGE = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
 const transcript: ChatTranscript = {
   messages: [
     {
@@ -359,6 +367,8 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           refusal: { category: "cyber", partial_output: false },
           file_changes: [],
+          usage: NO_USAGE,
+          voice_input_used: false,
           finished_at: "2026-07-19T10:00:00Z",
         },
         {
@@ -368,6 +378,8 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           refusal: { category: "general_harms", partial_output: true },
           file_changes: [],
+          usage: NO_USAGE,
+          voice_input_used: false,
           finished_at: "2026-07-19T10:01:00Z",
         },
       ],
@@ -433,6 +445,8 @@ describe("terminal transcript presentation", () => {
           partial_content: "Partial answer",
           reasoning: "Considering the first approach",
           file_changes: [],
+          usage: NO_USAGE,
+          voice_input_used: false,
           finished_at: "2026-07-19T10:01:00Z",
         },
         {
@@ -443,6 +457,8 @@ describe("terminal transcript presentation", () => {
           failure_category: "transient",
           failure_model: { id: "gpt-5.6-sol", provider: "openai" },
           file_changes: [],
+          usage: NO_USAGE,
+          voice_input_used: false,
           finished_at: "2026-07-19T10:02:00Z",
         },
       ],
@@ -507,6 +523,8 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           reasoning: "Considering the first approach",
           file_changes: [],
+          usage: NO_USAGE,
+          voice_input_used: false,
           finished_at: "2026-07-19T10:01:00Z",
         },
       ],

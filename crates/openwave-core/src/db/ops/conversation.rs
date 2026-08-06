@@ -825,6 +825,7 @@ where
             _ => continue,
         };
         let invoked_skills = super::turn::invoked_skills_from_model(&turn)?;
+        let usage = super::turn::usage_from_turn_model(&turn)?;
         index_of.insert(turn.id, snapshots.len());
         snapshots.push(ChatTerminalTurnSnapshot {
             turn_id: TurnId(turn.id),
@@ -836,6 +837,8 @@ where
             failure_kind: turn.last_error_code,
             model: turn.model,
             invoked_skills,
+            usage,
+            voice_input_used: turn.voice_input_used,
             finished_at,
         });
     }
@@ -1045,6 +1048,7 @@ pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) ->
         seq: Set(seq),
         role: Set(role_to_db(message.role).to_string()),
         content: Set(message.content.clone()),
+        llm_content: Set(message.llm_content.clone()),
         reasoning: Set(reasoning_to_db(&message.reasoning)),
         turn_lease_token: Set(None),
         created_at: Set(message.created_at),
@@ -1420,6 +1424,7 @@ fn message_from_model(model: entities::message::Model) -> Result<Message> {
         turn_id: TurnId(model.turn_id),
         role: role_from_db(&model.role)?,
         content: model.content,
+        llm_content: model.llm_content,
         reasoning: reasoning_from_db(model.reasoning),
         created_at: model.created_at,
     })

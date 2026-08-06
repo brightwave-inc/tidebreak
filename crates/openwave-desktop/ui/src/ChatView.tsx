@@ -36,6 +36,7 @@ import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useUserQuestions } from "./useUserQuestions";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
+import { recentChatFiles } from "./ComposerMentions";
 import {
   backgroundAgentSpawnKeys as spawnKeysOf,
   useAgentRuns,
@@ -53,6 +54,7 @@ export type ChatViewProps = {
   /** The composer draft, readable synchronously — see [useTurnControls]. */
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
+  composerContextMeter?: ReactNode;
   composerPermissionMenu: ReactNode;
   composerNetwork?: ComposerNetwork;
   composerReasoning?: ComposerReasoning;
@@ -60,6 +62,10 @@ export type ChatViewProps = {
   files: ComposerFiles;
   folders?: ComposerFolders;
   voice?: ComposerVoice;
+  /** Whether voice transcription contributed to the current draft. */
+  voiceInputUsed: boolean;
+  /** Retire voice origin only after the current draft is durably accepted. */
+  onVoiceInputAccepted: () => void;
   nativeDropTarget?: ReactNode;
   attachError: string | null;
   onDraftChange: (value: string) => void;
@@ -87,6 +93,7 @@ export function ChatView({
   deletingChat,
   draftRef,
   composerModelMenu,
+  composerContextMeter,
   composerPermissionMenu,
   composerNetwork,
   composerReasoning,
@@ -94,6 +101,8 @@ export function ChatView({
   files,
   folders,
   voice,
+  voiceInputUsed,
+  onVoiceInputAccepted,
   nativeDropTarget,
   attachError,
   onDraftChange,
@@ -116,8 +125,15 @@ export function ChatView({
   const userQuestions = useUserQuestions(client, chat.id);
   const planApprovals = usePlanApprovals(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
-  const turnControls = useTurnControls(client, chat.id, draftRef, () =>
-    onDraftChange(""),
+  const turnControls = useTurnControls(
+    client,
+    chat.id,
+    draftRef,
+    () => {
+      onDraftChange("");
+      onVoiceInputAccepted();
+    },
+    voiceInputUsed,
   );
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
@@ -131,6 +147,22 @@ export function ChatView({
     [messages],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
+  // The files already on this conversation, so `@` can name one instead of
+  // sending the reader back to the picker for a document we are already
+  // holding. Read from the transcript rather than fetched: these are the
+  // attachments of the messages on screen.
+  const composerFiles = useMemo(
+    () => ({
+      ...files,
+      recent: recentChatFiles(
+        messages.flatMap((message) =>
+          message.role === "user" ? [message] : [],
+        ),
+        files.items,
+      ),
+    }),
+    [files, messages],
+  );
 
   const navigate = useNavigate();
   const focusCallId = (useSearch({ strict: false }) as { focus?: string }).focus;
@@ -416,6 +448,7 @@ export function ChatView({
           disabled={deletingChat}
           draft={draft}
           modelMenu={composerModelMenu}
+          contextMeter={composerContextMeter}
           permissionMenu={composerPermissionMenu}
           network={composerNetwork}
           reasoning={composerReasoning}
@@ -423,10 +456,10 @@ export function ChatView({
           slash={{
             options: composerPlugins.slashOptions,
             invoked: invokedSkills,
-            onInvoke: (name) =>
+            onInvoke: (names) =>
               useComposerDrafts
                 .getState()
-                .setSkills(chat.id, [...invokedSkills, name]),
+                .setSkills(chat.id, [...invokedSkills, ...names]),
             onRemove: (name) =>
               useComposerDrafts
                 .getState()
@@ -437,7 +470,7 @@ export function ChatView({
             loadPromptBody: composerPlugins.loadPromptBody,
           }}
           images={composerImages}
-          files={files}
+          files={composerFiles}
           folders={folders}
           voice={voice}
           nativeDropTarget={nativeDropTarget}

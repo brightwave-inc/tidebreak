@@ -98,6 +98,13 @@ describe("voice composer", () => {
     resolveTranscript(" spoken words ");
     await waitFor(() => expect(result.current.state).toBe("idle"));
     expect(draft).toBe("Existing draft spoken words");
+    expect(result.current.inputUsed).toBe(true);
+
+    act(() => result.current.resetInputUsed());
+    expect(result.current.inputUsed).toBe(false);
+
+    act(() => result.current.markInputUsed());
+    expect(result.current.inputUsed).toBe(true);
   });
 
   it("checks selected-model readiness before requesting microphone access", async () => {

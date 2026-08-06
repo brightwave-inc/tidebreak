@@ -14,8 +14,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
-    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
-    ResponseFormat, StopReason, ToolChoice, Usage,
+    provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider, ProviderEvent,
+    ProviderId, RefusalDetails, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
@@ -109,13 +109,12 @@ impl ModelProvider for AnthropicProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let body = build_request_json(&req)?;
+        let mut body = build_request_json(&req)?;
         // `build_request_json` has already rejected a format it cannot enforce.
         let output_tool = match &req.response_format {
             Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
             _ => None,
         };
-        let url = format!("{}/v1/messages", self.base_url);
         let api_key = match &self.token_source {
             Some(source) => source.bearer_token_for(req.conversation).await?,
             None => self.api_key.clone(),
@@ -124,20 +123,139 @@ impl ModelProvider for AnthropicProvider {
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
         // router can classify and fail over; the returned stream only yields
         // normalized events.
+        let response = self.send(&body, &api_key, req.conversation).await?;
+
+        // Only a request that can pause needs its raw blocks kept, and only
+        // Anthropic's own server tools pause a turn.
+        let continuations_allowed = req.vendor_web_search.is_some();
+        let provider = self.clone();
+        let conversation = req.conversation;
+        let ceiling = crate::http::timeouts().total_stream;
+        let stream = async_stream::stream! {
+            let mut response = response;
+            let mut state = StreamState {
+                output_tool,
+                raw_blocks: continuations_allowed.then(RawAssistantBlocks::default),
+                ..StreamState::default()
+            };
+            let mut continuations = 0u32;
+            'legs: loop {
+                let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
+                futures::pin_mut!(bytes);
+                // Accumulate raw BYTES, not a String: a chunk may split a multi-byte
+                // UTF-8 character, so we only decode once a whole frame is buffered.
+                let mut buffer: Vec<u8> = Vec::new();
+                while let Some(chunk) = bytes.next().await {
+                    // A mid-stream transport error must not read as a clean end:
+                    // the accumulated tool-call arguments may be truncated
+                    // mid-JSON, and acting on them silently corrupts the step.
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            yield ProviderEvent::Failed {
+                                error: ProviderErrorInfo::provider(
+                                    error.client_message("anthropic"),
+                                ),
+                            };
+                            return;
+                        }
+                    };
+                    buffer.extend_from_slice(&chunk);
+                    for frame in drain_frames(&mut buffer) {
+                        if let Some(data) = frame_data(&frame) {
+                            for event in normalize(&data, &mut state) {
+                                yield event;
+                            }
+                        }
+                    }
+                }
+                // Flush a final frame that wasn't terminated by a blank line.
+                if !buffer.is_empty() {
+                    let frame = String::from_utf8_lossy(&buffer).into_owned();
+                    if let Some(data) = frame_data(&frame) {
+                        for event in normalize(&data, &mut state) {
+                            yield event;
+                        }
+                    }
+                }
+                // The provider suspended the turn for its own server-side tool and
+                // resumes from the paused response replayed back to it. That
+                // continuation belongs here rather than above the adapter: the
+                // turn is one turn, and a consumer must only ever see it finish
+                // once.
+                if state.paused {
+                    state.paused = false;
+                    if continuations >= MAX_PAUSE_CONTINUATIONS {
+                        // Out of continuations. Everything streamed so far is
+                        // real output the model produced, so it ends as an
+                        // ordinary turn rather than as a failure that would
+                        // discard it.
+                        yield ProviderEvent::Stop { reason: StopReason::EndTurn };
+                        return;
+                    }
+                    continuations += 1;
+                    let blocks = state
+                        .raw_blocks
+                        .as_ref()
+                        .map(RawAssistantBlocks::sealed)
+                        .unwrap_or_default();
+                    replace_paused_assistant_message(&mut body, blocks, continuations == 1);
+                    state.begin_continuation();
+                    match provider.send(&body, &api_key, conversation).await {
+                        Ok(next) => {
+                            response = next;
+                            continue 'legs;
+                        }
+                        // The paused turn cannot be resumed, and what streamed
+                        // before the pause is a fragment of an unfinished answer.
+                        Err(error) => {
+                            yield ProviderEvent::Failed {
+                                error: ProviderErrorInfo::from_error(&error),
+                            };
+                            return;
+                        }
+                    }
+                }
+                // A stream that closes with a tool call's argument JSON still open
+                // was truncated — a clean TCP close carries no transport error.
+                // Fail the step rather than committing the fragment as a finish.
+                if let Some(event) = end_of_stream(&state) {
+                    yield event;
+                }
+                break 'legs;
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+impl AnthropicProvider {
+    /// POST one Messages request and hand back its streaming response.
+    ///
+    /// Every leg of a paused turn goes out through here, so the credential,
+    /// version header, and error classification are identical on the first
+    /// request and on each continuation.
+    async fn send(
+        &self,
+        body: &Value,
+        api_key: &str,
+        conversation: Option<openwave_core::id::ChatId>,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}/v1/messages", self.base_url);
         let mut request = self
             .client
             .post(url)
-            .header("x-api-key", &api_key)
+            .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
         // A conversation is declared only where one is configured to be read.
         // The id is a UUID, so it satisfies the gateway's bound on the value
         // (1-256 ASCII graphic bytes) by construction.
-        if let (true, Some(conversation)) = (self.conversation_attribution, req.conversation) {
+        if let (true, Some(conversation)) = (self.conversation_attribution, conversation) {
             request = request.header(GATEWAY_CONVERSATION_HEADER, conversation.to_string());
         }
         let response = request
-            .json(&body)
+            .json(body)
             .send()
             .await
             // reqwest's display includes the URL, and a gateway URL can carry
@@ -159,56 +277,35 @@ impl ModelProvider for AnthropicProvider {
                 retry_after,
             ));
         }
+        Ok(response)
+    }
+}
 
-        let ceiling = crate::http::timeouts().total_stream;
-        let stream = async_stream::stream! {
-            let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
-            futures::pin_mut!(bytes);
-            // Accumulate raw BYTES, not a String: a chunk may split a multi-byte
-            // UTF-8 character, so we only decode once a whole frame is buffered.
-            let mut buffer: Vec<u8> = Vec::new();
-            let mut state = StreamState { output_tool, ..StreamState::default() };
-            while let Some(chunk) = bytes.next().await {
-                // A mid-stream transport error must not read as a clean end:
-                // the accumulated tool-call arguments may be truncated
-                // mid-JSON, and acting on them silently corrupts the step.
-                let chunk = match chunk {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        yield ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(
-                                error.client_message("anthropic"),
-                            ),
-                        };
-                        return;
-                    }
-                };
-                buffer.extend_from_slice(&chunk);
-                for frame in drain_frames(&mut buffer) {
-                    if let Some(data) = frame_data(&frame) {
-                        for event in normalize(&data, &mut state) {
-                            yield event;
-                        }
-                    }
-                }
-            }
-            // Flush a final frame that wasn't terminated by a blank line.
-            if !buffer.is_empty() {
-                let frame = String::from_utf8_lossy(&buffer).into_owned();
-                if let Some(data) = frame_data(&frame) {
-                    for event in normalize(&data, &mut state) {
-                        yield event;
-                    }
-                }
-            }
-            // A stream that closes with a tool call's argument JSON still open
-            // was truncated — a clean TCP close carries no transport error.
-            // Fail the step rather than committing the fragment as a finish.
-            if let Some(event) = end_of_stream(&state) {
-                yield event;
-            }
-        };
-        Ok(Box::pin(stream))
+/// How many times one turn may be resumed after the provider pauses it.
+///
+/// A pause costs a whole extra request, and a turn that has paused this many
+/// times is not converging. The cap bounds that without cutting short the
+/// ordinary case, where a turn pauses once or twice around its searches.
+const MAX_PAUSE_CONTINUATIONS: u32 = 8;
+
+/// Put the paused assistant response back on the request so the provider can
+/// resume it.
+///
+/// The blocks go back exactly as they arrived — encrypted search content
+/// included — because that is what the provider validates the resumed turn
+/// against. No user message is added: nothing new is being asked, the same
+/// turn is being continued. Later pauses rewrite the message rather than
+/// appending another, since two assistant messages cannot sit next to each
+/// other and the turn only ever produced one.
+fn replace_paused_assistant_message(body: &mut Value, blocks: &[Value], first_pause: bool) {
+    let message = json!({ "role": "assistant", "content": blocks });
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if first_pause {
+        messages.push(message);
+    } else if let Some(last) = messages.last_mut() {
+        *last = message;
     }
 }
 
@@ -221,13 +318,18 @@ impl ModelProvider for AnthropicProvider {
 /// becomes a top-level field, and only `user`/`assistant` roles are valid on
 /// messages.
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
+    let rename_client_web_search = req.vendor_web_search.is_some();
     let mut messages = req
         .messages
         .iter()
         .map(|message| {
             Ok(json!({
                 "role": anthropic_role(message.role),
-                "content": anthropic_content(&message.content, &req.images)?,
+                "content": anthropic_content(
+                    &message.content,
+                    &req.images,
+                    rename_client_web_search,
+                )?,
             }))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -266,6 +368,20 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                 })
                 .collect(),
         );
+    }
+    // The vendor search is a server tool, declared alongside the client tools
+    // rather than instead of them: the model may still call anything the host
+    // advertised in the same turn.
+    if let Some(search) = req.vendor_web_search {
+        let vendor_tool = json!({
+            "type": web_search_tool_type(&req.model),
+            "name": VENDOR_WEB_SEARCH_TOOL,
+            "max_uses": search.max_uses,
+        });
+        match body["tools"].as_array_mut() {
+            Some(tools) => tools.push(vendor_tool),
+            None => body["tools"] = json!([vendor_tool]),
+        }
     }
     match &req.response_format {
         Some(ResponseFormat::JsonSchema { name, schema }) => {
@@ -524,6 +640,39 @@ fn takes_adaptive_thinking(model: &str) -> bool {
     claude_generation(model).is_some_and(|generation| generation >= FIRST_ADAPTIVE)
 }
 
+/// The name Anthropic gives its server-side web search tool, and the name the
+/// search surfaces under to the host.
+const VENDOR_WEB_SEARCH_TOOL: &str = "web_search";
+
+/// The `type` of Anthropic's server-side web search tool for `model`.
+///
+/// The tool is versioned by date and the versions are not interchangeable: a
+/// model that has not been trained against the newer one rejects it. The
+/// 2026-02-09 revision ships on the larger current models — Opus and Sonnet
+/// from 4.6 on, and the whole 5 generation — while the smaller and older
+/// models keep the original 2025-03-05 tool. Read from the id's generation for
+/// the same reason `takes_adaptive_thinking` does: a pinned list goes stale on
+/// the next release, and an id with no readable generation gets the basic tool,
+/// which every search-capable model accepts.
+fn web_search_tool_type(model: &str) -> &'static str {
+    /// The revision the current large models take.
+    const CURRENT: &str = "web_search_20260209";
+    /// The original tool, and the safe answer for anything else.
+    const BASIC: &str = "web_search_20250305";
+    /// First generation on the current revision, for Opus and Sonnet.
+    const FIRST_CURRENT: (u32, u32) = (4, 6);
+
+    // Haiku is the small tier across every generation and stays on the basic
+    // tool.
+    if model.contains("haiku") {
+        return BASIC;
+    }
+    match claude_generation(model) {
+        Some(generation) if generation >= FIRST_CURRENT => CURRENT,
+        _ => BASIC,
+    }
+}
+
 /// Read the `(major, minor)` generation out of a Claude model id.
 ///
 /// Handles the shapes Anthropic ships: split across tokens (`claude-opus-4-8`),
@@ -556,7 +705,14 @@ fn claude_generation(model: &str) -> Option<(u32, u32)> {
 /// `Image N:` label. Anthropic's vision guidance calls for this in multi-image
 /// prompts so the model can refer to a specific image unambiguously; with a
 /// single image the label is noise and is omitted.
-fn anthropic_content(blocks: &[ContentBlock], images: &ImageAttachments) -> Result<Value> {
+///
+/// `rename_client_web_search` rewrites the name of historical client-style
+/// `web_search` tool calls — see [`PRIOR_WEB_SEARCH_TOOL`].
+fn anthropic_content(
+    blocks: &[ContentBlock],
+    images: &ImageAttachments,
+    rename_client_web_search: bool,
+) -> Result<Value> {
     let image_count = blocks
         .iter()
         .filter(|block| matches!(block, ContentBlock::Image { .. }))
@@ -592,10 +748,50 @@ fn anthropic_content(blocks: &[ContentBlock], images: &ImageAttachments) -> Resu
                     }
                 }));
             }
+            // A search this or another provider ran server-side. Anthropic's
+            // own `server_tool_use`/`web_search_tool_result` pair is not
+            // retained across turns — replaying it would need the encrypted
+            // content that goes with it — so the block goes back as one line
+            // of prose, which is valid history for any model.
+            ContentBlock::ProviderExecutedToolCall {
+                name,
+                input,
+                output,
+                is_error,
+            } => out.push(json!({
+                "type": "text",
+                "text": provider_executed_tool_call_text(name, input, output, *is_error),
+            })),
+            ContentBlock::ToolUse { id, name, input } if rename_client_web_search => {
+                out.push(json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": rename_prior_web_search(name),
+                    "input": input,
+                }));
+            }
             other => out.push(serde_json::to_value(other)?),
         }
     }
     Ok(Value::Array(out))
+}
+
+/// The name a historical client-side `web_search` call is replayed under once
+/// the request declares Anthropic's server tool of that name.
+///
+/// The request would then carry two different tools called `web_search` — one
+/// the client executes, one the provider does — and replaying client
+/// `tool_use` blocks under the server tool's name is undefined. Renaming keeps
+/// the history well-formed and readable; `tool_result` blocks pair by id, so
+/// they need no matching change.
+const PRIOR_WEB_SEARCH_TOOL: &str = "web_search_prior";
+
+fn rename_prior_web_search(name: &str) -> &str {
+    if name == VENDOR_WEB_SEARCH_TOOL {
+        PRIOR_WEB_SEARCH_TOOL
+    } else {
+        name
+    }
 }
 
 fn anthropic_role(role: Role) -> &'static str {
@@ -639,6 +835,124 @@ struct StreamState {
     /// refusal, or an interrupting failure). Without it a silent close is
     /// indistinguishable from a finished message on the wire.
     finished: bool,
+    /// Server-side tool calls in flight, keyed by content-block index: the
+    /// provider-assigned id, the tool name, and the arguments accumulating
+    /// from `input_json_delta` exactly as a client tool call's would.
+    open_server_tools: std::collections::HashMap<u32, PendingServerTool>,
+    /// Closed server-side calls still waiting for their result block, keyed by
+    /// the `tool_use_id` the result will name.
+    awaiting_server_results: std::collections::HashMap<String, PendingServerTool>,
+    /// This message's assistant content blocks exactly as the provider sent
+    /// them, kept only to replay a `pause_turn` continuation. Populated only
+    /// while the request allows continuations, so an ordinary turn carries no
+    /// second copy of its own output.
+    raw_blocks: Option<RawAssistantBlocks>,
+    /// Set when the provider paused the turn and this stream is allowed to
+    /// resume it. The stop is then withheld: the turn is not over, and one
+    /// finished turn is all a consumer may ever see.
+    paused: bool,
+}
+
+impl StreamState {
+    /// Reset the per-response bookkeeping before the next leg of a paused
+    /// turn.
+    ///
+    /// Content-block indices restart at zero on each response, so anything
+    /// keyed by index has to go. What survives is what belongs to the turn
+    /// rather than the response: the accumulated raw blocks, the token counts,
+    /// and a server tool call still waiting for the result the next leg will
+    /// deliver.
+    fn begin_continuation(&mut self) {
+        self.output_block = None;
+        self.pending_reasoning.clear();
+        self.open_tool_blocks.clear();
+        self.open_server_tools.clear();
+        self.finished = false;
+    }
+}
+
+/// A server-side tool call whose arguments are still streaming, or which has
+/// closed and is waiting for its result block.
+#[derive(Clone, Default)]
+struct PendingServerTool {
+    id: String,
+    name: String,
+    input_json: String,
+}
+
+impl PendingServerTool {
+    /// The accumulated arguments, or an empty object when the provider sent
+    /// none or sent something unparseable — the call still happened, and
+    /// dropping it over its arguments would lose the search entirely.
+    fn input(&self) -> Value {
+        serde_json::from_str(&self.input_json).unwrap_or_else(|_| json!({}))
+    }
+}
+
+/// The assistant content blocks of the message being streamed, kept in the
+/// provider's own shape.
+///
+/// Only a `pause_turn` continuation reads this: Anthropic resumes a paused
+/// turn from the paused response replayed back verbatim, and a normalized
+/// block is not that — a `web_search_tool_result` in particular has to go back
+/// with the encrypted content the model was given. Blocks accumulate across
+/// every leg of one turn, so the replayed assistant message stays a single
+/// message however many times the provider pauses.
+#[derive(Default)]
+struct RawAssistantBlocks {
+    /// Blocks from legs that have already ended, in wire order.
+    sealed: Vec<Value>,
+    /// The current leg's blocks, keyed by content-block index.
+    open: std::collections::BTreeMap<u32, Value>,
+    /// Argument JSON accumulating for the current leg's tool blocks.
+    partial_json: std::collections::HashMap<u32, String>,
+}
+
+impl RawAssistantBlocks {
+    fn start(&mut self, index: u32, block: &Value) {
+        self.open.insert(index, block.clone());
+    }
+
+    fn append_text(&mut self, index: u32, key: &str, fragment: &str) {
+        if let Some(block) = self.open.get_mut(&index) {
+            append_str_field(block, key, fragment);
+        }
+    }
+
+    fn set(&mut self, index: u32, key: &str, value: &str) {
+        if let Some(block) = self.open.get_mut(&index) {
+            block[key] = json!(value);
+        }
+    }
+
+    fn append_json(&mut self, index: u32, fragment: &str) {
+        self.partial_json
+            .entry(index)
+            .or_default()
+            .push_str(fragment);
+    }
+
+    /// End the current leg, folding its blocks into the replayable sequence.
+    ///
+    /// A block whose argument JSON never parsed is dropped rather than sent
+    /// back malformed; the provider rejects a `tool_use` with invalid input,
+    /// and one lost block is better than a failed continuation.
+    fn seal(&mut self) {
+        for (index, mut block) in std::mem::take(&mut self.open) {
+            if let Some(partial) = self.partial_json.remove(&index) {
+                match serde_json::from_str::<Value>(&partial) {
+                    Ok(input) => block["input"] = input,
+                    Err(_) => continue,
+                }
+            }
+            self.sealed.push(block);
+        }
+        self.partial_json.clear();
+    }
+
+    fn sealed(&self) -> &[Value] {
+        &self.sealed
+    }
 }
 
 /// What a silent end of the byte stream means.
@@ -692,6 +1006,11 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         Some("content_block_start") => {
             let index = u32_at(data, "index");
             let block = data.get("content_block");
+            // Capture before normalizing: a continuation replays the provider's
+            // own blocks, not this adapter's reading of them.
+            if let (Some(raw), Some(block)) = (state.raw_blocks.as_mut(), block) {
+                raw.start(index, block);
+            }
             match block.and_then(|b| b.get("type")).and_then(Value::as_str) {
                 Some("tool_use") => {
                     let block = block.unwrap();
@@ -721,6 +1040,46 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         .insert(index, block.unwrap().clone());
                     Vec::new()
                 }
+                // The provider running a tool on its own infrastructure. Its
+                // arguments stream exactly like a client tool call's, but no
+                // consumer ever answers it, so nothing is announced until the
+                // matching result block completes the pair.
+                Some("server_tool_use") => {
+                    let block = block.unwrap();
+                    state.open_tool_blocks.insert(index);
+                    state.open_server_tools.insert(
+                        index,
+                        PendingServerTool {
+                            id: str_at(block, "id"),
+                            name: str_at(block, "name"),
+                            input_json: String::new(),
+                        },
+                    );
+                    Vec::new()
+                }
+                // The result of one of those calls, arriving whole. This is
+                // where the search becomes visible to the host.
+                Some("web_search_tool_result") => {
+                    let block = block.unwrap();
+                    // An unpaired result still means a search ran; reporting it
+                    // with what is known beats dropping it.
+                    let call = state
+                        .awaiting_server_results
+                        .remove(&str_at(block, "tool_use_id"))
+                        .unwrap_or_default();
+                    let (output, is_error) = web_search_output(block.get("content"));
+                    let input = call.input();
+                    vec![ProviderEvent::ProviderExecutedToolCall {
+                        name: if call.name.is_empty() {
+                            VENDOR_WEB_SEARCH_TOOL.to_string()
+                        } else {
+                            call.name
+                        },
+                        input,
+                        output,
+                        is_error,
+                    }]
+                }
                 _ => Vec::new(),
             }
         }
@@ -730,6 +1089,21 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 Some(delta) => delta,
                 None => return Vec::new(),
             };
+            if let Some(raw) = state.raw_blocks.as_mut() {
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => raw.append_text(index, "text", &str_at(delta, "text")),
+                    Some("thinking_delta") => {
+                        raw.append_text(index, "thinking", &str_at(delta, "thinking"));
+                    }
+                    Some("signature_delta") => {
+                        raw.set(index, "signature", &str_at(delta, "signature"));
+                    }
+                    Some("input_json_delta") => {
+                        raw.append_json(index, &str_at(delta, "partial_json"));
+                    }
+                    _ => {}
+                }
+            }
             match delta.get("type").and_then(Value::as_str) {
                 Some("text_delta") => vec![ProviderEvent::TextDelta {
                     text: str_at(delta, "text"),
@@ -758,6 +1132,15 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         text: str_at(delta, "partial_json"),
                     }]
                 }
+                // A server tool's arguments accumulate the same way, but go
+                // out with its result rather than as they stream: there is no
+                // call for a consumer to watch, only a finished one to record.
+                Some("input_json_delta") if state.open_server_tools.contains_key(&index) => {
+                    if let Some(call) = state.open_server_tools.get_mut(&index) {
+                        call.input_json.push_str(&str_at(delta, "partial_json"));
+                    }
+                    Vec::new()
+                }
                 Some("input_json_delta") => vec![ProviderEvent::ToolCallArgsDelta {
                     index,
                     fragment: str_at(delta, "partial_json"),
@@ -768,6 +1151,11 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         Some("content_block_stop") => {
             let index = u32_at(data, "index");
             state.open_tool_blocks.remove(&index);
+            // A closed server tool call has its whole argument JSON; park it
+            // under the id its result block will name.
+            if let Some(call) = state.open_server_tools.remove(&index) {
+                state.awaiting_server_results.insert(call.id.clone(), call);
+            }
             match state.pending_reasoning.remove(&index) {
                 Some(block) => vec![ProviderEvent::ReasoningBlock { data: block }],
                 None => Vec::new(),
@@ -791,6 +1179,17 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 // However the message ended, the provider said it ended: a
                 // later silent close is no longer truncation evidence.
                 state.finished = true;
+                // A pause this stream is allowed to resume is not an ending at
+                // all. Seal the leg's blocks for replay and report nothing:
+                // the caller re-issues the request and keeps streaming into
+                // the same turn.
+                if reason == "pause_turn" {
+                    if let Some(raw) = state.raw_blocks.as_mut() {
+                        raw.seal();
+                        state.paused = true;
+                        return events;
+                    }
+                }
                 let mut reason = match map_stop_reason(reason) {
                     StopOutcome::Reason(reason) => reason,
                     // Whatever streamed before this stop is a fragment, so no
@@ -828,6 +1227,62 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             events
         }
         _ => Vec::new(),
+    }
+}
+
+/// Normalize a `web_search_tool_result` block's `content` into the shape the
+/// host's own `web_search` tool returns, so one renderer draws both.
+///
+/// The content is a JSON array of results on success and a single error object
+/// on failure, so the branch is on the shape rather than on any field. The
+/// encrypted content Anthropic attaches to each result is dropped whole: it is
+/// an opaque blob only replayable to Anthropic, and nothing here replays it.
+/// `page_age` is a fuzzy human date rather than a timestamp, so it rides in
+/// the result metadata the host shape already carries rather than being forced
+/// into a typed field.
+///
+/// Returns the output and whether it is an error.
+fn web_search_output(content: Option<&Value>) -> (Value, bool) {
+    /// Same cap the host tool applies, so a vendor result cannot put more into
+    /// context than the host's own search would.
+    const MAX_RESULTS: usize = openwave_core::MAX_WEB_SEARCH_RESULTS;
+
+    match content {
+        Some(Value::Array(results)) => {
+            let results: Vec<Value> = results
+                .iter()
+                .filter(|result| !str_at(result, "url").is_empty())
+                .take(MAX_RESULTS)
+                .map(|result| {
+                    let mut normalized = json!({
+                        "url": str_at(result, "url"),
+                        "title": str_at(result, "title"),
+                        // Anthropic returns no excerpt in the clear; the field
+                        // stays present so the shape does not vary by provider.
+                        "snippet": "",
+                    });
+                    let page_age = str_at(result, "page_age");
+                    if !page_age.is_empty() {
+                        normalized["metadata"] = json!({ "page_age": page_age });
+                    }
+                    normalized
+                })
+                .collect();
+            (
+                json!({ "provider": "anthropic", "results": results }),
+                false,
+            )
+        }
+        Some(Value::Object(error)) => {
+            let code = error
+                .get("error_code")
+                .and_then(Value::as_str)
+                .unwrap_or("unavailable");
+            (json!({ "error_code": code }), true)
+        }
+        // No content, or a shape this adapter has not seen. The search still
+        // ran, so it is reported as a failed one rather than dropped.
+        _ => (json!({ "error_code": "unrecognized_result" }), true),
     }
 }
 
@@ -1755,8 +2210,386 @@ mod tests {
                 is_error: false,
             },
         ];
-        let shaped = anthropic_content(&blocks, &ImageAttachments::new()).unwrap();
+        let shaped = anthropic_content(&blocks, &ImageAttachments::new(), false).unwrap();
         assert_eq!(shaped, serde_json::to_value(&blocks).unwrap());
+    }
+
+    // ── Vendor web search ──────────────────────────────────────────
+
+    fn search_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: model.into(),
+            messages: vec![ChatMessage::text(Role::User, "what happened today?")],
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "read a file".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            vendor_web_search: Some(openwave_core::provider::VendorWebSearch { max_uses: 3 }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_vendor_search_tool_is_declared_beside_the_client_tools() {
+        let body = build_request_json(&search_request("claude-opus-5")).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        // The client tool is untouched: a turn that may search may still call
+        // everything the host advertised.
+        assert_eq!(tools[0]["name"], "read_file");
+        assert_eq!(
+            tools[1],
+            json!({
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "max_uses": 3,
+                // The last tool carries the cache breakpoint, which is settled
+                // after the whole array is built.
+                "cache_control": {"type": "ephemeral"},
+            })
+        );
+
+        // Absent the control, nothing about the request changes.
+        let mut plain = search_request("claude-opus-5");
+        plain.vendor_web_search = None;
+        let body = build_request_json(&plain).unwrap();
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_search_tool_version_follows_the_model() {
+        for id in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6-20260101",
+            "claude-opus-4-8",
+        ] {
+            assert_eq!(web_search_tool_type(id), "web_search_20260209", "{id}");
+        }
+        for id in [
+            // Haiku is the small tier in every generation.
+            "claude-haiku-4-5-20251001",
+            "claude-haiku-5",
+            // Older than the current revision.
+            "claude-opus-4-5",
+            "claude-3-5-sonnet-20241022",
+            // No readable generation: the basic tool is the one every
+            // search-capable model accepts.
+            "some-gateway-alias",
+        ] {
+            assert_eq!(web_search_tool_type(id), "web_search_20250305", "{id}");
+        }
+    }
+
+    #[test]
+    fn a_prior_client_side_search_is_replayed_under_another_name() {
+        // The request declares a *server* tool called `web_search`. Replaying
+        // client tool_use blocks under that same name is undefined, so history
+        // goes back renamed; results pair by id and are untouched.
+        let mut req = search_request("claude-opus-5");
+        req.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "web_search".into(),
+                    input: json!({"query": "yesterday"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_2".into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "a"}),
+                },
+            ],
+            reasoning: MessageReasoning::default(),
+        });
+        req.messages.push(ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "{}".into(),
+                is_error: false,
+            }],
+            reasoning: MessageReasoning::default(),
+        });
+
+        let body = build_request_json(&req).unwrap();
+        let assistant = &body["messages"][1]["content"];
+        assert_eq!(assistant[0]["name"], "web_search_prior");
+        assert_eq!(assistant[0]["id"], "toolu_1");
+        assert_eq!(assistant[0]["input"], json!({"query": "yesterday"}));
+        assert_eq!(assistant[1]["name"], "read_file");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+
+        // Without the vendor tool there is no collision, so the name stands.
+        req.vendor_web_search = None;
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(body["messages"][1]["content"][0]["name"], "web_search");
+    }
+
+    #[test]
+    fn a_provider_executed_call_replays_as_one_line_of_prose() {
+        // Anthropic's own server_tool_use/result pair is not retained across
+        // turns, so the block goes back as prose rather than as a shape the
+        // API would reject.
+        let mut req = search_request("claude-opus-5");
+        req.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ProviderExecutedToolCall {
+                name: "web_search".into(),
+                input: json!({"query": "rust 2027"}),
+                output: json!({"provider": "anthropic", "results": [{"url": "https://a"}]}),
+                is_error: false,
+            }],
+            reasoning: MessageReasoning::default(),
+        });
+        let body = build_request_json(&req).unwrap();
+        let block = &body["messages"][1]["content"][0];
+        assert_eq!(block["type"], "text");
+        assert_eq!(block["text"], "[web_search: rust 2027 -> 1 results]");
+    }
+
+    /// The frames Anthropic sends for one completed server-side search.
+    fn search_frames(result_content: Value) -> Vec<Value> {
+        vec![
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Let me check."},
+            }),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_1",
+                    "name": "web_search",
+                    "input": {},
+                },
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"rus"},
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "t 2027\"}"},
+            }),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({
+                "type": "content_block_start",
+                "index": 2,
+                "content_block": {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_1",
+                    "content": result_content,
+                },
+            }),
+            json!({"type": "content_block_stop", "index": 2}),
+        ]
+    }
+
+    #[test]
+    fn a_completed_vendor_search_becomes_one_provider_executed_call() {
+        let mut frames = search_frames(json!([
+            {
+                "type": "web_search_result",
+                "url": "https://example.com/a",
+                "title": "A",
+                "encrypted_content": "opaque-and-enormous",
+                "page_age": "April 30, 2026",
+            },
+            {
+                "type": "web_search_result",
+                "url": "https://example.com/b",
+                "title": "B",
+                "encrypted_content": "opaque",
+            },
+            // No url: nothing citable, so nothing to report.
+            {"type": "web_search_result", "title": "C"},
+        ]));
+        frames.push(json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}));
+        let out = run(&frames);
+
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "Let me check.".into(),
+                },
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: "web_search".into(),
+                    // The arguments the provider ran, reassembled from the
+                    // same delta mechanism a client tool call uses.
+                    input: json!({"query": "rust 2027"}),
+                    // The host web_search tool's own output shape, so one
+                    // renderer draws both. The encrypted content is gone.
+                    output: json!({
+                        "provider": "anthropic",
+                        "results": [
+                            {
+                                "url": "https://example.com/a",
+                                "title": "A",
+                                "snippet": "",
+                                "metadata": {"page_age": "April 30, 2026"},
+                            },
+                            {"url": "https://example.com/b", "title": "B", "snippet": ""},
+                        ],
+                    }),
+                    is_error: false,
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_vendor_search_is_reported_rather_than_dropped() {
+        // The result content is a single error object here, not an array.
+        // Indexing it as one would panic or silently report zero results.
+        let frames = search_frames(json!({
+            "type": "web_search_tool_result_error",
+            "error_code": "max_uses_exceeded",
+        }));
+        let out = run(&frames);
+        assert_eq!(
+            out.last().unwrap(),
+            &ProviderEvent::ProviderExecutedToolCall {
+                name: "web_search".into(),
+                input: json!({"query": "rust 2027"}),
+                output: json!({"error_code": "max_uses_exceeded"}),
+                is_error: true,
+            }
+        );
+
+        // A shape this adapter has not seen is still a search that ran.
+        let out = run(&search_frames(json!("surprise")));
+        assert!(matches!(
+            out.last().unwrap(),
+            ProviderEvent::ProviderExecutedToolCall { is_error: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_is_resumed_inside_the_adapter() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+        use std::sync::{Arc, Mutex};
+
+        fn sse(frames: &[Value]) -> String {
+            frames
+                .iter()
+                .map(|frame| format!("data: {frame}\n\n"))
+                .collect()
+        }
+
+        #[derive(Clone, Default)]
+        struct Script(Arc<Mutex<Vec<Value>>>);
+
+        async fn respond(
+            State(script): State<Script>,
+            axum::Json(body): axum::Json<Value>,
+        ) -> impl IntoResponse {
+            let mut seen = script.0.lock().unwrap();
+            seen.push(body);
+            let leg = seen.len();
+            let mut frames = search_frames(json!([{
+                "type": "web_search_result",
+                "url": "https://example.com/a",
+                "title": "A",
+                "encrypted_content": "opaque",
+            }]));
+            // The first response pauses mid-turn; the second finishes it.
+            frames.push(json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": if leg == 1 { "pause_turn" } else { "end_turn" }},
+                "usage": {"output_tokens": 5},
+            }));
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                sse(&frames),
+            )
+        }
+
+        let script = Script::default();
+        let app = Router::new()
+            .fallback(post(respond))
+            .with_state(script.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = AnthropicProvider::new("key").with_base_url(format!("http://{address}"));
+        let events: Vec<ProviderEvent> = provider
+            .stream(search_request("claude-opus-5"))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        server.abort();
+
+        // Two requests, one turn: the pause never reaches the consumer, and
+        // exactly one stop closes the stream.
+        let requests = script.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::Stop { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::Stop {
+                reason: StopReason::EndTurn
+            })
+        ));
+        // Both legs' searches surface.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::ProviderExecutedToolCall { .. }))
+                .count(),
+            2
+        );
+
+        // The continuation replays the paused response verbatim — encrypted
+        // search content included, because that is what the provider resumes
+        // against — with no user message invented to carry it.
+        let messages = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        let blocks = messages[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], json!({"type": "text", "text": "Let me check."}));
+        assert_eq!(
+            blocks[1],
+            json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": "rust 2027"},
+            })
+        );
+        assert_eq!(blocks[2]["type"], "web_search_tool_result");
+        assert_eq!(
+            blocks[2]["content"][0]["encrypted_content"], "opaque",
+            "the provider validates the resumed turn against what it sent"
+        );
     }
 
     #[tokio::test]
