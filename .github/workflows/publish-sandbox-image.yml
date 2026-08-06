@@ -236,7 +236,7 @@ jobs:
         run: |
           docker run --rm --entrypoint python3 \
             "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
-            -c 'import fpdf, pypdf, pptx, docx, openpyxl, matplotlib, pypdfium2, uno'
+            -c 'import fpdf, pypdf, docx, openpyxl, matplotlib, pypdfium2, uno'
           docker run --rm --entrypoint soffice \
             "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
             --version

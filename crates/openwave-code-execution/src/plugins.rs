@@ -1164,12 +1164,7 @@ router-preamble: Pick by the file the user needs.\n\
         let pip = skill("pip", &["python-docx==1.2.0"], &[], &[]);
         let npm = skill("npm", &[], &["mermaid@11.4.1"], &[]);
         let hosted = skill("hosted", &[], &[], &[HostDep::LibreOffice]);
-        let both = skill(
-            "both",
-            &["python-pptx==1.0.2"],
-            &[],
-            &[HostDep::LibreOffice],
-        );
+        let both = skill("both", &[], &["pptxgenjs@4.0.1"], &[HostDep::LibreOffice]);
         // Not a member of any plugin under test: a caller may pass the whole
         // catalog, and a non-member must never contribute a badge.
         let outsider = skill("outsider", &["numpy==2.3.4"], &[], &[HostDep::LibreOffice]);

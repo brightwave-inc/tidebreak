@@ -1,12 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const SCRIPTS: [&str; 4] = [
+/// Helpers that turn a document into bounded images under `preview/`; every
+/// one of them takes `--preview-dir`.
+const PREVIEW_SCRIPTS: [&str; 4] = [
     "render_pdf.py",
     "extract_pdf_figures.py",
     "render_office.py",
     "analyze_xlsx.py",
 ];
+
+/// Helpers for the in-place OOXML editing pipeline. They read and write
+/// package trees and emit no previews.
+const PACKAGE_SCRIPTS: [&str; 3] = ["office_unpack.py", "office_pack.py", "pptx_clean.py"];
 
 fn python() -> Option<PathBuf> {
     ["python3", "python"].into_iter().find_map(|candidate| {
@@ -55,7 +61,7 @@ fn document_scripts_compile_and_expose_argparse_help() {
     };
     let directory = scripts_dir();
     let cache = tempfile::tempdir().unwrap();
-    for script in SCRIPTS {
+    for script in PREVIEW_SCRIPTS.iter().chain(PACKAGE_SCRIPTS.iter()) {
         let path = directory.join(script);
         let compiled = Command::new(&python)
             .args(["-m", "py_compile"])
@@ -81,7 +87,10 @@ fn document_scripts_compile_and_expose_argparse_help() {
         );
         let stdout = String::from_utf8_lossy(&help.stdout);
         assert!(stdout.starts_with("usage:"), "{script} uses argparse");
-        assert!(stdout.contains("--preview-dir"));
+        assert!(
+            !PREVIEW_SCRIPTS.contains(script) || stdout.contains("--preview-dir"),
+            "{script} must expose --preview-dir"
+        );
     }
 }
 

@@ -3540,7 +3540,7 @@ mod tests {
             "---\n\
              name: presentations\n\
              description: Decks.\n\
-             deps: { python: [\"python-pptx==1.0.2\"], host: [\"libreoffice\"] }\n\
+             deps: { npm: [\"pptxgenjs@4.0.1\"], host: [\"libreoffice\"] }\n\
              ---\n\
              Body.\n",
         )
