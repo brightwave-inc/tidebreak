@@ -1,4 +1,10 @@
-import { isValidElement, memo, useMemo, type ReactNode } from "react";
+import {
+  isValidElement,
+  memo,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, {
   type Components,
   type Options,
@@ -7,7 +13,16 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
-import { ClipboardCopyButton } from "./ClipboardCopyButton";
+import { ClipboardCopyButton, copyRichText } from "./ClipboardCopyButton";
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   CITATION_DOCUMENT_PROPERTY,
   CITATION_LOCATOR_PROPERTY,
@@ -128,6 +143,58 @@ export function safeMarkdownUrl(url: string | undefined): string | undefined {
   }
 }
 
+/**
+ * The tab-separated form of a rendered table — what a spreadsheet, an editor,
+ * or a terminal receives when the table is copied.
+ *
+ * Read off the DOM rather than the Markdown source: what the reader sees is
+ * already the resolved cell text, inline formatting and citations included,
+ * and re-parsing the source would be a second renderer to keep in agreement
+ * with this one.
+ */
+export function tableClipboardText(table: HTMLTableElement): string {
+  return Array.from(table.rows)
+    .map((row) =>
+      Array.from(row.cells)
+        .map((cell) => (cell.textContent ?? "").replace(/\s+/g, " ").trim())
+        .join("\t"),
+    )
+    .join("\n");
+}
+
+async function copyTable(table: HTMLTableElement | null): Promise<void> {
+  if (!table) throw new Error("No table to copy");
+  await copyRichText(table.outerHTML, tableClipboardText(table));
+}
+
+/**
+ * A Markdown table, in its own horizontal scroll container so a wide table
+ * scrolls instead of crushing its columns below the message width, with a copy
+ * control that yields the table in both a rich and a plain flavour.
+ *
+ * The control reads the table out of a ref at click time, so this stays a pure
+ * render with no effect that would assume a complete table — the block is
+ * re-rendered on every streaming tick, half-parsed rows and all.
+ */
+function MarkdownTable({ children }: { children?: ReactNode }) {
+  const container = useRef<HTMLDivElement>(null);
+
+  return (
+    <div className="group/markdown-table relative my-5">
+      <ClipboardCopyButton
+        copy={() => copyTable(container.current?.querySelector("table") ?? null)}
+        label="Copy table"
+        copiedAnnouncement="Table copied"
+        failedAnnouncement="Copy failed"
+        className="border-border bg-background text-muted-foreground hover:text-foreground absolute top-0 right-0 z-10 inline-flex items-center rounded-md border p-1 opacity-0 shadow-sm transition-opacity group-hover/markdown-table:opacity-100 focus-visible:opacity-100"
+      />
+      <div ref={container} className="w-full overflow-x-auto">
+        <Table>{children}</Table>
+      </div>
+    </div>
+  );
+}
+
 const components: Components = {
   p: ({ children }) => <p>{children}</p>,
   h1: ({ children }) => <h1>{children}</h1>,
@@ -176,6 +243,15 @@ const components: Components = {
     );
   },
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
+  table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
+  thead: ({ children }) => <TableHeader>{children}</TableHeader>,
+  tbody: ({ children }) => <TableBody>{children}</TableBody>,
+  tr: ({ children }) => <TableRow>{children}</TableRow>,
+  // GFM column alignment arrives as an inline text-align style; forwarding it
+  // is what keeps a right-aligned numeric column right-aligned.
+  th: ({ children, style }) => <TableHead style={style}>{children}</TableHead>,
+  td: ({ children, style }) => <TableCell style={style}>{children}</TableCell>,
+  caption: ({ children }) => <TableCaption>{children}</TableCaption>,
   // Most spans in a rendered message are syntax-highlighting tokens and pass
   // straight through; the ones {@link rehypeCitationDirectives} built carry the
   // citation they cite and become the phrase a reader can open.

@@ -21,6 +21,21 @@ describe("code block copy", () => {
   });
 });
 
+describe("table copy", () => {
+  it("copies the rendered cells as tab-separated rows", async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageMarkdown>
+        {"| Name | Value |\n| --- | --- |\n| Alpha | **1** |"}
+      </MessageMarkdown>,
+    );
+    await user.click(screen.getByRole("button", { name: "Copy table" }));
+    expect(await window.navigator.clipboard.readText()).toBe(
+      "Name\tValue\nAlpha\t1",
+    );
+  });
+});
+
 const DOCUMENT = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
 const OLD_CITATION = "3f7c8a91-2b4d-4e6f-9a1b-5c7d8e9f0a1b";
 
