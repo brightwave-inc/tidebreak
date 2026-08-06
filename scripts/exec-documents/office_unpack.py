@@ -66,7 +66,10 @@ def main() -> int:
             f"{source.name} has no [Content_Types].xml; it is not a valid OOXML package"
         )
     print(f"Unpacked {source.name} into {args.directory} ({written} parts).")
-    print("Edit the XML parts in place, then run pptx_clean.py and office_pack.py.")
+    print(
+        "Edit the XML parts in place, then run pptx_clean.py or docx_clean.py, "
+        "then office_pack.py."
+    )
     return 0
 
 

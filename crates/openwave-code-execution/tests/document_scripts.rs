@@ -12,7 +12,12 @@ const PREVIEW_SCRIPTS: [&str; 4] = [
 
 /// Helpers for the in-place OOXML editing pipeline. They read and write
 /// package trees and emit no previews.
-const PACKAGE_SCRIPTS: [&str; 3] = ["office_unpack.py", "office_pack.py", "pptx_clean.py"];
+const PACKAGE_SCRIPTS: [&str; 4] = [
+    "office_unpack.py",
+    "office_pack.py",
+    "pptx_clean.py",
+    "docx_clean.py",
+];
 /// The Calc helpers produce no preview images, so they are held to the
 /// weaker contract the sandbox image's smoke check relies on: they import
 /// and answer `--help` on a machine with no UNO bridge at all.

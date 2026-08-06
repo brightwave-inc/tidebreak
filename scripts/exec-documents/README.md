@@ -12,6 +12,7 @@ in an exec workspace into concise stdout summaries and bounded images under
 | `analyze_xlsx.py` | Print sheet inventory, used ranges, and sample rows; thumbnail sheets | Python, openpyxl, and Pillow |
 | `office_unpack.py` | Unzip an OOXML package into a directory tree for direct XML edits | Python |
 | `pptx_clean.py` | Check an unpacked PPTX tree for malformed XML and dangling relationships | Python |
+| `docx_clean.py` | Check an unpacked DOCX tree for malformed XML and dangling relationships | Python |
 | `office_pack.py` | Zip an unpacked tree back into a valid OOXML file | Python |
 | `calc_uno.py` | Inspect and edit an existing spreadsheet in place (cells, formulas, named ranges) | LibreOffice Calc plus its Python bridge (`python3-uno`) in the sandbox |
 | `xlsx_recalc.py` | Recalculate a workbook and report error cells and numbers stored as text | LibreOffice Calc plus `python3-uno` in the sandbox |
