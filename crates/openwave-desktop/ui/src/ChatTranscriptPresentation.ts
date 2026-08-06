@@ -1,4 +1,5 @@
 import type { ApiClient, ChatTranscript } from "./api";
+import type { RendererTurnUsage } from "./generated/wire";
 import type { ChatMessage } from "./MessageList";
 import { TURN_CANCELLED_NOTICE } from "./MessageList";
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
@@ -15,6 +16,11 @@ export type PresentedTranscript = {
   lastEventSeq: number;
   messages: ChatMessage[];
   messageIds: Set<string>;
+  /**
+   * Token counts from the chat's most recently finished turn, for the context
+   * meter. Null for a chat that has never completed one.
+   */
+  lastTurnUsage: RendererTurnUsage | null;
 };
 
 /** Convert one durable snapshot into the renderer's closed message model. */
@@ -153,6 +159,10 @@ export function presentChatTranscript(
     lastEventSeq: transcript.last_event_seq,
     messages,
     messageIds,
+    // The server orders terminal turns oldest-first, so the meter wants the
+    // tail. Each turn re-sends the conversation, which makes the latest turn's
+    // counts the current account of the window rather than one term in a sum.
+    lastTurnUsage: transcript.terminal_turns?.at(-1)?.usage ?? null,
   };
 }
 

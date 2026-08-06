@@ -220,6 +220,8 @@ export type ComposerProps = {
   disabled: boolean;
   draft: string;
   modelMenu?: ReactNode;
+  /** Context-window meter, rendered beside the model menu. */
+  contextMeter?: ReactNode;
   permissionMenu?: ReactNode;
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
@@ -249,6 +251,7 @@ export function Composer({
   disabled,
   draft,
   modelMenu,
+  contextMeter,
   permissionMenu,
   network,
   reasoning,
@@ -760,6 +763,7 @@ export function Composer({
             }
           />
           {modelMenu}
+          {contextMeter}
         </div>
         <div className="flex items-center gap-2">
           {/* The permission mode sits with the send cluster: it is what the
