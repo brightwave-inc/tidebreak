@@ -327,16 +327,32 @@ activity projection.
 `GET /chats/{chat_id}/agent-runs/{run_id}/activity` rebuilds the background
 run's ordered history from those durable checkpoints. Each item keeps the fixed
 kind, coarse outcome, and timestamp, and may add one typed headline: the bounded
-command vector and recorded exit code, the bounded public-web query, or the leaf
-name of the one delegated file. Command, argument, and query strings are
-model-authored: the display clamp bounds and de-spoofs them, but they may repeat
-anything the child already saw and are outside the host-field non-disclosure
-guarantee. The server does not directly copy stored stdout, stderr, search
-results, full broker paths, opaque root identities, provider identities,
-executor leases, or raw diagnostics. The only host-derived detail is the typed
-numeric exit code and delegated leaf name. The detail key is optional, so a call
-without a derivable headline retains the original three-field shape; no separate
-activity-history payload or database migration is involved.
+command vector, recorded exit code, and captured output tail of a settled `exec`
+step; the bounded public-web query; or the leaf name of the one delegated file.
+Command, argument, and query strings are model-authored: the display clamp
+bounds and de-spoofs them, but they may repeat anything the child already saw
+and are outside the host-field non-disclosure guarantee.
+
+A settled `exec` step's output tail is the one deliberate exception to the rule
+that stored results stay server-side. A sandbox command runs in a private,
+initially-empty workspace containing only what the run itself staged, so what it
+printed is the command's own text rather than host- or user-derived content, and
+without it a failed background command is unreadable. The tail is bounded to
+2,000 characters, carried only for terminal steps, and taken from the whole
+receipt rather than from the section after a `stdout:` marker, so a command
+cannot choose what the card shows by printing that marker itself; control
+characters other than newlines and tabs are dropped. It is bounded that
+tightly because the endpoint returns a run's entire history in one response and
+the panel re-fetches on update. The exception does not extend to web-search
+results or delegated-file contents, which carry material the run was handed and
+are still never projected.
+
+The server does not directly copy any other stored result, nor full broker
+paths, opaque root identities, provider identities, executor leases, or raw
+diagnostics. The other host-derived details are the typed numeric exit code and
+delegated leaf name. The detail key is optional, so a call without a derivable
+headline retains the original three-field shape; no separate activity-history
+payload or database migration is involved.
 
 The desktop consumes that projection in two places. The transcript renders one
 status row per spawned child beside the delegation it came from, correlated by

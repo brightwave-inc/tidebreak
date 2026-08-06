@@ -1,10 +1,19 @@
 //! Closed renderer projections of what a tool will do, and what it did.
 //!
 //! The renderer boundary carries neither raw argument objects nor raw tool
-//! output. These types are the deliberate exceptions: a tool may opt in to
-//! showing a human selected fields, one by one. Model-authored strings remain
-//! untrusted text and may repeat information the model already saw; the
-//! boundary guarantee is about which stored and host-owned fields are copied.
+//! output, with one deliberate exception noted below. These types are the
+//! opt-in surface: a tool may show a human selected fields, one by one.
+//! Model-authored strings remain untrusted text and may repeat information the
+//! model already saw; the boundary guarantee is about which stored and
+//! host-owned fields are copied.
+//!
+//! The exception is a settled `exec` receipt's bounded tail on
+//! [`AgentActivityDetail::Exec`]. A sandbox command runs in a private,
+//! initially-empty workspace holding only what the run itself staged, so its
+//! stdout and stderr are the child's own text rather than host- or
+//! user-derived content — and without it a failed background command is
+//! unreadable. It does not generalize: web-search and delegated-file results
+//! carry material the run was handed, and are still never projected.
 //!
 //! They are not passthroughs. Each variant enumerates exactly what a person
 //! needs in order to consent to an action or to understand its outcome, values
@@ -37,29 +46,45 @@ pub const MAX_RESULT_ENTRY_CHARS: usize = 200;
 /// Most rows a result preview lists before it counts the rest instead.
 pub const MAX_RESULT_ENTRIES: usize = 50;
 
+/// Longest exec receipt tail one background activity step carries.
+///
+/// Much smaller than [`MAX_RESULT_STREAM_CHARS`] because the cost is paid
+/// differently: the activity endpoint returns a run's *whole* history in one
+/// response and the panel re-fetches it on every update, so this bound is
+/// multiplied by every settled command a long run ever ran. A tail of the last
+/// couple of thousand characters is where a failure's message almost always
+/// is; the full receipt stays server-side.
+pub const MAX_ACTIVITY_EXEC_OUTPUT_CHARS: usize = 2_000;
+
 /// A bounded headline for one background-agent activity step.
 ///
 /// This is deliberately smaller than [`ToolActionPreview`]. The command,
 /// arguments, and query are model-authored text: they are bounded for safe
 /// single-line presentation, but may repeat any information the background
 /// agent already saw and are therefore outside the host-field non-disclosure
-/// guarantee. The projection never copies stored result text or host-only
-/// broker identity directly. Its only host-derived values are a typed numeric
-/// exit code and the leaf name of the canonically admitted delegated file.
+/// guarantee. The projection copies no stored result text except a settled
+/// `exec` receipt's bounded tail — see [`Self::with_exec_result`] — and never
+/// copies host-only broker identity directly. Its only other host-derived
+/// values are a typed numeric exit code and the leaf name of the canonically
+/// admitted delegated file.
 ///
 /// Command and search fields use the foreground approval-card projection so
 /// both surfaces share the same sanitization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentActivityDetail {
-    /// The argument vector a background command ran and its settled exit code,
-    /// when the immutable receipt recorded one.
+    /// The argument vector a background command ran, its settled exit code,
+    /// and the tail of what it printed, when the immutable receipt recorded
+    /// them.
     Exec {
         command: String,
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        output: Option<String>,
     },
     /// One public-web query, trimmed and bounded like its approval preview.
     Search { query: String },
@@ -82,6 +107,7 @@ impl AgentActivityDetail {
                     command,
                     args,
                     exit_code: None,
+                    output: None,
                 });
             }
             Some(ToolActionPreview::WebSearch { query, .. }) => {
@@ -103,33 +129,55 @@ impl AgentActivityDetail {
         })
     }
 
-    /// Attach an exec exit code from the immutable receipt's first line.
+    /// Attach what a settled exec recorded: its exit code and a readable tail
+    /// of the receipt.
     ///
-    /// A live call has no receipt, a signal is recorded as `exit: signal`, and
-    /// setup failures carry no `exit:` line; all three keep the field absent.
+    /// The exit code is parsed from the receipt's first line. A live call has
+    /// no receipt, a signal is recorded as `exit: signal`, and setup failures
+    /// carry no `exit:` line; all three keep the field absent.
+    ///
+    /// The output is the tail of the *whole* receipt, headers included, not
+    /// the section after a `stdout:` marker. A command can print those markers
+    /// itself, so splitting on them would let it choose what the card shows;
+    /// carrying the receipt verbatim means the card shows what the host wrote.
+    /// The tail is preferred over the head because the receipt's own tail is
+    /// already the tail of the streams, which is where a failure's message
+    /// almost always is. Control characters other than newlines and tabs are
+    /// dropped so the pane cannot be redrawn or reordered by what a command
+    /// printed, and the bound is applied in characters, so the result is never
+    /// split mid-codepoint.
     #[must_use]
     pub fn with_exec_result(self, result: &str) -> Self {
+        let Self::Exec { command, args, .. } = self else {
+            return self;
+        };
         let exit_code = result
             .lines()
             .next()
             .and_then(|line| line.strip_prefix("exit: "))
             .and_then(|code| code.parse::<i32>().ok());
-        match (self, exit_code) {
-            (
-                Self::Exec {
-                    command,
-                    args,
-                    exit_code: _,
-                },
-                Some(exit_code),
-            ) => Self::Exec {
-                command,
-                args,
-                exit_code: Some(exit_code),
-            },
-            (detail, _) => detail,
+        Self::Exec {
+            command,
+            args,
+            exit_code,
+            output: receipt_tail(result, MAX_ACTIVITY_EXEC_OUTPUT_CHARS),
         }
     }
+}
+
+/// Keep the last `max_chars` readable characters of a receipt, or nothing when
+/// it had none.
+fn receipt_tail(result: &str, max_chars: usize) -> Option<String> {
+    let readable: Vec<char> = result
+        .chars()
+        .filter(|character| {
+            !preview_formatting_character(*character) || matches!(character, '\n' | '\t')
+        })
+        .collect();
+    let start = readable.len().saturating_sub(max_chars);
+    let tail: String = readable[start..].iter().collect();
+    let trimmed = tail.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 /// The action a call will take, in a form a human can inspect.
@@ -1180,6 +1228,7 @@ mod tests {
                     command: "python".into(),
                     args: vec!["safearg".into()],
                     exit_code: None,
+                    output: None,
                 }),
             ),
             (
@@ -1190,6 +1239,7 @@ mod tests {
                     command: "cat".into(),
                     args: vec!["/Users/alice/private.txt".into()],
                     exit_code: None,
+                    output: None,
                 }),
             ),
             (
@@ -1208,6 +1258,7 @@ mod tests {
                         .map(|index| format!("arg-{index}"))
                         .collect(),
                     exit_code: None,
+                    output: None,
                 }),
             ),
         ];
@@ -1242,6 +1293,7 @@ mod tests {
                     command: "leftright".into(),
                     args: Vec::new(),
                     exit_code: None,
+                    output: None,
                 }),
                 "background detail did not reject {case}"
             );
@@ -1264,6 +1316,7 @@ mod tests {
             command: "python3".into(),
             args: vec!["report.py".into()],
             exit_code: None,
+            output: None,
         };
         for (case, result, exit_code) in [
             ("numeric first line", "exit: 17\nexit: 99", Some(17)),
@@ -1281,10 +1334,60 @@ mod tests {
                     command: "python3".into(),
                     args: vec!["report.py".into()],
                     exit_code,
+                    output: Some(result.into()),
                 },
                 "{case}"
             );
         }
+    }
+
+    /// The receipt tail is what makes a settled background command readable,
+    /// so what it carries is bounded and de-spoofed rather than trusted: an
+    /// oversized receipt keeps its end, multi-byte text is never split
+    /// mid-codepoint, terminal control sequences are dropped, and a receipt
+    /// with nothing readable in it carries no output at all.
+    #[test]
+    fn exec_activity_output_keeps_a_bounded_despoofed_tail() {
+        let base = AgentActivityDetail::Exec {
+            command: "python3".into(),
+            args: Vec::new(),
+            exit_code: None,
+            output: None,
+        };
+        let output = |result: &str| match base.clone().with_exec_result(result) {
+            AgentActivityDetail::Exec { output, .. } => output,
+            other => panic!("exec detail became {other:?}"),
+        };
+
+        // An overlong receipt keeps its end, where a failure's message is.
+        let long = format!(
+            "exit: 1\n{}\nTraceback: the part that matters",
+            "x".repeat(MAX_ACTIVITY_EXEC_OUTPUT_CHARS * 2)
+        );
+        let tail = output(&long).expect("an overlong receipt still carries a tail");
+        assert_eq!(tail.chars().count(), MAX_ACTIVITY_EXEC_OUTPUT_CHARS);
+        assert!(tail.ends_with("Traceback: the part that matters"));
+        assert!(!tail.contains("exit: 1"));
+
+        // Cutting a multi-byte tail lands on a character boundary, because the
+        // bound counts characters rather than bytes.
+        let multibyte = "é".repeat(MAX_ACTIVITY_EXEC_OUTPUT_CHARS + 40);
+        assert_eq!(
+            output(&multibyte),
+            Some("é".repeat(MAX_ACTIVITY_EXEC_OUTPUT_CHARS))
+        );
+
+        // Escape sequences and bidi overrides cannot redraw or reorder the
+        // pane; newlines and tabs survive because output without them is not
+        // readable.
+        assert_eq!(
+            output("exit: 0\n\u{1b}[2Jcol\ta\u{202e}drowssap\nline"),
+            Some("exit: 0\n[2Jcol\tadrowssap\nline".into())
+        );
+
+        // A receipt with nothing readable left carries no output rather than
+        // an empty pane.
+        assert_eq!(output("  \n\u{1b}\n "), None);
     }
 
     /// The exec card lists the durable outputs the command published. Only

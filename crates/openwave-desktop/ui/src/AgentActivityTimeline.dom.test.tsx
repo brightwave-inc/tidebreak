@@ -28,6 +28,7 @@ const state: AgentActivityState = {
         command: "pip",
         args: ["install", "matplotlib"],
         exit_code: 1,
+        output: "exit: 1\n\nstderr:\nERROR: no matching distribution",
       },
     },
     {
@@ -69,8 +70,10 @@ describe("AgentActivityTimeline", () => {
     expect(screen.queryByRole("list")).toBeNull();
   });
 
-  it("gives a failed command an open card with its headline and exit status", () => {
-    render(<AgentActivityTimeline state={state} active={false} expanded />);
+  it("gives a failed command an open card with its headline, exit status, and captured output", () => {
+    const { rerender } = render(
+      <AgentActivityTimeline state={state} active={false} expanded />,
+    );
 
     const commandRow = within(screen.getByRole("list")).getAllByRole(
       "listitem",
@@ -83,5 +86,26 @@ describe("AgentActivityTimeline", () => {
       "pip install matplotlib",
     );
     expect(within(commandRow).getByText("Exit 1")).toBeTruthy();
+    expect(
+      within(commandRow).getByText(/ERROR: no matching distribution/),
+    ).toBeTruthy();
+
+    // A settled command that printed nothing says so, rather than leaving the
+    // reader to wonder whether the pane failed to load.
+    const withoutOutput: AgentActivityState = {
+      ...state,
+      items: state.items.map((item, index) =>
+        index === 1
+          ? {
+              ...item,
+              detail: { kind: "exec", command: "pip", args: [], exit_code: 0 },
+            }
+          : item,
+      ),
+    };
+    rerender(
+      <AgentActivityTimeline state={withoutOutput} active={false} expanded />,
+    );
+    expect(screen.getByText("No output captured.")).toBeTruthy();
   });
 });

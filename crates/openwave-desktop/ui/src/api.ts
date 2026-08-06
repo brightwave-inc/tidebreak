@@ -2371,17 +2371,39 @@ function bounded(value: unknown, maxChars: number): value is string {
   return (
     typeof value === "string" &&
     Array.from(value).length <= maxChars &&
-    !Array.from(value).some((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return (
-        code < 32 ||
-        (code >= 127 && code <= 159) ||
-        code === 0x2028 ||
-        code === 0x2029 ||
-        (code >= 0x202a && code <= 0x202e) ||
-        (code >= 0x2066 && code <= 0x2069)
-      );
-    })
+    !Array.from(value).some(forbiddenPreviewCharacter)
+  );
+}
+
+/**
+ * The same clamp for a field that is drawn as a block rather than a line, so
+ * line breaks and tabs are structure rather than spoofing. Everything else
+ * {@link bounded} rejects is still rejected: an escape sequence or a
+ * bidirectional override in a pane of command output could still redraw or
+ * reorder what the reader sees.
+ */
+function boundedBlock(value: unknown, maxChars: number): value is string {
+  return (
+    typeof value === "string" &&
+    Array.from(value).length <= maxChars &&
+    !Array.from(value).some(
+      (character) =>
+        forbiddenPreviewCharacter(character) &&
+        character !== "\n" &&
+        character !== "\t",
+    )
+  );
+}
+
+function forbiddenPreviewCharacter(character: string): boolean {
+  const code = character.codePointAt(0) ?? 0;
+  return (
+    code < 32 ||
+    (code >= 127 && code <= 159) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
   );
 }
 
@@ -2410,6 +2432,13 @@ const AGENT_ACTIVITY_OUTCOMES = new Set<AgentActivityOutcome>([
  */
 const ACTIVITY_DETAIL_FIELD_CHARS = 512;
 const ACTIVITY_DETAIL_ARGS = 32;
+
+/**
+ * The exec output tail's cap, with slack over the server's own 2,000-character
+ * bound: the point of checking is to reject a payload orders of magnitude
+ * larger than the projection can emit, not to re-derive its arithmetic.
+ */
+const ACTIVITY_DETAIL_OUTPUT_CHARS = 4_000;
 
 /** The half-open range of a signed 32-bit exit code, as the wire type spells it. */
 const ACTIVITY_EXIT_CODE_MIN = -(2 ** 31);
@@ -2448,6 +2477,7 @@ function parseAgentActivityDetail(
         "command",
         "args",
         "exit_code",
+        "output",
       ]) ||
       !nonEmptyBounded(value.command, ACTIVITY_DETAIL_FIELD_CHARS) ||
       !Array.isArray(value.args) ||
@@ -2461,16 +2491,23 @@ function parseAgentActivityDetail(
       args.push(arg);
     }
     // The exit status is decoration next to the command itself, so an
-    // unusable one costs only itself: the reader still sees what ran.
+    // unusable one costs only itself: the reader still sees what ran. The
+    // captured tail is treated the same way — a payload the projection could
+    // not have produced is dropped, not rendered, and not fatal to the row.
     const exitCode = activityExitCode(value.exit_code);
-    return exitCode === undefined
-      ? { kind: "exec", command: value.command, args }
-      : {
-          kind: "exec",
-          command: value.command,
-          args,
-          exit_code: exitCode,
-        };
+    const output =
+      value.output !== undefined &&
+      boundedBlock(value.output, ACTIVITY_DETAIL_OUTPUT_CHARS) &&
+      value.output.trim().length > 0
+        ? value.output
+        : undefined;
+    return {
+      kind: "exec",
+      command: value.command,
+      args,
+      ...(exitCode === undefined ? {} : { exit_code: exitCode }),
+      ...(output === undefined ? {} : { output }),
+    };
   }
   if (value.kind === "search") {
     if (

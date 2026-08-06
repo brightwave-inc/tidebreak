@@ -265,7 +265,7 @@ async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files()
                 exec.id,
                 exec_lease,
                 &ToolCallResolution::Failed {
-                    result: "exit: 17\nduration_ms: 42\n\nstderr:\nprivate output".into(),
+                    result: "exit: 17\nduration_ms: 42\n\nstderr:\nthe command's own stderr".into(),
                     error_code: "exec_command_failed".into(),
                     error_detail: Some("private executor detail".into()),
                 },
@@ -430,6 +430,7 @@ async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files()
             "command": "python3",
             "args": ["report.py", "--format", "md"],
             "exit_code": 17,
+            "output": "exit: 17\nduration_ms: 42\n\nstderr:\nthe command's own stderr",
         }))
     );
     assert_eq!(
@@ -459,9 +460,12 @@ async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files()
         serde_json::from_value(old_entry).expect("the old history shape still deserializes");
     assert_eq!(old_entry.detail, None);
 
+    // A settled exec's receipt tail is the one stored result the projection
+    // carries, asserted exactly above. Nothing else crosses: not the search
+    // result, not the executor's own failure detail, not the arguments a
+    // search was called with, and not the durable row's other columns.
     let encoded = serde_json::to_string(&history).unwrap();
     for forbidden in [
-        "private output",
         "private executor detail",
         "private search result",
         "secret-value",
@@ -469,8 +473,6 @@ async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files()
         "private-search-provider-identity",
         "arguments",
         "lease_token",
-        "duration_ms",
-        "result",
     ] {
         assert!(!encoded.contains(forbidden), "history leaked {forbidden}");
     }

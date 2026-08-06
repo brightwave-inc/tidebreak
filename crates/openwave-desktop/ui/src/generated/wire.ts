@@ -15,14 +15,16 @@
  * arguments, and query are model-authored text: they are bounded for safe
  * single-line presentation, but may repeat any information the background
  * agent already saw and are therefore outside the host-field non-disclosure
- * guarantee. The projection never copies stored result text or host-only
- * broker identity directly. Its only host-derived values are a typed numeric
- * exit code and the leaf name of the canonically admitted delegated file.
+ * guarantee. The projection copies no stored result text except a settled
+ * `exec` receipt's bounded tail — see [`Self::with_exec_result`] — and never
+ * copies host-only broker identity directly. Its only other host-derived
+ * values are a typed numeric exit code and the leaf name of the canonically
+ * admitted delegated file.
  *
  * Command and search fields use the foreground approval-card projection so
  * both surfaces share the same sanitization.
  */
-export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, exit_code?: number, } | { "kind": "search", query: string, } | { "kind": "file", name: string, };
+export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, exit_code?: number, output?: string, } | { "kind": "search", query: string, } | { "kind": "file", name: string, };
 
 /**
  * One renderer-safe entry in a background run's ordered activity history.
@@ -30,10 +32,14 @@ export type AgentActivityDetail = { "kind": "exec", command: string, args: Array
  * Built on read from durable sandbox tool calls and their immutable receipts.
  * `detail` admits bounded model-authored command/argument/query text, which may
  * repeat anything the child already saw and is not covered by the host-field
- * non-disclosure guarantee. The only host-derived values are the numeric exit
- * code parsed from a receipt's first line and the delegated file's leaf name.
- * Stored result text, full broker paths and root identities, provider
- * identities, executor leases, and diagnostics are never copied directly.
+ * non-disclosure guarantee. Stored result text is copied in one place only: a
+ * settled `exec` step carries its receipt's bounded tail, because that text is
+ * the command's own output from a private workspace and is what makes a failed
+ * step readable. Web-search and delegated-file results stay server-side. The
+ * other host-derived values are the numeric exit code parsed from a receipt's
+ * first line and the delegated file's leaf name. Full broker paths and root
+ * identities, provider identities, executor leases, and diagnostics are never
+ * copied.
  *
  * No separate activity-history shape is persisted. The optional field keeps
  * the wire additive for older clients and lets calls without derivable detail
