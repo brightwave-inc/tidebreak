@@ -110,8 +110,9 @@ pub const PACKAGE_MANAGER_DOMAINS: &[&str] = &[
 ];
 
 /// Files copied as one indivisible helper library into an exec workspace.
-pub const DOCUMENT_SCRIPT_FILES: [&str; 8] = [
+pub const DOCUMENT_SCRIPT_FILES: [&str; 11] = [
     "_openwave_preview.py",
+    "_openwave_calc.py",
     "render_pdf.py",
     "extract_pdf_figures.py",
     "render_office.py",
@@ -119,6 +120,8 @@ pub const DOCUMENT_SCRIPT_FILES: [&str; 8] = [
     "office_unpack.py",
     "office_pack.py",
     "pptx_clean.py",
+    "calc_uno.py",
+    "xlsx_recalc.py",
 ];
 
 /// The baseline Python packages guaranteed on every execution backend, as
