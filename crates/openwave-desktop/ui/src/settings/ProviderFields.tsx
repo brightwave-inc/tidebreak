@@ -119,7 +119,7 @@ export function ActiveProviderField<Kind extends string>({
         <SelectTrigger aria-label="Provider">
           <SelectValue />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent scrollButtons={false}>
           <SelectItem value={NO_PROVIDER}>Disabled</SelectItem>
           {options.map((option) => (
             <SelectItem key={option.kind} value={option.kind}>
