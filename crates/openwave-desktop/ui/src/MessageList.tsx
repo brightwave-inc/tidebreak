@@ -214,6 +214,8 @@ type MessageListProps = {
   ) => Promise<AgentActivityHistoryEntry[]>;
   onOpenBackgroundAgent?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
+  /** The connected client, so a background agent row can fetch debug info. */
+  backgroundAgentClient?: ApiClient;
   busy: boolean;
   /** The live turn's stream has gone quiet — see [useStreamStalled]. */
   streamStalled?: boolean;
@@ -308,6 +310,7 @@ export function MessageList({
   imageClient,
   executionConfigClient,
   changeClient,
+  backgroundAgentClient,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
   // approval state itself changes, not on every streamed token.
@@ -338,6 +341,7 @@ export function MessageList({
       loadActivity: onLoadBackgroundAgentActivity,
       open: onOpenBackgroundAgent,
       openOutput: onOpenOutput,
+      client: backgroundAgentClient,
     },
     retry,
   );
@@ -559,6 +563,8 @@ export function groupMessageItems(
     loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
     open?: (runId: string) => void;
     openOutput?: (outputId: string) => void;
+    /** The connected client, so a row's "Copy debug info" can fetch its run. */
+    client?: ApiClient;
   } = {
     runs: [],
     loading: false,
@@ -706,6 +712,9 @@ export function groupMessageItems(
             onLoadActivity={backgroundAgents.loadActivity}
             onOpen={backgroundAgents.open}
             onOpenOutput={backgroundAgents.openOutput}
+            {...(backgroundAgents.client && chatId
+              ? { client: backgroundAgents.client, chatId }
+              : {})}
           />,
         ),
       );

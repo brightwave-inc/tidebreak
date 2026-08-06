@@ -398,6 +398,7 @@ export function ChatView({
           onLoadBackgroundAgentActivity={agentRuns.loadActivity}
           onOpenBackgroundAgent={onOpenAgentPanel}
           onOpenOutput={onOpenOutput}
+          backgroundAgentClient={client}
           busy={busy}
           streamStalled={streamStalled}
           scrollRef={attachScrollRef}

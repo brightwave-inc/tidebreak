@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Bot, ChevronDown, ChevronRight, Square } from "lucide-react";
 import { toast } from "sonner";
 
-import type { AgentActivityHistoryEntry, AgentRun } from "./api";
+import type { AgentActivityHistoryEntry, AgentRun, ApiClient } from "./api";
 import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
 import {
   AGENT_RUN_STATUS_GROUPS,
@@ -10,6 +10,7 @@ import {
   getAgentRunDotClass,
   RUNNING_AGENT_STATUSES,
 } from "./AgentRunDisplay";
+import { CopyAgentRunDebugButton } from "./BackgroundAgentPanel";
 import { friendlyErrorMessage } from "./lib/utils";
 import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import type { ToolCallStatus } from "./ToolCallCard";
@@ -24,6 +25,9 @@ export type BackgroundAgentSpawn = {
 };
 
 type BackgroundAgentListProps = {
+  /** Client + chat scope for a row's "Copy debug info"; absent hides it. */
+  client?: ApiClient;
+  chatId?: string;
   spawns: readonly BackgroundAgentSpawn[];
   runs: readonly AgentRun[];
   loading: boolean;
@@ -45,6 +49,8 @@ type BackgroundAgentListProps = {
  * durable cancellation request, resolved by the same read model it polls.
  */
 export function BackgroundAgentList({
+  client,
+  chatId,
   spawns,
   runs,
   loading,
@@ -164,6 +170,8 @@ export function BackgroundAgentList({
                     {groupRuns.map((run) => (
                       <BackgroundAgentRow
                         key={run.id}
+                        client={client}
+                        chatId={chatId}
                         run={run}
                         onCancel={onCancel}
                         onLoadActivity={onLoadActivity}
@@ -226,6 +234,8 @@ export function BackgroundAgentList({
  * row under it, and a delegation of any size is a list to scan, not to read.
  */
 function BackgroundAgentRow({
+  client,
+  chatId,
   run,
   onCancel,
   onLoadActivity,
@@ -236,6 +246,8 @@ function BackgroundAgentRow({
   activityExpanded,
   onActivityExpandedChange,
 }: {
+  client?: ApiClient;
+  chatId?: string;
   run: AgentRun;
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
@@ -318,6 +330,14 @@ function BackgroundAgentRow({
         <span className="shrink-0 text-xs text-muted-foreground">
           {showStopping ? "Stopping" : agentRunStatusDetail(run)}
         </span>
+        {client && chatId && (
+          <CopyAgentRunDebugButton
+            client={client}
+            chatId={chatId}
+            run={run}
+            className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
+          />
+        )}
         {stoppable && (
           <Button
             type="button"
