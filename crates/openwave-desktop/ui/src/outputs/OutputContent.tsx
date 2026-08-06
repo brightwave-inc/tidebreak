@@ -5,7 +5,7 @@
  * against private scratch bytes. Curated text without a dedicated engine stays
  * on the bounded preview string. Everything else offers export only.
  */
-import { Suspense } from "react";
+import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";
 
 import { ImageViewer } from "@/components/document/image-viewer";
@@ -20,6 +20,12 @@ import {
 } from "@/deliverables";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import { CodeViewer } from "./CodeViewer";
+
+// The plotting engine is a large dependency and only chart outputs need it, so
+// it is fetched from the app bundle on first use rather than at startup.
+const ChartViewer = lazy(() => import("./ChartViewer"));
+
+const CHART_MEDIA_TYPE = "application/vnd.openwave.chart+json";
 
 function normalizeMediaType(mediaType: string): string {
   return mediaType.split(";", 1)[0]!.trim().toLowerCase();
@@ -53,6 +59,18 @@ export function OutputContent({
     return (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <ImageViewer source={source} className="bg-page-background grow" />
+      </div>
+    );
+  }
+
+  if (type === CHART_MEDIA_TYPE) {
+    return (
+      <div className="min-h-0 flex-1 overflow-auto p-6">
+        <div className="mx-auto max-w-4xl">
+          <Suspense fallback={<ViewerLoading />}>
+            <ChartViewer preview={preview} />
+          </Suspense>
+        </div>
       </div>
     );
   }
