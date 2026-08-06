@@ -8,8 +8,6 @@ design before large changes.
 
 - **Open an issue before a large PR.** For anything beyond a small fix, let's
   align on the approach first so your time is well spent.
-- **Keep changes focused.** One logical change per PR; small and reviewable beats
-  big and sprawling.
 - **No secrets, ever.** Never commit credentials, tokens, or `.env` files. CI
   runs a secret scan on every push and pull request.
 
