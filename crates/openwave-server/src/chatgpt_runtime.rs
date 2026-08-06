@@ -60,21 +60,18 @@ impl ChatGptRuntime {
         })
     }
 
-    /// Build route auth from the secret store. Used by the provider resolver
-    /// when assembling OpenAI ChatGPT OAuth routes.
-    pub async fn route_auth_from_secrets(
-        secrets: Arc<dyn SecretProvider>,
-    ) -> Option<(Arc<dyn BearerTokenSource>, String)> {
-        if !openwave_connectors::has_stored_chatgpt_credentials(&*secrets).await {
-            return None;
-        }
-        let auth = ChatGptAuth::new(ChatGptAuthConfig::production()).ok()?;
-        let connection = Arc::new(ChatGptConnection::new(
-            auth,
-            ChatGptCredentialVault::new(secrets),
-        ));
-        let account_id = connection.account_id().await.ok().flatten()?;
-        let source: Arc<dyn BearerTokenSource> = Arc::new(ChatGptTokenSource(connection));
+    /// Route auth for the OpenAI ChatGPT OAuth route, or `None` when no
+    /// session is stored.
+    ///
+    /// The token source borrows this runtime's connection rather than opening
+    /// a second one over the same vault entry: refresh rotation and sign-out
+    /// are serialized per connection, so two of them racing can push a stale
+    /// refresh token at OpenAI or resurrect a session that sign-out just
+    /// cleared.
+    pub async fn route_auth(&self) -> Option<(Arc<dyn BearerTokenSource>, String)> {
+        let account_id = self.connection.account_id().await.ok().flatten()?;
+        let source: Arc<dyn BearerTokenSource> =
+            Arc::new(ChatGptTokenSource(self.connection.clone()));
         Some((source, account_id))
     }
 

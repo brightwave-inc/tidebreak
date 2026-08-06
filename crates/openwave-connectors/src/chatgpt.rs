@@ -223,10 +223,10 @@ impl ChatGptAuth {
 
     /// Bind port 1455 and produce the URL the user's browser must visit.
     pub async fn start_sign_in(&self) -> Result<ChatGptPendingSignIn> {
-        // Bind IPv4 loopback: the public redirect URI uses host `localhost`,
-        // which browsers resolve to 127.0.0.1 in practice; tests rewrite the
-        // fake's redirect to the literal IP for the same reason.
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, CALLBACK_PORT))
+        // The redirect URI the client allows names host `localhost`, so the
+        // browser may arrive over either loopback family depending on how it
+        // resolves the name. Bind both rather than betting on IPv4.
+        let v4 = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, CALLBACK_PORT))
             .await
             .map_err(|error| {
                 chatgpt_error(
@@ -237,6 +237,11 @@ impl ChatGptAuth {
                     ),
                 )
             })?;
+        // Hosts with IPv6 disabled simply have no `::1` to serve.
+        let v6 = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, CALLBACK_PORT))
+            .await
+            .ok();
+        let listeners = LoopbackListeners { v4, v6 };
         let verifier = random_token();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let state = random_token();
@@ -257,7 +262,7 @@ impl ChatGptAuth {
 
         Ok(ChatGptPendingSignIn {
             auth: self.clone(),
-            listener,
+            listeners,
             authorization_url: authorization_url.to_string(),
             verifier,
             state,
@@ -357,10 +362,34 @@ impl ChatGptAuth {
 /// A sign-in in flight. Dropping this cancels the listener.
 pub struct ChatGptPendingSignIn {
     auth: ChatGptAuth,
-    listener: TcpListener,
+    listeners: LoopbackListeners,
     authorization_url: String,
     verifier: String,
     state: String,
+}
+
+/// The loopback callback port, held on both families the browser might use.
+struct LoopbackListeners {
+    v4: TcpListener,
+    v6: Option<TcpListener>,
+}
+
+impl LoopbackListeners {
+    /// Accept callbacks on every bound address until the caller stops polling.
+    async fn serve(self, app: Router) {
+        match self.v6 {
+            Some(v6) => {
+                let v6_app = app.clone();
+                tokio::select! {
+                    _ = axum::serve(self.v4, app).into_future() => {}
+                    _ = axum::serve(v6, v6_app).into_future() => {}
+                }
+            }
+            None => {
+                let _ = axum::serve(self.v4, app).into_future().await;
+            }
+        }
+    }
 }
 
 /// Completed ChatGPT sign-in ready to persist.
@@ -379,7 +408,7 @@ impl ChatGptPendingSignIn {
     pub async fn finish(self, timeout: Duration) -> Result<ChatGptAuthorizedSession> {
         let Self {
             auth,
-            listener,
+            listeners,
             verifier,
             state,
             ..
@@ -397,7 +426,7 @@ impl ChatGptPendingSignIn {
         // leaked listener would block every later sign-in.
         let outcome = tokio::select! {
             outcome = tokio::time::timeout(timeout, receiver.recv()) => outcome,
-            _ = axum::serve(listener, callback_app).into_future() => Ok(None),
+            () = listeners.serve(callback_app) => Ok(None),
         };
 
         let callback = outcome

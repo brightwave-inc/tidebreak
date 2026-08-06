@@ -1323,6 +1323,10 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
@@ -1468,6 +1472,10 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                 store.clone(),
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
@@ -1848,6 +1856,9 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             secrets.clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
     let resolved = resolver.resolve().await;
@@ -1944,6 +1955,10 @@ async fn resolver_includes_configured_curated_api_key_providers() {
                 store.clone(),
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
@@ -2243,6 +2258,9 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
             secrets.clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
     assert_eq!(resolver.resolve().await.id().0, "router");
@@ -2302,6 +2320,10 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
                 store.clone(),
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),

@@ -1686,10 +1686,14 @@ mod tests {
         let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
             Arc::new(crate::managed_policy::NoOsPolicy);
         let runtime = GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+        let chatgpt = Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        );
         let resolver = Arc::new(crate::resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
             runtime.clone(),
+            chatgpt.clone(),
             os_policy.clone(),
         ));
         let state = crate::state::AppState::with_gateway_runtime(
@@ -1701,6 +1705,7 @@ mod tests {
             openwave_core::AgentConfig::default(),
             uuid::Uuid::new_v4(),
             runtime,
+            chatgpt,
             os_policy,
         )
         .unwrap();

@@ -128,6 +128,10 @@ async fn titling_app(
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,

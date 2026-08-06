@@ -922,10 +922,15 @@ async fn bind_inner(
     }
     let gateway =
         gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+    let chatgpt = Arc::new(chatgpt_runtime::ChatGptRuntime::new(
+        store.clone(),
+        secrets.clone(),
+    )?);
     let resolver = Arc::new(KeyedResolver::new(
         store.clone(),
         secrets.clone(),
         gateway.clone(),
+        chatgpt.clone(),
         os_policy.clone(),
     ));
     let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
@@ -983,6 +988,7 @@ async fn bind_inner(
         agent_config,
         client_executor_id.unwrap_or_else(Uuid::new_v4),
         gateway,
+        chatgpt,
         os_policy,
     )?;
     // Without a restart-stable native executor identity, durable
