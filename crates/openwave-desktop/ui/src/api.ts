@@ -62,7 +62,9 @@ import {
   type PluginCategory as WirePluginCategory,
   type PluginEnableUpdate as WirePluginEnableUpdate,
   type PluginInfo as WirePluginInfo,
+  type PluginPromptInfo as WirePluginPromptInfo,
   type PluginSkillInfo as WirePluginSkillInfo,
+  type PromptBody as WirePromptBody,
   type SkillOrigin as WireSkillOrigin,
   type SkillInstructions as WireSkillInstructions,
   type NetworkPolicy as WireNetworkPolicy,
@@ -554,6 +556,12 @@ export type PluginInfo = WirePluginInfo;
 
 /** One skill, inside a bundle or standing alone. */
 export type PluginSkillInfo = WirePluginSkillInfo;
+
+/** One reusable prompt, bundled or standalone, as the catalog lists it. */
+export type PluginPromptInfo = WirePluginPromptInfo;
+
+/** One prompt's insertable text, fetched when the user picks it. */
+export type PromptBody = WirePromptBody;
 
 /** What a bundle can do, derived by the host from what it contains. */
 export type PluginCapability = WirePluginCapability;
@@ -1228,6 +1236,18 @@ export class ApiClient {
   /** One skill's full instruction body — what the model is taught by it. */
   getSkillInstructions(name: string): Promise<SkillInstructions> {
     return this.json(`/plugins/skills/${encodeURIComponent(name)}/instructions`, {
+      headers: this.headers(),
+    });
+  }
+
+  /**
+   * One prompt's insertable text — what a picker drops into the composer.
+   *
+   * Its own route because the catalog is read far more often than any single
+   * prompt is inserted.
+   */
+  getPromptBody(name: string): Promise<PromptBody> {
+    return this.json(`/plugins/prompts/${encodeURIComponent(name)}/body`, {
       headers: this.headers(),
     });
   }

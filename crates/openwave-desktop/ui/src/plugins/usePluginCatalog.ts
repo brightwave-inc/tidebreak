@@ -35,6 +35,13 @@ export function applyEnableUpdate(
       };
     }),
     skills: catalog.skills.map(applySkill),
+    // A prompt has no flag of its own: a bundled one follows its bundle, so an
+    // optimistic bundle toggle has to carry its prompts with it. A standalone
+    // prompt is always on and never moves.
+    prompts: catalog.prompts.map((prompt) => {
+      const next = prompt.plugin ? update.plugins[prompt.plugin] : undefined;
+      return next === undefined ? prompt : { ...prompt, enabled: next };
+    }),
   };
 }
 
