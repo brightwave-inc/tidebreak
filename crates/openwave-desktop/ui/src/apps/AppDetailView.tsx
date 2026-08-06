@@ -174,7 +174,10 @@ export function AppDetailView({
                 className="flex min-w-0 flex-1 items-center gap-3"
                 aria-label="Access"
               >
-                {grant.granted && (
+                {/* A bindingless app is granted vacuously and holds nothing
+                    revocable, so the access readout and revoke control stay
+                    hidden. */}
+                {grant.granted && grant.bindings.length > 0 && (
                   <>
                     <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs">
                       <ShieldCheck

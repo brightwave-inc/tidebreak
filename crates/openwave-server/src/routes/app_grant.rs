@@ -37,8 +37,9 @@ use crate::state::AppState;
 pub struct AppGrantState {
     /// Whether a live grant fully covers the current manifest with every
     /// bound definition unchanged since consent — the "no sheet needed"
-    /// verdict. When `false`, (re-)consent is required before every pinned
-    /// capability is invokable.
+    /// verdict. A manifest with no bindings is vacuously granted: there is
+    /// nothing to consent to, so no sheet is shown. When `false`,
+    /// (re-)consent is required before every pinned capability is invokable.
     pub granted: bool,
     /// The current manifest's bindings, one entry per bound connected app or
     /// folder.
@@ -304,14 +305,20 @@ pub(crate) fn grant_state(
             }
         })
         .collect();
-    // The invoke gate also pins targets the grant names beyond the current
-    // manifest, so the overall verdict does too.
-    let granted = grant.is_some_and(|grant| {
-        bindings.iter().all(|binding| binding.granted)
-            && grant
-                .bindings
-                .iter()
-                .all(|binding| current.grant_binding_current(binding))
-    });
+    // A manifest that binds nothing has nothing to consent to: every invoke
+    // fails the pin check before the consent gate is reached, so prompting
+    // would gate the frame on a vacuous "yes". Granted, with or without a
+    // stored grant.
+    //
+    // Otherwise the invoke gate also pins targets the grant names beyond the
+    // current manifest, so the overall verdict does too.
+    let granted = manifest.bindings.is_empty()
+        || grant.is_some_and(|grant| {
+            bindings.iter().all(|binding| binding.granted)
+                && grant
+                    .bindings
+                    .iter()
+                    .all(|binding| current.grant_binding_current(binding))
+        });
     AppGrantState { granted, bindings }
 }
