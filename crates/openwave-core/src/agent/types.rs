@@ -321,5 +321,3 @@ impl ForegroundAgentWaitRequest {
                 .is_ok_and(|arguments| arguments.agent_ids == self.child_run_ids)
     }
 }
-
-

@@ -6,8 +6,8 @@ use crate::id::{ChatId, HostRootId, ProjectId};
 
 use super::chat_settings::{NetworkPolicy, PermissionMode, ReasoningEffort};
 use super::identity::{
-    ChatRootAttachment, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS, Project,
-    RootAttachmentOrigin,
+    ChatRootAttachment, Project, RootAttachmentOrigin, MAX_ATTACHMENT_REVISION,
+    MAX_ROOT_ATTACHMENTS,
 };
 use super::messages::{ToolCallRecord, ToolCallResolution};
 use super::turns::{TurnCheckpointProgress, TurnRun};

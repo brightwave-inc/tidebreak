@@ -15,7 +15,6 @@ use crate::id::AgentRunId;
 use crate::model::ToolCallExecution;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec};
 
-
 /// A name-keyed registry of the tools available to the agent.
 ///
 /// The map is ordered by name so that [advertisement](Self::specs) is a pure
@@ -562,4 +561,3 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 }
-

@@ -16,15 +16,11 @@ use crate::semantic_checkpoint::{
 };
 
 use super::transcript::{
-    checkpoint_is_projectable, project_checkpoint, rebuild_transcript_with_boundary, covered_prefix_was_reduced,
+    checkpoint_is_projectable, covered_prefix_was_reduced, project_checkpoint,
+    rebuild_transcript_with_boundary,
 };
-use super::types::{
-    CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS,
-    CONTEXT_CHECKPOINT_SYSTEM_PROMPT,
-};
-use super::{
-    Agent, LoadedTranscript, TranscriptSourceBoundary, USER_INTERRUPTION_NOTE,
-};
+use super::types::{CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS, CONTEXT_CHECKPOINT_SYSTEM_PROMPT};
+use super::{Agent, LoadedTranscript, TranscriptSourceBoundary, USER_INTERRUPTION_NOTE};
 
 impl Agent {
     /// Load one checkpoint only when it is supported and owned by this chat.
@@ -32,7 +28,10 @@ impl Agent {
     /// Checkpoints are an optimization over the raw transcript. Store failures
     /// and corrupt/future values therefore fail closed to no projection rather
     /// than turning an otherwise valid turn into an infrastructure failure.
-    pub(crate) async fn load_projectable_checkpoint(&self, chat_id: ChatId) -> Option<ContextCheckpoint> {
+    pub(crate) async fn load_projectable_checkpoint(
+        &self,
+        chat_id: ChatId,
+    ) -> Option<ContextCheckpoint> {
         let checkpoint = self.store.get_context_checkpoint(chat_id).await.ok()??;
         checkpoint_is_projectable(&checkpoint, chat_id).then_some(checkpoint)
     }
@@ -325,7 +324,10 @@ impl Agent {
     /// built. That keeps the invariant adapters rely on: a surviving
     /// [`ContentBlock::Image`] always has bytes, so an adapter that finds none
     /// is looking at a real fault rather than an intended drop.
-    pub(crate) async fn hydrate_images(&self, messages: &mut [ChatMessage]) -> Result<ImageAttachments> {
+    pub(crate) async fn hydrate_images(
+        &self,
+        messages: &mut [ChatMessage],
+    ) -> Result<ImageAttachments> {
         let carries_image = messages.iter().any(|message| {
             message
                 .content

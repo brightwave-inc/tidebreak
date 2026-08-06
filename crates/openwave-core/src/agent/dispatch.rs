@@ -1,4 +1,3 @@
-
 use chrono::Utc;
 use futures::future::{self, Either};
 use serde_json::Value;
@@ -22,14 +21,12 @@ use crate::tool::{ApprovalClass, ToolCtx, ToolErrorCategory, ToolOutput};
 
 use super::events::EventSink;
 use super::transcript::{
-    parse_args, parse_tool_args, tool_result_blocks, truncate_to_bytes, exec_preview_images,
+    exec_preview_images, parse_args, parse_tool_args, tool_result_blocks, truncate_to_bytes,
 };
-use super::types::{
-    ForegroundAgentWaitRequest, SandboxAgentSpawnRequest,
-};
+use super::types::{ForegroundAgentWaitRequest, SandboxAgentSpawnRequest};
 use super::{
-    call_action_preview, provider_executed_entries, AcceptedServerCall, Agent,
-    CallIsolation, ClientArgumentResolution, PendingCall, SandboxSpawnGate,
+    call_action_preview, provider_executed_entries, AcceptedServerCall, Agent, CallIsolation,
+    ClientArgumentResolution, PendingCall, SandboxSpawnGate,
 };
 
 impl Agent {
@@ -1302,5 +1299,4 @@ impl Agent {
         }
         Ok(())
     }
-
 }

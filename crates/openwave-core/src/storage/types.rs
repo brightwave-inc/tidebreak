@@ -4,14 +4,11 @@ use serde::Serialize;
 use crate::approval::ToolApproval;
 use crate::error::Result;
 use crate::event::SequencedEvent;
-use crate::id::{
-    AgentRunId, CallId, ChatId, MessageId, TurnId,
-};
+use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, Message, MessageAttachment,
-    MessageDocumentAttachment,
-    RootAttachmentChange, ToolCallRecord,
-    TurnAgentRunWaitSet, TurnClientWait, TurnFailureReceipt, TurnRun, TurnSteer,
+    MessageDocumentAttachment, RootAttachmentChange, ToolCallRecord, TurnAgentRunWaitSet,
+    TurnClientWait, TurnFailureReceipt, TurnRun, TurnSteer,
 };
 use crate::provider::RefusalOutcome;
 

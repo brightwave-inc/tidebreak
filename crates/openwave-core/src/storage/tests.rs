@@ -7,12 +7,24 @@ use futures::executor::block_on;
 use super::*;
 mod root_attachment;
 
+use async_trait::async_trait;
+use serde_json::Value;
+
+use crate::error::{AgentError, Result};
+use crate::event::{AgentEvent, SequencedEvent};
+use crate::id::{CallId, ChatId, DocumentId, ProjectId, RootAttachmentChangeId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project,
     validate_project_root_projection, ChatRootAttachment, RootAttachmentChangeAction,
     RootAttachmentChangeFailure, RootAttachmentChangePhase, RootAttachmentOrigin,
     RootAttachmentSubjectKind, ToolCallExecution, ToolCallStatus, MAX_ATTACHMENT_REVISION,
     MAX_ROOT_ATTACHMENTS,
+};
+use crate::model::{
+    BeginRootAttachmentChange, Chat, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, PermissionMode, Project,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
+    ToolCallResolution,
 };
 
 /// Minimal in-memory `Store` — proves the trait is object-safe and usable

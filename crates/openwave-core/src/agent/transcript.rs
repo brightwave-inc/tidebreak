@@ -280,6 +280,9 @@ pub(crate) fn covered_prefix_was_reduced(
 }
 
 #[cfg(test)]
+use super::types::AgentConfig;
+
+#[cfg(test)]
 pub(crate) fn rebuild_transcript_for_test(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
@@ -475,7 +478,11 @@ pub(crate) fn tool_result_blocks(
 
 /// Truncate `content` to at most `max_bytes` (on a UTF-8 char boundary) and
 /// append a notice. Returns `None` when it already fits.
-pub(crate) fn truncate_to_bytes(content: &str, max_bytes: usize, call_id: Option<CallId>) -> Option<String> {
+pub(crate) fn truncate_to_bytes(
+    content: &str,
+    max_bytes: usize,
+    call_id: Option<CallId>,
+) -> Option<String> {
     if content.len() <= max_bytes {
         return None;
     }
@@ -543,4 +550,3 @@ pub(crate) fn parse_tool_args(raw: &str) -> Option<Value> {
     }
     serde_json::from_str(raw).ok()
 }
-
