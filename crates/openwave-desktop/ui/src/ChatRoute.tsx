@@ -56,6 +56,7 @@ import {
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu } from "./ModelMenu";
+import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -114,6 +115,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const busy = useChatSessionStore((session) => session.busy);
+  const lastTurnUsage = useChatSessionStore((session) => session.lastTurnUsage);
   const [hydrated, setHydrated] = useState(false);
   const files = useComposerAttachments(chatId).files;
   const [attaching, setAttaching] = useState(false);
@@ -596,9 +598,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   function renderChat(visible: boolean) {
+    // The model selected right now: the reasoning levels it accepts, and the
+    // window the context meter reads against. Switching models mid-chat
+    // re-scales the meter immediately, which is the question being asked.
+    const activeModel = modelForSelection(models, chat!.model);
     // Only the levels the selected model accepts are offerable, and a model
     // that accepts none gets no selector at all.
-    const efforts = modelForSelection(models, chat!.model)?.reasoning_efforts ?? [];
+    const efforts = activeModel?.reasoning_efforts ?? [];
     return (
       <TranscriptVisibilityProvider value={visible}>
         <ChatView
@@ -658,6 +664,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onRemove: images.remove,
             onRetry: images.retry,
           }}
+          composerContextMeter={
+            <ContextUsageIndicator
+              usage={lastTurnUsage}
+              contextWindow={activeModel?.context_window}
+              modelName={activeModel?.display_name}
+            />
+          }
           composerModelMenu={
             <ModelMenu
               models={models}

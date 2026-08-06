@@ -12,6 +12,7 @@ import {
   modelForSelection,
   providerLabel,
 } from "../ModelSelection";
+import { formatTokenCount } from "../ContextUsage";
 import {
   Select,
   SelectContent,
@@ -331,6 +332,7 @@ function ManagedModelRoleRow({
                 disabled={!model.available}
               >
                 {model.display_name}
+                {contextWindowSuffix(model)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -446,6 +448,7 @@ function ModelRoleRow({
                 disabled={!model.available}
               >
                 {model.display_name}
+                {contextWindowSuffix(model)}
                 {model.available ? "" : " — unavailable"}
               </SelectItem>
             ))}
@@ -468,6 +471,17 @@ function ModelRoleRow({
       )}
     </SettingsSection>
   );
+}
+
+/**
+ * How much conversation a model can hold, beside its name.
+ *
+ * The single number that most often decides between two otherwise similar
+ * models, and it was only visible by picking one and watching the meter.
+ */
+function contextWindowSuffix(model: ModelInfo): string {
+  if (!model.context_window) return "";
+  return ` — ${formatTokenCount(model.context_window)} context`;
 }
 
 /**

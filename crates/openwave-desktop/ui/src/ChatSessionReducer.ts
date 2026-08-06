@@ -1,5 +1,7 @@
 import type { SequencedEvent } from "./api";
 import { parseToolActionPreview, parseToolResultPreview } from "./api";
+import { contextTruncationNotice } from "./ContextUsage";
+import type { RendererTurnUsage } from "./generated/wire";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import type { ChatMessage } from "./MessageList";
 import { TURN_CANCELLED_NOTICE } from "./MessageList";
@@ -37,6 +39,17 @@ export type ChatSessionState = {
   hydratedMessageIds: ReadonlySet<string>;
   /** One truncation notice per turn, however many truncation events arrive. */
   contextTruncationNoted: boolean;
+  /**
+   * Token counts from the most recent terminal turn, or null before any turn
+   * in this chat has finished.
+   *
+   * The composer's context meter reads this. It is deliberately the last
+   * turn's figures rather than a running total: each turn re-sends the
+   * conversation, so the latest turn is the best available account of what the
+   * window is holding, and summing turns would just count the transcript once
+   * per turn.
+   */
+  lastTurnUsage: RendererTurnUsage | null;
   /**
    * Whether code execution is preparing its sandbox image right now.
    *
@@ -89,6 +102,7 @@ export function initialChatSessionState(): ChatSessionState {
     provisionalToolCallIds: new Set(),
     hydratedMessageIds: new Set(),
     contextTruncationNoted: false,
+    lastTurnUsage: null,
     sandboxPreparing: false,
   };
 }
@@ -392,6 +406,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
+          lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
         },
         effects,
@@ -411,6 +426,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
+          lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
           messages: [
             ...discardToolCalls(
@@ -442,6 +458,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
+          lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "cancelled"),
@@ -516,7 +533,10 @@ export function reduceChatSessionEvent(
       messages.splice(insertAt, 0, {
         id: deps.nextId(),
         role: "system",
-        text: "Earlier conversation was trimmed to fit the model's context.",
+        text: contextTruncationNotice(
+          event.original_tokens,
+          event.fitted_tokens,
+        ),
       });
       return {
         state: { ...state, contextTruncationNoted: true, messages },
@@ -547,6 +567,7 @@ export function applyTerminalHydration(
     messages: ChatMessage[];
     messageIds: ReadonlySet<string>;
     lastEventSeq: number;
+    lastTurnUsage: RendererTurnUsage | null;
   },
 ): ChatSessionState {
   return {
@@ -554,6 +575,10 @@ export function applyTerminalHydration(
     lastSeq: Math.max(state.lastSeq, hydration.lastEventSeq),
     hydratedMessageIds: hydration.messageIds,
     messages: hydration.messages,
+    // The snapshot is authoritative when it has counts — it is rebuilt from
+    // the durable turn rows. A chat with no finished turn yet leaves whatever
+    // the live stream established rather than blanking the meter.
+    lastTurnUsage: hydration.lastTurnUsage ?? state.lastTurnUsage,
   };
 }
 
