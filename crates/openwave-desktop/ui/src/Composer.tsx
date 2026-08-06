@@ -14,24 +14,33 @@ import {
   Image as ImageIcon,
   Mic,
   Square,
-  Sparkles,
   Wand2,
   X,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
 import {
   activeSlashQuery,
+  availableSlashOptions,
   filterSlashOptions,
+  nextOptionHighlight,
   replaceSlashToken,
+  skillsToInvoke,
   MAX_INVOKED_SKILLS,
   type SlashOption,
 } from "./ComposerSlash";
 import {
   ComposerToolsMenu,
   type ComposerNetwork,
-  type ComposerPlugins,
   type ComposerReasoning,
 } from "./ComposerToolsMenu";
+import {
+  optionIcon,
+  pluginOptionRows,
+  PluginsPanel,
+  PLUGINS_PANEL_LABEL,
+  skillCapNote,
+} from "@/plugins/PluginsPanel";
+import { OptionListbox, optionElementId } from "@/components/OptionListbox";
 import {
   describeImageAttachment,
   imageFilesFrom,
@@ -52,6 +61,8 @@ import type { ChatFolderAccess } from "./useChatFolderAttachments";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
+
+const SLASH_LIST_ID = "composer-slash-list";
 
 type ComposerKeyEvent = Pick<
   KeyboardEvent<HTMLTextAreaElement>["nativeEvent"],
@@ -114,31 +125,17 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
 }
 
 /**
- * The sentence that engages a plugin, and where the caret lands after it.
+ * The installed bundles, and how one is turned on.
  *
- * There is no directive the backend parses: an enabled bundle's skills are in
- * the model's system prompt, so asking for one in plain words is what makes it
- * happen. The text goes in at the caret, with a space in front of it when it
- * would otherwise run into what is already written.
+ * A bundle being on is a property of the installation rather than of this
+ * message, so engaging one that is off turns it on the same way its switch on
+ * the Plugins page would. What the pick then puts on the message is the
+ * composer's business.
  */
-export function insertPluginDirective(
-  draft: string,
-  directive: string,
-  selectionStart: number,
-  selectionEnd: number,
-): { text: string; caret: number } {
-  const before = draft.slice(0, selectionStart);
-  const after = draft.slice(selectionEnd);
-  const gap = before && !/\s$/.test(before) ? " " : "";
-  return {
-    text: `${before}${gap}${directive}${after}`,
-    caret: before.length + gap.length + directive.length,
-  };
-}
-
-export function pluginDirective(displayName: string): string {
-  return `Use the ${displayName} plugin: `;
-}
+export type ComposerPlugins = {
+  items: readonly PluginInfo[];
+  onSelect: (plugin: PluginInfo) => void;
+};
 
 /**
  * Everything the composer needs to present attached images.
@@ -183,17 +180,22 @@ export type ComposerVoice = {
 };
 
 /**
- * What typing `/` reaches, and which skills the next message will invoke.
+ * What the plugins panel reaches, and which skills the next message will
+ * invoke.
  *
- * The composer owns the token and the list; the surface above it owns the
- * catalog and the invoked names, because those have to survive this component
- * — the chat route reads them again when it posts the turn.
+ * The composer owns the token, the panel, and its highlight; the surface above
+ * it owns the catalog and the invoked names, because those have to survive this
+ * component — the chat route reads them again when it posts the turn.
  */
 export type ComposerSlash = {
   options: readonly SlashOption[];
   /** Skill names invoked for the next send, in the order they were picked. */
   invoked: readonly string[];
-  onInvoke: (name: string) => void;
+  /**
+   * Add these skills to the message, in order. A list rather than one name
+   * because a bundle stands for its members and they all arrive at once.
+   */
+  onInvoke: (names: readonly string[]) => void;
   onRemove: (name: string) => void;
   /** One prompt's insertable text. A rejection leaves the draft as it was. */
   loadPromptBody: (name: string) => Promise<string>;
@@ -288,6 +290,9 @@ export function Composer({
     query: string;
   } | null>(null);
   const [slashHighlight, setSlashHighlight] = useState(0);
+  // The same list, opened from the tools menu instead of from a `/`. Its query
+  // is its own: there is no token in the draft to read one from.
+  const [panelQuery, setPanelQuery] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const inputDisabled = disabled;
   const active = busy && activeTurnId !== null;
@@ -321,26 +326,17 @@ export function Composer({
 
   const invokedSkills = slash?.invoked ?? [];
   const atSkillCap = invokedSkills.length >= MAX_INVOKED_SKILLS;
-  /**
-   * What this `/` can still reach.
-   *
-   * A skill already on the message is not offered again — the server refuses a
-   * duplicate — and neither is any skill once the turn's cap is reached, or
-   * while a turn is running: steering carries no invocation, so a pill picked
-   * there would silently apply to some later message. Prompts are text and stay
-   * available throughout.
-   */
-  const slashOptions = (slash?.options ?? []).filter((option) => {
-    if (option.kind === "prompt") return true;
-    if (active || atSkillCap) return false;
-    return !invokedSkills.includes(option.name);
+  /** What a pick can still reach, given what this message already carries. */
+  const slashOptions = availableSlashOptions(slash?.options ?? [], invokedSkills, {
+    steering: active,
   });
   const slashMatches = slashToken
     ? filterSlashOptions(slashOptions, slashToken.query)
     : [];
   // Skills vanish from the list at the cap, which would otherwise read as a
   // catalog that has lost them. The note says which bound was reached.
-  const slashCapNote = slashToken !== null && !active && atSkillCap;
+  const capNote = !active && atSkillCap;
+  const slashCapNote = slashToken !== null && capNote;
   // An open list with nothing in it is a panel over the draft saying nothing.
   const slashOpen =
     slashToken !== null && (slashMatches.length > 0 || slashCapNote);
@@ -354,34 +350,43 @@ export function Composer({
   }
 
   /**
-   * Take the `/query` out of the draft, and do what the row promised.
+   * Do what the row promised, and take the `/query` out of the draft when the
+   * pick came from one.
    *
    * A skill leaves a pill behind: the name travels beside the message rather
-   * than inside it, so nothing has to be parsed back out of prose. A prompt is
-   * text, so its body replaces the token — fetched only now, because the
-   * catalog deliberately carries no bodies.
+   * than inside it, so nothing has to be parsed back out of prose. A bundle
+   * leaves one per member skill, and turns itself on first if it was off. A
+   * prompt is text, so its body goes into the draft — fetched only now, because
+   * the catalog deliberately carries no bodies.
    */
-  function selectSlashOption(option: SlashOption) {
-    const token = slashToken;
-    if (!slash || !token) return;
-    const caret = token.start + 1 + token.query.length;
-    setSlashToken(null);
-    if (option.kind === "skill") {
-      applySlashReplacement(draft, token.start, caret, "");
-      slash.onInvoke(option.name);
+  function pickOption(
+    option: SlashOption,
+    token: { start: number; query: string } | null,
+  ) {
+    if (!slash) return;
+    const caret = token ? token.start + 1 + token.query.length : 0;
+    if (option.kind === "prompt") {
+      void (async () => {
+        let body: string;
+        try {
+          body = await slash.loadPromptBody(option.name);
+        } catch {
+          // Picking is not a place to raise an error: a body that cannot be
+          // read leaves the draft exactly as the reader typed it, token and all.
+          return;
+        }
+        if (token) applySlashReplacement(draft, token.start, caret, body);
+        else insertAtSelection(body);
+      })();
       return;
     }
-    void (async () => {
-      let body: string;
-      try {
-        body = await slash.loadPromptBody(option.name);
-      } catch {
-        // Picking is not a place to raise an error: a body that cannot be read
-        // leaves the draft exactly as the reader typed it, `/` token and all.
-        return;
-      }
-      applySlashReplacement(draft, token.start, caret, body);
-    })();
+    if (token) applySlashReplacement(draft, token.start, caret, "");
+    if (option.kind === "plugin") {
+      const plugin = plugins?.items.find((item) => item.name === option.name);
+      if (plugin) plugins?.onSelect(plugin);
+    }
+    const names = skillsToInvoke(option, invokedSkills);
+    if (names.length > 0) slash.onInvoke(names);
   }
 
   function applySlashReplacement(
@@ -391,13 +396,32 @@ export function Composer({
     replacement: string,
   ) {
     const next = replaceSlashToken(source, start, caret, replacement);
-    selectionRef.current = { start: next.caret, end: next.caret };
-    onDraftChange(next.text);
+    moveCaret(next.text, next.caret);
+  }
+
+  /** Text put in where the reader last had the caret, without running words together. */
+  function insertAtSelection(text: string) {
+    const remembered = selectionRef.current;
+    const start = Math.min(remembered?.start ?? draft.length, draft.length);
+    const end = Math.min(remembered?.end ?? draft.length, draft.length);
+    const before = draft.slice(0, start);
+    const gap = before && !/\s$/.test(before) ? " " : "";
+    moveCaret(
+      `${before}${gap}${text}${draft.slice(end)}`,
+      before.length + gap.length + text.length,
+    );
+  }
+
+  function moveCaret(text: string, caret: number) {
+    selectionRef.current = { start: caret, end: caret };
+    onDraftChange(text);
+    // After the panel or menu has closed and the new value has been painted;
+    // focusing while either is still up hands focus straight back to it.
     window.requestAnimationFrame(() => {
       const field = textareaRef.current;
       if (!field || field.disabled) return;
       field.focus();
-      field.setSelectionRange(next.caret, next.caret);
+      field.setSelectionRange(caret, caret);
     });
   }
 
@@ -414,23 +438,17 @@ export function Composer({
     // A list showing only the cap note has nothing to move through or pick, so
     // Enter stays what it always is: send.
     if (slashMatches.length === 0) return false;
-    if (event.key === "ArrowDown") {
-      setSlashHighlight((current) => (current + 1) % slashMatches.length);
-      return true;
-    }
-    if (event.key === "ArrowUp") {
-      setSlashHighlight(
-        (current) =>
-          (Math.min(current, slashMatches.length - 1) +
-            slashMatches.length -
-            1) %
-          slashMatches.length,
-      );
+    const moved = nextOptionHighlight(event.key, slashIndex, slashMatches.length);
+    if (moved !== null) {
+      setSlashHighlight(moved);
       return true;
     }
     if (event.key === "Enter" || event.key === "Tab") {
       const option = slashMatches[slashIndex];
-      if (option) selectSlashOption(option);
+      if (option) {
+        setSlashToken(null);
+        pickOption(option, slashToken);
+      }
       return true;
     }
     return false;
@@ -470,37 +488,6 @@ export function Composer({
       start: textarea.selectionStart,
       end: textarea.selectionEnd,
     };
-  }
-
-  /**
-   * Turn the bundle on, then say so in the message being written.
-   *
-   * The caret is restored after the insertion so the reader carries on typing
-   * their request where the sentence left off, rather than at the end of a
-   * draft they may have been editing in the middle of. A draft nobody has put
-   * a caret in yet — a starter prompt, a transcript — is appended to.
-   */
-  function engagePlugin(plugin: PluginInfo) {
-    plugins?.onSelect(plugin);
-    const remembered = selectionRef.current;
-    const start = Math.min(remembered?.start ?? draft.length, draft.length);
-    const end = Math.min(remembered?.end ?? draft.length, draft.length);
-    const { text, caret } = insertPluginDirective(
-      draft,
-      pluginDirective(plugin.display_name),
-      start,
-      end,
-    );
-    selectionRef.current = { start: caret, end: caret };
-    onDraftChange(text);
-    // After the menu has closed and the new value has been painted; focusing
-    // while the menu is still up hands focus straight back to the trigger.
-    window.requestAnimationFrame(() => {
-      const field = textareaRef.current;
-      if (!field || field.disabled) return;
-      field.focus();
-      field.setSelectionRange(caret, caret);
-    });
   }
 
   function endDrag() {
@@ -631,69 +618,49 @@ export function Composer({
           {invokedSkills.map((name) => (
             <InvokedSkillChip
               key={name}
-              label={skillLabel(slash.options, name)}
+              option={skillOption(slash.options, name)}
+              name={name}
+              // Steering carries no invocation, so a chip is set aside for as
+              // long as a turn is running rather than silently applying later.
+              inactive={active}
               onRemove={() => slash.onRemove(name)}
             />
           ))}
         </ul>
       )}
+      {panelQuery !== null && slash && (
+        <PluginsPanel
+          options={slashOptions}
+          query={panelQuery}
+          capNote={capNote}
+          onQueryChange={setPanelQuery}
+          onPick={(option) => {
+            setPanelQuery(null);
+            pickOption(option, null);
+          }}
+          onClose={() => setPanelQuery(null)}
+        />
+      )}
       {slashOpen && (
         // In flow above the field rather than floating over it: the composer
         // clips its own overflow to keep its rounded edge, so a panel anchored
         // above the box would be cut off at the border.
-        <ul
-          id="composer-slash-list"
-          role="listbox"
-          aria-label="Skills and prompts"
-          className="m-0 max-h-56 list-none overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
-        >
-          {slashMatches.map((option, index) => (
-            <li key={`${option.kind}:${option.name}`}>
-              <button
-                type="button"
-                id={`composer-slash-option-${index}`}
-                role="option"
-                aria-selected={index === slashIndex}
-                className={cn(
-                  "flex w-full items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
-                  index === slashIndex && "bg-accent text-accent-foreground",
-                )}
-                // Taken on mousedown so the field never loses the caret the
-                // insertion is about to be made at.
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => selectSlashOption(option)}
-              >
-                {option.kind === "skill" ? (
-                  <Wand2
-                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <Sparkles
-                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                )}
-                <span className="flex min-w-0 flex-col">
-                  <span className="truncate">{option.label}</span>
-                  {option.description && (
-                    <span className="truncate text-xs text-muted-foreground">
-                      {option.description}
-                    </span>
-                  )}
-                </span>
-                <span className="ml-auto shrink-0 pl-2 text-[0.68rem] text-muted-foreground">
-                  {option.kind === "skill" ? "Skill" : "Prompt"}
-                </span>
-              </button>
-            </li>
-          ))}
-          {slashCapNote && (
-            <li className="px-2 py-1.5 text-xs text-muted-foreground">
-              {`A message can invoke at most ${MAX_INVOKED_SKILLS} skills.`}
-            </li>
-          )}
-        </ul>
+        <div className="rounded-md border border-border bg-popover text-popover-foreground shadow-md">
+          <OptionListbox
+            listId={SLASH_LIST_ID}
+            label={PLUGINS_PANEL_LABEL}
+            rows={pluginOptionRows(slashMatches)}
+            activeIndex={slashIndex}
+            note={slashCapNote ? skillCapNote() : null}
+            onPick={(index) => {
+              const option = slashMatches[index];
+              if (!option) return;
+              setSlashToken(null);
+              pickOption(option, slashToken);
+            }}
+            onHighlight={setSlashHighlight}
+          />
+        </div>
       )}
       <textarea
         ref={textareaRef}
@@ -712,9 +679,9 @@ export function Composer({
                 : "Message OpenWave…"
         }
         aria-label="Message"
-        aria-controls={slashOpen ? "composer-slash-list" : undefined}
+        aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
         aria-activedescendant={
-          slashOpen ? `composer-slash-option-${slashIndex}` : undefined
+          slashOpen ? optionElementId(SLASH_LIST_ID, slashIndex) : undefined
         }
         // A stable hook for the shell's focus-composer shortcut, which has to
         // find the field without a ref threaded up through every route.
@@ -757,8 +724,13 @@ export function Composer({
             network={network}
             reasoning={reasoning}
             plugins={
-              plugins
-                ? { items: plugins.items, onSelect: engagePlugin }
+              slash && slash.options.length > 0
+                ? {
+                    onOpen: () => {
+                      setSlashToken(null);
+                      setPanelQuery("");
+                    },
+                  }
                 : undefined
             }
           />
@@ -921,12 +893,14 @@ export function Composer({
   );
 }
 
-/** What the catalog calls a skill, falling back to its slug if it has gone. */
-function skillLabel(options: readonly SlashOption[], name: string): string {
-  const option = options.find(
+/** What the catalog calls a skill, or nothing if the catalog has lost it. */
+function skillOption(
+  options: readonly SlashOption[],
+  name: string,
+): SlashOption | undefined {
+  return options.find(
     (candidate) => candidate.kind === "skill" && candidate.name === name,
   );
-  return option?.label ?? name;
 }
 
 /**
@@ -934,36 +908,48 @@ function skillLabel(options: readonly SlashOption[], name: string): string {
  *
  * A pill rather than words in the draft: the invocation is a field on the
  * message, so it has to be visible and removable as one thing, not as text the
- * reader could half-delete.
+ * reader could half-delete. It carries the icon of the library it came from,
+ * which is what makes the several a bundle leaves behind read as one pick.
  */
 function InvokedSkillChip({
-  label,
+  option,
+  name,
+  inactive,
   onRemove,
 }: {
-  label: string;
+  option: SlashOption | undefined;
+  name: string;
+  inactive: boolean;
   onRemove: () => void;
 }) {
+  const label = option?.label ?? name;
+  const Icon = option ? optionIcon(option) : Wand2;
   return (
-    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
-      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
-        <Wand2 size={16} aria-hidden="true" />
+    <li
+      className={cn(
+        "relative flex min-w-0 max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 py-1 pl-2 pr-7 text-muted-foreground",
+        inactive && "opacity-60",
+      )}
+    >
+      <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-background">
+        <Icon size={14} aria-hidden="true" />
       </span>
-      <span className="grid min-w-0 gap-px">
-        <strong
-          className="max-w-[12rem] truncate text-xs font-semibold text-foreground"
-          title={label}
-        >
-          {label}
-        </strong>
-        <small className="text-[0.68rem]">Skill</small>
+      <span
+        className="max-w-[12rem] truncate text-xs font-semibold text-foreground"
+        title={label}
+      >
+        {label}
       </span>
+      <small className="text-[0.68rem]">
+        {inactive ? "Next message" : "Skill"}
+      </small>
       <button
         type="button"
-        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+        className="absolute right-1 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${label}`}
         onClick={onRemove}
       >
-        <X size={14} aria-hidden="true" />
+        <X size={13} aria-hidden="true" />
       </button>
     </li>
   );

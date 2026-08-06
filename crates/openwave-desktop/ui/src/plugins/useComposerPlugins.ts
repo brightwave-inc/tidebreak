@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 
 import type { ApiClient } from "@/api";
-import type { ComposerPlugins } from "@/ComposerToolsMenu";
+import type { ComposerPlugins } from "@/Composer";
 import { slashOptionsFromCatalog, type SlashOption } from "@/ComposerSlash";
 import { pluginsApisFromClient } from "./pluginsApis";
 import { usePluginCatalog } from "./usePluginCatalog";
@@ -17,7 +17,7 @@ import { usePluginCatalog } from "./usePluginCatalog";
 export type ComposerPluginLibrary = {
   /** Absent while loading, after a failed load, or when nothing is installed. */
   plugins: ComposerPlugins | undefined;
-  /** Enabled skills and prompts, flat, for the `/` list. */
+  /** Enabled bundles, skills, and prompts, flat, for the composer's panel. */
   slashOptions: SlashOption[];
   loadPromptBody: (name: string) => Promise<string>;
 };

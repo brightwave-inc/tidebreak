@@ -304,10 +304,10 @@ export function HomeRoute() {
             slash={{
               options: composerPlugins.slashOptions,
               invoked: pendingSkills,
-              onInvoke: (name) =>
+              onInvoke: (names) =>
                 composerDraftActions.setSkills(HOME_DRAFT_KEY, [
                   ...pendingSkills,
-                  name,
+                  ...names,
                 ]),
               onRemove: (name) =>
                 composerDraftActions.setSkills(
