@@ -10,8 +10,11 @@ import {
 import type { ApiClient, Chat } from "./api";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
-import { useComposerDraft } from "./ComposerDrafts";
 import {
+  useComposerAttachments,
+  useComposerDraft,
+  useComposerDrafts,
+} from "./ComposerDrafts";import {
   Composer,
   type ComposerFiles,
   type ComposerFolders,
@@ -107,6 +110,7 @@ export function ChatView({
   // reloading its engine mid-typing.
   const draft = useComposerDraft(chat.id);
   const composerPlugins = useComposerPlugins(client);
+  const invokedSkills = useComposerAttachments(chat.id).skills;
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
@@ -415,7 +419,23 @@ export function ChatView({
           permissionMenu={composerPermissionMenu}
           network={composerNetwork}
           reasoning={composerReasoning}
-          plugins={composerPlugins}
+          plugins={composerPlugins.plugins}
+          slash={{
+            options: composerPlugins.slashOptions,
+            invoked: invokedSkills,
+            onInvoke: (name) =>
+              useComposerDrafts
+                .getState()
+                .setSkills(chat.id, [...invokedSkills, name]),
+            onRemove: (name) =>
+              useComposerDrafts
+                .getState()
+                .setSkills(
+                  chat.id,
+                  invokedSkills.filter((skill) => skill !== name),
+                ),
+            loadPromptBody: composerPlugins.loadPromptBody,
+          }}
           images={composerImages}
           files={files}
           folders={folders}

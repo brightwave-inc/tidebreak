@@ -173,7 +173,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   useEffect(() => {
     if (!chat || !hydrated) return;
     const pending = firstMessageActions.take(chatId);
-    if (pending) void sendMessage(pending.text, pending.images, pending.files);
+    if (pending) {
+      void sendMessage(
+        pending.text,
+        pending.images,
+        pending.files,
+        pending.skills,
+      );
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat, chatId, hydrated]);
 
@@ -357,6 +364,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     content: string,
     imageItems: readonly ImageAttachment[] = images.attachments,
     fileItems: readonly ImportedDocument[] = files,
+    skillNames: readonly string[] = invokedSkills(),
   ) {
     await postTurn({
       content,
@@ -368,8 +376,18 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         name: file.displayName,
         mediaType: file.mediaType,
       })),
+      invokedSkills: skillNames,
       fromComposer: true,
     });
+  }
+
+  /**
+   * The skills the composer is holding, read outside a render: the route does
+   * not subscribe to the draft, so a pill picked in the pane below has to be
+   * read from the store at the moment the turn is posted.
+   */
+  function invokedSkills(): readonly string[] {
+    return useComposerDrafts.getState().attachments[chatId]?.skills ?? [];
   }
 
   /**
@@ -389,6 +407,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       transcriptImages: [...turn.images],
       documentIds: turn.files.map((file) => file.documentId),
       transcriptFiles: [...turn.files],
+      // A retry resends what the transcript holds, and the transcript does not
+      // yet carry the skills a turn was invoked with — so a retried turn is the
+      // ordinary send, with the composer's own pills left out of it.
+      invokedSkills: [],
       fromComposer: false,
     });
   }
@@ -404,6 +426,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     transcriptImages,
     documentIds,
     transcriptFiles,
+    invokedSkills: skillNames,
     fromComposer,
   }: {
     content: string;
@@ -411,6 +434,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     transcriptImages: readonly TranscriptImageAttachment[];
     documentIds: readonly string[];
     transcriptFiles: readonly TranscriptFileAttachment[];
+    invokedSkills: readonly string[];
     fromComposer: boolean;
   }) {
     if (!chat || !content || busy || deletingChatId !== null) return;
@@ -442,15 +466,18 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         content,
         attachments,
         documentIds,
+        skillNames,
       );
       // Only once the turn is durably accepted, and only for what the composer
       // actually contributed. A refused send — an image the selected model
-      // cannot read, say — must leave the attachments where the reader can fix
-      // the problem and try again; a retry must not throw away attachments the
-      // reader has queued for their *next* message.
+      // cannot read, or a skill this install can no longer run — must leave the
+      // attachments and the pills where the reader can fix the problem and try
+      // again; a retry must not throw away attachments the reader has queued
+      // for their *next* message.
       if (fromComposer) {
         images.clear();
         setComposerFiles(() => []);
+        composerDraftActions.setSkills(chatId, []);
       }
     } catch (err) {
       // Nothing was accepted, so the message has to go back to where it can be

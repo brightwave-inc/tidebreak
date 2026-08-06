@@ -6,6 +6,8 @@ export type PendingFirstMessage = {
   text: string;
   images: ImageAttachment[];
   files: ImportedDocument[];
+  /** Skills picked on home, which only the chat route can actually post. */
+  skills: string[];
 };
 
 /**

@@ -94,6 +94,7 @@ export function HomeRoute() {
   const pendingChatId = attachments.pendingChatId;
   const pendingImages = attachments.images;
   const pendingFiles = attachments.files;
+  const pendingSkills = attachments.skills;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
 
@@ -239,6 +240,7 @@ export function HomeRoute() {
         text: content,
         images: pendingImages,
         files: pendingFiles,
+        skills: pendingSkills,
       });
       // Clear the home draft only once navigation has committed. If it throws,
       // the message lives only in the FirstMessage store with no composer
@@ -298,7 +300,22 @@ export function HomeRoute() {
             cancelPending={false}
             disabled={creatingChat}
             draft={draft}
-            plugins={composerPlugins}
+            plugins={composerPlugins.plugins}
+            slash={{
+              options: composerPlugins.slashOptions,
+              invoked: pendingSkills,
+              onInvoke: (name) =>
+                composerDraftActions.setSkills(HOME_DRAFT_KEY, [
+                  ...pendingSkills,
+                  name,
+                ]),
+              onRemove: (name) =>
+                composerDraftActions.setSkills(
+                  HOME_DRAFT_KEY,
+                  pendingSkills.filter((skill) => skill !== name),
+                ),
+              loadPromptBody: composerPlugins.loadPromptBody,
+            }}
             images={composerImages}
             voice={{
               available: voice.available,

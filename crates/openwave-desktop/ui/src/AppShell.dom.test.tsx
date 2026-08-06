@@ -326,6 +326,7 @@ describe("app shell", () => {
         "summarise the filing",
         [],
         [],
+        [],
       ),
     );
     expect(

@@ -559,6 +559,33 @@ describe("parseToolActionPreview", () => {
   });
 });
 
+describe("sending a message", () => {
+  it("carries the invoked skills beside the prose the reader typed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.postMessage(
+      "chat-1",
+      "turn-1",
+      "make the deck",
+      [],
+      ["doc-1"],
+      ["pptx"],
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1/chats/chat-1/messages");
+    expect(JSON.parse(String(init.body))).toEqual({
+      turn_id: "turn-1",
+      content: "make the deck",
+      attachments: [],
+      file_attachments: ["doc-1"],
+      invoked_skills: ["pptx"],
+    });
+  });
+});
+
 describe("active turn steering", () => {
   it("posts an interrupt against the exact chat, turn, and stable identity", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
