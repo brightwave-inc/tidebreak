@@ -247,9 +247,10 @@ pub async fn delete_provider_credential(
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
     refuse_credential_writes_when_managed(&state).await?;
     if kind == ProviderKind::Openai {
-        // Prefer the ChatGPT runtime so an in-flight sign-in is cancelled too.
+        // Revoke through the runtime first so an in-flight sign-in is
+        // cancelled; the delete below still has to run because the stored
+        // credential may be an API key rather than the OAuth marker.
         state.chatgpt.sign_out().await?;
-        return Ok(StatusCode::NO_CONTENT);
     }
     providers::delete_credential(&*state.secrets, kind).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -262,7 +263,9 @@ pub async fn post_openai_chatgpt_sign_in(
 ) -> Result<Json<serde_json::Value>, ServerError> {
     refuse_credential_writes_when_managed(&state).await?;
     let authorization_url = state.chatgpt.begin_sign_in().await?;
-    Ok(Json(serde_json::json!({ "authorization_url": authorization_url })))
+    Ok(Json(
+        serde_json::json!({ "authorization_url": authorization_url }),
+    ))
 }
 
 /// `POST /providers/openai/chatgpt/sign-out` — revoke and clear ChatGPT OAuth.

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type {
   ApiClient,
@@ -23,6 +23,9 @@ import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { providerLabel } from "../ModelSelection";
 
 const CHATGPT_SIGN_IN_POLL_MS = 2_000;
+// Matches the server's sign-in window; polling past it can only report a
+// timeout the server has already recorded.
+const CHATGPT_SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function ProvidersPanel({
   providers,
@@ -462,12 +465,20 @@ function OpenAiCredentialSection({
 }) {
   const signedInWithChatgpt = info.auth_mode === "chatgpt" && info.has_credential;
   const pollRef = useRef<number | null>(null);
+  const pollDeadlineRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    return () => {
-      if (pollRef.current !== null) window.clearInterval(pollRef.current);
-    };
+  const stopPolling = useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (pollDeadlineRef.current !== null) {
+      window.clearTimeout(pollDeadlineRef.current);
+      pollDeadlineRef.current = null;
+    }
   }, []);
+
+  useEffect(() => stopPolling, [stopPolling]);
 
   async function signInWithChatgpt() {
     setSaving(true);
@@ -476,31 +487,31 @@ function OpenAiCredentialSection({
       const { authorization_url } = await client.openaiChatgptSignIn();
       await openSignInPage(authorization_url);
       toast.message("Finish signing in with ChatGPT in your browser");
-      if (pollRef.current !== null) window.clearInterval(pollRef.current);
+      stopPolling();
       pollRef.current = window.setInterval(() => {
         void client
-          .listProviders()
-          .then(({ providers }) => {
-            const openai = providers.find((provider) => provider.kind === "openai");
-            if (openai?.auth_mode === "chatgpt" && openai.has_credential) {
-              if (pollRef.current !== null) {
-                window.clearInterval(pollRef.current);
-                pollRef.current = null;
-              }
+          .getOpenaiChatgptStatus()
+          .then((status) => {
+            if (status.error) {
+              stopPolling();
+              setError(status.error);
+              toast.error("ChatGPT sign-in failed");
+              return;
+            }
+            if (status.signed_in) {
+              stopPolling();
               onChanged();
               toast.success("Signed in with ChatGPT");
             }
           })
           .catch(() => {
-            /* keep polling until timeout elsewhere */
+            /* transient; keep polling until the deadline below */
           });
       }, CHATGPT_SIGN_IN_POLL_MS);
-      window.setTimeout(() => {
-        if (pollRef.current !== null) {
-          window.clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
-      }, 5 * 60 * 1000);
+      pollDeadlineRef.current = window.setTimeout(
+        stopPolling,
+        CHATGPT_SIGN_IN_TIMEOUT_MS,
+      );
     } catch (err) {
       setError(String(err));
     } finally {

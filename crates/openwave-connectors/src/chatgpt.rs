@@ -10,6 +10,7 @@
 //! is the well-known Codex public client. The product surface is ours
 //! (`originator=openwave`); the OAuth identity is shared.
 
+use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,7 +18,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use base64::engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use openwave_core::{AgentError, Result, SecretProvider};
 use serde::{Deserialize, Serialize};
@@ -336,14 +337,12 @@ impl ChatGptAuth {
             .account_id
             .filter(|id| !id.is_empty())
             .or_else(|| extract_account_id(&token.access_token))
-            .or_else(|| {
-                token
-                    .id_token
-                    .as_deref()
-                    .and_then(extract_account_id)
-            })
+            .or_else(|| token.id_token.as_deref().and_then(extract_account_id))
             .ok_or_else(|| {
-                chatgpt_error("token request", "response did not include a ChatGPT account id")
+                chatgpt_error(
+                    "token request",
+                    "response did not include a ChatGPT account id",
+                )
             })?;
         Ok(ChatGptCredentials {
             access_token: token.access_token,
@@ -393,10 +392,13 @@ impl ChatGptPendingSignIn {
                 expected_state: state,
                 sender,
             });
-        let server = tokio::spawn(async move { axum::serve(listener, callback_app).await });
-        let outcome = tokio::time::timeout(timeout, receiver.recv()).await;
-        server.abort();
-        let _ = server.await;
+        // The callback server runs inside this future rather than a detached
+        // task so that cancelling the waiter releases the callback port; a
+        // leaked listener would block every later sign-in.
+        let outcome = tokio::select! {
+            outcome = tokio::time::timeout(timeout, receiver.recv()) => outcome,
+            _ = axum::serve(listener, callback_app).into_future() => Ok(None),
+        };
 
         let callback = outcome
             .map_err(|_| chatgpt_error("sign-in", "browser authorization timed out"))?
@@ -513,6 +515,12 @@ async fn callback(
     Query(query): Query<CallbackQuery>,
 ) -> Response {
     if query.state.as_deref() != Some(state.expected_state.as_str()) {
+        // Report the mismatch so the waiter fails now instead of holding the
+        // callback port until the sign-in timeout expires.
+        let _ = state.sender.try_send(CallbackResult {
+            code: None,
+            error: Some("authorization state did not match".to_owned()),
+        });
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Html(callback_page(

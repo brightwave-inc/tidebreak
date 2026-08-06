@@ -20,11 +20,22 @@ use crate::providers::{self, ProviderCredential, ProviderKind};
 
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum SignInProgress {
+    #[default]
     Idle,
-    Pending { authorization_url: String },
-    Failed { message: String },
+    Pending {
+        authorization_url: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Default)]
+struct SignInState {
+    progress: SignInProgress,
+    waiter: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Process-local ChatGPT OAuth handle shared by provider routes and routing.
@@ -32,7 +43,7 @@ pub struct ChatGptRuntime {
     connection: Arc<ChatGptConnection>,
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
-    sign_in: Mutex<SignInProgress>,
+    sign_in: Mutex<SignInState>,
     sign_in_generation: AtomicU64,
 }
 
@@ -44,7 +55,7 @@ impl ChatGptRuntime {
             connection: Arc::new(ChatGptConnection::new(auth, vault)),
             store,
             secrets,
-            sign_in: Mutex::new(SignInProgress::Idle),
+            sign_in: Mutex::new(SignInState::default()),
             sign_in_generation: AtomicU64::new(0),
         })
     }
@@ -72,6 +83,9 @@ impl ChatGptRuntime {
     /// Callers must refuse managed profiles before invoking this — BYO OpenAI
     /// credentials (key or ChatGPT OAuth) are locked out there.
     pub async fn begin_sign_in(self: &Arc<Self>) -> Result<String, ServerError> {
+        // A previous attempt still owns the fixed callback port, so it has to
+        // be torn down before the new listener can bind.
+        self.cancel_pending().await;
         let pending = self
             .connection
             .auth()
@@ -79,23 +93,20 @@ impl ChatGptRuntime {
             .await
             .map_err(ServerError::from)?;
         let authorization_url = pending.authorization_url().to_string();
-        let generation = {
-            let mut sign_in = self.sign_in.lock().await;
-            let generation = self.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            *sign_in = SignInProgress::Pending {
-                authorization_url: authorization_url.clone(),
-            };
-            generation
-        };
 
+        let mut sign_in = self.sign_in.lock().await;
+        let generation = self.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        sign_in.progress = SignInProgress::Pending {
+            authorization_url: authorization_url.clone(),
+        };
         let runtime = self.clone();
-        tokio::spawn(async move {
+        sign_in.waiter = Some(tokio::spawn(async move {
             let finished = pending.finish(SIGN_IN_TIMEOUT).await;
             let mut sign_in = runtime.sign_in.lock().await;
             if runtime.sign_in_generation.load(Ordering::SeqCst) != generation {
                 return;
             }
-            *sign_in = match finished {
+            sign_in.progress = match finished {
                 Ok(session) => match runtime.persist_session(&session).await {
                     Ok(()) => SignInProgress::Idle,
                     Err(error) => SignInProgress::Failed {
@@ -106,9 +117,22 @@ impl ChatGptRuntime {
                     message: error.to_string(),
                 },
             };
-        });
+        }));
 
         Ok(authorization_url)
+    }
+
+    /// Abandon any in-flight sign-in and wait for its callback listener to go
+    /// away. Aborting alone is not enough: the port is only freed once the
+    /// task has actually been dropped.
+    async fn cancel_pending(&self) {
+        self.sign_in_generation.fetch_add(1, Ordering::SeqCst);
+        let mut sign_in = self.sign_in.lock().await;
+        sign_in.progress = SignInProgress::Idle;
+        if let Some(waiter) = sign_in.waiter.take() {
+            waiter.abort();
+            let _ = waiter.await;
+        }
     }
 
     async fn persist_session(
@@ -134,9 +158,11 @@ impl ChatGptRuntime {
 
     /// Revoke best-effort, clear vault and Oauth marker.
     pub async fn sign_out(&self) -> Result<(), ServerError> {
-        self.sign_in_generation.fetch_add(1, Ordering::SeqCst);
-        *self.sign_in.lock().await = SignInProgress::Idle;
-        self.connection.sign_out().await.map_err(ServerError::from)?;
+        self.cancel_pending().await;
+        self.connection
+            .sign_out()
+            .await
+            .map_err(ServerError::from)?;
         if matches!(
             providers::read_credential(&*self.secrets, ProviderKind::Openai).await?,
             Some(ProviderCredential::Oauth {})
@@ -148,7 +174,7 @@ impl ChatGptRuntime {
 
     /// Pending / failed status for the OpenAI Providers row.
     pub async fn status(&self) -> ChatGptSignInStatus {
-        let progress = self.sign_in.lock().await.clone();
+        let progress = self.sign_in.lock().await.progress.clone();
         let signed_in = openwave_connectors::has_stored_chatgpt_credentials(&*self.secrets).await;
         match progress {
             SignInProgress::Pending { authorization_url } => ChatGptSignInStatus {

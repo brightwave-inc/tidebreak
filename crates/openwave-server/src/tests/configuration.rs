@@ -2003,9 +2003,11 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
     )
     .await
     .unwrap());
-    assert!(providers::collect_routes(&*store, &*secrets, None, None, &policy)
-        .await
-        .is_empty());
+    assert!(
+        providers::collect_routes(&*store, &*secrets, None, None, &policy)
+            .await
+            .is_empty()
+    );
     assert!(providers::catalog_models(&*store, &*secrets, &policy)
         .await
         .unwrap()
@@ -2167,7 +2169,8 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy).await;
+    let routes =
+        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
     assert_eq!(

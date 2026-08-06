@@ -1983,7 +1983,8 @@ mod tests {
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
-        let routes = providers::collect_routes(&*store, &*runtime.secrets, None, None, &policy).await;
+        let routes =
+            providers::collect_routes(&*store, &*runtime.secrets, None, None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));
@@ -2080,7 +2081,8 @@ mod tests {
         // token source in hand, the gateway route is not built.
         assert!(runtime.route_token_source().await.is_none());
         let tokens: Arc<dyn BearerTokenSource> = Arc::new(StaticTokens);
-        let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
+        let routes =
+            providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));
