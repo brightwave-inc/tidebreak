@@ -129,8 +129,8 @@ pub enum PluginCapability {
     /// Produces deliverables in the workspace. Every skill teaches `exec`
     /// work that saves files, so any bundle with a member carries this.
     WriteFiles,
-    /// Reaches the network while running. Today that is the sandbox `pip`
-    /// install a declared Python dependency implies.
+    /// Reaches the network while running. Today that is the sandbox `pip` or
+    /// `npm` install a declared package dependency implies.
     Network,
     /// Needs a host-managed install outside the sandbox (a declared
     /// [`crate::HostDep`], e.g. the LibreOffice converter).
@@ -221,6 +221,10 @@ pub struct PluginInstallStamp {
 /// `has_scripts` is supplied separately from `SkillPackage` because scripts
 /// never affect prompt composition and therefore do not belong in that catalog
 /// type. Import is the boundary where both facts are available together.
+///
+/// Only Python pins are compared: the image build's requirements file is the
+/// source of truth for what is baked in, and there is no equivalent npm
+/// closure to check declared npm pins against yet.
 #[must_use]
 pub fn assess_plugin_compatibility(skills: &[(&SkillPackage, bool)]) -> PluginCompatibility {
     let mut issues = Vec::new();
@@ -298,9 +302,13 @@ pub fn derived_capabilities(
         // one member is enough for the bundle to write files.
         capabilities.insert(PluginCapability::WriteFiles);
     }
-    if members.iter().any(|skill| !skill.python_deps.is_empty()) {
-        // Declared Python deps are installed with `pip` inside the sandbox,
-        // which is a network reach under the current install flow.
+    if members
+        .iter()
+        .any(|skill| !skill.python_deps.is_empty() || !skill.npm_deps.is_empty())
+    {
+        // Declared package dependencies are installed with `pip` or `npm`
+        // inside the sandbox, which is a network reach under the current
+        // install flow.
         capabilities.insert(PluginCapability::Network);
     }
     if members.iter().any(|skill| !skill.host_deps.is_empty()) {
@@ -1144,20 +1152,27 @@ router-preamble: Pick by the file the user needs.\n\
     /// protects.
     #[test]
     fn capabilities_derive_from_member_deps_and_never_from_the_manifest() {
-        let skill = |name: &str, python: &[&str], host: &[HostDep]| SkillPackage {
+        let skill = |name: &str, python: &[&str], npm: &[&str], host: &[HostDep]| SkillPackage {
             name: name.to_owned(),
             description: "Does work.".to_owned(),
             python_deps: python.iter().map(|dep| (*dep).to_owned()).collect(),
+            npm_deps: npm.iter().map(|dep| (*dep).to_owned()).collect(),
             host_deps: host.to_vec(),
             origin: SkillOrigin::Builtin,
         };
-        let plain = skill("plain", &[], &[]);
-        let pip = skill("pip", &["python-docx==1.2.0"], &[]);
-        let hosted = skill("hosted", &[], &[HostDep::LibreOffice]);
-        let both = skill("both", &["python-pptx==1.0.2"], &[HostDep::LibreOffice]);
+        let plain = skill("plain", &[], &[], &[]);
+        let pip = skill("pip", &["python-docx==1.2.0"], &[], &[]);
+        let npm = skill("npm", &[], &["mermaid@11.4.1"], &[]);
+        let hosted = skill("hosted", &[], &[], &[HostDep::LibreOffice]);
+        let both = skill(
+            "both",
+            &["python-pptx==1.0.2"],
+            &[],
+            &[HostDep::LibreOffice],
+        );
         // Not a member of any plugin under test: a caller may pass the whole
         // catalog, and a non-member must never contribute a badge.
-        let outsider = skill("outsider", &["numpy==2.3.4"], &[HostDep::LibreOffice]);
+        let outsider = skill("outsider", &["numpy==2.3.4"], &[], &[HostDep::LibreOffice]);
 
         for (case, members, expected) in [
             ("no members", vec![], vec![]),
@@ -1169,6 +1184,11 @@ router-preamble: Pick by the file the user needs.\n\
             (
                 "python deps imply the pip install's network reach",
                 vec![&pip],
+                vec![PluginCapability::WriteFiles, PluginCapability::Network],
+            ),
+            (
+                "npm deps imply the same package-manager network reach",
+                vec![&npm],
                 vec![PluginCapability::WriteFiles, PluginCapability::Network],
             ),
             (

@@ -37,16 +37,16 @@ pub const SKILL_SCRIPTS_DIR: &str = "scripts";
 
 const MAX_NAME_BYTES: usize = 64;
 const MAX_DESCRIPTION_BYTES: usize = 200;
-const MAX_PYTHON_DEPS: usize = 8;
+const MAX_DEPS_PER_LIST: usize = 8;
 const MAX_DEP_BYTES: usize = 100;
 const MAX_SKILL_SCRIPTS: usize = 16;
 
 /// A host-provided tool a skill declares it wants, from a closed vocabulary.
 ///
-/// Unlike Python deps — free-form pins the sandbox installs — a host dep names
-/// a capability only the host can provide (a managed install outside the
-/// sandbox). The vocabulary is closed on purpose: an unknown value rejects the
-/// whole manifest rather than parsing into a string nothing can act on.
+/// Unlike language-package deps — free-form pins the sandbox installs — a host
+/// dep names a capability only the host can provide (a managed install outside
+/// the sandbox). The vocabulary is closed on purpose: an unknown value rejects
+/// the whole manifest rather than parsing into a string nothing can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostDep {
     /// LibreOffice, for converting office documents to renderable PDFs.
@@ -85,6 +85,9 @@ pub struct SkillPackage {
     pub description: String,
     /// Exactly pinned `package==version` Python requirements.
     pub python_deps: Vec<String>,
+    /// Exactly pinned `package@version` npm requirements, scoped names
+    /// included.
+    pub npm_deps: Vec<String>,
     /// Host-provided tools the skill's instructions depend on.
     pub host_deps: Vec<HostDep>,
     /// Where the package was loaded from.
@@ -167,15 +170,67 @@ pub(crate) fn is_pinned_python_dep(dep: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
+/// Whether `dep` is an exactly pinned npm requirement: `package@version`, or
+/// `@scope/package@version` for a scoped name.
+///
+/// The version must be a literal `major.minor.patch`, optionally carrying a
+/// prerelease or build suffix. Everything a range could hide behind — `^1.2.3`,
+/// `1.x`, `latest`, a bare name — fails here, so a declared dependency always
+/// names one immutable package version.
+pub(crate) fn is_pinned_npm_dep(dep: &str) -> bool {
+    if dep.is_empty() || dep.len() > MAX_DEP_BYTES {
+        return false;
+    }
+    // A scope's `@` is a prefix, so the last `@` is always the version's.
+    let Some((package, version)) = dep.rsplit_once('@') else {
+        return false;
+    };
+    is_npm_package_name(package) && is_exact_npm_version(version)
+}
+
+fn is_npm_package_name(name: &str) -> bool {
+    match name.strip_prefix('@') {
+        Some(scoped) => scoped.split_once('/').is_some_and(|(scope, unscoped)| {
+            is_npm_name_segment(scope) && is_npm_name_segment(unscoped)
+        }),
+        None => is_npm_name_segment(name),
+    }
+}
+
+fn is_npm_name_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+fn is_exact_npm_version(version: &str) -> bool {
+    let (core, suffix) = version.split_at(version.find(['-', '+']).unwrap_or(version.len()));
+    let mut components = core.split('.');
+    let mut numeric = || {
+        components.next().is_some_and(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    numeric()
+        && numeric()
+        && numeric()
+        && components.next().is_none()
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+}
+
 /// Parse one `SKILL.md` source: strict frontmatter between `---` fences,
 /// then a non-empty markdown instruction body. `origin` records which source
 /// the caller is loading from; it never comes from the manifest itself.
 ///
 /// Recognized frontmatter keys are exactly `name`, `description`, and the
-/// optional single-line `deps: { python: ["package==version", ...], host:
-/// ["libreoffice"] }` (either list may be omitted, not both). Duplicates, an
-/// unpinned dependency, an unknown host tool, or a control character in the
-/// description reject the whole manifest regardless of origin.
+/// optional single-line `deps: { python: ["package==version", ...], npm:
+/// ["package@version", ...], host: ["libreoffice"] }` (any list may be
+/// omitted, but not all of them). Duplicates, an unpinned dependency, an
+/// unknown host tool, or a control character in the description reject the
+/// whole manifest regardless of origin.
 ///
 /// Unknown keys split by origin. A [`SkillOrigin::Builtin`] manifest is a
 /// package we ship, so an unrecognized key there is a bug worth failing on. A
@@ -258,26 +313,41 @@ pub fn parse_skill_manifest(
     if body.trim().is_empty() {
         return Err(invalid("empty instruction body"));
     }
-    let (python_deps, host_deps) = deps.unwrap_or_default();
+    let SkillDeps {
+        python_deps,
+        npm_deps,
+        host_deps,
+    } = deps.unwrap_or_default();
     Ok(SkillPackage {
         name: name.to_owned(),
         description: description.to_owned(),
         python_deps,
+        npm_deps,
         host_deps,
         origin,
     })
 }
 
-/// Parse the single-line flow form `{ python: ["a==1"], host: ["libreoffice"] }`.
+/// The three dependency lists one `deps` entry may declare.
+#[derive(Debug, Default)]
+struct SkillDeps {
+    python_deps: Vec<String>,
+    npm_deps: Vec<String>,
+    host_deps: Vec<HostDep>,
+}
+
+/// Parse the single-line flow form
+/// `{ python: ["a==1"], npm: ["b@1.0.0"], host: ["libreoffice"] }`.
 ///
 /// Each key appears at most once and at least one must be present; every item
 /// is a double-quoted string. The quoted grammars downstream admit neither
 /// `"` nor `]`, so scanning for the closing bracket cannot land inside an
 /// item.
-fn parse_deps(value: &str) -> Result<(Vec<String>, Vec<HostDep>), SkillParseError> {
+fn parse_deps(value: &str) -> Result<SkillDeps, SkillParseError> {
     let malformed = || {
         invalid(
-            "'deps' must be `{ python: [\"package==version\", ...], host: [\"libreoffice\"] }` \
+            "'deps' must be `{ python: [\"package==version\", ...], \
+             npm: [\"package@version\", ...], host: [\"libreoffice\"] }` \
              with at least one list",
         )
     };
@@ -287,6 +357,7 @@ fn parse_deps(value: &str) -> Result<(Vec<String>, Vec<HostDep>), SkillParseErro
         .ok_or_else(malformed)?
         .trim();
     let mut python: Option<Vec<String>> = None;
+    let mut npm: Option<Vec<String>> = None;
     let mut host: Option<Vec<HostDep>> = None;
     while !inner.is_empty() {
         let (key, rest) = inner.split_once(':').ok_or_else(malformed)?;
@@ -294,8 +365,21 @@ fn parse_deps(value: &str) -> Result<(Vec<String>, Vec<HostDep>), SkillParseErro
         let (list, tail) = rest.split_once(']').ok_or_else(malformed)?;
         match key.trim() {
             "python" => {
-                if python.replace(parse_python_deps(list.trim())?).is_some() {
+                let parsed = parse_pinned_deps(
+                    list.trim(),
+                    "python",
+                    "package==version",
+                    is_pinned_python_dep,
+                )?;
+                if python.replace(parsed).is_some() {
                     return Err(invalid("duplicate 'python' list in 'deps'"));
+                }
+            }
+            "npm" => {
+                let parsed =
+                    parse_pinned_deps(list.trim(), "npm", "package@version", is_pinned_npm_dep)?;
+                if npm.replace(parsed).is_some() {
+                    return Err(invalid("duplicate 'npm' list in 'deps'"));
                 }
             }
             "host" => {
@@ -315,17 +399,27 @@ fn parse_deps(value: &str) -> Result<(Vec<String>, Vec<HostDep>), SkillParseErro
             return Err(malformed());
         }
     }
-    if python.is_none() && host.is_none() {
+    if python.is_none() && npm.is_none() && host.is_none() {
         return Err(invalid("'deps' lists nothing"));
     }
-    Ok((python.unwrap_or_default(), host.unwrap_or_default()))
+    Ok(SkillDeps {
+        python_deps: python.unwrap_or_default(),
+        npm_deps: npm.unwrap_or_default(),
+        host_deps: host.unwrap_or_default(),
+    })
 }
 
-/// Parse the items of one `python: [...]` list.
-fn parse_python_deps(items: &str) -> Result<Vec<String>, SkillParseError> {
-    let malformed = || invalid("'deps' python items must be `\"package==version\"` strings");
+/// Parse the items of one exactly pinned dependency list, where `form` is the
+/// pin shape the ecosystem's `is_pinned` predicate accepts.
+fn parse_pinned_deps(
+    items: &str,
+    key: &str,
+    form: &str,
+    is_pinned: fn(&str) -> bool,
+) -> Result<Vec<String>, SkillParseError> {
+    let malformed = || invalid(format!("'deps' {key} items must be `\"{form}\"` strings"));
     if items.is_empty() {
-        return Err(invalid("'deps' python list is empty"));
+        return Err(invalid(format!("'deps' {key} list is empty")));
     }
     let mut deps = Vec::new();
     for item in items.split(',') {
@@ -334,15 +428,17 @@ fn parse_python_deps(items: &str) -> Result<Vec<String>, SkillParseError> {
             .strip_prefix('"')
             .and_then(|rest| rest.strip_suffix('"'))
             .ok_or_else(malformed)?;
-        if !is_pinned_python_dep(dep) {
+        if !is_pinned(dep) {
             return Err(invalid(format!(
-                "dependency is not exactly pinned as package==version: {dep:?}"
+                "{key} dependency is not exactly pinned as {form}: {dep:?}"
             )));
         }
         deps.push(dep.to_owned());
     }
-    if deps.len() > MAX_PYTHON_DEPS {
-        return Err(invalid("'deps' lists too many packages"));
+    if deps.len() > MAX_DEPS_PER_LIST {
+        return Err(invalid(format!(
+            "'deps' {key} list names too many packages"
+        )));
     }
     Ok(deps)
 }
@@ -601,7 +697,7 @@ Instructions live here.\n";
             ),
             (
                 "unknown deps key",
-                "---\nname: a\ndescription: b\ndeps: { npm: [\"left-pad==1.0.0\"] }\n---\nBody.\n",
+                "---\nname: a\ndescription: b\ndeps: { cargo: [\"serde@1.0.0\"] }\n---\nBody.\n",
             ),
             (
                 "trailing comma",
@@ -613,6 +709,64 @@ Instructions live here.\n";
                 "{case} should be rejected"
             );
         }
+    }
+
+    /// The `npm:` list holds the same discipline as `python:`: an exact
+    /// `package@version` pin, scoped names included, and nothing a range or a
+    /// floating tag could hide behind.
+    #[test]
+    fn npm_deps_parse_only_when_exactly_pinned() {
+        let source = "---\nname: diagrams\ndescription: Diagrams.\n\
+                      deps: { python: [\"pypdf==6.14.2\"], \
+                      npm: [\"mermaid@11.4.1\", \"@mermaid-js/mermaid-cli@11.4.2\"], \
+                      host: [\"libreoffice\"] }\n---\nBody.\n";
+        let package = parse_skill_manifest(source, SkillOrigin::Builtin).unwrap();
+        assert_eq!(package.python_deps, ["pypdf==6.14.2"]);
+        assert_eq!(
+            package.npm_deps,
+            ["mermaid@11.4.1", "@mermaid-js/mermaid-cli@11.4.2"]
+        );
+        assert_eq!(package.host_deps, [HostDep::LibreOffice]);
+
+        // npm alone satisfies "at least one list", and a prerelease pin is
+        // still an exact version.
+        let npm_only = "---\nname: a\ndescription: b\n\
+                        deps: { npm: [\"puppeteer@24.0.0-next.1\"] }\n---\nBody.\n";
+        let package = parse_skill_manifest(npm_only, SkillOrigin::Builtin).unwrap();
+        assert_eq!(package.npm_deps, ["puppeteer@24.0.0-next.1"]);
+        assert_eq!(package.python_deps, [""; 0]);
+
+        for (case, list) in [
+            ("caret range", "\"mermaid@^11.4.1\""),
+            ("tilde range", "\"mermaid@~11.4.1\""),
+            ("partial version", "\"mermaid@11.4\""),
+            ("wildcard version", "\"mermaid@11.x\""),
+            ("floating tag", "\"mermaid@latest\""),
+            ("no version", "\"mermaid\""),
+            ("scoped without version", "\"@mermaid-js/mermaid-cli\""),
+            ("scope without a name", "\"@mermaid-js@11.4.1\""),
+            ("uppercase name", "\"Mermaid@11.4.1\""),
+            ("python-style pin", "\"mermaid==11.4.1\""),
+            ("empty list", ""),
+            ("unquoted item", "mermaid@11.4.1"),
+            (
+                "too many packages",
+                "\"a@1.0.0\", \"b@1.0.0\", \"c@1.0.0\", \"d@1.0.0\", \"e@1.0.0\", \
+                 \"f@1.0.0\", \"g@1.0.0\", \"h@1.0.0\", \"i@1.0.0\"",
+            ),
+        ] {
+            let source =
+                format!("---\nname: a\ndescription: b\ndeps: {{ npm: [{list}] }}\n---\nBody.\n");
+            assert!(
+                parse_skill_manifest(&source, SkillOrigin::Builtin).is_err(),
+                "{case} should be rejected"
+            );
+        }
+
+        let duplicate = "---\nname: a\ndescription: b\n\
+                         deps: { npm: [\"mermaid@11.4.1\"], npm: [\"mermaid@11.4.1\"] }\n\
+                         ---\nBody.\n";
+        assert!(parse_skill_manifest(duplicate, SkillOrigin::Builtin).is_err());
     }
 
     #[test]
