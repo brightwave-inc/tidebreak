@@ -668,24 +668,22 @@ async fn disabling_drops_a_component_from_staging_and_the_catalog() {
     assert!(provider.skill_catalog().await.is_empty());
 }
 
-/// The declaration-driven host-tool contract: staging a skill that
-/// declares `host: ["libreoffice"]` warms the broker exactly once per
-/// staging, and the prompt capability flag is the broker's status — never
-/// a promise — omitted entirely when nothing declares the dependency.
+/// The host-tool contract, from a staged manifest to the prompt: a skill that
+/// declares `host: ["libreoffice"]` and npm packages warms both tools exactly
+/// once per staging — Node is derived from the npm list, which is the only
+/// place a skill can ask for it — and each capability line is the broker's
+/// status rather than a promise, omitted entirely when nothing needs the tool.
 #[tokio::test]
-async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
+async fn staged_skills_warm_their_host_tools_and_gate_the_capability_lines() {
     struct RecordingBroker {
-        ensures: AtomicUsize,
+        ensured: Mutex<Vec<openwave_code_execution::HostDep>>,
         available: bool,
     }
 
     #[async_trait]
     impl openwave_code_execution::HostToolBroker for RecordingBroker {
         fn ensure(&self, tool: openwave_code_execution::HostDep) {
-            assert_eq!(tool, openwave_code_execution::HostDep::LibreOffice);
-            self.ensures.fetch_add(1, Ordering::SeqCst);
+            self.ensured.lock().expect("ensured tools").push(tool);
         }
 
         async fn status(
@@ -725,7 +723,7 @@ async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
     .unwrap();
 
     let broker = Arc::new(RecordingBroker {
-        ensures: AtomicUsize::new(0),
+        ensured: Mutex::new(Vec::new()),
         available: true,
     });
     let provider = ConfiguredCodeExecutionProvider::new(
@@ -737,13 +735,24 @@ async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
     .with_host_tool_broker(Some(broker.clone()));
 
     provider.stage_turn_workspace(ChatId::new()).await;
-    assert_eq!(broker.ensures.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *broker.ensured.lock().expect("ensured tools"),
+        [
+            openwave_code_execution::HostDep::LibreOffice,
+            openwave_code_execution::HostDep::Node,
+        ]
+    );
     assert_eq!(provider.office_rendering_available().await, Some(true));
+    assert_eq!(
+        provider.node_runtime_status().await,
+        Some(openwave_code_execution::HostToolStatus::Available)
+    );
 
-    // An unavailable tool reports false — the prompt says so instead of
-    // teaching a QA loop the host cannot run.
+    // An unavailable tool reports itself unavailable — the prompt says so
+    // instead of teaching a QA loop the host cannot run or an npm path that
+    // has no interpreter behind it.
     let unavailable = Arc::new(RecordingBroker {
-        ensures: AtomicUsize::new(0),
+        ensured: Mutex::new(Vec::new()),
         available: false,
     });
     let provider = ConfiguredCodeExecutionProvider::new(
@@ -754,6 +763,10 @@ async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
     .with_skills(Some(source.path().to_owned()))
     .with_host_tool_broker(Some(unavailable));
     assert_eq!(provider.office_rendering_available().await, Some(false));
+    assert!(matches!(
+        provider.node_runtime_status().await,
+        Some(openwave_code_execution::HostToolStatus::Unavailable(_))
+    ));
 
     // No declaration, no line; no broker, no promise.
     let no_deps = tempfile::tempdir().unwrap();
@@ -771,11 +784,16 @@ async fn declared_host_deps_warm_the_broker_and_gate_the_capability_flag() {
     )
     .with_skills(Some(no_deps.path().to_owned()));
     assert_eq!(provider.office_rendering_available().await, None);
+    assert_eq!(provider.node_runtime_status().await, None);
 
     let brokerless =
         ConfiguredCodeExecutionProvider::new(store, Arc::new(NoSecrets), scratch_root.path())
             .with_skills(Some(source.path().to_owned()));
     assert_eq!(brokerless.office_rendering_available().await, Some(false));
+    assert!(matches!(
+        brokerless.node_runtime_status().await,
+        Some(openwave_code_execution::HostToolStatus::Unavailable(_))
+    ));
 }
 
 /// Local exec is confined to the scratch directory but can create entries

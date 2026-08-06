@@ -200,6 +200,30 @@ pub(super) async fn materialize_attachments(
     Ok(())
 }
 
+/// The host tools a staged set of skills needs: what the manifests declare,
+/// plus what they imply.
+///
+/// A skill declares the npm packages it uses and never the interpreter that
+/// runs them, so a non-empty npm list is the declaration of a Node dependency
+/// — the only one there is. Deriving it here keeps the two from disagreeing:
+/// there is no manifest spelling of `node` for a skill to omit or to claim
+/// without the packages behind it.
+pub(super) fn required_host_deps(
+    skills: &[openwave_code_execution::LoadedSkill],
+) -> Vec<openwave_code_execution::HostDep> {
+    let mut required: Vec<openwave_code_execution::HostDep> = Vec::new();
+    for skill in skills {
+        let implied =
+            (!skill.package.npm_deps.is_empty()).then_some(openwave_code_execution::HostDep::Node);
+        for dep in skill.package.host_deps.iter().copied().chain(implied) {
+            if !required.contains(&dep) {
+                required.push(dep);
+            }
+        }
+    }
+    required
+}
+
 pub(super) async fn prepare_execution_directories(
     host_dir: &std::path::Path,
     mirrored: bool,

@@ -66,6 +66,7 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         crate::code_execution::DEFAULT_TIMEOUT_MS,
         false,
         None,
+        None,
         false,
     )
 }
@@ -181,6 +182,7 @@ pub(crate) fn compose_for_surface(
     exec_timeout_ms: u64,
     offline_package_cache: bool,
     office_rendering: Option<bool>,
+    node_runtime: Option<openwave_code_execution::HostToolStatus>,
     plan_mode: bool,
 ) -> String {
     let names = specs
@@ -569,6 +571,25 @@ pub(crate) fn compose_for_surface(
                 ),
                 None => {}
             }
+            // The same rule for the other half of a document skill's
+            // toolchain. A skill declares npm packages; whether anything can
+            // run them is host state, and a model that is told plainly does
+            // not spend a turn discovering it one failed command at a time.
+            match node_runtime {
+                Some(openwave_code_execution::HostToolStatus::Available) => lines.push(
+                    "- Node is available: run a skill's npm work with `node`, and install its pinned packages with `npm install --ignore-scripts <package>@<version>` when they are not already present. Always pass `--ignore-scripts`."
+                        .to_owned(),
+                ),
+                Some(openwave_code_execution::HostToolStatus::Installing) => lines.push(
+                    "- Node is being installed on this host right now and does not run yet. Do the parts of the task that do not need it first, then retry the Node step later in the turn; if it still does not run, say so rather than silently switching to a lesser format."
+                        .to_owned(),
+                ),
+                Some(openwave_code_execution::HostToolStatus::Unavailable(_)) => lines.push(
+                    "- Node is unavailable on this host: `node` and `npm` do not run, so a skill's npm path is not usable this turn and there is nothing to probe. Follow the skill's other path if it has one, and otherwise tell the user plainly what cannot be produced."
+                        .to_owned(),
+                ),
+                None => {}
+            }
             push_section(&mut prompt, DOCUMENT_SKILLS_HEADING, &lines);
         }
     }
@@ -764,6 +785,7 @@ mod tests {
             TIMEOUT,
             false,
             None,
+            None,
             true,
         );
         let normal = compose_for_surface(
@@ -774,6 +796,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             None,
             false,
         );
@@ -827,6 +850,7 @@ mod tests {
             TIMEOUT,
             false,
             None,
+            None,
             false,
         );
 
@@ -857,6 +881,7 @@ mod tests {
                 TIMEOUT,
                 false,
                 None,
+                None,
                 false,
             )
         };
@@ -879,6 +904,7 @@ mod tests {
             &NetworkPolicy::Off,
             TIMEOUT,
             true,
+            None,
             None,
             false,
         );
@@ -947,6 +973,7 @@ mod tests {
             1_500,
             false,
             None,
+            None,
             false,
         );
         assert!(odd.contains("killed by the host after 1500 milliseconds"));
@@ -1000,6 +1027,7 @@ mod tests {
             TIMEOUT,
             false,
             None,
+            None,
             false,
         );
         assert!(prompt.contains(DOCUMENT_SKILLS_HEADING));
@@ -1022,6 +1050,7 @@ mod tests {
             TIMEOUT,
             false,
             None,
+            None,
             false,
         );
         assert!(!without_exec.contains(DOCUMENT_SKILLS_HEADING));
@@ -1034,6 +1063,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             None,
             false,
         );
@@ -1110,6 +1140,7 @@ mod tests {
             TIMEOUT,
             false,
             None,
+            None,
             false,
         );
         let catalog = prompt
@@ -1156,6 +1187,7 @@ mod tests {
                 TIMEOUT,
                 false,
                 office_rendering,
+                None,
                 false,
             )
         };
@@ -1167,6 +1199,47 @@ mod tests {
         assert!(unavailable.contains("visual pass was not possible"));
         let undeclared = for_state(None);
         assert!(!undeclared.contains("Office rendering"));
+    }
+
+    /// The Node line carries the same host truth, with the middle state the
+    /// office line has no use for: a runtime that is still installing is
+    /// worth retrying within the turn, and one that is absent closes the npm
+    /// path instead of inviting the model to probe for it.
+    #[test]
+    fn node_runtime_line_states_availability_and_keeps_installs_scriptless() {
+        let skills = vec![SkillPackage {
+            name: "presentations".into(),
+            description: "Decks.".into(),
+            python_deps: Vec::new(),
+            npm_deps: vec!["pptxgenjs@4.0.1".into()],
+            host_deps: Vec::new(),
+            origin: SkillOrigin::Builtin,
+        }];
+        let for_state = |node_runtime| {
+            compose_for_surface(
+                &[spec("exec")],
+                &[],
+                &skills,
+                &[],
+                &NetworkPolicy::default(),
+                TIMEOUT,
+                false,
+                None,
+                node_runtime,
+                false,
+            )
+        };
+        let available = for_state(Some(openwave_code_execution::HostToolStatus::Available));
+        assert!(available.contains("Node is available"));
+        assert!(available.contains("npm install --ignore-scripts"));
+        let installing = for_state(Some(openwave_code_execution::HostToolStatus::Installing));
+        assert!(installing.contains("being installed"));
+        let unavailable = for_state(Some(openwave_code_execution::HostToolStatus::Unavailable(
+            "not installed".into(),
+        )));
+        assert!(unavailable.contains("Node is unavailable"));
+        assert!(!unavailable.contains("npm install"));
+        assert!(!for_state(None).contains("Node is"));
     }
 
     #[test]
@@ -1251,6 +1324,7 @@ mod tests {
             &NetworkPolicy::default(),
             TIMEOUT,
             false,
+            None,
             None,
             false,
         );

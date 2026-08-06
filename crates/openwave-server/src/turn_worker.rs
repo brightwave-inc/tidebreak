@@ -153,6 +153,7 @@ pub(crate) fn freeze_foreground_turn_surface(
         crate::code_execution::DEFAULT_TIMEOUT_MS,
         false,
         None,
+        None,
         false,
         openwave_core::TurnWebSearch::Host,
     )
@@ -169,6 +170,7 @@ fn freeze_foreground_turn_surface_with_folders(
     exec_timeout_ms: u64,
     offline_package_cache: bool,
     office_rendering: Option<bool>,
+    node_runtime: Option<openwave_code_execution::HostToolStatus>,
     plan_mode: bool,
     web_search: openwave_core::TurnWebSearch,
 ) -> ForegroundTurnSurface {
@@ -192,6 +194,7 @@ fn freeze_foreground_turn_surface_with_folders(
         exec_timeout_ms,
         offline_package_cache,
         office_rendering,
+        node_runtime,
         plan_mode,
     ));
     ForegroundTurnSurface {
@@ -679,6 +682,10 @@ impl TurnWorker {
             Some(provider) => provider.office_rendering_available().await,
             None => None,
         };
+        let node_runtime = match self.exec_folder_context.as_ref() {
+            Some(provider) => provider.node_runtime_status().await,
+            None => None,
+        };
         let exec_timeout_ms = match self.exec_folder_context.as_ref() {
             Some(provider) => provider.current_timeout_ms().await,
             None => crate::code_execution::DEFAULT_TIMEOUT_MS,
@@ -723,6 +730,7 @@ impl TurnWorker {
             exec_timeout_ms,
             offline_package_cache,
             office_rendering,
+            node_runtime,
             matches!(
                 chat.permission_mode,
                 Some(openwave_core::PermissionMode::Plan)
