@@ -143,6 +143,19 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.iter().map(openai_tool).collect());
     }
+    // The vendor search is a hosted tool, declared alongside the function tools
+    // rather than instead of them: the model may still call anything the host
+    // advertised in the same response. The Responses API exposes no cap on how
+    // many searches one response may run — its knobs are context size, domain
+    // filters and location — so `max_uses` has nothing to map onto here and is
+    // deliberately dropped.
+    if req.vendor_web_search.is_some() {
+        let vendor_tool = json!({ "type": VENDOR_WEB_SEARCH_TOOL });
+        match body["tools"].as_array_mut() {
+            Some(tools) => tools.push(vendor_tool),
+            None => body["tools"] = json!([vendor_tool]),
+        }
+    }
     if let Some(choice) = &req.tool_choice {
         body["tool_choice"] = openai_tool_choice(choice)?;
     }
@@ -181,8 +194,13 @@ fn build_input(req: &ChatRequest) -> Result<Vec<Value>> {
             "content": [{ "type": "input_text", "text": system }]
         }));
     }
+    // Declaring the hosted search puts a tool named `web_search` on the request
+    // that the provider executes; historical calls to the host's client-side
+    // tool of that name are replayed under another name so one request never
+    // carries two different tools called the same thing.
+    let rename_client_web_search = req.vendor_web_search.is_some();
     for message in &req.messages {
-        extend_input(&mut out, message, &req.images)?;
+        extend_input(&mut out, message, &req.images, rename_client_web_search)?;
     }
     Ok(sanitize_tool_pairs(out))
 }
@@ -191,9 +209,10 @@ fn extend_input(
     out: &mut Vec<Value>,
     message: &openwave_core::ChatMessage,
     images: &ImageAttachments,
+    rename_client_web_search: bool,
 ) -> Result<()> {
     if message.role == Role::Assistant {
-        return extend_assistant_input(out, message);
+        return extend_assistant_input(out, message, rename_client_web_search);
     }
     let mut message_parts = Vec::new();
     for block in &message.content {
@@ -221,7 +240,7 @@ fn extend_input(
                 out.push(json!({
                     "type": "function_call",
                     "call_id": id,
-                    "name": name,
+                    "name": prior_tool_name(name, rename_client_web_search),
                     "arguments": serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
                 }));
             }
@@ -277,6 +296,7 @@ fn extend_input(
 fn extend_assistant_input(
     out: &mut Vec<Value>,
     message: &openwave_core::ChatMessage,
+    rename_client_web_search: bool,
 ) -> Result<()> {
     let mut texts = Vec::new();
     let mut calls = Vec::new();
@@ -292,7 +312,7 @@ fn extend_assistant_input(
                 calls.push(json!({
                     "type": "function_call",
                     "call_id": id,
-                    "name": name,
+                    "name": prior_tool_name(name, rename_client_web_search),
                     "arguments": serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
                 }));
             }
@@ -358,6 +378,28 @@ fn sanitize_tool_pairs(items: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
+/// The Responses API's own name for its hosted web search tool, and the name
+/// each completed search surfaces under to the host.
+const VENDOR_WEB_SEARCH_TOOL: &str = "web_search";
+
+/// The name a historical client-side `web_search` call is replayed under once
+/// the request declares the hosted tool of that name.
+///
+/// The request would otherwise carry two different tools called `web_search` —
+/// one the client executes, one the provider does — and a replayed
+/// `function_call` naming the hosted tool is undefined. Only the name changes;
+/// items still pair by `call_id`, so the matching output needs no change and
+/// `sanitize_tool_pairs` still sees a complete pair.
+const PRIOR_WEB_SEARCH_TOOL: &str = "web_search_prior";
+
+fn prior_tool_name(name: &str, renaming: bool) -> &str {
+    if renaming && name == VENDOR_WEB_SEARCH_TOOL {
+        PRIOR_WEB_SEARCH_TOOL
+    } else {
+        name
+    }
+}
+
 fn openai_tool(tool: &openwave_core::tool::ToolSpec) -> Value {
     let schema = strict_json_schema(&tool.input_schema, OptionalProperties::Reject)
         .unwrap_or_else(|| tool.input_schema.clone());
@@ -390,6 +432,31 @@ struct StreamState {
     next_index: u32,
     terminal: bool,
     refused: bool,
+    /// The most recently completed hosted search, still collecting the
+    /// citations that describe what it found. See [`PendingSearch`].
+    pending_search: Option<PendingSearch>,
+}
+
+/// A hosted web search that has finished running, held back until the results
+/// it produced can be read off the response.
+///
+/// The Responses API returns no result list with the search itself: the search
+/// call item carries only the query, and what it found shows up afterwards as
+/// `url_citation` annotations on the message the model writes from it. So the
+/// finished search waits here, gathering annotations, and is emitted when the
+/// next search completes or the response ends — whichever comes first.
+///
+/// Annotations are attributed to the most recent completed search. Where a
+/// response runs several searches back to back before writing anything, that
+/// puts every citation on the last of them; the alternative is correlating
+/// citations to searches by content the API does not relate, and a search
+/// reported with no results is still a search the host can show.
+struct PendingSearch {
+    input: Value,
+    results: Vec<Value>,
+    /// URL and title of every result already taken, so a source cited in
+    /// several places is reported once.
+    seen: HashSet<(String, String)>,
 }
 
 #[derive(Default)]
@@ -408,12 +475,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     match event_type {
         "error" => {
             state.terminal = true;
-            vec![ProviderEvent::Failed {
+            let mut events = flush_search(state);
+            events.push(ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&classify_in_band_error(
                     "openai",
                     data.get("error").unwrap_or(data),
                 )),
-            }]
+            });
+            events
         }
         "response.output_text.delta" => data["delta"]
             .as_str()
@@ -432,6 +501,13 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             Vec::new()
         }
         "response.output_item.added" => start_call(data, state, false),
+        // Every citation on the model's output text describes a page one of
+        // its searches reached, and is the only account of what the search
+        // returned.
+        "response.output_text.annotation.added" => {
+            collect_citation(&data["annotation"], state);
+            Vec::new()
+        }
         "response.function_call_arguments.delta" => {
             let call_id = data["call_id"].as_str().unwrap_or_default();
             let mut events = ensure_call(call_id, None, state);
@@ -446,11 +522,17 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             }
             events
         }
-        "response.output_item.done" => start_call(data, state, true),
+        "response.output_item.done" => {
+            if data["item"]["type"] == "web_search_call" {
+                return finish_search(&data["item"], state);
+            }
+            start_call(data, state, true)
+        }
         "response.completed" => {
             state.terminal = true;
             let response = &data["response"];
-            let mut events = usage_event(response).into_iter().collect::<Vec<_>>();
+            let mut events = flush_search(state);
+            events.extend(usage_event(response));
             if state.refused {
                 events.push(ProviderEvent::Refusal {
                     details: RefusalDetails::from_category(None),
@@ -470,7 +552,8 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         "response.incomplete" => {
             state.terminal = true;
             let response = &data["response"];
-            let mut events = usage_event(response).into_iter().collect::<Vec<_>>();
+            let mut events = flush_search(state);
+            events.extend(usage_event(response));
             match response["incomplete_details"]["reason"].as_str() {
                 Some("max_output_tokens") => events.push(ProviderEvent::Stop {
                     reason: StopReason::MaxTokens,
@@ -489,12 +572,109 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         "response.failed" => {
             state.terminal = true;
             let error = data["response"].get("error").unwrap_or(&data["response"]);
-            vec![ProviderEvent::Failed {
+            let mut events = flush_search(state);
+            events.push(ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&classify_in_band_error("openai", error)),
-            }]
+            });
+            events
         }
         _ => Vec::new(),
     }
+}
+
+/// Handle a finished `web_search_call` output item.
+///
+/// A completed search becomes the pending one, which first flushes whatever
+/// search was pending before it. A search that ended any other way produced
+/// nothing to cite, so it goes out immediately as a failure — dropping it
+/// would hide from the host that the model tried to search at all.
+fn finish_search(item: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
+    let input = search_input(item.get("action"));
+    let status = item["status"].as_str().unwrap_or_default();
+    let mut events = flush_search(state);
+    if status == "completed" {
+        state.pending_search = Some(PendingSearch {
+            input,
+            results: Vec::new(),
+            seen: HashSet::new(),
+        });
+    } else {
+        events.push(ProviderEvent::ProviderExecutedToolCall {
+            name: VENDOR_WEB_SEARCH_TOOL.to_owned(),
+            input,
+            output: json!({
+                "error_code": if status.is_empty() { "failed" } else { status },
+            }),
+            is_error: true,
+        });
+    }
+    events
+}
+
+/// The arguments to report a hosted search ran with.
+///
+/// A plain `search` action carries the query, which is what a reader wants and
+/// what the host's own `web_search` tool takes. Reasoning models also browse
+/// with `open_page` and `find_in_page` actions that have no query; there the
+/// action itself is the only description of what ran, so it goes through whole
+/// rather than being flattened into a sentence this adapter invented.
+fn search_input(action: Option<&Value>) -> Value {
+    match action {
+        Some(action) => match action.get("query").and_then(Value::as_str) {
+            Some(query) => json!({ "query": query }),
+            None => json!({ "query": action }),
+        },
+        None => json!({}),
+    }
+}
+
+/// Take a `url_citation` annotation as a result of the pending search.
+fn collect_citation(annotation: &Value, state: &mut StreamState) {
+    /// The cap the host's own search applies, so a hosted search cannot put
+    /// more into context than the tool it stands in for.
+    const MAX_RESULTS: usize = openwave_core::MAX_WEB_SEARCH_RESULTS;
+
+    if annotation["type"] != "url_citation" {
+        return;
+    }
+    let Some(search) = state.pending_search.as_mut() else {
+        return;
+    };
+    if search.results.len() >= MAX_RESULTS {
+        return;
+    }
+    let url = annotation["url"].as_str().unwrap_or_default();
+    if url.is_empty() {
+        return;
+    }
+    let title = annotation["title"].as_str().unwrap_or_default();
+    if !search.seen.insert((url.to_owned(), title.to_owned())) {
+        return;
+    }
+    search.results.push(json!({
+        "url": url,
+        "title": title,
+        // The API cites a location in the model's own text rather than an
+        // excerpt of the page; the field stays present so the result shape does
+        // not vary by provider.
+        "snippet": "",
+    }));
+}
+
+/// Emit the pending search, if there is one, as a finished provider-executed
+/// call.
+fn flush_search(state: &mut StreamState) -> Vec<ProviderEvent> {
+    let Some(search) = state.pending_search.take() else {
+        return Vec::new();
+    };
+    vec![ProviderEvent::ProviderExecutedToolCall {
+        name: VENDOR_WEB_SEARCH_TOOL.to_owned(),
+        input: search.input,
+        // A search that cited nothing still ran, and is reported as a search
+        // that found nothing rather than as a failure.
+        output: json!({ "provider": "openai", "results": search.results }),
+        is_error: false,
+    }]
 }
 
 fn start_call(
@@ -576,7 +756,7 @@ fn usage_event(response: &Value) -> Option<ProviderEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::{ChatMessage, MessageReasoning};
+    use openwave_core::provider::{ChatMessage, MessageReasoning, VendorWebSearch};
     use openwave_core::tool::ToolSpec;
     use openwave_core::{ImageData, ImageMediaType, ImageRef, ReasoningEffort};
 
@@ -744,6 +924,161 @@ mod tests {
             .unwrap();
         assert_eq!(output["call_id"], "call_1");
         assert_eq!(output["output"], "/tmp");
+    }
+
+    #[test]
+    fn vendor_search_declares_the_hosted_tool_and_renames_prior_client_calls() {
+        let history = vec![
+            openwave_core::ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "web_search".into(),
+                    input: json!({"query":"rust"}),
+                }],
+                reasoning: MessageReasoning::default(),
+            },
+            openwave_core::ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "one result".into(),
+                    is_error: false,
+                }],
+                reasoning: MessageReasoning::default(),
+            },
+        ];
+        let req = ChatRequest {
+            model: "gpt-5.6-sol".into(),
+            messages: history,
+            tools: vec![tool()],
+            vendor_web_search: Some(VendorWebSearch {
+                max_uses: VendorWebSearch::DEFAULT_MAX_USES,
+            }),
+            ..Default::default()
+        };
+        let body = build_request_json(&req).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[1], json!({"type":"web_search"}));
+
+        let call = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap();
+        assert_eq!(call["name"], "web_search_prior");
+        // The rename must not break the pairing that keeps the call in history.
+        assert_eq!(call["call_id"], "call_1");
+        assert!(body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1"));
+
+        let without = ChatRequest {
+            vendor_web_search: None,
+            ..req
+        };
+        let body = build_request_json(&without).unwrap();
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert!(body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "web_search"));
+    }
+
+    #[test]
+    fn a_hosted_search_reports_the_sources_its_answer_cited() {
+        let mut state = StreamState::default();
+        let events: Vec<_> = [
+            json!({
+                "type":"response.output_item.done",
+                "item":{
+                    "type":"web_search_call",
+                    "id":"ws_1",
+                    "status":"completed",
+                    "action":{"type":"search","query":"rust 2027"}
+                }
+            }),
+            json!({"type":"response.output_text.delta","delta":"Rust 2027 ships"}),
+            json!({
+                "type":"response.output_text.annotation.added",
+                "annotation":{
+                    "type":"url_citation",
+                    "url":"https://example.com/a",
+                    "title":"A",
+                    "start_index":0,
+                    "end_index":5
+                }
+            }),
+            // The same source cited twice is one result.
+            json!({
+                "type":"response.output_text.annotation.added",
+                "annotation":{"type":"url_citation","url":"https://example.com/a","title":"A"}
+            }),
+            json!({
+                "type":"response.output_text.annotation.added",
+                "annotation":{"type":"url_citation","url":"https://example.com/b","title":"B"}
+            }),
+            json!({"type":"response.completed","response":{}}),
+        ]
+        .iter()
+        .flat_map(|event| normalize(event, &mut state))
+        .collect();
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "Rust 2027 ships".into()
+                },
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: "web_search".into(),
+                    input: json!({"query":"rust 2027"}),
+                    output: json!({
+                        "provider": "openai",
+                        "results": [
+                            {"url":"https://example.com/a","title":"A","snippet":""},
+                            {"url":"https://example.com/b","title":"B","snippet":""},
+                        ]
+                    }),
+                    is_error: false,
+                },
+                // A hosted search is not a call anyone answers, so the turn
+                // still ends rather than asking for tool results.
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_hosted_search_is_reported_rather_than_dropped() {
+        let mut state = StreamState::default();
+        let events = normalize(
+            &json!({
+                "type":"response.output_item.done",
+                "item":{
+                    "type":"web_search_call",
+                    "id":"ws_1",
+                    "status":"failed",
+                    "action":{"type":"search","query":"rust 2027"}
+                }
+            }),
+            &mut state,
+        );
+        assert_eq!(
+            events,
+            vec![ProviderEvent::ProviderExecutedToolCall {
+                name: "web_search".into(),
+                input: json!({"query":"rust 2027"}),
+                output: json!({"error_code":"failed"}),
+                is_error: true,
+            }]
+        );
     }
 
     #[test]
