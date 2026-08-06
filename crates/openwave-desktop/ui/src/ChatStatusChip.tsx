@@ -46,9 +46,10 @@ export type ChatStatusChipProps = {
  * work first, what it has produced otherwise.
  *
  * Behind it, the places that describe only this conversation — its outputs,
- * its folders, its background agents. The composer owns the chat's settings
- * (model, mode, effort), so none of them appear here: this chip is the
- * conversation's activity, not a second copy of its controls.
+ * its folders, its background agents. The context meter sits beside this chip
+ * in the header; the composer still owns the chat's settings (model, mode,
+ * effort). This chip is the conversation's activity, not a second copy of
+ * those controls.
  */
 export function ChatStatusChip({
   outputCount,

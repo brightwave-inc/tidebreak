@@ -13,8 +13,10 @@ import { useApp } from "./AppContext";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import { ChatHeaderTitle } from "./ChatHeaderTitle";
 import { ChatStatusChip } from "./ChatStatusChip";
-import { reconcilePendingApprovalCards } from "./ApprovalHistory";
-import { loadChatApprovalHydration } from "./ChatApprovalHydration";
+import {
+  loadChatApprovalHydration,
+  sessionFromOpenedChat,
+} from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
 import {
   useComposerAttachments,
@@ -27,10 +29,7 @@ import {
   type ChatSessionState,
 } from "./ChatSessionReducer";
 import { useChatSessionStore } from "./ChatSessionStore";
-import {
-  loadCurrentTerminalTranscript,
-  presentChatTranscript,
-} from "./ChatTranscriptPresentation";
+import { loadCurrentTerminalTranscript } from "./ChatTranscriptPresentation";
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import type { RetryableTurn } from "./MessageList";
@@ -55,8 +54,8 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
-import { ModelMenu } from "./ModelMenu";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
+import { ModelMenu } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -205,16 +204,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         );
         if (!hydration) return;
         const { transcript, pendingApprovals } = hydration;
-        const presented = presentChatTranscript(transcript);
-        const pendingTurnId = pendingApprovals[0]?.turnId ?? null;
-        updateSession((session) => ({
-          ...session,
-          lastSeq: transcript.last_event_seq,
-          hydratedMessageIds: presented.messageIds,
-          messages: reconcilePendingApprovalCards(presented.messages, pendingApprovals),
-          activeTurnId: pendingTurnId,
-          busy: pendingTurnId !== null,
-        }));
+        updateSession((session) =>
+          sessionFromOpenedChat(session, transcript, pendingApprovals),
+        );
         setHydrated(true);
       } catch (err) {
         if (cancelled) return;
@@ -633,9 +625,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   function renderChat(visible: boolean) {
-    // The model selected right now: the reasoning levels it accepts, and the
-    // window the context meter reads against. Switching models mid-chat
-    // re-scales the meter immediately, which is the question being asked.
+    // The model selected right now: the reasoning levels it accepts.
     const activeModel = modelForSelection(models, chat!.model);
     // Only the levels the selected model accepts are offerable, and a model
     // that accepts none gets no selector at all.
@@ -704,13 +694,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onRemove: images.remove,
             onRetry: images.retry,
           }}
-          composerContextMeter={
-            <ContextUsageIndicator
-              usage={lastTurnUsage}
-              contextWindow={activeModel?.context_window}
-              modelName={activeModel?.display_name}
-            />
-          }
           composerModelMenu={
             <ModelMenu
               models={models}
@@ -818,19 +801,30 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     }
   }
 
+  // Header chrome reads the active model's window so the meter stays honest
+  // when the selection changes, without living in the composer.
+  const headerModel = modelForSelection(models, chat.model);
+
   return (
     <RouteFrame sidebar={<AppSidebar chat={chat} />}>
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
         <ChatHeaderTitle chat={chat} />
-        <ChatStatusChip
-          outputCount={deliverables.length}
-          folders={folders.items}
-          runs={chatAgentRuns}
-          onOpenOutputs={() => openPanel({ type: "outputs" })}
-          onOpenFolders={() => openPanel({ type: "folders" })}
-          onOpenAgents={() => openPanel({ type: "agents" })}
-        />
+        <div className="flex shrink-0 items-center gap-2">
+          <ContextUsageIndicator
+            usage={lastTurnUsage}
+            contextWindow={headerModel?.context_window}
+            modelName={headerModel?.display_name}
+          />
+          <ChatStatusChip
+            outputCount={deliverables.length}
+            folders={folders.items}
+            runs={chatAgentRuns}
+            onOpenOutputs={() => openPanel({ type: "outputs" })}
+            onOpenFolders={() => openPanel({ type: "folders" })}
+            onOpenAgents={() => openPanel({ type: "agents" })}
+          />
+        </div>
       </header>
       <PinnedOutputsStrip
         chatId={chatId}

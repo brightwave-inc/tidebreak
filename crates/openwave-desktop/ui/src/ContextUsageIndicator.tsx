@@ -18,6 +18,9 @@ import { cn } from "./lib/utils";
  * The denominator is the *currently selected* model, not the one that ran the
  * turn. Switching models mid-chat is a question about what will fit next, so
  * the reading moves the moment the selection does.
+ *
+ * Lives in the chat header beside the activity chip so the reading stays on
+ * screen for the whole conversation, not only while the composer is in view.
  */
 export function ContextUsageIndicator({
   usage,
@@ -62,14 +65,14 @@ export function ContextUsageIndicator({
     >
       <span
         className={cn(
-          "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs tabular-nums",
+          "flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium tabular-nums",
           level === "critical"
-            ? "text-destructive"
+            ? "border-destructive/40 bg-destructive/10 text-destructive"
             : level === "warning"
-              ? "text-warning-foreground"
-              : "text-muted-foreground",
+              ? "border-warning-border bg-warning-background text-warning-foreground"
+              : "border-border bg-muted text-foreground",
         )}
-        // The visible pill is a magnitude; the accessible name is the sentence
+        // The visible chip is a magnitude; the accessible name is the sentence
         // a screen reader needs, since "34%" alone says nothing about of what.
         // A graphic with a text alternative rather than a live region: this
         // updates on every turn, and it is reference material, not an
@@ -78,16 +81,17 @@ export function ContextUsageIndicator({
         aria-label={`Context: ${percent}% of ${formatTokenCount(contextWindow)} tokens used`}
       >
         <ContextUsageRing percent={percent} />
-        {percent}%
+        <span>{percent}%</span>
+        <span className="font-normal opacity-70">{formatTokenCount(used)}</span>
       </span>
     </WithTooltip>
   );
 }
 
 /**
- * A small filled ring, drawn as a conic sweep over a muted track.
+ * A filled ring, drawn as a conic sweep over a muted track.
  *
- * Takes its colour from the pill via `currentColor`, so the threshold styling
+ * Takes its colour from the chip via `currentColor`, so the threshold styling
  * lives in exactly one place.
  */
 function ContextUsageRing({ percent }: { percent: number }) {
@@ -95,9 +99,9 @@ function ContextUsageRing({ percent }: { percent: number }) {
   return (
     <span
       aria-hidden="true"
-      className="size-3 shrink-0 rounded-full"
+      className="size-3.5 shrink-0 rounded-full"
       style={{
-        background: `conic-gradient(currentColor 0deg ${filled}, color-mix(in oklch, currentColor 20%, transparent) ${filled} 360deg)`,
+        background: `conic-gradient(currentColor 0deg ${filled}, color-mix(in oklch, currentColor 22%, transparent) ${filled} 360deg)`,
       }}
     />
   );

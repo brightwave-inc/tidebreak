@@ -54,7 +54,6 @@ export type ChatViewProps = {
   /** The composer draft, readable synchronously — see [useTurnControls]. */
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
-  composerContextMeter?: ReactNode;
   composerPermissionMenu: ReactNode;
   composerNetwork?: ComposerNetwork;
   composerReasoning?: ComposerReasoning;
@@ -93,7 +92,6 @@ export function ChatView({
   deletingChat,
   draftRef,
   composerModelMenu,
-  composerContextMeter,
   composerPermissionMenu,
   composerNetwork,
   composerReasoning,
@@ -448,7 +446,6 @@ export function ChatView({
           disabled={deletingChat}
           draft={draft}
           modelMenu={composerModelMenu}
-          contextMeter={composerContextMeter}
           permissionMenu={composerPermissionMenu}
           network={composerNetwork}
           reasoning={composerReasoning}

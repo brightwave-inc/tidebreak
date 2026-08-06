@@ -153,12 +153,23 @@ vi.mock("./settings/ProvidersPanel", () => ({
   ProvidersPanel: () => <div data-testid="settings">settings</div>,
 }));
 
-vi.mock("./ChatApprovalHydration", () => ({
-  loadChatApprovalHydration: vi.fn(async () => ({
-    transcript: { messages: [], tool_activity: [], last_event_seq: 0 },
-    pendingApprovals: [],
-  })),
-}));
+vi.mock("./ChatApprovalHydration", async () => {
+  const actual = await vi.importActual<typeof import("./ChatApprovalHydration")>(
+    "./ChatApprovalHydration",
+  );
+  return {
+    ...actual,
+    loadChatApprovalHydration: vi.fn(async () => ({
+      transcript: {
+        messages: [],
+        tool_activity: [],
+        terminal_turns: [],
+        last_event_seq: 0,
+      },
+      pendingApprovals: [],
+    })),
+  };
+});
 
 // The resize library lays out from real element measurements, which jsdom does
 // not provide — left to itself it registers no panels and renders nothing. The
