@@ -34,7 +34,10 @@ pub const MAX_PATH_BYTES: usize = 1_024;
 /// Maximum bytes returned by one read.
 pub const MAX_READ_BYTES: usize = 256 * 1_024;
 /// Maximum bytes accepted by one write.
-pub const MAX_WRITE_BYTES: usize = 1_024 * 1_024;
+///
+/// Shared with the host `write_file` tool so the two cannot diverge; see
+/// [`openwave_core::MAX_WRITE_FILE_BYTES`].
+pub const MAX_WRITE_BYTES: usize = openwave_core::MAX_WRITE_FILE_BYTES;
 /// Maximum entries returned by one directory listing.
 pub const MAX_LIST_ENTRIES: usize = 256;
 
