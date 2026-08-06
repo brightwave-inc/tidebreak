@@ -222,10 +222,14 @@ pub(crate) fn structural_preconditions(
 ///
 /// The token-issuer fact is deployment-wide (the gateway either can mint
 /// run-scoped tokens or it cannot); the lifetime-cap fact is per backend. The
-/// local provider reads the real Docker backend's declaration. E2B and
-/// Daytona have no sandbox backend at all today — they are exec adapters, not
-/// hosts for background agent runs — so no capability is established for them
-/// and the fail-closed evaluation names everything missing.
+/// local provider reads the real Docker backend's declaration. E2B, Daytona,
+/// and the container exec backend have no sandbox backend at all today — they
+/// are exec adapters, not hosts for background agent runs — so no capability
+/// is established for them and the fail-closed evaluation names everything
+/// missing. The container exec backend in particular is not the sandbox-agent
+/// container tier: the two are deliberately orthogonal, and running commands
+/// in a container through `docker exec` establishes none of the preconditions
+/// a detached run needs.
 pub(crate) fn settings_detached_admissions(
     config: &Config,
 ) -> Vec<(CodeExecutionProviderKind, DetachedAdmission)> {
@@ -239,6 +243,7 @@ pub(crate) fn settings_detached_admissions(
         (CodeExecutionProviderKind::Local, local_facts),
         (CodeExecutionProviderKind::E2b, (false, false)),
         (CodeExecutionProviderKind::Daytona, (false, false)),
+        (CodeExecutionProviderKind::Docker, (false, false)),
     ]
     .into_iter()
     .map(|(provider, (lifetime_cap, image_verified))| {

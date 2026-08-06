@@ -926,7 +926,7 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
  * says a vendor's mechanism leaves a general-purpose destination reachable,
  * the surface must not present it as a full boundary.
  */
-export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed";
+export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed" | "not_enforced";
 
 /**
  * The execution backend that ran a command, as a closed vocabulary.

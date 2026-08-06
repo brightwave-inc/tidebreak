@@ -8,9 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_code_execution::{
     CodeExecutionError, CodeExecutionProviderKind, CodeExecutionUnavailableReason,
-    DaytonaCredential, DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider,
-    LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
-    PACKAGE_MANAGER_DOMAINS,
+    DaytonaCredential, DaytonaExecutionProvider, DockerExecutionProvider, E2BCredential,
+    E2BExecutionProvider, LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY,
+    E2B_CREDENTIAL_KEY, PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{ChatId, HostRootId, NetworkPolicy, ProjectId, Result, SecretProvider, Store};
 use openwave_egress::{
@@ -169,10 +169,11 @@ pub(super) const CREDENTIAL_PROVIDERS: [CodeExecutionProviderKind; 2] = [
 /// surface reports them. Availability is computed per row, so a host with no
 /// usable provider says so with a reason for each rather than presenting a
 /// selection that cannot run.
-pub(super) const EXECUTION_PROVIDERS: [CodeExecutionProviderKind; 3] = [
+pub(super) const EXECUTION_PROVIDERS: [CodeExecutionProviderKind; 4] = [
     CodeExecutionProviderKind::Local,
     CodeExecutionProviderKind::E2b,
     CodeExecutionProviderKind::Daytona,
+    CodeExecutionProviderKind::Docker,
 ];
 
 /// Host-owned, non-secret egress policy for the managed exec sandboxes.
@@ -371,6 +372,17 @@ pub(super) fn configured_daytona(
     }
 }
 
+/// Build the container adapter. It holds no credential and compiles no
+/// egress policy — the configured policy is deliberately not passed here,
+/// because nothing in this backend would enforce it and accepting it would
+/// imply otherwise. See [`egress_enforcement_status`].
+pub(super) fn configured_docker(
+    timeout: Duration,
+    pool: RemoteSessionPool,
+) -> std::result::Result<DockerExecutionProvider, CodeExecutionError> {
+    DockerExecutionProvider::with_session_pool(timeout, pool)
+}
+
 /// Renderer-safe configuration and readiness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct CodeExecutionConfigInfo {
@@ -442,6 +454,11 @@ pub enum EgressEnforcementStatus {
     /// A policy is sent at creation, but the vendor's enforcement is not yet
     /// confirmed against the live API.
     Unconfirmed,
+    /// No egress restriction is applied at all: the backend creates its
+    /// sandbox with ordinary outbound access and the conversation's network
+    /// policy reaches nothing. Distinct from [`Self::Unconfirmed`], which is
+    /// a policy whose effect is unproven — here there is no policy to prove.
+    NotEnforced,
 }
 
 /// A managed provider's egress-enforcement status, as host knowledge rather
@@ -567,8 +584,24 @@ pub(super) fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement>
             true,
             Some(DAYTONA_TIER_REQUIREMENT),
         ),
+        // The container backend applies no network policy at all. It is not
+        // derived from an enforcement model because there is no enforcement
+        // to model: saying so plainly is the only honest row, and it is what
+        // stops a conversation set to "no network" from reading as enforced
+        // when it is running on this backend.
+        CodeExecutionEgressEnforcement {
+            provider: CodeExecutionProviderKind::Docker,
+            status: EgressEnforcementStatus::NotEnforced,
+            gaps: vec![DOCKER_OPEN_EGRESS_GAP.to_owned()],
+            requirement: None,
+        },
     ]
 }
+
+/// What the container backend leaves reachable: everything. Stated as a gap
+/// so the settings surface lists it inline beside the vendors' caveats.
+pub(super) const DOCKER_OPEN_EGRESS_GAP: &str =
+    "every destination — the container runs with ordinary internet access";
 
 /// Project one provider's enforcement declaration into the renderer-safe row.
 ///
@@ -665,6 +698,11 @@ pub(super) async fn provider_availability(
 ) -> CodeExecutionProviderAvailability {
     let reason = match provider {
         CodeExecutionProviderKind::Local => LocalExecutionProvider::availability().err(),
+        // The container backend needs no credential; what it needs is a
+        // runtime that answers. The probe distinguishes an absent runtime
+        // from an installed one whose daemon is down, and caches its answer,
+        // so rendering this surface costs at most one probe.
+        CodeExecutionProviderKind::Docker => DockerExecutionProvider::availability().await.err(),
         _ => (!has_credential(secrets, provider).await)
             .then_some(CodeExecutionUnavailableReason::MissingCredential),
     };
@@ -865,7 +903,7 @@ pub(super) async fn has_credential(
             .ok()
             .flatten()
             .is_some(),
-        CodeExecutionProviderKind::Local => false,
+        CodeExecutionProviderKind::Local | CodeExecutionProviderKind::Docker => false,
         _ => false,
     }
 }

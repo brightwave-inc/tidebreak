@@ -609,7 +609,7 @@ async fn code_execution_config_route_is_authenticated_and_preserves_explicit_dis
             .iter()
             .map(|row| row["provider"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>(),
-        ["local", "e2b", "daytona"]
+        ["local", "e2b", "daytona", "docker"]
     );
     let local = &admission[0];
     assert_eq!(local["admitted"], false);

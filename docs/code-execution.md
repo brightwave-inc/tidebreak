@@ -1,9 +1,10 @@
 # Code execution
 
 OpenWave exposes one foreground `exec` tool through a provider-neutral command
-execution contract. The first provider is a native local sandbox. A managed
+execution contract. The first provider is a native local sandbox. Another
 provider can implement the same contract without changing the model-facing tool
-schema; E2B and Daytona are the current managed adapters.
+schema: E2B and Daytona are the managed cloud adapters, and Docker runs the same
+image in a container on the host's own runtime.
 
 This capability is separate from a sandbox *agent*. A sandbox agent is a
 depth-one model run with a constrained tool budget. A code-execution sandbox is
@@ -38,7 +39,9 @@ when execution is disabled or unsupported.
 Timeouts must be between 1 and 120 seconds; the default is 60 seconds, enough headroom for a cold package install that pulls compiled wheels. Sending `{"provider": null}`
 disables execution; sending `{"provider": "local"}` enables the local adapter.
 `e2b` and `daytona` select the managed adapters, which become available once
-their fixed credential slot is populated. No executable, endpoint, environment
+their fixed credential slot is populated. `docker` selects the container
+adapter, which needs no credential and becomes available once a
+Docker-compatible runtime is installed and its daemon answers. No executable, endpoint, environment
 value, or secret reference is accepted by the non-secret settings surface.
 
 `GET /code-execution` reports `has_credential` for the selected provider only,
@@ -84,8 +87,9 @@ The older host-level `egress` value remains readable for stored-config
 compatibility and provider disclosure, but chat execution always uses the
 per-chat policy.
 
-The `enforcement` field discloses, per managed provider, an honest `status`
-(`boundary`, `conditional_boundary`, `applied_with_gaps`, or `unconfirmed`),
+The `enforcement` field discloses, per non-native provider, an honest `status`
+(`boundary`, `conditional_boundary`, `applied_with_gaps`, `unconfirmed`, or
+`not_enforced`),
 plus the `gaps` the vendor leaves reachable regardless of policy and an optional
 `requirement` when a boundary is gated on a precondition. The status is
 **derived from the shipped enforcement model** (`EgressEnforcement`), not
@@ -114,6 +118,14 @@ destination reachable, the surface cannot present it as a full boundary.
   org default applies, so the boundary is not guaranteed — the projection
   therefore reports it as a *conditional* boundary with that requirement inline,
   never an unconditional green one.
+
+- **Docker — `not_enforced`.** The container backend applies no network
+  restriction at all: the container runs on the runtime's default network with
+  ordinary outbound access, and a conversation's network setting does not reach
+  it. This is not a weaker boundary but the absence of one, and it is disclosed
+  as its own status rather than borrowed from `unconfirmed`, which describes a
+  policy that *was* sent. Compiling the per-chat policy into container
+  networking is a later slice.
 
 The local adapter is an unconditional external boundary: direct networking
 stays denied and the only pinhole reaches the policy broker. Managed fidelity
@@ -149,7 +161,9 @@ CodeExecutionProvider::execute
     |
     +-- E2BExecutionProvider --------+
     |                                |
-    `-- DaytonaExecutionProvider ----+-- shared remote session + receipt layer
+    +-- DaytonaExecutionProvider ----+-- shared remote session + receipt layer
+    |                                |
+    `-- DockerExecutionProvider -----+
 ```
 
 A request contains:
@@ -173,6 +187,40 @@ code, stdout, stderr, timeout and truncation flags, and duration. Provider-nativ
 responses, credentials, and unbounded logs do not cross the contract. Absolute
 folder paths are a host-only input to the local adapter: they are never tool
 arguments and are stripped from managed-provider requests.
+
+## Container execution
+
+The Docker backend is opt-in and never a default. It exists because the native
+local sandbox is macOS-only: without it, a Linux or Windows host's only options
+upload the conversation's staged files to a vendor.
+
+It runs the same digest-pinned documents image the Daytona adapter registers as
+a snapshot and the E2B template is built from, so LibreOffice, the document
+skills' preinstalled Python dependencies, Node with the deck library, and the
+bundled exec helpers are present at the same versions on every backend. The pin
+lives in one module (`sandbox_image.rs`) that both backends in the crate read,
+and the image-publish workflow rewrites it there.
+
+One container serves one chat workspace, under a name derived from the
+workspace id so a restarted host adopts its containers rather than duplicating
+them. Commands cross as an argument vector through `docker exec` under an
+in-container `timeout`, so a command that exceeds its limit is stopped rather
+than left running behind an abandoned CLI. Workspace file transfers use the
+same channel. The container's only process is a bounded sleep and it is created
+with `--rm`, so an abandoned chat's container and its workspace volume remove
+themselves.
+
+Confinement is the container itself: the image's unprivileged uid forced from
+the host, every Linux capability dropped, privilege escalation refused, and
+process, memory, and CPU ceilings. No host path is bind-mounted — the workspace
+is an anonymous volume, and host files enter only through the staging the host
+performs for the paths a call listed. The root filesystem is deliberately
+writable, unlike the sandbox-agent container tier: foreground exec installs
+packages and writes scratch, and the surface a read-only root would protect is
+the container's own ephemeral layer.
+
+Network policy is **not** enforced here yet — see the `not_enforced`
+disclosure above.
 
 ## Connected folders in local exec
 
