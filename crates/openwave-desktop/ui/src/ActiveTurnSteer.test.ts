@@ -39,6 +39,7 @@ describe("ActiveTurnSteerFence", () => {
       content: "change course",
       draftSnapshot: "  change course  ",
       steerId: "steer-1",
+      voiceInputUsed: false,
     });
     expect(fence.begin(target, "another direction", createId)).toBeNull();
     expect(createId).toHaveBeenCalledTimes(1);
@@ -70,6 +71,20 @@ describe("ActiveTurnSteerFence", () => {
     expect(fence.begin(target, "different course", createId)?.steerId).toBe(
       "steer-2",
     );
+  });
+
+  it("allocates a new identity when failed guidance gains voice context", () => {
+    const createId = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("steer-1")
+      .mockReturnValueOnce("steer-2");
+    const fence = new ActiveTurnSteerFence();
+    const first = fence.begin(target, "change course", createId)!;
+    fence.fail(first);
+
+    expect(
+      fence.begin(target, "change course", createId, true)?.steerId,
+    ).toBe("steer-2");
   });
 
   it("accepts a response only for the exact selected chat and active turn", () => {

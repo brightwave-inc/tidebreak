@@ -37,15 +37,16 @@ pub(in crate::db) async fn insert_on<C>(
     message_id: MessageId,
     documents: &[DocumentId],
     now: chrono::DateTime<Utc>,
-) -> Result<()>
+) -> Result<Vec<MessageDocumentAttachment>>
 where
     C: ConnectionTrait,
 {
     if documents.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    for &document_id in documents {
+    let mut attachments = Vec::with_capacity(documents.len());
+    for (ordinal, &document_id) in documents.iter().enumerate() {
         let document = entities::document::Entity::find_by_id(document_id.0)
             .one(conn)
             .await
@@ -58,18 +59,37 @@ where
                 "document attachment {document_id} does not belong to chat {chat_id}"
             )));
         }
+        let source_blob = source_blob_from_model(
+            document.source_blob_id,
+            document.source_sha256,
+            document.source_byte_len,
+        )?;
+        let attachment = MessageDocumentAttachment {
+            message_id,
+            chat_id,
+            ordinal: i32::try_from(ordinal).expect("attachment count is bounded"),
+            document_id,
+            title: document.title,
+            media_type: document.media_type,
+            source_blob,
+            readable: !document.canonical_text.is_empty(),
+            created_at: now,
+        };
+        attachment
+            .validate()
+            .map_err(|reason| AgentError::Store(reason.into()))?;
+        attachments.push(attachment);
     }
 
-    let rows = documents
+    let rows = attachments
         .iter()
-        .enumerate()
         .map(
-            |(ordinal, document_id)| entities::message_document_attachment::ActiveModel {
-                message_id: Set(message_id.0),
-                ordinal: Set(i32::try_from(ordinal).expect("attachment count is bounded")),
-                chat_id: Set(chat_id.0),
-                document_id: Set(document_id.0),
-                created_at: Set(now),
+            |attachment| entities::message_document_attachment::ActiveModel {
+                message_id: Set(attachment.message_id.0),
+                ordinal: Set(attachment.ordinal),
+                chat_id: Set(attachment.chat_id.0),
+                document_id: Set(attachment.document_id.0),
+                created_at: Set(attachment.created_at),
             },
         )
         .collect::<Vec<_>>();
@@ -77,7 +97,7 @@ where
         .exec_without_returning(conn)
         .await
         .map_err(store_err)?;
-    Ok(())
+    Ok(attachments)
 }
 
 pub(in crate::db) async fn list_for_chat(

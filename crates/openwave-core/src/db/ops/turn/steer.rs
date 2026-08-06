@@ -28,6 +28,7 @@ pub(in crate::db) async fn accept_turn_steer(
     chat_id: ChatId,
     content: &str,
     interrupt: bool,
+    voice_input_used: bool,
 ) -> Result<AcceptTurnSteerOutcome> {
     validate_steer_input(id, turn_id, chat_id, content)?;
     if let Some(existing) = entities::turn_steer::Entity::find_by_id(id.0)
@@ -35,7 +36,14 @@ pub(in crate::db) async fn accept_turn_steer(
         .await
         .map_err(store_err)?
     {
-        return exact_accepted_steer(existing, turn_id, chat_id, content, interrupt);
+        return exact_accepted_steer(
+            existing,
+            turn_id,
+            chat_id,
+            content,
+            interrupt,
+            voice_input_used,
+        );
     }
     if entities::message::Entity::find_by_id(id.0)
         .one(&store.conn)
@@ -61,7 +69,14 @@ pub(in crate::db) async fn accept_turn_steer(
         .await
         .map_err(store_err)?
     {
-        let outcome = exact_accepted_steer(existing, turn_id, chat_id, content, interrupt)?;
+        let outcome = exact_accepted_steer(
+            existing,
+            turn_id,
+            chat_id,
+            content,
+            interrupt,
+            voice_input_used,
+        )?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(outcome);
     }
@@ -116,7 +131,14 @@ pub(in crate::db) async fn accept_turn_steer(
             .await
             .map_err(store_err)?
         {
-            return exact_accepted_steer(existing, turn_id, chat_id, content, interrupt);
+            return exact_accepted_steer(
+                existing,
+                turn_id,
+                chat_id,
+                content,
+                interrupt,
+                voice_input_used,
+            );
         }
         return Ok(AcceptTurnSteerOutcome::IdentityConflict);
     }
@@ -126,6 +148,7 @@ pub(in crate::db) async fn accept_turn_steer(
         turn_id: Set(turn_id.0),
         chat_id: Set(chat_id.0),
         content: Set(content.to_owned()),
+        voice_input_used: Set(voice_input_used),
         interrupt: Set(interrupt),
         status: Set(TurnSteerStatus::Pending.as_str().into()),
         applied_lease_token: Set(None),
@@ -145,7 +168,14 @@ pub(in crate::db) async fn accept_turn_steer(
                 .await
                 .map_err(store_err)?
             {
-                return exact_accepted_steer(existing, turn_id, chat_id, content, interrupt);
+                return exact_accepted_steer(
+                    existing,
+                    turn_id,
+                    chat_id,
+                    content,
+                    interrupt,
+                    voice_input_used,
+                );
             }
             if entities::message::Entity::find_by_id(id.0)
                 .one(&store.conn)
@@ -430,6 +460,7 @@ pub(in crate::db) async fn apply_turn_steer(
             seq: Set(next_message_seq_on(&transaction, preceding.chat_id).await?),
             role: Set("assistant".into()),
             content: Set(preceding.content.clone()),
+            llm_content: Set(preceding.llm_content.clone()),
             reasoning: Set(reasoning_to_db(&preceding.reasoning)),
             turn_lease_token: Set(Some(lease_token)),
             created_at: Set(preceding_created_at),
@@ -462,6 +493,13 @@ pub(in crate::db) async fn apply_turn_steer(
         seq: Set(next_message_seq_on(&transaction, ChatId(steer.chat_id)).await?),
         role: Set("user".into()),
         content: Set(steer.content.clone()),
+        llm_content: Set(crate::model::user_message_llm_content(
+            &steer.content,
+            &[],
+            &[],
+            &[],
+            steer.voice_input_used,
+        )),
         reasoning: Set(None),
         turn_lease_token: Set(Some(lease_token)),
         created_at: Set(now),
@@ -623,11 +661,13 @@ fn exact_accepted_steer(
     chat_id: ChatId,
     content: &str,
     interrupt: bool,
+    voice_input_used: bool,
 ) -> Result<AcceptTurnSteerOutcome> {
     if existing.turn_id != turn_id.0
         || existing.chat_id != chat_id.0
         || existing.content != content
         || existing.interrupt != interrupt
+        || existing.voice_input_used != voice_input_used
     {
         return Ok(AcceptTurnSteerOutcome::IdentityConflict);
     }
@@ -643,6 +683,13 @@ async fn ensure_exact_applied_message_on<C>(
 where
     C: ConnectionTrait,
 {
+    let expected_llm_content = crate::model::user_message_llm_content(
+        &steer.content,
+        &[],
+        &[],
+        &[],
+        steer.voice_input_used,
+    );
     let exact = entities::message::Entity::find_by_id(steer.id)
         .one(conn)
         .await
@@ -652,6 +699,7 @@ where
                 && message.turn_id == steer.turn_id
                 && message.role == "user"
                 && message.content == steer.content
+                && message.llm_content == expected_llm_content
                 && steer
                     .resolved_at
                     .is_some_and(|resolved_at| message.created_at == resolved_at)
@@ -791,6 +839,7 @@ fn turn_steer_from_model(model: entities::turn_steer::Model) -> Result<TurnSteer
         turn_id: TurnId(model.turn_id),
         chat_id: ChatId(model.chat_id),
         content: model.content,
+        voice_input_used: model.voice_input_used,
         interrupt: model.interrupt,
         status: turn_steer_status_from_db(&model.status)?,
         applied_lease_token: model.applied_lease_token,

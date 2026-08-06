@@ -61,6 +61,11 @@ export function presentChatTranscript(
                 role: "turn_failure",
                 category: entry.failureCategory ?? "unknown",
                 model: entry.failureModel,
+                invokedSkills:
+                  entry.invokedSkills.length > 0
+                    ? entry.invokedSkills
+                    : undefined,
+                voiceInputUsed: entry.voiceInputUsed || undefined,
               } satisfies ChatMessage)
             : ({
                 id: `cancellation:${entry.id}`,

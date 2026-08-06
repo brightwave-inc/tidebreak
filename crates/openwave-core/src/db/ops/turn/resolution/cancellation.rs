@@ -498,6 +498,7 @@ async fn finish_turn_cancellation_inner(
                 seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
                 role: Set("assistant".into()),
                 content: Set(output.content.clone()),
+                llm_content: Set(output.llm_content.clone()),
                 reasoning: Set(reasoning_to_db(&output.reasoning)),
                 turn_lease_token: Set(Some(lease_token)),
                 created_at: Set(canonical_db_timestamp(output.created_at)?),

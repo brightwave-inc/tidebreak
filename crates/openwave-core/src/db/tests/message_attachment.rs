@@ -98,6 +98,90 @@ async fn accepted_attachments_persist_identity_in_submission_order() {
 }
 
 #[tokio::test]
+async fn message_context_is_persisted_for_the_model_without_changing_visible_content() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let image = image_for(b"voice image", 640, 480);
+    let mut document = sample_document(None);
+    document.chat_id = Some(chat.id);
+    document.title = Some("meeting-notes.pdf".into());
+    document.media_type = "application/pdf".into();
+    document.source_blob = Some(DocumentSourceBlob::from_bytes(b"opaque pdf"));
+    document.canonical_text.clear();
+    store.create_document(&document).await.unwrap();
+
+    let turn_id = TurnId::new();
+    let invoked = vec!["pdf-documents".to_owned()];
+    let accepted = store
+        .accept_turn_with_message_context(
+            turn_id,
+            chat.id,
+            "gpt-5",
+            "Summarize the meting notes",
+            &[image],
+            &[document.id],
+            &invoked,
+            true,
+        )
+        .await
+        .unwrap();
+    let AcceptTurnOutcome::Accepted(turn) = accepted else {
+        panic!("unexpected acceptance outcome: {accepted:?}");
+    };
+    assert!(turn.voice_input_used);
+
+    let messages = store.list_messages(chat.id).await.unwrap();
+    let [message] = messages.as_slice() else {
+        panic!("accepted turn should persist one input message");
+    };
+    assert_eq!(message.content, "Summarize the meting notes");
+    let llm_content = message
+        .llm_content
+        .as_deref()
+        .expect("message-scoped context should create a model projection");
+    assert!(llm_content.contains("transcribed from speech"));
+    assert!(llm_content.contains("pdf-documents"));
+    assert!(llm_content.contains(&image.blob_id.to_string()));
+    assert!(llm_content.contains(&document.id.to_string()));
+    assert!(llm_content.ends_with("# User message\n\nSummarize the meting notes"));
+
+    assert!(matches!(
+        store
+            .accept_turn_with_message_context(
+                turn_id,
+                chat.id,
+                "gpt-5",
+                "Summarize the meting notes",
+                &[image],
+                &[document.id],
+                &invoked,
+                true,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Existing(_)
+    ));
+    assert!(matches!(
+        store
+            .accept_turn_with_message_context(
+                turn_id,
+                chat.id,
+                "gpt-5",
+                "Summarize the meting notes",
+                &[image],
+                &[document.id],
+                &invoked,
+                false,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::IdentityConflict
+    ));
+}
+
+#[tokio::test]
 async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proof() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -362,10 +446,10 @@ async fn a_reloaded_conversation_rebuilds_the_same_image_blocks_in_order() {
             ContentBlock::Image { image: second },
             ContentBlock::Text {
                 text: format!(
-                    "compare these\n\n<attachments>\n\
+                    "# Important context\n\n<attachments>\n\
                      image_1: id={}; media_type=image/png; byte_size=20; this is image content block 1\n\
                      image_2: id={}; media_type=image/webp; byte_size=21; this is image content block 2\n\
-                     </attachments>",
+                     </attachments>\n\n# User message\n\ncompare these",
                     first.blob_id, second.blob_id
                 )
             },

@@ -1795,6 +1795,7 @@ export class ApiClient {
     attachments: readonly string[] = [],
     fileAttachments: readonly string[] = [],
     invokedSkills: readonly string[] = [],
+    voiceInputUsed = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
@@ -1805,6 +1806,7 @@ export class ApiClient {
         attachments,
         file_attachments: fileAttachments,
         invoked_skills: invokedSkills,
+        voice_input_used: voiceInputUsed,
       }),
     });
   }
@@ -1815,11 +1817,18 @@ export class ApiClient {
     steerId: string,
     content: string,
     interrupt = false,
+    voiceInputUsed = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/steer`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ steer_id: steerId, turn_id: turnId, content, interrupt }),
+      body: JSON.stringify({
+        steer_id: steerId,
+        turn_id: turnId,
+        content,
+        interrupt,
+        voice_input_used: voiceInputUsed,
+      }),
     });
   }
 

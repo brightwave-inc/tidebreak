@@ -328,6 +328,7 @@ async fn complete_turn_run_inner(
         seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(output.content.clone()),
+        llm_content: Set(output.llm_content.clone()),
         reasoning: Set(reasoning_to_db(&output.reasoning)),
         turn_lease_token: Set(Some(lease_token)),
         created_at: Set(output_created_at),
@@ -1066,6 +1067,7 @@ where
                 && message.turn_id == output.turn_id.0
                 && message.role == "assistant"
                 && message.content == output.content
+                && message.llm_content == output.llm_content
                 && message.reasoning == reasoning_to_db(&output.reasoning)
                 && message.created_at == created_at
         }))

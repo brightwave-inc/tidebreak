@@ -12,8 +12,12 @@ export type VoiceComposer = {
   available: boolean;
   state: VoiceComposerState;
   error: string | null;
+  /** At least one non-empty transcript has contributed to the current draft. */
+  inputUsed: boolean;
   start: () => Promise<void>;
   stop: () => void;
+  markInputUsed: () => void;
+  resetInputUsed: () => void;
 };
 
 const VOICE_MIME_TYPES = [
@@ -59,6 +63,7 @@ export function useVoiceComposer(
     typeof navigator.mediaDevices?.getUserMedia === "function";
   const [state, setState] = useState<VoiceComposerState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [inputUsed, setInputUsed] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -127,7 +132,10 @@ export function useVoiceComposer(
         void transcribeRef.current(audio)
           .then((transcript) => {
             if (!mountedRef.current) return;
-            if (transcript.trim()) onTranscriptRef.current(transcript);
+            if (transcript.trim()) {
+              setInputUsed(true);
+              onTranscriptRef.current(transcript);
+            }
           })
           .catch((caught) => {
             if (mountedRef.current) setError(voiceError(caught));
@@ -160,5 +168,17 @@ export function useVoiceComposer(
     if (recorder?.state === "recording") recorder.stop();
   }, []);
 
-  return { available, state, error, start, stop };
+  const markInputUsed = useCallback(() => setInputUsed(true), []);
+  const resetInputUsed = useCallback(() => setInputUsed(false), []);
+
+  return {
+    available,
+    state,
+    error,
+    inputUsed,
+    start,
+    stop,
+    markInputUsed,
+    resetInputUsed,
+  };
 }

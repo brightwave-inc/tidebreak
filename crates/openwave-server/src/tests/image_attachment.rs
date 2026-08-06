@@ -845,10 +845,10 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     assert_eq!(content[0]["type"], "input_image");
     assert_eq!(content[1]["type"], "input_image");
     let text = content[2]["text"].as_str().unwrap();
-    assert!(text.starts_with("Describe these attachments.\n\n<attachments>"));
+    assert!(text.starts_with("# Important context\n\n<attachments>"));
     assert!(text.contains(&format!("image_1: id={png};")));
     assert!(text.contains(&format!("image_2: id={jpeg};")));
-    assert!(text.ends_with("</attachments>"));
+    assert!(text.ends_with("</attachments>\n\n# User message\n\nDescribe these attachments."));
     for (part, media_type) in content[..2].iter().zip(["image/png", "image/jpeg"]) {
         assert_eq!(part["type"], "input_image");
         assert!(

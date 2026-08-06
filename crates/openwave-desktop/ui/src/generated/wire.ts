@@ -486,7 +486,7 @@ invoked_skills?: Array<string>,
  * Token accounting for the turn, so a freshly opened chat can show
  * context usage without waiting for the next turn to finish.
  */
-usage: RendererTurnUsage, finished_at: string, };
+usage: RendererTurnUsage, voice_input_used: boolean, finished_at: string, };
 
 export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 

@@ -232,6 +232,12 @@ pub(super) fn turn_run_table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(TurnRun::VoiceInputUsed)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .col(
             ColumnDef::new(TurnRun::Status)
                 .string_len(32)
                 .not_null()
@@ -669,6 +675,12 @@ pub(super) fn turn_steer_table() -> TableCreateStatement {
         .col(ColumnDef::new(TurnSteer::TurnId).uuid().not_null())
         .col(ColumnDef::new(TurnSteer::ChatId).uuid().not_null())
         .col(ColumnDef::new(TurnSteer::Content).text().not_null())
+        .col(
+            ColumnDef::new(TurnSteer::VoiceInputUsed)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
         .col(
             ColumnDef::new(TurnSteer::Interrupt)
                 .boolean()

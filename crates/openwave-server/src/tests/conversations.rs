@@ -862,6 +862,7 @@ async fn chat_transcript_replays_only_visible_durable_messages() {
             role: Role::User,
             reasoning: Default::default(),
             content: "remember this".into(),
+            llm_content: None,
             created_at: chrono::Utc::now(),
         })
         .await

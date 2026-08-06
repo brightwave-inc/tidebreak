@@ -2135,6 +2135,7 @@ async fn chats_and_messages_roundtrip() {
         role: Role::User,
         reasoning: Default::default(),
         content: "hi there".into(),
+        llm_content: None,
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
     };
     store.append_message(&msg).await.unwrap();
@@ -2160,6 +2161,7 @@ async fn make_queued_turn(
         role: Set("user".into()),
         reasoning: Default::default(),
         content: Set("turn input".into()),
+        llm_content: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
     }
@@ -2176,6 +2178,7 @@ async fn make_queued_turn(
         output_message_id: Set(None),
         model: Set(model.into()),
         invoked_skills: Set(serde_json::json!([])),
+        voice_input_used: Set(false),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
         max_attempts: Set(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
@@ -2242,6 +2245,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         role: Set("assistant".into()),
         reasoning: Default::default(),
         content: Set("done".into()),
+        llm_content: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
     }
@@ -3291,6 +3295,7 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "resumed answer".into(),
+        llm_content: None,
         created_at: resume_at + chrono::Duration::seconds(1),
     };
     assert_eq!(
@@ -3698,6 +3703,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "must not commit".into(),
+        llm_content: None,
         created_at: resolved_at + chrono::Duration::microseconds(1),
     };
     assert_eq!(
@@ -5100,6 +5106,7 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "final answer".into(),
+        llm_content: None,
         created_at: claimed_at + chrono::Duration::nanoseconds(1_234_567),
     };
 
@@ -5364,6 +5371,7 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "recovered".into(),
+        llm_content: None,
         created_at: canonical_retry_at + chrono::Duration::seconds(1),
     };
     assert!(matches!(
@@ -6037,6 +6045,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "too late".into(),
+        llm_content: None,
         created_at: requested_at + chrono::Duration::seconds(1),
     };
     assert_eq!(
@@ -6170,6 +6179,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             model: "gpt-5".into(),
             invoked_skills: Vec::new(),
             usage,
+            voice_input_used: false,
             finished_at: acknowledged_at,
         }]
     );
@@ -6507,6 +6517,7 @@ async fn turn_completion_and_cancellation_serialize_to_one_decision() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "race answer".into(),
+        llm_content: None,
         created_at: decided_at,
     };
     let store = std::sync::Arc::new(store);
@@ -6586,6 +6597,7 @@ async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "race winner".into(),
+        llm_content: None,
         created_at: resolved_at,
     };
     let store = std::sync::Arc::new(store);
@@ -6679,11 +6691,13 @@ async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() 
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "prepared before retry".into(),
+        llm_content: None,
         created_at: heartbeat_at - chrono::Duration::microseconds(1),
     };
     let future_output = Message {
         id: MessageId::new(),
         content: "future output".into(),
+        llm_content: None,
         created_at: heartbeat_at + chrono::Duration::seconds(2),
         ..prepared_output.clone()
     };
@@ -6700,6 +6714,7 @@ async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() 
     let output = Message {
         id: MessageId::new(),
         content: "after the original lease".into(),
+        llm_content: None,
         created_at: original_expiry + chrono::Duration::seconds(1),
         ..prepared_output
     };
@@ -6743,6 +6758,7 @@ async fn turn_completion_rejects_prepared_output_retried_after_expiry() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "prepared while live".into(),
+        llm_content: None,
         created_at: lease_expires_at - chrono::Duration::seconds(1),
     };
 
@@ -6809,6 +6825,7 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "stale answer".into(),
+        llm_content: None,
         created_at: first_expiry + chrono::Duration::seconds(1),
     };
     assert_eq!(
@@ -6827,6 +6844,7 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
     let output = Message {
         id: MessageId::new(),
         content: "current answer".into(),
+        llm_content: None,
         ..stale_output
     };
     assert!(matches!(
@@ -6868,11 +6886,13 @@ async fn concurrent_different_turn_completions_commit_one_output_once() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "one answer".into(),
+        llm_content: None,
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
     let competing_output = Message {
         id: MessageId::new(),
         content: "different answer".into(),
+        llm_content: None,
         ..output.clone()
     };
     let store = std::sync::Arc::new(store);
@@ -6944,6 +6964,7 @@ async fn turn_completion_rolls_back_output_when_state_update_fails() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "must roll back".into(),
+        llm_content: None,
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
     assert!(store
@@ -7009,6 +7030,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "must roll back".into(),
+        llm_content: None,
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
 
@@ -7338,6 +7360,7 @@ async fn list_chats_is_newest_first_and_messages_follow_commit_sequence() {
         role: Role::User,
         reasoning: Default::default(),
         content: format!("t{ts}"),
+        llm_content: None,
         created_at: DateTime::<Utc>::from_timestamp(ts, 0).unwrap(),
     };
     let (m1, m2) = (msg(20), msg(10));
@@ -7359,6 +7382,7 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         role: Role::User,
         reasoning: Default::default(),
         content: "delete this history".into(),
+        llm_content: None,
         created_at: Utc::now(),
     };
     store.append_message(&message).await.unwrap();
@@ -7616,6 +7640,7 @@ async fn refused_turn_metadata_hydrates_with_its_exact_durable_output() {
             role: Role::Assistant,
             reasoning: Default::default(),
             content: content.into(),
+            llm_content: None,
             created_at: accepted.available_at,
         };
         let refusal = RefusalOutcome::new(
@@ -7957,6 +7982,7 @@ async fn all_roles_round_trip() {
                 role: *role,
                 reasoning: Default::default(),
                 content: String::new(),
+                llm_content: None,
                 created_at: DateTime::<Utc>::from_timestamp(i as i64, 0).unwrap(),
             })
             .await
@@ -8233,6 +8259,7 @@ async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "intermediate".into(),
+        llm_content: None,
         created_at: claimed_at,
     };
     assert_eq!(
@@ -8263,6 +8290,7 @@ async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
     let stale_message = Message {
         id: MessageId::new(),
         content: "stale".into(),
+        llm_content: None,
         created_at: retry_at,
         ..message
     };
@@ -9612,6 +9640,7 @@ async fn reasoning_deltas_rebuild_into_the_transcript() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "the answer".into(),
+        llm_content: None,
         created_at: accepted.available_at,
     };
     store
@@ -9902,6 +9931,7 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "the answer so far".into(),
+        llm_content: None,
         created_at: requested_at,
     };
     store
