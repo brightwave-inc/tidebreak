@@ -51,6 +51,26 @@ say so plainly instead of quietly delivering a lesser format.
 - Always open source PDFs from the workspace (attachments arrive under
   `documents/`), and never assume a page count — read it.
 
+## Working from an existing PDF as a template
+
+A PDF the user supplies as a template is a read-only reference: its layout
+cannot be edited in place. There are two ways forward, and the first is much
+better whenever it applies.
+
+1. **Check for fillable form fields first.** Read the template with
+   `PdfReader.get_fields()`. If it returns usable fields, fill them as above
+   — that keeps the original design intact and is far less work than
+   rebuilding the document.
+2. **Only when there are no usable fields, reproduce the layout.** Render the
+   template to images with the helper below and study it visually — fonts,
+   sizes, margins, column positions, rules, headers and footers — alongside
+   its structure, then rebuild it as a new document with fpdf2, matching that
+   layout as closely as fpdf2 allows. Approximations are expected; say which
+   ones you made.
+
+A reproduction is a new document that resembles the template, not the
+template itself. Never present it as the original.
+
 ## Saving deliverables
 
 Save the finished PDF in `output/` — files there are published to the user
