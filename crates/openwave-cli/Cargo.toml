@@ -22,8 +22,15 @@ path = "src/main.rs"
 openwave-core = { path = "../openwave-core", default-features = false, features = ["tools"] }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-server = { path = "../openwave-server" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+crossterm = { version = "=0.28.1", features = ["event-stream"] }
+futures = { workspace = true }
+ratatui = "=0.29.0"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-tungstenite = { workspace = true }
+tui-textarea = "=0.7.0"
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tempfile = "=3.27.0"

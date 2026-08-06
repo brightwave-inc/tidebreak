@@ -15,15 +15,22 @@
 //! `openwave rehome-secrets` rewrites the profile's stored credentials so their
 //! keychain items belong to the running binary's code signature, which is what
 //! stops macOS asking for credentials an earlier build created.
+//!
+//! `openwave tui [--chat <id>]` runs an interactive terminal chat: it boots the
+//! same in-process server as `serve` and drives it over the loopback HTTP+WS
+//! API, starting a fresh chat or resuming an existing one.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use openwave_core::{AgentError, ChatId, Config, ListDir, ReadFile, Result, ToolCtx, ToolRegistry};
 
-const USAGE: &str =
-    "usage: openwave serve\n       openwave mcp <workspace>\n       openwave rehome-secrets";
+mod tui;
+
+const USAGE: &str = "usage: openwave serve\n       openwave mcp <workspace>\n       openwave \
+                     rehome-secrets\n       openwave tui [--chat <id>]";
 
 #[tokio::main]
 async fn main() {
@@ -60,6 +67,25 @@ async fn run() -> Result<()> {
                 usage_error("rehome-secrets does not accept arguments");
             }
             rehome_secrets().await
+        }
+        Some(command) if command == OsStr::new("tui") => {
+            let chat = match args.next() {
+                None => None,
+                Some(flag) if flag == OsStr::new("--chat") => {
+                    let Some(id) = args.next() else {
+                        usage_error("tui --chat requires a chat id");
+                    };
+                    match ChatId::from_str(&id.to_string_lossy()) {
+                        Ok(chat) => Some(chat),
+                        Err(_) => usage_error("tui --chat expects a chat UUID"),
+                    }
+                }
+                Some(_) => usage_error("tui accepts only an optional --chat <id>"),
+            };
+            if args.next().is_some() {
+                usage_error("tui accepts only an optional --chat <id>");
+            }
+            tui::run(chat).await
         }
         Some(other) => {
             usage_error(&format!("unknown command {other:?}"));
