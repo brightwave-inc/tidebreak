@@ -353,7 +353,10 @@ impl App {
         };
         let (client, chat, actions) = (self.client.clone(), self.chat, self.actions.clone());
         tokio::spawn(async move {
-            if let Err(error) = client.decide_approval(chat, pending.call_id, approve).await {
+            if let Err(error) = client
+                .decide_approval(chat, pending.call_id, approve, "declined from terminal")
+                .await
+            {
                 let _ = actions.send(ActionOutcome::DecisionFailed(error.to_string()));
             }
         });

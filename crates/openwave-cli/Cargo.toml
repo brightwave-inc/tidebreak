@@ -36,7 +36,7 @@ syntect = { version = "=5.3.0", default-features = false, features = ["default-s
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-tungstenite = { workspace = true }
 tui-textarea = "=0.7.0"
 
