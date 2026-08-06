@@ -533,6 +533,11 @@ fn syntect_color(color: Color) -> Option<SyntectColor> {
 /// rather than a syntect theme dump so highlighting stays cohesive with the
 /// rest of the TUI. Foreground-only; unmapped scopes keep the terminal's
 /// default text color.
+///
+/// The base foreground is an alpha-zero sentinel: syntect resolves unmapped
+/// scopes to it (and would otherwise default them to black, invisible on a
+/// dark terminal), so [`highlight`] can recognize it and emit no color.
+/// Every real palette color above carries alpha 255.
 fn syntax_theme() -> Theme {
     let item = |scope: &str, color: Color| ThemeItem {
         scope: ScopeSelectors::from_str(scope).unwrap_or_default(),
@@ -545,7 +550,15 @@ fn syntax_theme() -> Theme {
     Theme {
         name: Some("openwave-tui".to_owned()),
         author: None,
-        settings: ThemeSettings::default(),
+        settings: ThemeSettings {
+            foreground: Some(SyntectColor {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            }),
+            ..ThemeSettings::default()
+        },
         scopes: vec![
             item("comment", theme::CODE_COMMENT),
             item("string", theme::CODE_STRING),
@@ -579,14 +592,18 @@ fn highlight(lang: &str, code: &str) -> Vec<Vec<(String, Style)>> {
                 let mut spans: Vec<(String, Style)> = ranges
                     .into_iter()
                     .map(|(style, text)| {
-                        (
-                            text.to_owned(),
+                        // The alpha-zero sentinel marks an unmapped scope:
+                        // leave the terminal's default text color alone.
+                        let style = if style.foreground.a == 0 {
+                            Style::default()
+                        } else {
                             Style::default().fg(Color::Rgb(
                                 style.foreground.r,
                                 style.foreground.g,
                                 style.foreground.b,
-                            )),
-                        )
+                            ))
+                        };
+                        (text.to_owned(), style)
                     })
                     .collect();
                 // `load_defaults_newlines` keeps the trailing newline inside
