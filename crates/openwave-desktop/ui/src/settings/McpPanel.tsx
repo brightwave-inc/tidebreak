@@ -42,6 +42,7 @@ function emptyServer(index: number): McpServerInfo {
     gateway_endpoint: null,
     request_timeout_ms: DEFAULT_TIMEOUT_MS,
     enabled: true,
+    plugin: null,
     health: "initializing",
     tool_count: 0,
     diagnostic: null,
@@ -150,6 +151,32 @@ function definition(server: McpServerInfo): McpServerDefinition {
     ...value
   } = server;
   return value;
+}
+
+/**
+ * A server a plugin brings with it. It is listed because the tools it mounts
+ * are as real as any other server's, and read-only because its definition
+ * ships inside the package: the plugin's own switch is what turns it off.
+ */
+function PluginServerSection({ server }: { server: McpServerInfo }) {
+  return (
+    <SettingsSection title={server.name}>
+      <SettingsStatus
+        tone={healthTone(server.health)}
+        label={healthLabel(server.health)}
+        description={
+          server.health === "healthy"
+            ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
+            : (server.diagnostic ?? "This server is not connected.")
+        }
+      />
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        Provided by the <code>{server.plugin}</code> plugin. Its configuration
+        ships with the package, so it is not edited here — turn the plugin off
+        under Plugins to disconnect it and unmount its tools.
+      </p>
+    </SettingsSection>
+  );
 }
 
 export function McpPanel({
@@ -329,7 +356,9 @@ export function McpPanel({
     setSaving(true);
     setError(null);
     try {
-      const result = await client.putMcpServers(servers.map(definition));
+      const result = await client.putMcpServers(
+        servers.filter((server) => server.plugin === null).map(definition),
+      );
       // Supersede any in-flight background read; this list is fresher.
       requestRef.current += 1;
       setServers(result.servers);
@@ -352,7 +381,9 @@ export function McpPanel({
     setMounting(true);
     setError(null);
     try {
-      const current = (await client.listMcpServers()).servers.map(definition);
+      const current = (await client.listMcpServers()).servers
+        .filter((server) => server.plugin === null)
+        .map(definition);
       const without = current.filter(
         (server) => server.gateway_endpoint !== slug,
       );
@@ -604,7 +635,10 @@ export function McpPanel({
             </SettingsSection>
           )}
 
-          {servers.map((server, index) => (
+          {servers.map((server, index) =>
+            server.plugin !== null ? (
+              <PluginServerSection key={index} server={server} />
+            ) : (
             <SettingsSection
               key={index}
               title={server.name || `Server ${index + 1}`}
@@ -863,7 +897,8 @@ export function McpPanel({
                 )}
               </div>
             </SettingsSection>
-          ))}
+            ),
+          )}
 
           <div className="flex flex-wrap gap-2">
             <Button
@@ -983,6 +1018,7 @@ function mountDefinition(slug: string, name: string): McpServerDefinition {
     gateway_endpoint: slug,
     request_timeout_ms: DEFAULT_TIMEOUT_MS,
     enabled: true,
+    plugin: null,
   };
 }
 

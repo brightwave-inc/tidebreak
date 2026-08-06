@@ -58,6 +58,11 @@ pub struct ConfiguredCodeExecutionProvider {
     /// alongside the user skills and prompts they group so an added or edited
     /// bundle appears without a restart. `None` disables user plugins.
     user_plugins_dir: Option<PathBuf>,
+    /// Where the built-in plugin tree was loaded from, retained so a bundled
+    /// MCP server can be launched with its package root as `PLUGIN_ROOT`. The
+    /// packages themselves are already loaded; this is only the path they came
+    /// from.
+    plugins_dir: Option<PathBuf>,
     /// Public-HTTPS archive fetcher used only by explicit plugin installs.
     /// Injectable in route tests so the contract is driven without live
     /// internet access.
@@ -212,6 +217,7 @@ impl ConfiguredCodeExecutionProvider {
             user_prompts_dir: None,
             plugins: Arc::new(Vec::new()),
             user_plugins_dir: None,
+            plugins_dir: None,
             plugin_archive_fetcher: crate::plugin_install::default_fetcher(),
             plugin_install_lock: tokio::sync::Mutex::new(()),
             folder_grant_resolver: None,
@@ -337,6 +343,7 @@ impl ConfiguredCodeExecutionProvider {
                 })
                 .unwrap_or_default(),
         );
+        self.plugins_dir = source;
         self
     }
 
@@ -403,6 +410,37 @@ impl ConfiguredCodeExecutionProvider {
     /// directory, exactly as [`Self::installed_skills`] does.
     pub(crate) fn installed_plugins(&self) -> Vec<openwave_code_execution::PluginPackage> {
         self.merged_plugins(&self.installed_skills(), &self.installed_prompts())
+    }
+
+    /// Every installed bundle that ships a bundled MCP configuration, paired
+    /// with the absolute package root its servers are launched from.
+    ///
+    /// The root is resolved from the tree the package was loaded from and then
+    /// canonicalized, because `PLUGIN_ROOT` is specified as the *resolved*
+    /// plugin root and every containment check downstream compares against it.
+    /// A bundle whose root will not canonicalize (removed between the listing
+    /// and this call) is dropped rather than launched from a path that no
+    /// longer means what the loader read.
+    pub(crate) fn installed_plugin_mcp(
+        &self,
+    ) -> Vec<(
+        openwave_code_execution::PluginPackage,
+        PathBuf,
+        openwave_code_execution::PluginMcpConfig,
+    )> {
+        self.installed_plugins()
+            .into_iter()
+            .filter(|package| package.mcp_servers > 0)
+            .filter_map(|package| {
+                let tree = match package.origin {
+                    openwave_code_execution::PluginOrigin::Builtin => self.plugins_dir.as_deref(),
+                    openwave_code_execution::PluginOrigin::User => self.user_plugins_dir.as_deref(),
+                }?;
+                let root = std::fs::canonicalize(tree.join(&package.name)).ok()?;
+                let config = openwave_code_execution::load_plugin_mcp_config(&root)?;
+                Some((package, root, config))
+            })
+            .collect()
     }
 
     /// Fetch, validate, and publish one instruction-only plugin, then ask the

@@ -1542,6 +1542,8 @@ mod tests {
             gateway_endpoint: Some("tools".to_string()),
             request_timeout_ms: 60_000,
             enabled: true,
+            plugin: None,
+            launch: None,
         };
         // No environment variable anywhere: the URL and bearer come from the
         // stored session via a resource-scoped refresh (asserted inside the
@@ -1732,6 +1734,8 @@ mod tests {
                     gateway_endpoint: Some("tools".to_string()),
                     request_timeout_ms: 60_000,
                     enabled: true,
+                    plugin: None,
+                    launch: None,
                 }],
             })
             .await

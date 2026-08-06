@@ -229,9 +229,39 @@ impl McpClient {
         initialization_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self> {
+        Self::connect_http_with_headers(
+            server_name,
+            url,
+            bearer_token,
+            &std::collections::BTreeMap::new(),
+            initialization_timeout,
+            request_timeout,
+        )
+        .await
+    }
+
+    /// [`Self::connect_http_with_timeouts`] with static headers sent on every
+    /// request.
+    ///
+    /// This exists for configuration sources that declare their own headers —
+    /// a plugin's bundled `mcp.json` does. A header naming something the
+    /// transport generates itself (`authorization`, `accept`,
+    /// `mcp-protocol-version`, `mcp-session-id`, `host`, `content-*`) is
+    /// dropped rather than merged, and no configured header ever reaches a
+    /// second origin because this transport does not follow redirects at all.
+    /// Values are never logged.
+    pub async fn connect_http_with_headers(
+        server_name: impl Into<String>,
+        url: &str,
+        bearer_token: Option<&str>,
+        headers: &std::collections::BTreeMap<String, String>,
+        initialization_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self> {
         let server_name = server_name.into();
         validate_server_name(&server_name)?;
-        let wire = HttpWire::new(url, bearer_token)?;
+        let wire =
+            HttpWire::with_headers(url, bearer_token, crate::http::static_headers(headers)?)?;
         let client =
             Self::connect_session(server_name, Session::http(wire, initialization_timeout)).await?;
         client.session.lock().await.request_timeout = request_timeout;

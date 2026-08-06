@@ -31,6 +31,7 @@ const healthy: McpServersInfo = {
       gateway_endpoint: null,
       request_timeout_ms: 60_000,
       enabled: true,
+      plugin: null,
       health: "healthy",
       tool_count: 2,
       diagnostic: null,
@@ -65,6 +66,7 @@ function gatewayMount(
     gateway_endpoint: slug,
     request_timeout_ms: 60_000,
     enabled: true,
+    plugin: null,
     health: "healthy",
     tool_count: 3,
     diagnostic: null,
@@ -699,6 +701,7 @@ describe("McpPanel", () => {
           gateway_endpoint: null,
           request_timeout_ms: 60_000,
           enabled: true,
+          plugin: null,
         },
         expect.objectContaining({
           gateway_endpoint: "example-security-tools",

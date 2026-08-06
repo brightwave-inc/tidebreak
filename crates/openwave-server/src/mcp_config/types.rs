@@ -26,7 +26,7 @@ pub(super) const MAX_ENVIRONMENT_VARIABLES: usize = 128;
 pub(super) const MAX_PROCESS_STRING_BYTES: usize = 32 * 1024;
 pub(super) const MAX_ENVIRONMENT_NAME_BYTES: usize = 256;
 pub(super) const MAX_REQUEST_TIMEOUT_MS: u64 = 60 * 60 * 1000;
-pub(super) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60 * 1000;
+pub(crate) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60 * 1000;
 pub(super) const HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 pub(super) const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -182,6 +182,71 @@ pub(crate) struct McpServerDefinition {
     pub(crate) request_timeout_ms: u64,
     #[serde(default = "enabled_by_default")]
     pub(crate) enabled: bool,
+    /// The plugin this server was synthesized from, when it is plugin-sourced.
+    ///
+    /// Read-only over the API: `PUT /mcp/servers` refuses a body that sets it,
+    /// and the runtime rebuilds these entries from the installed plugin tree
+    /// rather than from anything a client sends or the store holds.
+    #[serde(default)]
+    pub(crate) plugin: Option<String>,
+    /// Connect-time material for a plugin-sourced server: the two reserved
+    /// directories, the literal environment and headers its `mcp.json`
+    /// declared, and the reason it is inert when this client cannot run it.
+    ///
+    /// Never serialized. Environment values and header values are visible
+    /// package data the specification tells clients not to treat as secrets,
+    /// which is exactly the reason not to copy them into persisted records,
+    /// API responses, or logs.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub(crate) launch: Option<Box<PluginLaunch>>,
+}
+
+/// Connect-time material a plugin-sourced server carries.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PluginLaunch {
+    /// Absolute, resolved package root: `PLUGIN_ROOT`, and the directory a
+    /// `./`-relative command is resolved against.
+    pub(crate) root: PathBuf,
+    /// Client-managed writable directory: `PLUGIN_DATA`.
+    pub(crate) data: PathBuf,
+    /// Literal environment for a stdio server, already expanded.
+    pub(crate) env: BTreeMap<String, String>,
+    /// Static headers for a streamable-http server.
+    pub(crate) headers: BTreeMap<String, String>,
+    /// Which root the working directory is anchored to, and so which one it
+    /// has to stay inside.
+    pub(crate) cwd_anchor: CwdAnchor,
+    /// Why this entry is present but inert, for the transports this client
+    /// does not implement.
+    pub(crate) disabled_reason: Option<String>,
+}
+
+/// The root a plugin server's working directory is anchored to.
+///
+/// The specification lets `cwd` be rooted at either reserved variable, and the
+/// two are not interchangeable: the package tree is immutable once installed
+/// while the data tree is client-managed and starts empty. Which one was named
+/// is therefore carried rather than inferred from the resolved path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CwdAnchor {
+    Root,
+    Data,
+}
+
+/// Values never appear: the whole point of keeping them off the definition.
+impl std::fmt::Debug for PluginLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginLaunch")
+            .field("root", &self.root)
+            .field("data", &self.data)
+            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("cwd_anchor", &self.cwd_anchor)
+            .field("disabled_reason", &self.disabled_reason)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for McpServerDefinition {
@@ -256,17 +321,42 @@ impl McpServerDefinition {
     /// Build the child command. `env` is the definition's literal environment
     /// as resolved from the secret store — passed in rather than read off the
     /// definition, because the definition never holds values.
+    ///
+    /// A plugin-sourced server takes its environment from its own launch
+    /// material instead: package data, never secret-store entries. Its working
+    /// directory is re-checked for containment here rather than trusted from
+    /// the textual rule the importer applied, because only a check at launch
+    /// sees symlinks and edits made since.
     pub(super) fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
         let Some(program) = &self.command else {
             return Err(AgentError::config(
                 "MCP server definition has no command to spawn",
             ));
         };
+        // A plugin's `./`-relative command names a file inside the package and
+        // is resolved against the package root before the child is built;
+        // everything else — including a plugin's bare command name — keeps the
+        // platform resolution every other stdio server gets, so the two paths
+        // cannot drift.
+        let program = match &self.launch {
+            Some(launch) => crate::plugin_mcp::resolve_command(program, &launch.root)
+                .map_err(AgentError::config)?,
+            None => PathBuf::from(program),
+        };
         let mut command = Command::new(program);
         command.args(&self.args);
         // Deliberately unconditional: a renderer cannot widen a child to the
         // desktop's provider credentials or other ambient environment.
         command.env_clear();
+        if let Some(launch) = &self.launch {
+            let cwd = self.cwd.as_deref().unwrap_or(&launch.root);
+            crate::plugin_mcp::working_directory(launch, cwd).map_err(AgentError::config)?;
+            for (name, value) in crate::plugin_mcp::launch_environment(launch) {
+                command.env(name, value);
+            }
+            command.current_dir(cwd);
+            return Ok(command);
+        }
         for name in &self.env_from {
             let value = std::env::var_os(name).ok_or_else(|| {
                 AgentError::config(format!(
@@ -317,10 +407,18 @@ impl McpServerDefinition {
         }
         if let Some(url) = &self.url {
             let bearer_token = self.resolve_bearer_token()?;
-            return McpClient::connect_http_with_timeouts(
+            let headers = match &self.launch {
+                Some(launch) => {
+                    admit_plugin_endpoint(url).await?;
+                    launch.headers.clone()
+                }
+                None => BTreeMap::new(),
+            };
+            return McpClient::connect_http_with_headers(
                 self.name.clone(),
                 url,
                 bearer_token.as_deref(),
+                &headers,
                 INITIALIZATION_TIMEOUT,
                 Duration::from_millis(self.request_timeout_ms),
             )
@@ -389,6 +487,67 @@ impl McpServerDefinition {
             ))
         })
     }
+}
+
+/// Admit a plugin-declared HTTP endpoint before any connection is opened.
+///
+/// A package can name any endpoint it likes, so the destination is admitted
+/// the way the native web-fetch path admits a model-chosen URL: every address
+/// the host resolves to must clear the denied-network list — loopback, RFC
+/// 1918, link-local (which includes cloud metadata services), CGNAT, and the
+/// rest — before the transport dials.
+///
+/// **Two deliberate divergences from the web-fetch rules**, both because this
+/// is a package-declared endpoint rather than a model-chosen page:
+///
+/// * A **loopback** URL is admitted. The Agent Plugins specification allows
+///   plain HTTP for loopback precisely so a plugin can ship a local server,
+///   and refusing it would make bundled local servers unrunnable. That is the
+///   one destination the fetch policy denies which this path allows, and it is
+///   permitted only when the URL's own host is a loopback literal or
+///   `localhost` — never when a DNS name merely resolves to one.
+/// * A **non-default port** is admitted. Local and self-hosted MCP endpoints
+///   routinely listen off 443; the fetch policy pins the default port because
+///   a model-chosen URL has no reason to need another.
+///
+/// Resolution here is advisory rather than a hard guarantee: the transport
+/// resolves again when it connects, so a name whose answer changes in between
+/// is not caught. That is the same TOCTOU the native fetch path lives with,
+/// and it is a weaker exposure here — the URL is fixed package data reviewed
+/// at install, not a string the model just produced. Failing admission is a
+/// per-server connection failure: the plugin's other servers still start.
+async fn admit_plugin_endpoint(url: &str) -> Result<()> {
+    use openwave_web_search::admit_fetch_address;
+
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AgentError::config("plugin MCP server URL is not a valid URL"))?;
+    let refused = || AgentError::config("plugin MCP server endpoint is not an allowed destination");
+    let host = parsed.host().ok_or_else(refused)?;
+    let loopback = match host {
+        url::Host::Domain(name) => name == "localhost",
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    };
+    if loopback {
+        return Ok(());
+    }
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AgentError::config("plugin MCP server URL has no port"))?;
+    let addresses: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((parsed.host_str().unwrap_or_default(), port))
+            .await
+            .map_err(|_| AgentError::config("plugin MCP server host could not be resolved"))?
+            .collect();
+    if addresses.is_empty() {
+        return Err(AgentError::config(
+            "plugin MCP server host resolved to no addresses",
+        ));
+    }
+    for address in addresses {
+        admit_fetch_address(address.ip()).map_err(|_| refused())?;
+    }
+    Ok(())
 }
 
 /// SHA-256 fingerprint of a server definition as configured, the value an app

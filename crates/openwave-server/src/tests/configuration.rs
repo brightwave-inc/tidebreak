@@ -3836,3 +3836,220 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
     assert_eq!(mixed.status(), StatusCode::BAD_REQUEST);
     assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
 }
+
+/// A stdio MCP server small enough to write into a plugin package: POSIX sh
+/// answering the three requests a connection makes, plus the health probe. It
+/// records the environment it was launched with on startup, which is what
+/// lets the test assert the two reserved variables actually reached the child.
+#[cfg(unix)]
+const FAKE_PLUGIN_MCP_SERVER: &str = r#"#!/bin/sh
+printf '%s|%s|%s|%s' "$PLUGIN_ROOT" "$PLUGIN_DATA" "$MODE" "$(pwd)" > "$PLUGIN_DATA/started"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"PROTOCOL","capabilities":{"tools":{}},"serverInfo":{"name":"toolbox","version":"1"}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"lookup","description":"Look something up.","inputSchema":{"type":"object"}}]}}\n' "$id"
+      ;;
+    *'"method":"ping"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+
+/// Contract: a plugin's bundled MCP servers are live tools exactly while the
+/// plugin is installed and enabled, and are managed only from there.
+///
+/// This is the whole lifecycle in one turn of the crank, because each half is
+/// only meaningful against the others: mounting without unmounting leaves a
+/// disabled plugin's subprocess serving tools, and a `PUT /mcp/servers` that
+/// could edit or drop a derived server would make the plugin's own switch a
+/// lie. The launch assertions cover what the Agent Plugins specification
+/// makes normative for a subprocess-launching client — `PLUGIN_ROOT` and
+/// `PLUGIN_DATA` set, the data directory created before launch, expansion in
+/// `env` values — by reading what the child itself observed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_plugins_bundled_mcp_server_mounts_only_while_the_plugin_is_enabled() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (dir, store) = temp_db_store("plugin-mcp.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+
+    // A bundle must claim at least one member, so it ships a skill too.
+    let skill = dir.path().join("skills/toolbox-notes");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: toolbox-notes\ndescription: Notes.\n---\nBody.\n",
+    )
+    .unwrap();
+
+    let plugin = dir.path().join("plugins/toolbox");
+    let write_plugin = || {
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("PLUGIN.md"),
+            "---\nname: toolbox\ndisplay-name: Toolbox\ndescription: Bundled tools.\n\
+             category: other\nskills: [\"toolbox-notes\"]\n---\n",
+        )
+        .unwrap();
+        // Exactly what the importer retains beside the manifest: the canonical
+        // form of a validated `mcp.json`.
+        std::fs::write(
+            plugin.join("mcp.json"),
+            format!(
+                "{{\"$schema\": \"{}\", \"mcpServers\": {{\"local.serve\": {{\
+                   \"type\": \"stdio\", \"command\": \"./serve\", \
+                   \"cwd\": \"${{PLUGIN_DATA}}/state\", \
+                   \"env\": {{\"MODE\": \"${{PLUGIN_DATA}}/state\"}}}}}}}}",
+                openwave_code_execution::AGENT_PLUGIN_MCP_SCHEMA_ID
+            ),
+        )
+        .unwrap();
+        let script = plugin.join("serve");
+        std::fs::write(
+            &script,
+            FAKE_PLUGIN_MCP_SERVER.replace("PROTOCOL", openwave_mcp::PROTOCOL_VERSION),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_plugin();
+
+    let build = || {
+        let secrets = Arc::new(MemSecrets::default());
+        let mut state = AppState::new(
+            Config::desktop(dir.path()),
+            store.clone(),
+            Arc::new(FixedResolver(Arc::new(FakeProvider))),
+            secrets.clone(),
+            Arc::new(ToolRegistry::new()),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
+        let exec = Arc::new(
+            crate::code_execution::ConfiguredCodeExecutionProvider::new(
+                store.clone(),
+                secrets,
+                dir.path().join("scratch"),
+            )
+            .with_user_skills(Some(dir.path().join("skills")))
+            .with_user_plugins(Some(dir.path().join("plugins"))),
+        );
+        state.code_execution = Some(exec.clone());
+        state
+            .mcp
+            .set_plugin_catalog(Arc::new(crate::plugin_mcp::InstalledPluginMcpCatalog::new(
+                exec,
+                store.clone(),
+                dir.path().join("plugin-data"),
+            )));
+        let mcp = state.mcp.clone();
+        let token = state.token.clone();
+        (app(state), format!("Bearer {token}"), mcp)
+    };
+
+    let (router, bearer, mcp) = build();
+    // Startup reconcile, as `serve` runs it after `initialize`.
+    mcp.reconcile_plugin_servers().await;
+
+    // The server key is `local.serve` and the plugin is `toolbox`; the runtime
+    // namespace folds the `.` the mount grammar has no room for.
+    let mounted = "mcp__toolbox-local-serve__lookup";
+    assert!(
+        mcp.snapshot().get(mounted).is_some(),
+        "an enabled plugin's bundled server mounts its tools"
+    );
+
+    // What the child observed: both reserved variables, the configured `env`
+    // value expanded against the data directory, and the working directory it
+    // was actually started in. That last one is the whole anchored-`cwd`
+    // contract in one reading — the directory is under the data tree the
+    // configuration named, and the client created it, because a plugin is
+    // handed that tree empty and cannot be expected to have made it first.
+    // It also pins that `./serve` resolved against the *package root*: with a
+    // working directory pointing somewhere else entirely, a command left for
+    // the child to resolve would not have started at all.
+    let data = dir.path().join("plugin-data/toolbox");
+    let observed = std::fs::read_to_string(data.join("started")).unwrap();
+    let root = std::fs::canonicalize(&plugin).unwrap();
+    let data_path = std::fs::canonicalize(&data).unwrap();
+    let state = std::fs::canonicalize(data.join("state")).unwrap();
+    assert_eq!(
+        observed,
+        format!(
+            "{}|{}|{}/state|{}",
+            root.display(),
+            data_path.display(),
+            data_path.display(),
+            state.display()
+        )
+    );
+
+    // The settings surface lists it read-only, attributed to its plugin.
+    let listed = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(listed["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["servers"][0]["name"], "toolbox-local-serve");
+    assert_eq!(listed["servers"][0]["plugin"], "toolbox");
+    assert_eq!(listed["servers"][0]["health"], "healthy");
+
+    // A body that names it is refused rather than quietly ignored, and a body
+    // that omits it does not delete it — the derived slice is rebuilt either
+    // way.
+    let refused = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({"servers": [{
+            "name": "toolbox-local-serve", "command": "/bin/false", "plugin": "toolbox"
+        }]}),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let response = put_mcp_servers(&router, &bearer, serde_json::json!({"servers": []})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let after: serde_json::Value = json_body(response).await;
+    assert_eq!(after["servers"][0]["plugin"], "toolbox");
+    assert!(
+        mcp.snapshot().get(mounted).is_some(),
+        "omitting a derived server from a settings save must not unmount it"
+    );
+
+    // Switching the plugin off disconnects its server and unmounts its tools.
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"toolbox": false}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(mcp.snapshot().get(mounted).is_none());
+    assert!(get_mcp_servers(&router, &bearer).await["servers"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // Its data survives the switch: it is off, not gone.
+    assert!(data.is_dir());
+
+    // Uninstalling — removing the package — takes the data directory with it.
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"toolbox": true}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    std::fs::remove_dir_all(&plugin).unwrap();
+    let (_router, _bearer, mcp) = build();
+    mcp.reconcile_plugin_servers().await;
+    assert!(mcp.snapshot().get(mounted).is_none());
+    assert!(
+        !data.exists(),
+        "uninstalling a plugin deletes the writable directory it was given"
+    );
+}

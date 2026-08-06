@@ -122,6 +122,19 @@ impl Config {
         self.data_dir.join("prompts")
     }
 
+    /// The client-managed writable data directories bundled MCP servers are
+    /// given as `PLUGIN_DATA` (`{data_dir}/plugin-data/<plugin>/`).
+    ///
+    /// A sibling of `{data_dir}/plugins` rather than a directory inside a
+    /// plugin's own tree: the Agent Plugins specification requires this
+    /// directory to survive an update of the package, and the package tree is
+    /// exactly what an update replaces. Keeping it outside also means nothing
+    /// a plugin writes at runtime can change what the package claims to be.
+    #[must_use]
+    pub fn plugin_data_dir(&self) -> PathBuf {
+        self.data_dir.join("plugin-data")
+    }
+
     /// A desktop-profile config rooted at `data_dir`.
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
         Self {
