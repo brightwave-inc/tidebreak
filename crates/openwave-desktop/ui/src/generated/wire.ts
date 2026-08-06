@@ -1561,6 +1561,21 @@ prompts: Array<PluginPromptInfo>, };
 export type PluginCategory = "documents" | "data" | "visualization" | "other";
 
 /**
+ * Renderer-safe compatibility disclosure for one plugin.
+ */
+export type PluginCompatibility = { status: PluginCompatibilityStatus, issues: Array<PluginCompatibilityIssue>, };
+
+/**
+ * One reason an imported plugin is not statically sandbox-compatible.
+ */
+export type PluginCompatibilityIssue = { "kind": "missing_sandbox_dependency", skill: string, dependency: string, } | { "kind": "scripts_present", skill: string, };
+
+/**
+ * The static sandbox-compatibility conclusion recorded at import time.
+ */
+export type PluginCompatibilityStatus = "compatible" | "limited" | "unchecked";
+
+/**
  * Body of `PUT /plugins/enabled`. Absent names are left alone.
  */
 export type PluginEnableUpdate = { 
@@ -1583,10 +1598,20 @@ export type PluginInfo = {
  */
 name: string, display_name: string, description: string, category: PluginCategory, 
 /**
+ * Where the bundle was loaded from; host-derived, never claimed.
+ */
+origin: PluginOrigin, 
+/**
  * What the bundle can do, derived by the host from what it contains.
  * Never self-declared: a manifest has no key for this.
  */
 capabilities: Array<PluginCapability>, 
+/**
+ * Import-time static compatibility disclosure. A hand-authored bundle is
+ * explicitly unchecked; imported bundles say whether they fit the
+ * prepared sandbox image and why not.
+ */
+compatibility: PluginCompatibility, 
 /**
  * Whether the bundle is on. Off gates every member regardless of the
  * member's own flag, which the member entries still report unchanged.
@@ -1596,6 +1621,16 @@ enabled: boolean,
  * Member skills in manifest order.
  */
 skills: Array<PluginSkillInfo>, };
+
+/**
+ * Which source a validated plugin package was loaded from.
+ *
+ * Origin is host-derived from the load path, never from manifest content —
+ * the closed key set has no `origin` key at all — so a user bundle cannot
+ * claim to ship with the app. A management surface uses it to attribute the
+ * bundles the user wrote themselves.
+ */
+export type PluginOrigin = "builtin" | "user";
 
 /**
  * One reusable prompt, as a picker or a management surface renders it.

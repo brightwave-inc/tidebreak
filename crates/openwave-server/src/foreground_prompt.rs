@@ -1052,6 +1052,8 @@ mod tests {
             skills: members.iter().map(|member| (*member).into()).collect(),
             prompts: Vec::new(),
             router_preamble: Some(preamble.into()),
+            origin: openwave_code_execution::PluginOrigin::Builtin,
+            compatibility: openwave_code_execution::PluginCompatibility::compatible(),
         };
         let plugins = vec![
             plugin(

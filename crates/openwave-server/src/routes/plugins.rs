@@ -19,12 +19,14 @@
 //! well-formed slug and that the recorded set stays bounded.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use openwave_code_execution::{
     derived_capabilities, is_valid_plugin_name, is_valid_prompt_name, is_valid_skill_name,
-    PluginCapability, PluginCategory, PromptOrigin, PromptPackage, SkillOrigin, SkillPackage,
+    PluginCapability, PluginCategory, PluginOrigin, PromptOrigin, PromptPackage, SkillOrigin,
+    SkillPackage,
 };
 
 use crate::error::ServerError;
@@ -59,9 +61,15 @@ pub struct PluginInfo {
     pub display_name: String,
     pub description: String,
     pub category: PluginCategory,
+    /// Where the bundle was loaded from; host-derived, never claimed.
+    pub origin: PluginOrigin,
     /// What the bundle can do, derived by the host from what it contains.
     /// Never self-declared: a manifest has no key for this.
     pub capabilities: Vec<PluginCapability>,
+    /// Import-time static compatibility disclosure. A hand-authored bundle is
+    /// explicitly unchecked; imported bundles say whether they fit the
+    /// prepared sandbox image and why not.
+    pub compatibility: openwave_code_execution::PluginCompatibility,
     /// Whether the bundle is on. Off gates every member regardless of the
     /// member's own flag, which the member entries still report unchanged.
     pub enabled: bool,
@@ -154,6 +162,7 @@ pub async fn get_plugins(
         }
         plugins.push(PluginInfo {
             capabilities: derived_capabilities(&plugin, &members),
+            compatibility: plugin.compatibility.clone(),
             enabled: plugin_enabled,
             skills: members
                 .into_iter()
@@ -163,6 +172,7 @@ pub async fn get_plugins(
             display_name: plugin.display_name,
             description: plugin.description,
             category: plugin.category,
+            origin: plugin.origin,
         });
     }
     let skills = installed
@@ -180,6 +190,49 @@ pub async fn get_plugins(
         skills,
         prompts,
     }))
+}
+
+/// `POST /plugins/install` — fetch and install one pinned instruction-only
+/// plugin, returning the import-specific compatibility and skip disclosures.
+pub async fn post_plugin_install(
+    State(state): State<AppState>,
+    Json(body): Json<crate::plugin_install::PluginInstallRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<crate::plugin_install::PluginInstallOutcome>,
+    ),
+    ServerError,
+> {
+    let exec = state.code_execution.as_ref().ok_or_else(|| {
+        ServerError::conflict_kind(
+            "plugin_install_unavailable",
+            "plugin installation requires code execution",
+        )
+    })?;
+    let installed = exec
+        .install_plugin(&body)
+        .await
+        .map_err(|error| match error {
+            crate::plugin_install::PluginInstallError::InvalidSource(message) => {
+                ServerError::bad_request_kind("plugin_source_invalid", message)
+            }
+            crate::plugin_install::PluginInstallError::Fetch(message) => {
+                ServerError::unprocessable_kind("plugin_source_unavailable", message)
+            }
+            crate::plugin_install::PluginInstallError::InvalidArchive(message)
+            | crate::plugin_install::PluginInstallError::InvalidPlugin(message) => {
+                ServerError::unprocessable_kind("plugin_invalid", message)
+            }
+            crate::plugin_install::PluginInstallError::Conflict(message) => {
+                ServerError::conflict_kind("plugin_conflict", message)
+            }
+            crate::plugin_install::PluginInstallError::Io(error) => {
+                tracing::error!(%error, "plugin install could not publish validated files");
+                ServerError::internal("plugin files could not be installed")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(installed)))
 }
 
 fn prompt_info(

@@ -28,7 +28,8 @@ import type { PluginCatalogState } from "./usePluginCatalog";
  * badges, and its member skills with their own switches.
  *
  * The origin split is the catalog's own: bundles first, then the skills no
- * bundle claims, with anything the user wrote themselves called out as theirs.
+ * bundle claims, with anything the user wrote themselves — bundle or skill —
+ * called out as theirs.
  */
 export function PluginsView({
   state,
@@ -42,6 +43,9 @@ export function PluginsView({
 }) {
   const { catalog, loading, error, reload, setEnabled } = state;
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
+  const yourPlugins = catalog?.plugins.filter((plugin) => plugin.origin === "user") ?? [];
+  const otherPlugins =
+    catalog?.plugins.filter((plugin) => plugin.origin !== "user") ?? [];
   const yourSkills = catalog?.skills.filter((skill) => skill.origin === "user") ?? [];
   const otherSkills =
     catalog?.skills.filter((skill) => skill.origin !== "user") ?? [];
@@ -94,21 +98,28 @@ export function PluginsView({
           </Empty>
         )}
 
-        {catalog && catalog.plugins.length > 0 && (
+        {otherPlugins.length > 0 && (
           <Section title="Plugins">
-            <ul className="flex flex-col gap-1" aria-label="Plugins">
-              {catalog.plugins.map((plugin) => (
-                <li key={plugin.name}>
-                  <PluginRow
-                    plugin={plugin}
-                    onOpen={() => onOpen(plugin.name)}
-                    onToggle={(enabled) =>
-                      setEnabled({ plugins: { [plugin.name]: enabled }, skills: {} })
-                    }
-                  />
-                </li>
-              ))}
-            </ul>
+            <PluginList
+              plugins={otherPlugins}
+              label="Plugins"
+              onOpen={onOpen}
+              setEnabled={setEnabled}
+            />
+          </Section>
+        )}
+
+        {yourPlugins.length > 0 && (
+          <Section
+            title="Your plugins"
+            description="Plugins you wrote, loaded from your data directory."
+          >
+            <PluginList
+              plugins={yourPlugins}
+              label="Your plugins"
+              onOpen={onOpen}
+              setEnabled={setEnabled}
+            />
           </Section>
         )}
 
@@ -175,6 +186,34 @@ function Section({
       </div>
       {children}
     </section>
+  );
+}
+
+function PluginList({
+  plugins,
+  label,
+  onOpen,
+  setEnabled,
+}: {
+  plugins: PluginInfo[];
+  label: string;
+  onOpen: (pluginId: string) => void;
+  setEnabled: PluginCatalogState["setEnabled"];
+}) {
+  return (
+    <ul className="flex flex-col gap-1" aria-label={label}>
+      {plugins.map((plugin) => (
+        <li key={plugin.name}>
+          <PluginRow
+            plugin={plugin}
+            onOpen={() => onOpen(plugin.name)}
+            onToggle={(enabled) =>
+              setEnabled({ plugins: { [plugin.name]: enabled }, skills: {} })
+            }
+          />
+        </li>
+      ))}
+    </ul>
   );
 }
 

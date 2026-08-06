@@ -17,6 +17,7 @@ const CATALOG: PluginCatalog = {
       display_name: "Documents",
       description: "Write and revise Word documents.",
       category: "documents",
+      origin: "builtin",
       capabilities: ["write-files", "host-install"],
       enabled: false,
       skills: [
