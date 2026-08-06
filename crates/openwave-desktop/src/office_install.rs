@@ -288,7 +288,9 @@ impl openwave_code_execution::HostToolBroker for DesktopHostToolBroker {
             openwave_code_execution::HostDep::LibreOffice => {
                 warm_presentation_converter(self.app.clone());
             }
-            openwave_code_execution::HostDep::Node => {}
+            openwave_code_execution::HostDep::Node => {
+                crate::node_install::ensure(self.app.clone());
+            }
         }
     }
 
@@ -298,22 +300,25 @@ impl openwave_code_execution::HostToolBroker for DesktopHostToolBroker {
     ) -> openwave_code_execution::HostToolStatus {
         match tool {
             openwave_code_execution::HostDep::LibreOffice => libreoffice_status(&self.app).await,
-            openwave_code_execution::HostDep::Node => {
-                openwave_code_execution::HostToolStatus::Unavailable(
-                    "no managed Node runtime is installed".into(),
-                )
-            }
+            openwave_code_execution::HostDep::Node => crate::node_install::status(&self.app).await,
         }
     }
 
     async fn managed_root(
         &self,
-        _tool: openwave_code_execution::HostDep,
+        tool: openwave_code_execution::HostDep,
     ) -> Option<std::path::PathBuf> {
-        // Conversion runs on the host, so LibreOffice has no root anything
-        // downstream needs; the managed Node runtime the sandbox is handed is
-        // installed separately.
-        None
+        match tool {
+            // Conversion runs on the host, so LibreOffice has no root anything
+            // downstream needs.
+            openwave_code_execution::HostDep::LibreOffice => None,
+            // Only a verified managed install resolves, so a backend handed
+            // this path is never exposing an unpinned or half-written tree.
+            openwave_code_execution::HostDep::Node => {
+                let data_dir = crate::data_dir(&self.app).ok()?;
+                crate::node_install::managed_node_root(&data_dir)
+            }
+        }
     }
 }
 
@@ -404,7 +409,12 @@ async fn install_into(
     pinned: &PinnedArtifact,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    ensure_free_disk(staging, REQUIRED_FREE_BYTES).await?;
+    ensure_free_disk(
+        staging,
+        REQUIRED_FREE_BYTES,
+        "Not enough free disk space to install LibreOffice (about 2 GB is needed)",
+    )
+    .await?;
 
     let dmg = staging.join("LibreOffice.dmg");
     download(app, pinned.url, &dmg, cancel).await?;
@@ -596,9 +606,9 @@ async fn download(
 
 /// SHA-256 of a file's contents, streamed, as lowercase hex.
 // Compiled on every platform — its test is platform-neutral — but only the
-// macOS install path calls it from the lib target.
+// macOS install paths call it from the lib target.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -621,7 +631,7 @@ fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
 /// Run one system tool to completion under a hard timeout, failing on a
 /// non-zero exit with its stderr in the reason.
 #[cfg(target_os = "macos")]
-async fn run_tool(
+pub(crate) async fn run_tool(
     program: &str,
     args: &[&std::ffi::OsStr],
     timeout: Duration,
@@ -647,10 +657,16 @@ async fn run_tool(
     Ok(())
 }
 
-/// Refuse to start a gigabyte of work on a nearly full disk. `df` because the
+/// Refuse to start a large install on a nearly full disk. `df` because the
 /// standard library has no free-space query and this path is macOS-only.
+/// `shortfall` is the message the caller wants when the check fails, so each
+/// managed install names itself and its own size.
 #[cfg(target_os = "macos")]
-async fn ensure_free_disk(directory: &Path, required: u64) -> Result<(), String> {
+pub(crate) async fn ensure_free_disk(
+    directory: &Path,
+    required: u64,
+    shortfall: &str,
+) -> Result<(), String> {
     let output = tokio::process::Command::new("/bin/df")
         .arg("-Pk")
         .arg(directory)
@@ -665,9 +681,7 @@ async fn ensure_free_disk(directory: &Path, required: u64) -> Result<(), String>
         .and_then(|field| field.parse().ok())
         .ok_or_else(|| "Could not check free disk space".to_owned())?;
     if available_kib.saturating_mul(1024) < required {
-        return Err(
-            "Not enough free disk space to install LibreOffice (about 2 GB is needed)".to_owned(),
-        );
+        return Err(shortfall.to_owned());
     }
     Ok(())
 }
