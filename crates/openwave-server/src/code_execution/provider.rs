@@ -1583,12 +1583,6 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     // [`ConfiguredCodeExecutionProvider::workspace`] instead.
 }
 
-/// Host infrastructure staged into every managed workspace regardless of the
-/// model's listed set: the conventional-directory markers that make `output/`
-/// and `preview/` exist remotely so commands can write into them, and the
-/// bundled document helpers the tool description tells the model to invoke
-/// without listing. All of it is host-authored, bounded, and digest-skipped on
-
 /// A resolved workspace-lifecycle handle over the currently selected provider.
 pub struct ConfiguredWorkspace {
     provider: Box<dyn CodeExecutionProvider>,
