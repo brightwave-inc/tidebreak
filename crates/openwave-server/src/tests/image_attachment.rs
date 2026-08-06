@@ -652,6 +652,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
             vertex_location: None,
             models: vec![providers::CustomModelConfig {
                 id: "vendor/model".into(),
+                upstream_id: None,
                 display_name: Some("Vendor Model".into()),
                 context_window: 65_536,
                 max_output_tokens: 8_192,

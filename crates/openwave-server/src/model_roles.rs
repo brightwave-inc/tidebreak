@@ -447,12 +447,14 @@ mod tests {
                 models: vec![
                     CustomModelConfig {
                         id: "gateway-flagship".to_string(),
+                        upstream_id: None,
                         display_name: Some("Gateway Flagship".to_string()),
                         context_window: 1_000_000,
                         max_output_tokens: 64_000,
                     },
                     CustomModelConfig {
                         id: "gateway-haiku".to_string(),
+                        upstream_id: None,
                         display_name: Some("Gateway Haiku".to_string()),
                         context_window: 200_000,
                         max_output_tokens: 8_192,

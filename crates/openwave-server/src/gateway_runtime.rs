@@ -546,6 +546,9 @@ impl GatewayRuntime {
             .map(|model| CustomModelConfig {
                 id: model.id,
                 display_name: Some(model.name),
+                // Carried so a deployment-aliased id can still be matched to
+                // its curated row; gateways older than the field send none.
+                upstream_id: model.upstream_id,
                 context_window: clamp_u32(model.context_window, 32_768),
                 max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
             })
@@ -1143,8 +1146,10 @@ mod tests {
     /// A gateway that serves a model under its upstream id is serving that
     /// curated model over a different route, so the row inherits the curated
     /// capabilities instead of being presented as an anonymous unverified
-    /// endpoint. The deployment's own limits still win, and an id the registry
-    /// does not carry keeps the conservative treatment.
+    /// endpoint — whether the gateway id is itself the curated id or a
+    /// deployment alias whose reported upstream id resolves to one. The
+    /// deployment's own limits still win, and a row the registry can be matched
+    /// to by neither route keeps the conservative treatment.
     #[tokio::test]
     async fn a_gateway_model_matching_a_curated_id_inherits_its_capabilities() {
         let address = serve(Arc::new(FakeGateway::default())).await;
@@ -1158,12 +1163,21 @@ mod tests {
                 models: vec![
                     CustomModelConfig {
                         id: "claude-opus-5".to_string(),
+                        upstream_id: None,
                         display_name: Some("Opus (gateway)".to_string()),
                         context_window: 200_000,
                         max_output_tokens: 32_000,
                     },
                     CustomModelConfig {
                         id: "anthropic-us-claude-opus-5".to_string(),
+                        upstream_id: Some("us.anthropic.claude-opus-5".to_string()),
+                        display_name: None,
+                        context_window: 200_000,
+                        max_output_tokens: 32_000,
+                    },
+                    CustomModelConfig {
+                        id: "acme-inhouse-llm".to_string(),
+                        upstream_id: None,
                         display_name: None,
                         context_window: 200_000,
                         max_output_tokens: 32_000,
@@ -1203,14 +1217,43 @@ mod tests {
         assert_eq!(matched.context_window, 200_000);
         assert_eq!(matched.max_output_tokens, 32_000);
 
-        let unmatched = providers::resolve_model_policy(
+        let aliased = providers::resolve_model_policy(
             &*store,
             "model_gateway::anthropic-us-claude-opus-5",
             false,
         )
         .await
         .unwrap()
-        .expect("the unmatched gateway row still resolves");
+        .expect("the aliased gateway row resolves");
+        assert_eq!(
+            aliased.provider,
+            crate::providers::ProviderKind::ModelGateway,
+            "matching by upstream id must not re-route the request"
+        );
+        assert_eq!(
+            aliased.id, "anthropic-us-claude-opus-5",
+            "the gateway's own id is what the request carries"
+        );
+        assert_eq!(
+            aliased.vendor,
+            Some(crate::providers::ProviderKind::Anthropic)
+        );
+        assert_eq!(aliased.display_name, "Claude Opus 5");
+        assert_eq!(
+            aliased.verification,
+            crate::model_registry::VerificationTier::Verified
+        );
+        assert!(aliased
+            .input_modalities
+            .contains(&crate::model_registry::InputModality::Image));
+        assert!(aliased.supports_reasoning);
+        assert_eq!(aliased.context_window, 200_000);
+
+        let unmatched =
+            providers::resolve_model_policy(&*store, "model_gateway::acme-inhouse-llm", false)
+                .await
+                .unwrap()
+                .expect("the unmatched gateway row still resolves");
         assert_eq!(unmatched.vendor, None);
         assert_eq!(
             unmatched.verification,
@@ -1990,6 +2033,7 @@ mod tests {
                 vertex_location: None,
                 models: vec![CustomModelConfig {
                     id: "legacy-model".to_string(),
+                    upstream_id: None,
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,
@@ -2103,6 +2147,7 @@ mod tests {
             vertex_location: None,
             models: vec![CustomModelConfig {
                 id: id.to_string(),
+                upstream_id: None,
                 display_name: None,
                 context_window: 32_768,
                 max_output_tokens: 4_096,
@@ -2179,6 +2224,7 @@ mod tests {
                 vertex_location: None,
                 models: vec![CustomModelConfig {
                     id: "foreign-model".to_string(),
+                    upstream_id: None,
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,
@@ -2230,6 +2276,7 @@ mod tests {
                 vertex_location: None,
                 models: vec![CustomModelConfig {
                     id: "legacy-model".to_string(),
+                    upstream_id: None,
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,

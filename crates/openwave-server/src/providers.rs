@@ -450,6 +450,14 @@ pub struct CustomModelConfig {
     /// Optional human-facing label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The provider-side id a managed gateway routes this model to, when the
+    /// gateway reports one that differs from `id`.
+    ///
+    /// Populated only by gateway model sync — a user-entered custom model
+    /// leaves it unset, and nothing in the settings UI offers it. It exists so
+    /// a deployment-aliased id can still be recognized as a curated model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<String>,
     /// Context limit used by OpenWave's reducer.
     #[serde(default = "default_custom_context_window")]
     pub context_window: u32,
@@ -517,11 +525,21 @@ impl ResolvedModelPolicy {
     /// reported context and output caps are authoritative for that deployment,
     /// which may be narrower than the upstream model's.
     ///
-    /// An id with no exact curated match keeps the conservative custom
-    /// treatment.
+    /// Deployments also alias their ids (`anthropic-us-claude-opus-5` for an
+    /// upstream `us.anthropic.claude-opus-5`), which no exact match can see.
+    /// When the gateway reports the upstream id, it is tried next — exactly,
+    /// then with the deployment decoration stripped by
+    /// [`curated_id_candidate`].
+    ///
+    /// An id that matches no curated row either way keeps the conservative
+    /// custom treatment.
     fn gateway_for(model: &CustomModelConfig) -> Self {
         let mut policy = Self::custom_for(ProviderKind::ModelGateway, model);
-        let Some(spec) = model_registry::find(&model.id) else {
+        let Some(spec) = model_registry::find(&model.id).or_else(|| {
+            let upstream = model.upstream_id.as_deref()?;
+            model_registry::find(upstream)
+                .or_else(|| model_registry::find(&curated_id_candidate(upstream)))
+        }) else {
             return policy;
         };
         policy.display_name = spec.display_name.to_owned();
@@ -560,10 +578,61 @@ impl ResolvedModelPolicy {
             &CustomModelConfig {
                 id: id.to_owned(),
                 display_name: None,
+                upstream_id: None,
                 context_window: default_custom_context_window(),
                 max_output_tokens: default_custom_max_output_tokens(),
             },
         )
+    }
+}
+
+/// Strip the deployment decoration a hosted provider adds to a curated model
+/// id, so `us.anthropic.claude-opus-5` can be recognized as `claude-opus-5`.
+///
+/// Deliberately narrow: one leading region prefix, then one leading vendor
+/// prefix, then one trailing version suffix — nothing else. Anything broader
+/// would start collapsing distinct curated ids into each other, and a wrong
+/// match here silently attributes another model's capabilities. The result is
+/// only ever *offered* to the registry; a miss keeps the conservative
+/// treatment.
+fn curated_id_candidate(upstream_id: &str) -> String {
+    const REGION_PREFIXES: [&str; 5] = ["us.", "eu.", "apac.", "jp.", "global."];
+    const VENDOR_PREFIXES: [&str; 1] = ["anthropic."];
+
+    let mut candidate = upstream_id;
+    for prefix in REGION_PREFIXES {
+        if let Some(rest) = candidate.strip_prefix(prefix) {
+            candidate = rest;
+            break;
+        }
+    }
+    for prefix in VENDOR_PREFIXES {
+        if let Some(rest) = candidate.strip_prefix(prefix) {
+            candidate = rest;
+            break;
+        }
+    }
+    strip_version_suffix(candidate).to_owned()
+}
+
+/// Drop a trailing `-v<digits>` or `-v<digits>:<digits>` — Bedrock's revision
+/// marker. Left alone when the tail is not exactly that shape.
+fn strip_version_suffix(id: &str) -> &str {
+    let Some((head, tail)) = id.rsplit_once("-v") else {
+        return id;
+    };
+    if head.is_empty() {
+        return id;
+    }
+    let numeric = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    let matches = match tail.split_once(':') {
+        Some((major, minor)) => numeric(major) && numeric(minor),
+        None => numeric(tail),
+    };
+    if matches {
+        head
+    } else {
+        id
     }
 }
 
@@ -1529,6 +1598,7 @@ mod tests {
     fn an_unset_display_name_is_absent_rather_than_null() {
         let unset = CustomModelConfig {
             id: "local/model".into(),
+            upstream_id: None,
             display_name: None,
             context_window: 32_768,
             max_output_tokens: 4_096,
@@ -1554,10 +1624,36 @@ mod tests {
         assert_eq!(explicit_null, unset);
     }
 
+    /// The candidate the registry is offered for a deployment-aliased upstream
+    /// id. The risk here is over-stripping: every extra rule is another way to
+    /// hand one model another model's capabilities, and curated ids contain
+    /// dots and digits of their own.
+    #[test]
+    fn upstream_ids_are_normalized_only_by_region_vendor_and_version() {
+        assert_eq!(
+            curated_id_candidate("us.anthropic.claude-opus-5"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            curated_id_candidate("anthropic.claude-sonnet-4-5-v1:0"),
+            "claude-sonnet-4-5"
+        );
+        // Not a region prefix, not a version suffix: left exactly as reported.
+        assert_eq!(curated_id_candidate("gpt-5.6-sol"), "gpt-5.6-sol");
+        assert_eq!(curated_id_candidate("acme.llm-v"), "acme.llm-v");
+        assert_eq!(
+            curated_id_candidate("us.acme.private-model"),
+            "acme.private-model"
+        );
+        // One region prefix, not repeated stripping.
+        assert_eq!(curated_id_candidate("us.eu.model"), "eu.model");
+    }
+
     #[test]
     fn custom_model_validation_is_conservative_and_rejects_duplicates() {
         let valid = CustomModelConfig {
             id: "local/model".into(),
+            upstream_id: None,
             display_name: Some("Local Model".into()),
             context_window: 32_768,
             max_output_tokens: 4_096,
@@ -1571,6 +1667,7 @@ mod tests {
         );
         assert!(validate_custom_models(&[CustomModelConfig {
             id: "bad model".into(),
+            upstream_id: None,
             display_name: None,
             context_window: 32_768,
             max_output_tokens: 4_096,
@@ -1578,6 +1675,7 @@ mod tests {
         .is_err());
         assert!(validate_custom_models(&[CustomModelConfig {
             id: "bad".into(),
+            upstream_id: None,
             display_name: None,
             context_window: 1_000,
             max_output_tokens: 4_096,
@@ -1634,6 +1732,7 @@ mod tests {
             ProviderKind::OpenaiCompatible,
             &CustomModelConfig {
                 id: "local-model".into(),
+                upstream_id: None,
                 display_name: None,
                 context_window: 32_768,
                 max_output_tokens: 4_096,

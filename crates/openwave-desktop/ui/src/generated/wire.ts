@@ -843,6 +843,15 @@ id: string,
  */
 display_name?: string | null, 
 /**
+ * The provider-side id a managed gateway routes this model to, when the
+ * gateway reports one that differs from `id`.
+ *
+ * Populated only by gateway model sync — a user-entered custom model
+ * leaves it unset, and nothing in the settings UI offers it. It exists so
+ * a deployment-aliased id can still be recognized as a curated model.
+ */
+upstream_id?: string | null, 
+/**
  * Context limit used by OpenWave's reducer.
  */
 context_window: number, 
