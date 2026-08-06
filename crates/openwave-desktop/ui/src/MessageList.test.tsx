@@ -136,6 +136,44 @@ describe("MessageBubble", () => {
     expect(markup).not.toContain("call-1");
   });
 
+  // The live reducer opens assistant bubbles that render nothing (turn-start
+  // and resume boundaries), and approval resume cycles can stack several in a
+  // row. Any such run between two calls split a phase the hydrated transcript
+  // later merges, so the groups visibly reshuffled at turn end (#1713). A
+  // trailing empty bubble is the response about to stream and must stay
+  // outside the phase.
+  it("keeps one phase across assistant bubbles that render nothing", () => {
+    const messages: ChatMessage[] = [
+      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
+      { id: "assistant-1", role: "assistant", text: "", sources: [] },
+      { id: "assistant-2", role: "assistant", text: "", sources: [] },
+      { id: "tool-2", role: "tool", callId: "call-2", name: "read_file", status: "completed" },
+      { id: "assistant-3", role: "assistant", text: "", sources: [] },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).toContain('aria-controls="tool-activity-group-0"');
+    expect(markup).not.toContain('aria-controls="tool-activity-group-1"');
+    expect(markup).toContain("Read a file and 1 other task");
+  });
+
   it("splits phases at the response between them", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },

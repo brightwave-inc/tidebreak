@@ -519,6 +519,22 @@ function isActivityMessage(message: ChatMessage | undefined): boolean {
 }
 
 /**
+ * Whether an assistant entry renders nothing at all: no prose, no sources, no
+ * reasoning. The bubble component returns `null` for these, so nothing marks
+ * their position on screen — which is exactly why they must not carry any
+ * structural weight in grouping.
+ */
+function isInvisibleAssistant(message: ChatMessage | undefined): boolean {
+  return (
+    message !== undefined &&
+    message.role === "assistant" &&
+    !message.text &&
+    message.sources.length === 0 &&
+    !message.reasoning
+  );
+}
+
+/**
  * Whether the assistant bubble at `index` closes its turn. A turn's prose is
  * split into one bubble per activity phase it passed through, and the copy
  * action and timestamp belong to the turn, not to each fragment — so only
@@ -654,9 +670,29 @@ export function groupMessageItems(
     // One phase per contiguous run of activity, however long. A phase that
     // splits at every assistant sentence is not a phase.
     const phase: ChatMessage[] = [];
-    while (index < messages.length && isActivityMessage(messages[index])) {
-      phase.push(messages[index]!);
-      index += 1;
+    while (index < messages.length) {
+      if (isActivityMessage(messages[index])) {
+        phase.push(messages[index]!);
+        index += 1;
+        continue;
+      }
+      // An assistant bubble that renders nothing must not end the phase: the
+      // live reducer opens empty bubbles at turn-start and resume boundaries,
+      // and the hydrated snapshot has no such entries — so a phase split here
+      // would merge back when the turn settles, visibly reshuffling the
+      // transcript. Approval resume cycles can stack several in a row, so the
+      // whole run is swallowed when activity continues past it. A trailing
+      // run is the response now streaming in, and stays outside the phase so
+      // gaining its first characters does not move the group boundary.
+      if (isInvisibleAssistant(messages[index])) {
+        let ahead = index + 1;
+        while (isInvisibleAssistant(messages[ahead])) ahead += 1;
+        if (isActivityMessage(messages[ahead])) {
+          index = ahead;
+          continue;
+        }
+      }
+      break;
     }
 
     // A call parked on approval is represented by its approval card, so the
