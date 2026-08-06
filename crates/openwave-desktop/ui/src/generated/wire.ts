@@ -1336,6 +1336,13 @@ display_name: string,
  */
 provider: ProviderKind, 
 /**
+ * The vendor whose curated model this row is, when that differs from the
+ * provider serving it — a gateway-served model whose id exactly matches a
+ * curated one. For presentation only (icon and branding); routing still
+ * uses `provider`, and a client falls back to it when this is null.
+ */
+vendor: ProviderKind | null, 
+/**
  * How thoroughly OpenWave has exercised this provider/model combination.
  */
 verification: VerificationTier, 

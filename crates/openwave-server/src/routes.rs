@@ -1220,6 +1220,11 @@ pub struct ModelInfo {
     pub display_name: String,
     /// The provider that serves the model.
     pub provider: ProviderKind,
+    /// The vendor whose curated model this row is, when that differs from the
+    /// provider serving it — a gateway-served model whose id exactly matches a
+    /// curated one. For presentation only (icon and branding); routing still
+    /// uses `provider`, and a client falls back to it when this is null.
+    pub vendor: Option<ProviderKind>,
     /// How thoroughly OpenWave has exercised this provider/model combination.
     pub verification: crate::model_registry::VerificationTier,
     /// Whether the provider is enabled, configured, and credentialed.
@@ -1295,6 +1300,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             id: entry.policy.id,
             display_name: entry.policy.display_name,
             provider: entry.policy.provider,
+            vendor: entry.policy.vendor,
             verification: entry.policy.verification,
             available: entry.available,
             context_window: entry.policy.context_window,
