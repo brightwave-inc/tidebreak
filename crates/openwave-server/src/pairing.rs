@@ -613,6 +613,7 @@ mod tests {
                 gateway_url: "https://old.gateway.test/".to_string(),
                 models: vec![providers::CustomModelConfig {
                     id: "stale-model".into(),
+                    upstream_id: None,
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,

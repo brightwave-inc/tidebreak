@@ -149,6 +149,12 @@ pub struct GatewayIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GatewayModel {
     pub id: String,
+    /// The provider-side id this deployment routes to, when it differs from
+    /// `id` — a deployment alias such as `us.anthropic.claude-opus-5` behind
+    /// the gateway id `anthropic-us-claude-opus-5`. Optional because gateways
+    /// older than this field simply omit it.
+    #[serde(default)]
+    pub upstream_id: Option<String>,
     pub name: String,
     pub context_window: Option<i64>,
     pub max_output_tokens: Option<i64>,
