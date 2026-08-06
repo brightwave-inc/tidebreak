@@ -10,7 +10,13 @@
 # Changing a pin here means regenerating the image closure in lockstep:
 #   python3 scripts/generate-documents-requirements.py
 # scripts/sandbox-image-pins.test.mjs fails when the two drift apart.
+#
+# The versions are the newest each backend can carry in common: the local
+# sandbox runs the system interpreter (macOS CPython 3.9), so a pin without a
+# cp39 wheel is unusable there no matter what the image could hold. The
+# generator resolves this set for that runtime and fails regeneration when a
+# pin cannot install on it.
 
-numpy==2.4.6
-pillow==12.3.0
+numpy==2.0.2
+pillow==11.3.0
 pypdfium2==4.30.0

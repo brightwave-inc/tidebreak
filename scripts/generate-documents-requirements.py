@@ -10,13 +10,14 @@ and from crates/openwave-code-execution/baseline_python_deps.txt (the baseline
 set every execution backend guarantees), resolves their transitive closure for
 the image's platform (linux cp311) with pip, and records every
 file hash PyPI publishes for each resolved version. It also resolves the skill
-pins for the local sandbox's fixed runtime (macOS arm64 cp39), so an incompatible
-pin fails regeneration instead of making every local cache-population pass
-retry it. The Dockerfile's documents stage installs the result with
-`pip install --require-hashes`, so the publish moment trusts these recorded
-digests rather than whatever the index serves that day. Also asserts that every
-compiled package publishes an aarch64 manylinux wheel, so the arm64 image build
-cannot discover a missing wheel at publish time.
+pins and the baseline pins together for the local sandbox's fixed runtime
+(macOS arm64 cp39), so a pin the local backend could never install — the
+baseline set's whole promise — fails regeneration instead of making every local
+cache-population pass retry it. The Dockerfile's documents stage installs the
+result with `pip install --require-hashes`, so the publish moment trusts these
+recorded digests rather than whatever the index serves that day. Also asserts
+that every compiled package publishes an aarch64 manylinux wheel, so the arm64
+image build cannot discover a missing wheel at publish time.
 """
 
 import json
@@ -136,7 +137,7 @@ def main():
     pins = skill_dependencies + baseline
     if len(pins) < len(baseline) + 5:
         sys.exit(f"expected at least five SKILL.md pins, found: {pins}")
-    validate_local_sandbox(skill_dependencies)
+    validate_local_sandbox(pins)
     resolved = resolve_closure(pins)
     for pin in pins:
         name, version = pin.split("==")
