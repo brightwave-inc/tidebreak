@@ -139,6 +139,8 @@ pub struct AppState {
     /// through — see [`Self::with_gateway_runtime`] for why the process
     /// must hold exactly one.
     pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    /// ChatGPT subscription OAuth for the OpenAI provider (sign-in / sign-out).
+    pub(crate) chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
     /// The OS-managed policy reader for managed-mode resolution. Directly
     /// assembled state (tests, custom hosts) gets the source that asserts
     /// nothing, so it reads nothing from the host OS; the production
@@ -324,6 +326,10 @@ impl AppState {
             os_policy.clone(),
         ));
         let rest_dispatch = crate::connected_apps::governed_rest_dispatcher(secrets.clone());
+        let chatgpt = Arc::new(crate::chatgpt_runtime::ChatGptRuntime::new(
+            store.clone(),
+            secrets.clone(),
+        )?);
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),
@@ -335,6 +341,7 @@ impl AppState {
             rest_dispatch,
             view_frames: Arc::default(),
             gateway,
+            chatgpt,
             os_policy,
             turn_job_wake: Arc::new(Notify::new()),
             agent_run_wake: Arc::new(Notify::new()),

@@ -353,6 +353,8 @@ mod tests {
         generate::collect_from::<crate::routes::ModelRoleInfo>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::providers::ProviderAuthMode>(&cfg, &mut out);
+        generate::collect_from::<crate::chatgpt_runtime::ChatGptSignInStatus>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchConfigInfo>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchCredentialReadiness>(&cfg, &mut out);
         generate::collect_from::<crate::code_execution::CodeExecutionConfigInfo>(&cfg, &mut out);

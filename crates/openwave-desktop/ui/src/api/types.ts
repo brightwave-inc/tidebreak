@@ -50,7 +50,9 @@ import {
   type ModelRoleInfo as WireModelRoleInfo,
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
+  type ProviderAuthMode as WireProviderAuthMode,
   type ProviderKind as WireProviderKind,
+  type ChatGptSignInStatus as WireChatGptSignInStatus,
   type PermissionMode as WirePermissionMode,
   type PluginCapability as WirePluginCapability,
   type PluginCatalog as WirePluginCatalog,
@@ -175,6 +177,8 @@ export type NetworkPolicy = WireNetworkPolicy;
 export type StickyChatDefaults = WireStickyChatDefaults;
 
 export type ProviderInfo = WireProviderInfo;
+export type ProviderAuthMode = WireProviderAuthMode;
+export type ChatGptSignInStatus = WireChatGptSignInStatus;
 
 export type VoiceTranscriptionModel = "local" | "gpt4o_transcribe" | "gemini_flash";
 export type LocalVoiceState =

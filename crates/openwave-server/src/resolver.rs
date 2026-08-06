@@ -87,8 +87,17 @@ impl ProviderResolver for ConfiguredResolver {
             return Arc::new(UnconfiguredProvider);
         };
         let gateway_tokens = self.gateway.route_token_source().await;
-        let routes =
-            providers::collect_routes(&*self.store, &*self.secrets, gateway_tokens, &policy).await;
+        let chatgpt =
+            crate::chatgpt_runtime::ChatGptRuntime::route_auth_from_secrets(self.secrets.clone())
+                .await;
+        let routes = providers::collect_routes(
+            &*self.store,
+            &*self.secrets,
+            gateway_tokens,
+            chatgpt,
+            &policy,
+        )
+        .await;
         let router = Router::build(routes);
         let fingerprint = router.fingerprint().to_string();
 

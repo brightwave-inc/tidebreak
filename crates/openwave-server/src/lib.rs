@@ -20,6 +20,7 @@ mod blob_orphan_auditor;
 mod blob_retirement_worker;
 mod bus;
 mod chat_titling;
+mod chatgpt_runtime;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod connected_apps;
@@ -433,6 +434,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/providers/{kind}/credential",
             axum::routing::delete(routes::delete_provider_credential),
+        )
+        .route(
+            "/providers/openai/chatgpt/sign-in",
+            post(routes::post_openai_chatgpt_sign_in),
+        )
+        .route(
+            "/providers/openai/chatgpt/sign-out",
+            post(routes::post_openai_chatgpt_sign_out),
+        )
+        .route(
+            "/providers/openai/chatgpt/status",
+            get(routes::get_openai_chatgpt_status),
         )
         .merge(public_document_api)
         .merge(renderer_document_api)

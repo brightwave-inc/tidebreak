@@ -127,6 +127,73 @@ describe("ProvidersPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("starts ChatGPT OAuth from the OpenAI provider row", async () => {
+    const openai: ProviderInfo = {
+      kind: "openai",
+      enabled: false,
+      has_credential: false,
+      models: [],
+    };
+    const openaiChatgptSignIn = vi.fn().mockResolvedValue({
+      authorization_url: "https://auth.openai.com/oauth/authorize?x=1",
+    });
+    const listProviders = vi.fn().mockResolvedValue({ providers: [openai] });
+    const client = {
+      openaiChatgptSignIn,
+      listProviders,
+      putProvider: vi.fn(),
+    } as unknown as ApiClient;
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    const user = userEvent.setup();
+
+    render(
+      <ProvidersPanel
+        providers={[openai]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("No credential")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Sign in with ChatGPT" }),
+    );
+    await waitFor(() => expect(openaiChatgptSignIn).toHaveBeenCalled());
+    expect(open).toHaveBeenCalledWith(
+      "https://auth.openai.com/oauth/authorize?x=1",
+      "_blank",
+      "noreferrer,noopener",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("shows ChatGPT sign-out when OpenAI is signed in via subscription", () => {
+    render(
+      <ProvidersPanel
+        providers={[
+          {
+            kind: "openai",
+            enabled: true,
+            has_credential: true,
+            auth_mode: "chatgpt",
+            models: [],
+          },
+        ]}
+        client={{} as ApiClient}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Signed in with ChatGPT")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Sign out of ChatGPT" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sign in with ChatGPT" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("configures Gemini service-account auth without projecting the secret", async () => {
     const gemini: ProviderInfo = {
       kind: "gemini",

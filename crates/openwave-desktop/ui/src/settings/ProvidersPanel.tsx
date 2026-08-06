@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type {
   ApiClient,
@@ -6,6 +6,7 @@ import type {
   ProviderInfo,
   ProviderKind,
 } from "../api";
+import { openSignInPage } from "../openSignInPage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -20,6 +21,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { providerLabel } from "../ModelSelection";
+
+const CHATGPT_SIGN_IN_POLL_MS = 2_000;
 
 export function ProvidersPanel({
   providers,
@@ -169,7 +172,7 @@ function ProviderRow({
         <div className="flex-1">
           <p className="text-sm font-bold">Enabled</p>
           <p className="text-xs text-muted-foreground">
-            {info.has_credential ? "Credential set" : "No credential"}
+            {credentialStatusLabel(info)}
           </p>
         </div>
         <Switch
@@ -313,6 +316,21 @@ function ProviderRow({
           </div>
         </>
       )}
+      {info.kind === "openai" ? (
+        <OpenAiCredentialSection
+          info={info}
+          client={client}
+          saving={saving}
+          setSaving={setSaving}
+          setError={setError}
+          onChanged={onChanged}
+          apiKey={key}
+          setApiKey={setKey}
+          onSaveApiKey={() => void save(true)}
+          onClear={() => void clearCredential()}
+        />
+      ) : (
+        <>
       {info.kind === "gemini" && (
         <label className="grid gap-1 text-xs text-muted-foreground">
           Credential type
@@ -400,8 +418,165 @@ function ProviderRow({
           </Button>
         )}
       </div>
+        </>
+      )}
       {error && <SettingsError>{error}</SettingsError>}
       {dialog}
     </SettingsSection>
+  );
+}
+
+function credentialStatusLabel(info: ProviderInfo): string {
+  if (!info.has_credential) return "No credential";
+  if (info.kind === "openai" && info.auth_mode === "chatgpt") {
+    return "Signed in with ChatGPT";
+  }
+  if (info.kind === "openai" && info.auth_mode === "api_key") {
+    return "API key set";
+  }
+  return "Credential set";
+}
+
+function OpenAiCredentialSection({
+  info,
+  client,
+  saving,
+  setSaving,
+  setError,
+  onChanged,
+  apiKey,
+  setApiKey,
+  onSaveApiKey,
+  onClear,
+}: {
+  info: ProviderInfo;
+  client: ApiClient;
+  saving: boolean;
+  setSaving: (value: boolean) => void;
+  setError: (value: string | null) => void;
+  onChanged: () => void;
+  apiKey: string;
+  setApiKey: (value: string) => void;
+  onSaveApiKey: () => void;
+  onClear: () => void;
+}) {
+  const signedInWithChatgpt = info.auth_mode === "chatgpt" && info.has_credential;
+  const pollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current !== null) window.clearInterval(pollRef.current);
+    };
+  }, []);
+
+  async function signInWithChatgpt() {
+    setSaving(true);
+    setError(null);
+    try {
+      const { authorization_url } = await client.openaiChatgptSignIn();
+      await openSignInPage(authorization_url);
+      toast.message("Finish signing in with ChatGPT in your browser");
+      if (pollRef.current !== null) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(() => {
+        void client
+          .listProviders()
+          .then(({ providers }) => {
+            const openai = providers.find((provider) => provider.kind === "openai");
+            if (openai?.auth_mode === "chatgpt" && openai.has_credential) {
+              if (pollRef.current !== null) {
+                window.clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+              onChanged();
+              toast.success("Signed in with ChatGPT");
+            }
+          })
+          .catch(() => {
+            /* keep polling until timeout elsewhere */
+          });
+      }, CHATGPT_SIGN_IN_POLL_MS);
+      window.setTimeout(() => {
+        if (pollRef.current !== null) {
+          window.clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      }, 5 * 60 * 1000);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function signOutChatgpt() {
+    setSaving(true);
+    setError(null);
+    try {
+      await client.openaiChatgptSignOut();
+      onChanged();
+      toast.success("Signed out of ChatGPT");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (signedInWithChatgpt) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="destructive"
+          disabled={saving}
+          onClick={() => void signOutChatgpt()}
+        >
+          Sign out of ChatGPT
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">
+        Use a ChatGPT subscription (Plus / Pro) or an OpenAI Platform API key.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          disabled={saving}
+          onClick={() => void signInWithChatgpt()}
+        >
+          Sign in with ChatGPT
+        </Button>
+      </div>
+      <Input
+        type="password"
+        placeholder="Or paste an API key"
+        value={apiKey}
+        onChange={(e) => setApiKey(e.target.value)}
+        autoComplete="off"
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          disabled={saving || (!info.has_credential && !apiKey.trim())}
+          onClick={onSaveApiKey}
+        >
+          Save configuration
+        </Button>
+        {info.has_credential && (
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={saving}
+            onClick={onClear}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
+    </>
   );
 }

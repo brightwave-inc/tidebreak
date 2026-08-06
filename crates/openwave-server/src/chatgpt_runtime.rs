@@ -1,0 +1,191 @@
+//! ChatGPT subscription OAuth runtime for the OpenAI provider.
+//!
+//! Lighter than [`crate::gateway_runtime`]: one pending sign-in at a time,
+//! vault-backed tokens, no model sync. Completing sign-in writes the
+//! `ProviderCredential::Oauth` marker and enables the OpenAI provider.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use openwave_connectors::{
+    ChatGptAuth, ChatGptAuthConfig, ChatGptConnection, ChatGptCredentialVault,
+};
+use openwave_core::{Result, SecretProvider, Store};
+use openwave_router::BearerTokenSource;
+use tokio::sync::Mutex;
+
+use crate::error::ServerError;
+use crate::providers::{self, ProviderCredential, ProviderKind};
+
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SignInProgress {
+    Idle,
+    Pending { authorization_url: String },
+    Failed { message: String },
+}
+
+/// Process-local ChatGPT OAuth handle shared by provider routes and routing.
+pub struct ChatGptRuntime {
+    connection: Arc<ChatGptConnection>,
+    store: Arc<dyn Store>,
+    secrets: Arc<dyn SecretProvider>,
+    sign_in: Mutex<SignInProgress>,
+    sign_in_generation: AtomicU64,
+}
+
+impl ChatGptRuntime {
+    pub fn new(store: Arc<dyn Store>, secrets: Arc<dyn SecretProvider>) -> Result<Self> {
+        let auth = ChatGptAuth::new(ChatGptAuthConfig::production())?;
+        let vault = ChatGptCredentialVault::new(secrets.clone());
+        Ok(Self {
+            connection: Arc::new(ChatGptConnection::new(auth, vault)),
+            store,
+            secrets,
+            sign_in: Mutex::new(SignInProgress::Idle),
+            sign_in_generation: AtomicU64::new(0),
+        })
+    }
+
+    /// Build route auth from the secret store. Used by the provider resolver
+    /// when assembling OpenAI ChatGPT OAuth routes.
+    pub async fn route_auth_from_secrets(
+        secrets: Arc<dyn SecretProvider>,
+    ) -> Option<(Arc<dyn BearerTokenSource>, String)> {
+        if !openwave_connectors::has_stored_chatgpt_credentials(&*secrets).await {
+            return None;
+        }
+        let auth = ChatGptAuth::new(ChatGptAuthConfig::production()).ok()?;
+        let connection = Arc::new(ChatGptConnection::new(
+            auth,
+            ChatGptCredentialVault::new(secrets),
+        ));
+        let account_id = connection.account_id().await.ok().flatten()?;
+        let source: Arc<dyn BearerTokenSource> = Arc::new(ChatGptTokenSource(connection));
+        Some((source, account_id))
+    }
+
+    /// Start browser sign-in; returns the URL to open.
+    ///
+    /// Callers must refuse managed profiles before invoking this — BYO OpenAI
+    /// credentials (key or ChatGPT OAuth) are locked out there.
+    pub async fn begin_sign_in(self: &Arc<Self>) -> Result<String, ServerError> {
+        let pending = self
+            .connection
+            .auth()
+            .start_sign_in()
+            .await
+            .map_err(ServerError::from)?;
+        let authorization_url = pending.authorization_url().to_string();
+        let generation = {
+            let mut sign_in = self.sign_in.lock().await;
+            let generation = self.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            *sign_in = SignInProgress::Pending {
+                authorization_url: authorization_url.clone(),
+            };
+            generation
+        };
+
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let finished = pending.finish(SIGN_IN_TIMEOUT).await;
+            let mut sign_in = runtime.sign_in.lock().await;
+            if runtime.sign_in_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            *sign_in = match finished {
+                Ok(session) => match runtime.persist_session(&session).await {
+                    Ok(()) => SignInProgress::Idle,
+                    Err(error) => SignInProgress::Failed {
+                        message: error.message().to_string(),
+                    },
+                },
+                Err(error) => SignInProgress::Failed {
+                    message: error.to_string(),
+                },
+            };
+        });
+
+        Ok(authorization_url)
+    }
+
+    async fn persist_session(
+        &self,
+        session: &openwave_connectors::ChatGptAuthorizedSession,
+    ) -> Result<(), ServerError> {
+        self.connection
+            .store_session(session)
+            .await
+            .map_err(ServerError::from)?;
+        // Mutual exclusivity: OAuth marker replaces any API key.
+        providers::write_credential(
+            &*self.secrets,
+            ProviderKind::Openai,
+            &ProviderCredential::Oauth {},
+        )
+        .await?;
+        let mut config = providers::read_config(&*self.store, ProviderKind::Openai).await?;
+        config.enabled = true;
+        providers::write_config(&*self.store, ProviderKind::Openai, &config).await?;
+        Ok(())
+    }
+
+    /// Revoke best-effort, clear vault and Oauth marker.
+    pub async fn sign_out(&self) -> Result<(), ServerError> {
+        self.sign_in_generation.fetch_add(1, Ordering::SeqCst);
+        *self.sign_in.lock().await = SignInProgress::Idle;
+        self.connection.sign_out().await.map_err(ServerError::from)?;
+        if matches!(
+            providers::read_credential(&*self.secrets, ProviderKind::Openai).await?,
+            Some(ProviderCredential::Oauth {})
+        ) {
+            providers::delete_credential(&*self.secrets, ProviderKind::Openai).await?;
+        }
+        Ok(())
+    }
+
+    /// Pending / failed status for the OpenAI Providers row.
+    pub async fn status(&self) -> ChatGptSignInStatus {
+        let progress = self.sign_in.lock().await.clone();
+        let signed_in = openwave_connectors::has_stored_chatgpt_credentials(&*self.secrets).await;
+        match progress {
+            SignInProgress::Pending { authorization_url } => ChatGptSignInStatus {
+                signed_in,
+                pending_authorization_url: Some(authorization_url),
+                error: None,
+            },
+            SignInProgress::Failed { message } => ChatGptSignInStatus {
+                signed_in,
+                pending_authorization_url: None,
+                error: Some(message),
+            },
+            SignInProgress::Idle => ChatGptSignInStatus {
+                signed_in,
+                pending_authorization_url: None,
+                error: None,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct ChatGptSignInStatus {
+    pub signed_in: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pending_authorization_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+struct ChatGptTokenSource(Arc<ChatGptConnection>);
+
+#[async_trait::async_trait]
+impl BearerTokenSource for ChatGptTokenSource {
+    async fn bearer_token(&self) -> openwave_core::Result<String> {
+        self.0.access_token().await
+    }
+}

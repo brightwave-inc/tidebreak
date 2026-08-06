@@ -1933,7 +1933,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
-        let routes = providers::collect_routes(&*store, &*secrets, None, &policy).await;
+        let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, route_kind);
 
@@ -2003,7 +2003,7 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
     )
     .await
     .unwrap());
-    assert!(providers::collect_routes(&*store, &*secrets, None, &policy)
+    assert!(providers::collect_routes(&*store, &*secrets, None, None, &policy)
         .await
         .is_empty());
     assert!(providers::catalog_models(&*store, &*secrets, &policy)
@@ -2049,7 +2049,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
     let router = openwave_router::Router::build(routes);
     assert_eq!(
         router.select("llama-3-local"),
@@ -2150,7 +2150,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
         .await
         .unwrap();
     let kinds: Vec<_> =
-        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), &policy)
+        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy)
             .await
             .into_iter()
             .map(|route| route.kind)
@@ -2167,7 +2167,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
     assert_eq!(
@@ -2194,7 +2194,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     )
     .await
     .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
 }
