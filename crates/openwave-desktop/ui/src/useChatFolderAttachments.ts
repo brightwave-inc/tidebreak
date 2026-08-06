@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 
 import type { Chat } from "./api";
 import {
+  connectApprovedFolder,
   connectFolder,
   disconnectFolder,
+  listApprovedFolders,
   listCapabilityConsents,
   listConnectedFolders,
   type ConnectedFolder,
@@ -28,9 +30,17 @@ export type ChatFolderAccess = ConnectedFolder & {
 
 export type ChatFolderAttachments = {
   items: ChatFolderAccess[];
+  /**
+   * Every folder approved on this device, attached here or not. The composer's
+   * `@` list draws the unattached ones from it: an approval outlives the chat
+   * it was granted in, so a second conversation can reach the folder by name
+   * instead of finding it on disk again.
+   */
+  approved: ConnectedFolder[];
   working: boolean;
   error: string | null;
   attach: () => void;
+  connectApproved: (rootId: string) => void;
   remove: (rootId: string) => void;
 };
 
@@ -44,6 +54,7 @@ export function useChatFolderAttachments(
   nativeHost: boolean,
 ): ChatFolderAttachments {
   const [items, setItems] = useState<ChatFolderAccess[]>([]);
+  const [approved, setApproved] = useState<ConnectedFolder[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
@@ -53,13 +64,19 @@ export function useChatFolderAttachments(
     const generation = ++refreshGeneration.current;
     if (!chat || !nativeHost) {
       setItems([]);
+      setApproved([]);
       setError(null);
       return;
     }
     setError(null);
-    void Promise.all([listConnectedFolders(chat), listCapabilityConsents()]).then(
-      ([folders, consents]) => {
+    void Promise.all([
+      listConnectedFolders(chat),
+      listCapabilityConsents(),
+      listApprovedFolders(),
+    ]).then(
+      ([folders, consents, approvedFolders]) => {
         if (generation !== refreshGeneration.current) return;
+        setApproved(approvedFolders);
         setItems(
           folders
             // The composer chips are working controls for the current turn;
@@ -102,6 +119,30 @@ export function useChatFolderAttachments(
     }
   }
 
+  /**
+   * Attach a folder this device already approved.
+   *
+   * No picker: the host confirms the re-attachment natively and the broker
+   * re-checks the approval, so the renderer never names a place on disk. The
+   * grant is the host's to make either way — this only spares the reader
+   * finding a folder they have already chosen once.
+   */
+  async function connectApproved(rootId: string) {
+    if (!chat || !nativeHost || working) return;
+    setWorking(true);
+    setError(null);
+    try {
+      const connected = await connectApprovedFolder(chat, rootId);
+      if (connected) {
+        useRefreshSignals.getState().signal("folderAccess");
+      }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   async function remove(rootId: string) {
     if (!chat || !nativeHost || working) return;
     setWorking(true);
@@ -118,9 +159,11 @@ export function useChatFolderAttachments(
 
   return {
     items,
+    approved,
     working,
     error,
     attach: () => void attach(),
+    connectApproved: (rootId) => void connectApproved(rootId),
     remove: (rootId) => void remove(rootId),
   };
 }

@@ -527,6 +527,33 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     }
   }
 
+  /**
+   * Put a file this conversation already carries back on the next message.
+   *
+   * Nothing is imported: the document is already in the chat's library, so the
+   * message only has to name it again. That is why no size comes with it — the
+   * transcript records what a document is, not how many bytes it was.
+   */
+  function onReattachFile(file: TranscriptFileAttachment) {
+    if (files.some((current) => current.documentId === file.documentId)) return;
+    if (images.attachments.length + files.length >= MAX_IMAGE_ATTACHMENTS) {
+      setAttachError(
+        `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+      );
+      return;
+    }
+    setAttachError(null);
+    setComposerFiles((current) => [
+      ...current,
+      {
+        documentId: file.documentId,
+        displayName: file.name,
+        mediaType: file.mediaType,
+        byteLen: 0,
+      },
+    ]);
+  }
+
   function adoptAttached(attached: AttachedFiles) {
     const seenDocumentIds = new Set(files.map((file) => file.documentId));
     const imported =
@@ -619,6 +646,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             items: files,
             attaching,
             onAttach: hasNativeHost() ? onAttach : undefined,
+            onReattach: onReattachFile,
             onRemove: (documentId) =>
               setComposerFiles((current) =>
                 current.filter((file) => file.documentId !== documentId),
@@ -626,9 +654,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           }}
           folders={{
             items: folders.items,
+            approved: folders.approved,
             working: folders.working,
             error: folders.error,
             onAttach: nativeHost ? folders.attach : undefined,
+            onConnect: nativeHost ? folders.connectApproved : undefined,
             onRemove: folders.remove,
           }}
           voice={{

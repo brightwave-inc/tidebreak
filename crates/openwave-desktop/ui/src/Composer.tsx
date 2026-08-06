@@ -29,6 +29,17 @@ import {
   type SlashOption,
 } from "./ComposerSlash";
 import {
+  activeMentionQuery,
+  attachableFiles,
+  attachableFolders,
+  mentionOptionRows,
+  mentionRows,
+  MENTION_LIST_LABEL,
+  type MentionAction,
+  type MentionCandidate,
+  type MentionRow,
+} from "./ComposerMentions";
+import {
   ComposerToolsMenu,
   type ComposerNetwork,
   type ComposerReasoning,
@@ -57,12 +68,15 @@ import { documentIcon } from "@/documentIcon";
 import type { ImportedDocument } from "@/documents";
 import type { PluginInfo } from "./api";
 import { folderAccessLabel, folderReach } from "./FolderAccess";
+import type { ConnectedFolder } from "./host";
+import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
 
 const SLASH_LIST_ID = "composer-slash-list";
+const MENTION_LIST_ID = "composer-mention-list";
 
 type ComposerKeyEvent = Pick<
   KeyboardEvent<HTMLTextAreaElement>["nativeEvent"],
@@ -158,16 +172,32 @@ export type ComposerImages = {
 
 export type ComposerFiles = {
   items: ImportedDocument[];
+  /**
+   * Files this conversation already carries, newest first — what `@` offers
+   * before the reader has typed anything. Absent on a surface with no
+   * transcript to read them from.
+   */
+  recent?: readonly TranscriptFileAttachment[];
   attaching: boolean;
   onAttach?: () => void;
+  /** Put one of `recent` back on the next message. */
+  onReattach?: (file: TranscriptFileAttachment) => void;
   onRemove: (documentId: string) => void;
 };
 
 export type ComposerFolders = {
   items: ChatFolderAccess[];
+  /**
+   * Folders approved on this device but not attached here. Approval outlives
+   * the chat it was granted in, so these are reachable by name rather than
+   * through the picker.
+   */
+  approved?: readonly ConnectedFolder[];
   working: boolean;
   error: string | null;
   onAttach?: () => void;
+  /** Attach one of `approved` to this conversation. */
+  onConnect?: (rootId: string) => void;
   onRemove: (rootId: string) => void;
 };
 
@@ -290,6 +320,13 @@ export function Composer({
     query: string;
   } | null>(null);
   const [slashHighlight, setSlashHighlight] = useState(0);
+  // The `@` token, kept apart from the `/` one so neither list can inherit the
+  // other's highlight or be closed by the other's Escape.
+  const [mentionToken, setMentionToken] = useState<{
+    start: number;
+    query: string;
+  } | null>(null);
+  const [mentionHighlight, setMentionHighlight] = useState(0);
   // The same list, opened from the tools menu instead of from a `/`. Its query
   // is its own: there is no token in the draft to read one from.
   const [panelQuery, setPanelQuery] = useState<string | null>(null);
@@ -322,6 +359,7 @@ export function Composer({
   useLayoutEffect(() => {
     selectionRef.current = null;
     setSlashToken(null);
+    setMentionToken(null);
   }, [resetKey]);
 
   const invokedSkills = slash?.invoked ?? [];
@@ -342,11 +380,98 @@ export function Composer({
     slashToken !== null && (slashMatches.length > 0 || slashCapNote);
   const slashIndex = Math.min(slashHighlight, slashMatches.length - 1);
 
+  /**
+   * What `@` can reach: the files this conversation already carries, the
+   * folders already approved on this device, and the two pickers behind the
+   * tools menu.
+   *
+   * Every candidate is something the app can already see — a document in this
+   * chat's library, a root the broker holds an approval for. Nothing here
+   * reaches into the filesystem on its own; a file that has never been given to
+   * OpenWave is still reached through the picker, which is what the last rows
+   * are for.
+   */
+  const mentionCandidates: MentionCandidate[] = [
+    ...attachableFiles(files?.recent ?? []),
+    ...attachableFolders(folders?.approved ?? [], folders?.items ?? []),
+  ];
+  const mentionActions: MentionAction[] = [
+    ...(files?.onAttach ? (["browse-files"] as const) : []),
+    ...(folders?.onAttach ? (["connect-folder"] as const) : []),
+  ];
+  const mentionMatches = mentionToken
+    ? mentionRows(mentionCandidates, mentionActions, mentionToken.query)
+    : [];
+  // The `/` list has the caret when both tokens somehow resolve: it is the
+  // older affordance, and two popovers over one draft is one too many.
+  const mentionOpen =
+    mentionToken !== null && !slashOpen && mentionMatches.length > 0;
+  const mentionIndex = Math.min(mentionHighlight, mentionMatches.length - 1);
+
   /** Re-read whether the caret sits inside a `/` token, and reset the cursor. */
   function syncSlashToken(value: string, caret: number) {
     const token = slash ? activeSlashQuery(value, caret) : null;
     setSlashToken(token);
     setSlashHighlight(0);
+    setMentionToken(activeMentionQuery(value, caret));
+    setMentionHighlight(0);
+  }
+
+  /**
+   * Attach what the row named, and take the `@query` out of the draft.
+   *
+   * The pick goes through the same callbacks the tools menu's own items use, so
+   * a mention leaves exactly the chip an attachment leaves — and a refusal
+   * (a cap reached, a folder the broker cannot reopen) is reported wherever
+   * that path already reports it.
+   */
+  function pickMention(
+    row: MentionRow,
+    token: { start: number; query: string },
+  ) {
+    applySlashReplacement(draft, token.start, token.start + 1 + token.query.length, "");
+    if (row.kind === "action") {
+      if (row.action === "browse-files") files?.onAttach?.();
+      else folders?.onAttach?.();
+      return;
+    }
+    const { candidate } = row;
+    if (candidate.kind === "folder") {
+      folders?.onConnect?.(candidate.id);
+      return;
+    }
+    const file = files?.recent?.find(
+      (recent) => recent.documentId === candidate.id,
+    );
+    if (file) files?.onReattach?.(file);
+  }
+
+  /** The `@` list's keys. Only reached when the `/` list did not claim them. */
+  function handleMentionKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (event.key === "Escape") {
+      if (mentionToken === null) return false;
+      setMentionToken(null);
+      return true;
+    }
+    if (!mentionOpen) return false;
+    const moved = nextOptionHighlight(
+      event.key,
+      mentionIndex,
+      mentionMatches.length,
+    );
+    if (moved !== null) {
+      setMentionHighlight(moved);
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      const row = mentionMatches[mentionIndex];
+      if (row && mentionToken) {
+        setMentionToken(null);
+        pickMention(row, mentionToken);
+      }
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -662,6 +787,24 @@ export function Composer({
           />
         </div>
       )}
+      {mentionOpen && (
+        <div className="rounded-md border border-border bg-popover text-popover-foreground shadow-md">
+          <OptionListbox
+            listId={MENTION_LIST_ID}
+            label={MENTION_LIST_LABEL}
+            rows={mentionOptionRows(mentionMatches)}
+            activeIndex={mentionIndex}
+            onPick={(index) => {
+              const row = mentionMatches[index];
+              if (!row || !mentionToken) return;
+              const token = mentionToken;
+              setMentionToken(null);
+              pickMention(row, token);
+            }}
+            onHighlight={setMentionHighlight}
+          />
+        </div>
+      )}
       <textarea
         ref={textareaRef}
         className={cn(
@@ -679,9 +822,15 @@ export function Composer({
                 : "Message OpenWave…"
         }
         aria-label="Message"
-        aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
+        aria-controls={
+          slashOpen ? SLASH_LIST_ID : mentionOpen ? MENTION_LIST_ID : undefined
+        }
         aria-activedescendant={
-          slashOpen ? optionElementId(SLASH_LIST_ID, slashIndex) : undefined
+          slashOpen
+            ? optionElementId(SLASH_LIST_ID, slashIndex)
+            : mentionOpen
+              ? optionElementId(MENTION_LIST_ID, mentionIndex)
+              : undefined
         }
         // A stable hook for the shell's focus-composer shortcut, which has to
         // find the field without a ref threaded up through every route.
@@ -695,10 +844,13 @@ export function Composer({
             event.currentTarget.selectionStart,
           );
         }}
-        onBlur={() => setSlashToken(null)}
+        onBlur={() => {
+          setSlashToken(null);
+          setMentionToken(null);
+        }}
         onPaste={onPaste}
         onKeyDown={(event) => {
-          if (handleSlashKey(event)) {
+          if (handleSlashKey(event) || handleMentionKey(event)) {
             event.preventDefault();
             return;
           }
@@ -728,6 +880,7 @@ export function Composer({
                 ? {
                     onOpen: () => {
                       setSlashToken(null);
+                      setMentionToken(null);
                       setPanelQuery("");
                     },
                   }
@@ -1013,7 +1166,12 @@ function FileAttachmentChip({
         >
           {file.displayName}
         </strong>
-        <small className="text-[0.68rem]">{formatBytes(file.byteLen)}</small>
+        {/* A file put back on the message by name carries its identity, not its
+            size — the transcript records what a document is, not how big it
+            was. An unknown size is left unsaid rather than reported as zero. */}
+        {file.byteLen > 0 && (
+          <small className="text-[0.68rem]">{formatBytes(file.byteLen)}</small>
+        )}
       </span>
       <button
         type="button"
