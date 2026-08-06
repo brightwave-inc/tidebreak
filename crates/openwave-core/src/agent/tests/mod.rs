@@ -18,6 +18,7 @@ use super::transcript::{
 use super::types::CONTEXT_CHECKPOINT_SYSTEM_PROMPT;
 use super::*;
 use crate::approval::{ApprovalDecision, ApprovalRequest, RefuseGate, ToolApprovalKind};
+use crate::compaction::CompactionPolicy;
 use crate::context;
 use crate::db::DbStore;
 use crate::error::{AgentError, Result};
@@ -29,7 +30,7 @@ use crate::model::{
     TurnRunStatus,
 };
 use crate::provider::{ChatRequest, ProviderEvent, ProviderId, Usage, VendorWebSearch};
-use crate::semantic_checkpoint::{ContextCheckpoint, ContextCheckpointPayloadV1};
+use crate::semantic_checkpoint::{ContextCheckpoint, ContextCheckpointPayloadV2};
 use crate::storage::AcceptClaimedToolCallOutcome;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolScratch, ToolSpec};
 use crate::tools::{ListDir, ReadFile, WriteFile};
@@ -5680,7 +5681,7 @@ impl ModelProvider for SemanticCheckpointProvider {
             let text = if self.malformed_summary {
                 "not a structured checkpoint"
             } else {
-                r#"{"version":1,"confirmed_decisions":["Use the durable SQLite path."],"unresolved_questions":["Confirm the rollout date."],"task_state":["Migration implementation is in progress."],"source_identities":["source:decision-doc"],"output_identities":["output:migration-plan"],"conclusions":["The local path preserves exact retries."]}"#
+                r#"{"version":2,"original_requests":[],"confirmed_decisions":["Use the durable SQLite path."],"unresolved_questions":["Confirm the rollout date."],"task_state":["Migration implementation is in progress."],"source_identities":["source:decision-doc"],"output_identities":["output:migration-plan"],"conclusions":["The local path preserves exact retries."]}"#
             };
             return Ok(stream::iter(vec![
                 ProviderEvent::TextDelta { text: text.into() },
@@ -5771,6 +5772,19 @@ fn test_utility_model() -> UtilityModel {
     }
 }
 
+/// Production defaults floor the trigger at 50k tokens and protect the five
+/// newest rows, which no small-window test can reach. These keep the same
+/// percentage hysteresis while letting a few-thousand-token transcript cross
+/// the threshold and still leave a compactable prefix.
+fn test_compaction_policy() -> CompactionPolicy {
+    CompactionPolicy {
+        threshold_fraction: 0.75,
+        target_fraction: 0.25,
+        min_threshold_tokens: 0,
+        protect_recent_messages: 2,
+    }
+}
+
 async fn append_semantic_checkpoint_history(
     store: &Arc<dyn Store>,
     chat_id: ChatId,
@@ -5848,6 +5862,7 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
             model: "small-context-model".into(),
             context_window: 3_000,
             utility_model: Some(test_utility_model()),
+            compaction: test_compaction_policy(),
             ..Default::default()
         },
     );
@@ -5871,7 +5886,14 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         .await
         .unwrap()
         .expect("the reduced prefix is checkpointed");
-    assert_eq!(checkpoint.source_message_id, history[1].id);
+    assert_eq!(
+        checkpoint.source_message_id, history[0].id,
+        "compaction cuts back to the oldest row the raw-history target cannot keep"
+    );
+    assert_eq!(
+        checkpoint.format_version,
+        crate::CONTEXT_CHECKPOINT_FORMAT_V2
+    );
     assert_eq!(
         checkpoint.usage,
         Usage {
@@ -5882,10 +5904,21 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         },
         "maintenance usage is durable on the checkpoint"
     );
-    let payload: ContextCheckpointPayloadV1 = serde_json::from_str(&checkpoint.content).unwrap();
+    let payload: ContextCheckpointPayloadV2 = serde_json::from_str(&checkpoint.content).unwrap();
     assert_eq!(
         payload.confirmed_decisions,
         ["Use the durable SQLite path."]
+    );
+    // The host, not the summarizer, owns `original_requests`: the founding ask
+    // in the compacted prefix has to survive even though the model returned an
+    // empty list.
+    assert!(
+        payload
+            .original_requests
+            .iter()
+            .any(|request| request.contains("OLD PREFIX")),
+        "the compacted user ask carries forward: {:?}",
+        payload.original_requests
     );
 
     let requests = requests.lock().unwrap();
@@ -5949,6 +5982,25 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
     assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::ContextTruncated { .. })));
+    let compaction: Vec<&AgentEvent> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::CompactionStarted | AgentEvent::CompactionFinished { .. }
+            )
+        })
+        .collect();
+    assert!(
+        matches!(
+            compaction.as_slice(),
+            [
+                AgentEvent::CompactionStarted,
+                AgentEvent::CompactionFinished { compacted: true }
+            ]
+        ),
+        "one compaction runs, and it reports success: {compaction:?}"
+    );
 }
 
 #[tokio::test]
@@ -5972,6 +6024,7 @@ async fn malformed_checkpoint_summary_fails_open_to_deterministic_reduction() {
             model: "small-context-model".into(),
             context_window: 3_000,
             utility_model: Some(test_utility_model()),
+            compaction: test_compaction_policy(),
             ..Default::default()
         },
     );
@@ -5993,8 +6046,18 @@ async fn malformed_checkpoint_summary_fails_open_to_deterministic_reduction() {
     assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::ContextTruncated { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionFinished { compacted: false })),
+        "a compaction that produced nothing still closes its status"
+    );
 }
 
+/// The trigger is a fraction of the model's window, so the same history that
+/// compacts on a small model has to pass untouched on a large one. At 0.75 the
+/// 50k window only compacts past 37 500 tokens, which this transcript is far
+/// below; the 3 000 window compacts past 2 250, which it clears.
 #[tokio::test]
 async fn model_window_change_recalculates_the_checkpoint_threshold() {
     let (store, chat, _workspace) = cancel_test_chat().await;
@@ -6015,6 +6078,7 @@ async fn model_window_change_recalculates_the_checkpoint_threshold() {
             model: "large-context-model".into(),
             context_window: 50_000,
             utility_model: Some(test_utility_model()),
+            compaction: test_compaction_policy(),
             ..Default::default()
         },
     );
@@ -6048,6 +6112,7 @@ async fn model_window_change_recalculates_the_checkpoint_threshold() {
             model: "small-context-model".into(),
             context_window: 3_000,
             utility_model: Some(test_utility_model()),
+            compaction: test_compaction_policy(),
             ..Default::default()
         },
     );
@@ -6143,8 +6208,12 @@ async fn oversized_transcript_emits_context_truncated() {
     assert!(fitted as usize <= context::compute_message_budget(context_window, 0, None, &[]));
 }
 
+/// Compaction is a soft load boundary, not a last-resort fallback: once a
+/// checkpoint covers a prefix, the model reads the checkpoint instead of that
+/// prefix on every subsequent turn, however much window is available. Only a
+/// boundary this transcript cannot locate falls back to the full raw history.
 #[tokio::test]
-async fn projects_a_checkpoint_only_after_its_history_is_reduced() {
+async fn projects_a_checkpoint_whenever_its_boundary_is_valid() {
     struct CaptureProvider {
         requests: Arc<Mutex<Vec<ChatRequest>>>,
     }
@@ -6245,8 +6314,8 @@ async fn projects_a_checkpoint_only_after_its_history_is_reduced() {
         .all(|message| !message.content.contains(CHECKPOINT_CONTEXT_PREFIX)));
     assert!(!format!("{events:?}").contains(CHECKPOINT_CONTEXT_PREFIX));
 
-    // A larger model window fits the same raw covered history, so the
-    // checkpoint stays out of the next provider request.
+    // A window large enough for the raw covered history changes nothing: the
+    // boundary is still valid, so the prefix stays replaced by its checkpoint.
     let requests = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         Arc::new(CaptureProvider {
@@ -6267,11 +6336,36 @@ async fn projects_a_checkpoint_only_after_its_history_is_reduced() {
         .unwrap();
     drop(tx);
     let _: Vec<AgentEvent> = rx.collect().await;
-    assert!(requests.lock().unwrap()[0].messages.iter().all(|message| {
-            message.content.iter().all(
-                |block| !matches!(block, ContentBlock::Text { text } if text.contains(CHECKPOINT_CONTEXT_PREFIX)),
-            )
-        }));
+    let wide = requests
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("one provider request");
+    let mentions = |needle: &str| {
+        wide.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains(needle)))
+        })
+    };
+    assert!(
+        mentions(CHECKPOINT_CONTEXT_PREFIX),
+        "a valid boundary projects regardless of how much window is spare"
+    );
+    assert!(
+        !mentions("old decision"),
+        "the covered prefix is not resent beside its own checkpoint"
+    );
+
+    // Fail open: a checkpoint whose source row this transcript cannot locate
+    // has no boundary to stand in for, so the raw history goes out whole.
+    let raw = vec![ChatMessage::text(Role::User, "What did we decide?")];
+    assert_eq!(
+        agent.fit_transcript(&raw, 0, Some(&checkpoint), None),
+        (raw.clone(), false)
+    );
 }
 
 #[tokio::test]
@@ -6343,14 +6437,15 @@ async fn checkpoint_fitting_preserves_tool_pairs_and_fails_closed_when_over_budg
         ..checkpoint
     };
     let expected = context::fit_to_budget(
-        &transcript,
+        &transcript[1..],
         context::compute_message_budget(config.context_window, 0, None, &[]),
         context::content_floor_for_level(0),
     );
     assert_eq!(
         agent.fit_transcript(&transcript, 0, Some(&over_budget), Some(1)),
         expected,
-        "a checkpoint that cannot share the request budget must not displace raw context"
+        "a checkpoint that cannot share the request budget is dropped rather than \
+         crowding out the post-boundary history it was meant to summarize"
     );
 }
 
@@ -6367,9 +6462,16 @@ fn unsupported_or_foreign_checkpoints_are_not_projectable() {
     };
     assert!(checkpoint_is_projectable(&checkpoint, chat_id));
     assert!(!checkpoint_is_projectable(&checkpoint, ChatId::new()));
+    assert!(checkpoint_is_projectable(
+        &ContextCheckpoint {
+            format_version: crate::CONTEXT_CHECKPOINT_FORMAT_V2,
+            ..checkpoint.clone()
+        },
+        chat_id,
+    ));
     assert!(!checkpoint_is_projectable(
         &ContextCheckpoint {
-            format_version: crate::CONTEXT_CHECKPOINT_FORMAT_V1 + 1,
+            format_version: crate::CONTEXT_CHECKPOINT_FORMAT_V2 + 1,
             ..checkpoint
         },
         chat_id,

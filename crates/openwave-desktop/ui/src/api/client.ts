@@ -279,6 +279,12 @@ export class ApiClient {
   putSettings(body: {
     model?: ModelSelectionKey | null;
     max_active_background_agents?: number;
+    compaction?: {
+      threshold_fraction?: number;
+      target_fraction?: number;
+      min_threshold_tokens?: number;
+      protect_recent_messages?: number;
+    };
   }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",

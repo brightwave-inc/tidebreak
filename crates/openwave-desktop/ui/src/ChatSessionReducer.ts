@@ -58,6 +58,11 @@ export type ChatSessionState = {
    * happening or over.
    */
   sandboxPreparing: boolean;
+  /**
+   * Semantic compaction is running on the utility model for the open turn.
+   * Cleared on finished or any turn-terminal event so it never sticks.
+   */
+  compacting: boolean;
 };
 
 export type ChatSessionEffect =
@@ -104,6 +109,7 @@ export function initialChatSessionState(): ChatSessionState {
     contextTruncationNoted: false,
     lastTurnUsage: null,
     sandboxPreparing: false,
+    compacting: false,
   };
 }
 
@@ -405,6 +411,7 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           busy: false,
+          compacting: false,
           activeTurnId: null,
           lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
@@ -425,6 +432,7 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           busy: false,
+          compacting: false,
           activeTurnId: null,
           lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
@@ -457,6 +465,7 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           busy: false,
+          compacting: false,
           activeTurnId: null,
           lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
@@ -485,6 +494,7 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           busy: false,
+          compacting: false,
           activeTurnId: null,
           provisionalToolCallIds: new Set(),
           messages: [
@@ -543,6 +553,12 @@ export function reduceChatSessionEvent(
         effects,
       };
     }
+
+    case "compaction_started":
+      return { state: { ...state, compacting: true }, effects };
+
+    case "compaction_finished":
+      return { state: { ...state, compacting: false }, effects };
 
     // Decoded but not presented; still advances the seq cursor.
     case "event_omitted":

@@ -762,9 +762,10 @@ mod tests {
             ("PendingApprovalSnapshot", "action", "RendererToolName"),
             ("PendingApprovalSnapshot", "approval", "ToolApprovalKind"),
             ("PendingApprovalSnapshot", "class", "ApprovalClass"),
-            // Four variants in the stored Role, two here. A widened union
-            // renders a system message as a user bubble, and the two-arm branch
-            // that reads it still compiles.
+            // Stored Role has four variants; TranscriptRole is the visible
+            // subset plus the synthetic compaction divider. A widened union
+            // renders a system message as a user bubble, and the branch that
+            // reads it still compiles.
             ("ChatMessageSnapshot", "role", "TranscriptRole"),
             ("ModelInfo", "input_modalities", "Array<InputModality>"),
         ] {

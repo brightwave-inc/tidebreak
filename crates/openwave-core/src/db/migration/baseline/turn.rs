@@ -1000,10 +1000,10 @@ pub(super) fn context_checkpoint_table() -> TableCreateStatement {
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .check(Expr::col(ContextCheckpoint::SourceMessageSeq).gt(0))
-        .check(
-            Expr::col(ContextCheckpoint::FormatVersion)
-                .eq(crate::semantic_checkpoint::CONTEXT_CHECKPOINT_FORMAT_V1 as i32),
-        )
+        .check(Expr::col(ContextCheckpoint::FormatVersion).is_in([
+            crate::semantic_checkpoint::CONTEXT_CHECKPOINT_FORMAT_V1 as i32,
+            crate::semantic_checkpoint::CONTEXT_CHECKPOINT_FORMAT_V2 as i32,
+        ]))
         .to_owned()
 }
 

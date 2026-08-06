@@ -13,7 +13,8 @@
 //!   require a checkpoint or approval stay ordered;
 //! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
 //!   [`ApprovalGate`] until approve/reject unless a standing grant covers it;
-//! - context reduction is deterministic floor+restore (no LLM summarization);
+//! - context reduction is deterministic floor+restore, with optional semantic
+//!   checkpoints on the utility model when compaction policy triggers;
 //!   retries with progressive reduction on provider prompt-too-long errors.
 
 mod context;
@@ -139,12 +140,16 @@ pub(crate) struct PendingCall {
 ///
 /// The boundary is measured in provider messages, not durable rows, because a
 /// provider turn can include reconstructed tool-use/result messages between
-/// two stored messages. It is deliberately private to the agent: checkpoints
-/// never become transcript rows or journal events.
+/// two stored messages. Soft load assembly skips the covered prefix for the
+/// model while the UI transcript stays complete.
 pub(crate) struct LoadedTranscript {
     messages: Vec<ChatMessage>,
     checkpoint_boundary: Option<usize>,
     source_boundaries: Vec<TranscriptSourceBoundary>,
+    /// Token estimate rebuilt without tool-result byte caps, for trigger math.
+    unabridged_tokens: usize,
+    /// Durable user texts for `original_requests` carry-forward.
+    user_texts: Vec<(MessageId, String)>,
 }
 
 /// Inclusive provider boundary contributed by one durable transcript row.

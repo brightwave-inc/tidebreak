@@ -61,6 +61,10 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert!(settings["model"].is_null());
     assert_eq!(settings["max_active_background_agents"], 5);
+    assert_eq!(settings["compaction"]["threshold_fraction"], 0.75);
+    assert_eq!(settings["compaction"]["target_fraction"], 0.25);
+    assert_eq!(settings["compaction"]["min_threshold_tokens"], 50000);
+    assert_eq!(settings["compaction"]["protect_recent_messages"], 5);
 
     // PUT a model, and it comes back.
     let response = router
@@ -74,7 +78,13 @@ async fn settings_default_then_update_roundtrips() {
                 .body(Body::from(
                     serde_json::json!({
                         "model": "claude-x",
-                        "max_active_background_agents": 7
+                        "max_active_background_agents": 7,
+                        "compaction": {
+                            "threshold_fraction": 0.8,
+                            "target_fraction": 0.3,
+                            "min_threshold_tokens": 40000,
+                            "protect_recent_messages": 8
+                        }
                     })
                     .to_string(),
                 ))
@@ -86,6 +96,10 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
     assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
+    assert_eq!(settings["compaction"]["target_fraction"], 0.3);
+    assert_eq!(settings["compaction"]["min_threshold_tokens"], 40000);
+    assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
 
     // GET reflects the update.
     let response = router
@@ -101,6 +115,8 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
     assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
+    assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
 }
 
 async fn put_mcp_servers(

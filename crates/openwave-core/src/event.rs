@@ -164,6 +164,16 @@ pub enum AgentEvent {
         /// Estimated tokens after fitting to the budget.
         fitted_tokens: u32,
     },
+    /// Semantic compaction is about to run on the utility model.
+    ///
+    /// Emitted only after token accounting proves work is needed, so clients
+    /// do not flash a compacting state on every turn.
+    CompactionStarted,
+    /// Semantic compaction finished for this attempt.
+    CompactionFinished {
+        /// Whether a new (or confirmed) checkpoint was stored.
+        compacted: bool,
+    },
     /// A validated plan-mode continuation committed and released its worker.
     /// Like [`Self::UserQuestionsAsked`], this is only a bounded refresh hint;
     /// clients load the plan from the renderer-safe pending-plan route.
@@ -277,7 +287,9 @@ mod tests {
             AgentEvent::TurnCancelled { .. } => 13,
             AgentEvent::UserSteered { .. } => 14,
             AgentEvent::ContextTruncated { .. } => 15,
-            AgentEvent::PlanProposed { .. } => 16,
+            AgentEvent::CompactionStarted => 16,
+            AgentEvent::CompactionFinished { .. } => 17,
+            AgentEvent::PlanProposed { .. } => 18,
         }
     }
 
@@ -404,6 +416,8 @@ mod tests {
                 original_tokens: 100_000,
                 fitted_tokens: 60_000,
             },
+            AgentEvent::CompactionStarted,
+            AgentEvent::CompactionFinished { compacted: true },
             AgentEvent::PlanProposed {
                 call_id: CallId(id(5)),
                 turn_id: TurnId(id(1)),

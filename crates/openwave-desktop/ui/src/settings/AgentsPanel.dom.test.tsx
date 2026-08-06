@@ -20,6 +20,12 @@ describe("AgentsPanel", () => {
         network_policy: null,
       },
       max_active_background_agents: 5,
+      compaction: {
+        threshold_fraction: 0.75,
+        target_fraction: 0.25,
+        min_threshold_tokens: 50000,
+        protect_recent_messages: 5,
+      },
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,

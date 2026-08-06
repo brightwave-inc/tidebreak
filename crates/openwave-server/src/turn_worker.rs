@@ -829,6 +829,7 @@ impl TurnWorker {
                 )?;
             }
             config.utility_model = utility_model.clone();
+            config.compaction = crate::routes::read_compaction_policy(&*self.store).await?;
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {

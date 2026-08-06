@@ -1,6 +1,6 @@
 use super::*;
 use crate::semantic_checkpoint::{
-    ContextCheckpoint, SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V1,
+    ContextCheckpoint, SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V2,
     MAX_CONTEXT_CHECKPOINT_BYTES,
 };
 
@@ -46,7 +46,7 @@ fn checkpoint(
     ContextCheckpoint {
         chat_id,
         source_message_id,
-        format_version: CONTEXT_CHECKPOINT_FORMAT_V1,
+        format_version: CONTEXT_CHECKPOINT_FORMAT_V2,
         content: content.into(),
         usage: crate::provider::Usage {
             input_tokens: 10,
@@ -134,7 +134,7 @@ async fn checkpoint_rejects_cross_chat_boundaries_and_malformed_payloads() {
     );
     assert!(store.save_context_checkpoint(&oversized).await.is_err());
     let unknown_format = ContextCheckpoint {
-        format_version: CONTEXT_CHECKPOINT_FORMAT_V1 + 1,
+        format_version: CONTEXT_CHECKPOINT_FORMAT_V2 + 1,
         ..checkpoint(chat.id, first.id, "valid text", 2)
     };
     assert!(store

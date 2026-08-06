@@ -6,7 +6,11 @@ use axum::http::{header, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use openwave_core::{AgentRun, ChatId, PermissionMode, ReasoningEffort, Store, TurnId};
+use openwave_core::{
+    AgentRun, ChatId, CompactionPolicy, PermissionMode, ReasoningEffort, Store, TurnId,
+    DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
+    DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+};
 
 use crate::code_execution::{
     self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate, CodeExecutionCredentialReadiness,
@@ -27,8 +31,46 @@ use crate::web_search::{
 };
 
 use super::providers_models::{has_api_key, read_model, validate_model_selection};
-use super::MAX_ACTIVE_BACKGROUND_AGENTS_SETTING;
-use super::SERVED_BYTES_CONTENT_POLICY;
+use super::{
+    COMPACTION_MIN_THRESHOLD_TOKENS_SETTING, COMPACTION_PROTECT_RECENT_MESSAGES_SETTING,
+    COMPACTION_TARGET_FRACTION_SETTING, COMPACTION_THRESHOLD_FRACTION_SETTING,
+    MAX_ACTIVE_BACKGROUND_AGENTS_SETTING, SERVED_BYTES_CONTENT_POLICY,
+};
+
+/// Host-tunable chat compaction cadence and retention.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+pub struct CompactionSettings {
+    /// Compact when unabridged tokens exceed this fraction of the context window.
+    pub threshold_fraction: f64,
+    /// After compaction, keep about this fraction of the window as raw recent history.
+    pub target_fraction: f64,
+    /// Absolute floor applied before scaling by context window.
+    pub min_threshold_tokens: u32,
+    /// Newest durable messages that must never enter the compacted prefix.
+    pub protect_recent_messages: u32,
+}
+
+impl Default for CompactionSettings {
+    fn default() -> Self {
+        Self {
+            threshold_fraction: DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+            target_fraction: DEFAULT_COMPACTION_TARGET_FRACTION,
+            min_threshold_tokens: DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS as u32,
+            protect_recent_messages: DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES as u32,
+        }
+    }
+}
+
+impl From<&CompactionSettings> for CompactionPolicy {
+    fn from(settings: &CompactionSettings) -> Self {
+        Self {
+            threshold_fraction: settings.threshold_fraction,
+            target_fraction: settings.target_fraction,
+            min_threshold_tokens: settings.min_threshold_tokens as usize,
+            protect_recent_messages: settings.protect_recent_messages as usize,
+        }
+    }
+}
 
 /// Runtime settings a client can read. The API key itself is never returned —
 /// it lives in the `SecretProvider`, not the store — only whether one is set.
@@ -45,6 +87,9 @@ pub struct Settings {
     pub chat_defaults: StickyChatDefaults,
     /// Maximum nonterminal spawned agents allowed in one chat.
     pub max_active_background_agents: u32,
+    /// When and how hard semantic compaction may run.
+    #[serde(default)]
+    pub compaction: CompactionSettings,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -74,6 +119,22 @@ pub struct SettingsUpdate {
     pub model: Option<Option<String>>,
     #[serde(default)]
     pub max_active_background_agents: Option<u32>,
+    #[serde(default)]
+    pub compaction: Option<CompactionSettingsUpdate>,
+}
+
+/// Partial update for [`CompactionSettings`]. Absent fields leave the current
+/// value unchanged; the merged result is validated together.
+#[derive(Debug, Default, Deserialize)]
+pub struct CompactionSettingsUpdate {
+    #[serde(default)]
+    pub threshold_fraction: Option<f64>,
+    #[serde(default)]
+    pub target_fraction: Option<f64>,
+    #[serde(default)]
+    pub min_threshold_tokens: Option<u32>,
+    #[serde(default)]
+    pub protect_recent_messages: Option<u32>,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
@@ -95,6 +156,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings
         has_api_key: has_api_key(&*state.secrets).await,
         chat_defaults: read_sticky_chat_defaults(&state).await?,
         max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
+        compaction: read_compaction_settings(&*state.store).await?,
     }))
 }
 
@@ -137,11 +199,29 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(update) = body.compaction {
+        let mut next = read_compaction_settings(&*state.store).await?;
+        if let Some(value) = update.threshold_fraction {
+            next.threshold_fraction = value;
+        }
+        if let Some(value) = update.target_fraction {
+            next.target_fraction = value;
+        }
+        if let Some(value) = update.min_threshold_tokens {
+            next.min_threshold_tokens = value;
+        }
+        if let Some(value) = update.protect_recent_messages {
+            next.protect_recent_messages = value;
+        }
+        validate_compaction_settings(&next)?;
+        write_compaction_settings(&*state.store, &next).await?;
+    }
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
         chat_defaults: read_sticky_chat_defaults(&state).await?,
         max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
+        compaction: read_compaction_settings(&*state.store).await?,
     }))
 }
 
@@ -154,6 +234,122 @@ pub(crate) async fn read_max_active_background_agents(
         .and_then(|value| serde_json::from_value::<u32>(value).ok())
         .filter(|limit| *limit > 0 && *limit <= AgentRun::MAX_CONCURRENCY_LIMIT)
         .unwrap_or(AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS))
+}
+
+/// Absolute floor / ceiling for `min_threshold_tokens`.
+const MIN_COMPACTION_MIN_THRESHOLD_TOKENS: u32 = 1_000;
+const MAX_COMPACTION_MIN_THRESHOLD_TOKENS: u32 = 2_000_000;
+
+fn validate_compaction_settings(settings: &CompactionSettings) -> Result<(), ServerError> {
+    if !(settings.threshold_fraction > 0.0 && settings.threshold_fraction <= 1.0) {
+        return Err(ServerError::bad_request(
+            "compaction.threshold_fraction must be in (0, 1]",
+        ));
+    }
+    if !(settings.target_fraction > 0.0 && settings.target_fraction <= 1.0) {
+        return Err(ServerError::bad_request(
+            "compaction.target_fraction must be in (0, 1]",
+        ));
+    }
+    if !(settings.threshold_fraction > settings.target_fraction) {
+        return Err(ServerError::bad_request(
+            "compaction.threshold_fraction must be greater than compaction.target_fraction",
+        ));
+    }
+    if !(MIN_COMPACTION_MIN_THRESHOLD_TOKENS..=MAX_COMPACTION_MIN_THRESHOLD_TOKENS)
+        .contains(&settings.min_threshold_tokens)
+    {
+        return Err(ServerError::bad_request(format!(
+            "compaction.min_threshold_tokens must be in {MIN_COMPACTION_MIN_THRESHOLD_TOKENS}..={MAX_COMPACTION_MIN_THRESHOLD_TOKENS}"
+        )));
+    }
+    if settings.protect_recent_messages < 1 {
+        return Err(ServerError::bad_request(
+            "compaction.protect_recent_messages must be >= 1",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn read_compaction_settings(
+    store: &dyn Store,
+) -> openwave_core::Result<CompactionSettings> {
+    let defaults = CompactionSettings::default();
+    let settings = CompactionSettings {
+        threshold_fraction: store
+            .get_setting(COMPACTION_THRESHOLD_FRACTION_SETTING)
+            .await?
+            .and_then(|value| serde_json::from_value::<f64>(value).ok())
+            .filter(|value| *value > 0.0 && *value <= 1.0)
+            .unwrap_or(defaults.threshold_fraction),
+        target_fraction: store
+            .get_setting(COMPACTION_TARGET_FRACTION_SETTING)
+            .await?
+            .and_then(|value| serde_json::from_value::<f64>(value).ok())
+            .filter(|value| *value > 0.0 && *value <= 1.0)
+            .unwrap_or(defaults.target_fraction),
+        min_threshold_tokens: store
+            .get_setting(COMPACTION_MIN_THRESHOLD_TOKENS_SETTING)
+            .await?
+            .and_then(|value| serde_json::from_value::<u32>(value).ok())
+            .filter(|value| {
+                (MIN_COMPACTION_MIN_THRESHOLD_TOKENS..=MAX_COMPACTION_MIN_THRESHOLD_TOKENS)
+                    .contains(value)
+            })
+            .unwrap_or(defaults.min_threshold_tokens),
+        protect_recent_messages: store
+            .get_setting(COMPACTION_PROTECT_RECENT_MESSAGES_SETTING)
+            .await?
+            .and_then(|value| serde_json::from_value::<u32>(value).ok())
+            .filter(|value| *value >= 1)
+            .unwrap_or(defaults.protect_recent_messages),
+    };
+    // Independently-stored keys can drift into an impossible pair; fall closed
+    // to defaults rather than hand the agent a policy that cannot resolve.
+    if settings.threshold_fraction <= settings.target_fraction {
+        return Ok(defaults);
+    }
+    Ok(settings)
+}
+
+async fn write_compaction_settings(
+    store: &dyn Store,
+    settings: &CompactionSettings,
+) -> Result<(), ServerError> {
+    store
+        .set_setting(
+            COMPACTION_THRESHOLD_FRACTION_SETTING,
+            &serde_json::json!(settings.threshold_fraction),
+        )
+        .await?;
+    store
+        .set_setting(
+            COMPACTION_TARGET_FRACTION_SETTING,
+            &serde_json::json!(settings.target_fraction),
+        )
+        .await?;
+    store
+        .set_setting(
+            COMPACTION_MIN_THRESHOLD_TOKENS_SETTING,
+            &serde_json::json!(settings.min_threshold_tokens),
+        )
+        .await?;
+    store
+        .set_setting(
+            COMPACTION_PROTECT_RECENT_MESSAGES_SETTING,
+            &serde_json::json!(settings.protect_recent_messages),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Resolve the host compaction policy for the next turn.
+pub(crate) async fn read_compaction_policy(
+    store: &dyn Store,
+) -> openwave_core::Result<CompactionPolicy> {
+    Ok(CompactionPolicy::from(
+        &read_compaction_settings(store).await?,
+    ))
 }
 
 /// `GET /web-search` — read host-owned web-search selection and readiness.

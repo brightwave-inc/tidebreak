@@ -61,6 +61,7 @@ pub mod deliverable;
 // Host-side acceptance writes bytes into private scratch, so it depends on the
 // capability filesystem and async runtime that only the `tools` feature pulls
 // in. The persisted contract and migration below stay available without it.
+pub mod compaction;
 #[cfg(feature = "tools")]
 pub mod deliverable_acceptance;
 pub mod error;
@@ -136,6 +137,11 @@ pub use client_tools::{
     LIST_FOLDER_TOOL, MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_FOLDER_ACCESS_REASON_CHARS,
     READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
+pub use compaction::{
+    CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
+    DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
+    DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+};
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
@@ -210,9 +216,9 @@ pub use provider::{
 pub use renderer_tool::RendererToolName;
 pub use secret_cache::CachingSecretProvider;
 pub use semantic_checkpoint::{
-    ContextCheckpoint, ContextCheckpointPayloadV1, SaveContextCheckpointOutcome,
-    CONTEXT_CHECKPOINT_FORMAT_V1, MAX_CONTEXT_CHECKPOINT_BYTES, MAX_CONTEXT_CHECKPOINT_ITEMS,
-    MAX_CONTEXT_CHECKPOINT_ITEM_BYTES,
+    ContextCheckpoint, ContextCheckpointPayloadV1, ContextCheckpointPayloadV2,
+    SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
+    MAX_CONTEXT_CHECKPOINT_BYTES, MAX_CONTEXT_CHECKPOINT_ITEMS, MAX_CONTEXT_CHECKPOINT_ITEM_BYTES,
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{

@@ -497,6 +497,7 @@ describe("terminal events", () => {
   it("turn_completed resolves the turn and requests hydration", () => {
     const { state, effects } = play([TURN, { type: "turn_completed", usage: NO_USAGE }]);
     expect(state.busy).toBe(false);
+    expect(state.compacting).toBe(false);
     expect(state.activeTurnId).toBeNull();
     expect(effects).toEqual([
       { type: "turn_resolved" },
@@ -504,6 +505,26 @@ describe("terminal events", () => {
       { type: "refresh_plan_approvals" },
       { type: "hydrate_terminal_transcript" },
     ]);
+  });
+
+  it("compaction_started and compaction_finished toggle compacting without sticking past a terminal", () => {
+    const mid = play([TURN, { type: "compaction_started" }]);
+    expect(mid.state.compacting).toBe(true);
+    expect(mid.state.busy).toBe(true);
+
+    const finished = play([{ type: "compaction_finished", compacted: true }], mid.state);
+    expect(finished.state.compacting).toBe(false);
+    expect(finished.state.busy).toBe(true);
+
+    const restarted = play([{ type: "compaction_started" }], finished.state);
+    expect(restarted.state.compacting).toBe(true);
+
+    const terminal = play(
+      [{ type: "turn_completed", usage: NO_USAGE }],
+      restarted.state,
+    );
+    expect(terminal.state.compacting).toBe(false);
+    expect(terminal.state.busy).toBe(false);
   });
 
   it("turn_refused renders a reason even when the model emitted no text", () => {
