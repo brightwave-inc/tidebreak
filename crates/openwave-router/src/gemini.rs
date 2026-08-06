@@ -372,12 +372,19 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }
     }
 
+    let grounding = declares_search_grounding(req);
     let mut body = json!({
-        "contents": gemini_contents(&req.messages, &req.images)?,
+        "contents": gemini_contents(&req.messages, &req.images, grounding)?,
         "generationConfig": generation_config,
     });
     if let Some(system) = &req.system {
         body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
+    }
+    if grounding {
+        // Search grounding is a tool entry of its own. Gemini has no cap on how
+        // many searches one turn may run, so `VendorWebSearch::max_uses` has
+        // nothing to map to here and is deliberately ignored.
+        body["tools"] = json!([{ "googleSearch": {} }]);
     }
     if !req.tools.is_empty() {
         let declarations = req
@@ -397,6 +404,28 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         });
     }
     Ok(body)
+}
+
+/// Whether this request declares Google Search grounding.
+///
+/// Grounding and host function tools do not currently coexist on a shape this
+/// adapter can send. Google's generateContent documentation puts built-in tools
+/// alongside `functionDeclarations` in Preview on Gemini 3 only, and only with
+/// `toolConfig.includeServerSideToolInvocations` set: that flag turns on tool
+/// context circulation, which drops `AUTO` function-calling mode and requires
+/// every later turn to replay the model's own parts verbatim, including part
+/// ids and opaque `thoughtSignature` values. OpenWave stores provider-neutral
+/// history precisely so a chat can switch models mid-conversation, so it sends
+/// the documented signature bypass and mints its own call ids — replaying what
+/// circulation demands is not something this adapter can do today.
+///
+/// Dropping the host's tools to make room for grounding would be worse than
+/// ignoring grounding: the turn would lose the agent's whole tool loop. So the
+/// search is honored only when the request carries no tools of its own, and the
+/// registry keeps `supports_vendor_web_search` false for Gemini rows until the
+/// combined shape is actually reachable.
+fn declares_search_grounding(req: &ChatRequest) -> bool {
+    req.vendor_web_search.is_some() && req.tools.is_empty()
 }
 
 fn gemini_function_calling_config(choice: Option<&ToolChoice>) -> Result<Value> {
@@ -805,15 +834,21 @@ fn gemini_thinking_level(effort: ReasoningEffort) -> &'static str {
 /// independent messages, so consecutive pure result messages are coalesced.
 /// Neither side of the protocol carries a call id, so that ordering is the only
 /// correlation the model has and the coalescing pass is load-bearing.
+/// `rename_client_web_search` rewrites the name of historical client-style
+/// `web_search` calls — see [`PRIOR_WEB_SEARCH_TOOL`].
 fn gemini_contents(
     messages: &[openwave_core::provider::ChatMessage],
     images: &ImageAttachments,
+    rename_client_web_search: bool,
 ) -> Result<Vec<Value>> {
+    let rename = rename_client_web_search;
     let tool_names: HashMap<&str, &str> = messages
         .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+            ContentBlock::ToolUse { id, name, .. } => {
+                Some((id.as_str(), replayed_tool_name(name, rename)))
+            }
             _ => None,
         })
         .collect();
@@ -835,7 +870,7 @@ fn gemini_contents(
                     // to its response by function name and part order.
                     let mut part = json!({
                         "functionCall": {
-                            "name": name,
+                            "name": replayed_tool_name(name, rename),
                             "args": input,
                         },
                     });
@@ -951,6 +986,7 @@ struct StreamState {
     usage: Option<Usage>,
     saw_tool_call: bool,
     terminal: bool,
+    reported_grounding: bool,
 }
 
 /// Convert one complete Gemini response frame into provider-neutral events.
@@ -1067,10 +1103,135 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         }
     }
 
+    // Grounding metadata rides on the candidate rather than on a part, and a
+    // stream repeats it once the searches are done, so the first usable one
+    // wins and later chunks add nothing.
+    if !state.reported_grounding {
+        if let Some(event) = candidate
+            .get("groundingMetadata")
+            .and_then(grounding_search_event)
+        {
+            state.reported_grounding = true;
+            events.push(event);
+        }
+    }
+
     if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
         finish_candidate(reason, state, &mut events);
     }
     events
+}
+
+/// The name a search Gemini ran server-side surfaces under to the host.
+///
+/// Deliberately the host's own tool name, so one renderer draws a grounded
+/// search and a client-executed one alike.
+const VENDOR_WEB_SEARCH_TOOL: &str = "web_search";
+
+/// The name a historical client-side `web_search` call is replayed under once
+/// the request declares Google Search grounding.
+///
+/// Gemini correlates a `functionCall` to its `functionResponse` by name, with
+/// no ids on either side, so a replayed client call named `web_search` sitting
+/// beside a declared `googleSearch` tool is ambiguous exactly where the model
+/// has the least to disambiguate with. Renaming keeps the history well-formed
+/// and readable; the matching response is renamed with it.
+const PRIOR_WEB_SEARCH_TOOL: &str = "web_search_prior";
+
+fn replayed_tool_name(name: &str, rename_client_web_search: bool) -> &str {
+    if rename_client_web_search && name == VENDOR_WEB_SEARCH_TOOL {
+        PRIOR_WEB_SEARCH_TOOL
+    } else {
+        name
+    }
+}
+
+/// Turn a candidate's `groundingMetadata` into one provider-executed search
+/// call, or nothing when it carries neither queries nor sources.
+///
+/// Grounding is not a tool-call part: the searches happen inside the turn and
+/// the whole record arrives as candidate metadata, in practice on the last
+/// chunk of a stream. So this reads whichever chunk carries it and reports the
+/// searches as a single completed call — there is no per-search error surface
+/// to report, which is why an unusable metadata object yields nothing rather
+/// than a failed call.
+fn grounding_search_event(metadata: &Value) -> Option<ProviderEvent> {
+    /// Same cap the host tool applies, so a grounded result set cannot put
+    /// more into context than the host's own search would.
+    const MAX_RESULTS: usize = openwave_core::MAX_WEB_SEARCH_RESULTS;
+    /// Ceiling on the Search Suggestions markup carried back to the host. It
+    /// is a small widget in practice; anything past this is dropped whole
+    /// rather than truncated, since half an HTML document renders as garbage.
+    const MAX_ATTRIBUTION_HTML_BYTES: usize = 64 * 1024;
+
+    let queries: Vec<&str> = metadata
+        .get("webSearchQueries")
+        .and_then(Value::as_array)
+        .map(|queries| {
+            queries
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|query| !query.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut seen = HashSet::new();
+    let results: Vec<Value> = metadata
+        .get("groundingChunks")
+        .and_then(Value::as_array)
+        .map(|chunks| {
+            chunks
+                .iter()
+                .filter_map(|chunk| chunk.get("web"))
+                .filter_map(|web| {
+                    let url = str_at(web, "uri");
+                    (!url.is_empty() && seen.insert(url.clone())).then(|| {
+                        json!({
+                            "url": url,
+                            "title": str_at(web, "title"),
+                            // Grounding returns no excerpt; the field stays
+                            // present so the shape does not vary by provider.
+                            "snippet": "",
+                        })
+                    })
+                })
+                .take(MAX_RESULTS)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if queries.is_empty() && results.is_empty() {
+        return None;
+    }
+
+    // One record covers every search the turn ran, so the queries join into
+    // the single `query` field the host tool and the prose replay both read.
+    let mut output = json!({ "provider": "gemini", "results": results });
+    let attribution = metadata
+        .get("searchEntryPoint")
+        .map(|entry| str_at(entry, "renderedContent"))
+        .filter(|html| !html.is_empty() && html.len() <= MAX_ATTRIBUTION_HTML_BYTES);
+    if let Some(html) = attribution {
+        // Carried through unsanitized and unrendered: Google requires the
+        // Search Suggestions widget to be displayed, and the surface that
+        // displays it decides how to make that markup safe.
+        output["attribution_html"] = json!(html);
+    }
+    Some(ProviderEvent::ProviderExecutedToolCall {
+        name: VENDOR_WEB_SEARCH_TOOL.to_string(),
+        input: json!({ "query": queries.join("; ") }),
+        output,
+        is_error: false,
+    })
+}
+
+fn str_at(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn finish_stream(state: &mut StreamState) -> Vec<ProviderEvent> {
@@ -1653,6 +1814,176 @@ mod tests {
                 reason: StopReason::MaxTokens
             }]
         );
+    }
+
+    // ── Search grounding ───────────────────────────────────────────
+
+    fn search_request() -> ChatRequest {
+        ChatRequest {
+            vendor_web_search: Some(openwave_core::provider::VendorWebSearch { max_uses: 3 }),
+            ..request(vec![ChatMessage::text(Role::User, "what happened today?")])
+        }
+    }
+
+    #[test]
+    fn grounding_is_declared_only_when_the_turn_carries_no_host_tools() {
+        // With host tools present, grounding is dropped rather than the tool
+        // loop: the combined shape needs tool context circulation, which this
+        // adapter's portable history cannot satisfy.
+        let body = build_request_json(&search_request()).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["functionDeclarations"][0]["name"], "read_file");
+
+        let mut tool_free = search_request();
+        tool_free.tools.clear();
+        let body = build_request_json(&tool_free).unwrap();
+        assert_eq!(body["tools"], json!([{ "googleSearch": {} }]));
+        // No function tools, so no function-calling config to send with them.
+        assert!(body.get("toolConfig").is_none());
+
+        // Absent the control, nothing about the request changes.
+        let mut plain = tool_free.clone();
+        plain.vendor_web_search = None;
+        let body = build_request_json(&plain).unwrap();
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn a_prior_client_side_search_is_replayed_under_another_name() {
+        // Gemini pairs a call to its response by name alone, so a replayed
+        // client `web_search` beside the declared `googleSearch` tool is
+        // renamed on both halves of the pair.
+        let mut req = search_request();
+        req.tools.clear();
+        req.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "web_search".into(),
+                input: json!({"query": "yesterday"}),
+            }],
+            reasoning: MessageReasoning::default(),
+        });
+        req.messages.push(ChatMessage {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "one hit".into(),
+                is_error: false,
+            }],
+            reasoning: MessageReasoning::default(),
+        });
+
+        let body = build_request_json(&req).unwrap();
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(
+            contents[1]["parts"][0]["functionCall"]["name"],
+            "web_search_prior"
+        );
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["name"],
+            "web_search_prior"
+        );
+
+        // Without the vendor tool the history keeps its own name.
+        req.vendor_web_search = None;
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionCall"]["name"],
+            "web_search"
+        );
+    }
+
+    #[test]
+    fn grounding_metadata_on_the_final_chunk_becomes_one_executed_search() {
+        let out = run(&[
+            json!({"candidates":[{"content":{"parts":[{"text":"Two teams advanced."}]}}]}),
+            json!({"candidates":[{
+                "content": {"parts": [{"text": ""}]},
+                "groundingMetadata": {
+                    "webSearchQueries": ["who advanced today", "semi-final results"],
+                    "groundingChunks": [
+                        {"web": {"uri": "https://a.example/1", "title": "a.example"}},
+                        // Deduped by url, and a chunk with no web entry or no
+                        // uri contributes nothing.
+                        {"web": {"uri": "https://a.example/1", "title": "a.example"}},
+                        {"web": {"title": "no uri"}},
+                        {"retrievedContext": {"title": "not a web chunk"}},
+                        {"web": {"uri": "https://b.example/2", "title": "b.example"}}
+                    ],
+                    "groundingSupports": [{"segment": {"startIndex": 0, "endIndex": 3}}],
+                    "searchEntryPoint": {"renderedContent": "<div>suggestions</div>"}
+                },
+                "finishReason": "STOP"
+            }]}),
+        ]);
+
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "Two teams advanced.".into()
+                },
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: "web_search".into(),
+                    input: json!({"query": "who advanced today; semi-final results"}),
+                    output: json!({
+                        "provider": "gemini",
+                        "results": [
+                            {"url": "https://a.example/1", "title": "a.example", "snippet": ""},
+                            {"url": "https://b.example/2", "title": "b.example", "snippet": ""},
+                        ],
+                        "attribution_html": "<div>suggestions</div>",
+                    }),
+                    is_error: false,
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn grounding_results_are_capped_and_empty_metadata_reports_nothing() {
+        let chunks: Vec<Value> = (0..openwave_core::MAX_WEB_SEARCH_RESULTS + 5)
+            .map(|n| json!({"web": {"uri": format!("https://e.example/{n}"), "title": "e"}}))
+            .collect();
+        let event = grounding_search_event(&json!({
+            "webSearchQueries": ["one"],
+            "groundingChunks": chunks,
+        }))
+        .unwrap();
+        let ProviderEvent::ProviderExecutedToolCall { output, .. } = event else {
+            panic!("expected an executed search");
+        };
+        assert_eq!(
+            output["results"].as_array().unwrap().len(),
+            openwave_core::MAX_WEB_SEARCH_RESULTS
+        );
+        // Nothing to attribute when the entry point is absent.
+        assert!(output.get("attribution_html").is_none());
+
+        // Oversized markup is dropped whole; the search is still reported.
+        let event = grounding_search_event(&json!({
+            "webSearchQueries": ["one"],
+            "searchEntryPoint": {"renderedContent": "x".repeat(64 * 1024 + 1)},
+        }))
+        .unwrap();
+        let ProviderEvent::ProviderExecutedToolCall { output, .. } = event else {
+            panic!("expected an executed search");
+        };
+        assert!(output.get("attribution_html").is_none());
+        assert_eq!(output["results"], json!([]));
+
+        // Metadata with neither queries nor sources is not a failed search.
+        assert!(grounding_search_event(&json!({})).is_none());
+        assert!(grounding_search_event(&json!({
+            "webSearchQueries": [],
+            "groundingChunks": [{"web": {"title": "no uri"}}],
+        }))
+        .is_none());
     }
 
     #[test]
