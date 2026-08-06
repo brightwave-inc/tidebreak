@@ -60,8 +60,8 @@ const LIST_VERBS: Readonly<Partial<Record<string, string>>> = {
 /**
  * The list of things a call found, read, or wrote, inside the activity rail.
  *
- * The shape follows Brightwave's tool-call document list: a bordered card led
- * by a muted count line, over one hoverable row per thing. It renders inside
+ * A bordered card led by a muted count line, over one hoverable row per thing.
+ * It renders inside
  * the expanded phase rather than as a standing card — collapsed, a phase is
  * one line of text, and what each call found is one click away.
  *

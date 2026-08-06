@@ -838,8 +838,7 @@ function surfacedCards(
  *
  * Separate from {@link surfacedCard} because they are additive: the command
  * card says what ran, and these say what it produced — one clickable card per
- * created or updated output, the way Brightwave surfaces deliverables at the
- * end of a turn.
+ * created or updated output, surfaced at the end of the turn.
  */
 function surfacedOutputCards(entry: ChatMessage): ReactNode {
   if (entry.role !== "tool" || entry.result?.tool !== "exec") return null;

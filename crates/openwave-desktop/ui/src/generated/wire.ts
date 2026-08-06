@@ -1886,12 +1886,10 @@ export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" 
  *
  * A batch tool succeeds and fails in the same breath — five files import, two
  * do not — and a card that lists only what worked is not reporting, it is
- * flattering. Every one of Brightwave's local-file results carries a parallel
- * failures list for exactly this reason.
+ * flattering. So every local-file result carries a parallel failures list.
  *
- * Two fields because that is what a failure row reads as, and it is what
- * Brightwave's own card normalizes its three failure shapes down to before
- * rendering them: the thing that failed, and why.
+ * Two fields because that is what a failure row reads as: the thing that
+ * failed, and why.
  */
 export type ResultFailure = { 
 /**
