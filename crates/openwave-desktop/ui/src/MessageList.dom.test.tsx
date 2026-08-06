@@ -5,9 +5,27 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 import type { ApiClient } from "./api";
+import { readDeliverable } from "./deliverables";
 import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
 import { SourceNavProvider } from "./panel/SourceNav";
 import { renderWithRouter } from "./test/router";
+import Plotly from "plotly.js-dist-min";
+
+// The chart card reads the output it draws, and draws it with the plotting
+// engine — neither of which a transcript test has any business really doing.
+vi.mock("./deliverables", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./deliverables")>()),
+  readDeliverable: vi.fn(),
+}));
+vi.mock("plotly.js-dist-min", () => ({
+  default: {
+    react: vi.fn(() => Promise.resolve()),
+    purge: vi.fn(),
+    Plots: { resize: vi.fn() },
+  },
+}));
+
+const CHART_MEDIA_TYPE = "application/vnd.openwave.chart+json";
 
 const noop = () => undefined;
 
@@ -38,7 +56,10 @@ const REMEMBER = "2.Yes, and don't ask again in this chat";
 const REMEMBER_IN_PROJECT = "2.Yes, and don't ask again in this project";
 const MORE = "More options";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("approval card interactions", () => {
   it("propagates each decision with the grant it names", async () => {
@@ -831,6 +852,42 @@ describe("mcp app views", () => {
 });
 
 describe("actionable tool results", () => {
+  /** One exec call that published a chart output. */
+  function chartExecMessage(): ChatMessage {
+    return {
+      id: "exec-chart",
+      role: "tool",
+      callId: "call-2",
+      name: "exec",
+      status: "completed",
+      preview: {
+        tool: "exec",
+        command: "python3",
+        args: ["plot.py"],
+        cwd: ".",
+        files: [],
+      },
+      result: {
+        tool: "exec",
+        exitCode: 0,
+        timedOut: false,
+        outputTruncated: false,
+        stdout: "",
+        stderr: "",
+        outputs: [
+          {
+            kind: "output",
+            label: "revenue.chart.json",
+            detail: null,
+            meta: "v1 · created",
+            mediaType: CHART_MEDIA_TYPE,
+            targetId: "output-2",
+          },
+        ],
+      },
+    };
+  }
+
   it("opens a published output in the content panel from its card", async () => {
     const user = userEvent.setup();
     const { router } = await renderWithRouter(
@@ -892,6 +949,97 @@ describe("actionable tool results", () => {
         tabs: "outputs.output-1",
       });
     });
+  });
+
+  /**
+   * A chart is only worth anything as a picture, so its card draws the figure
+   * where the turn produced it — and still goes to the output panel, which is
+   * where versions, export and the source view live.
+   */
+  it("draws a chart output inline and still opens it in the panel", async () => {
+    const user = userEvent.setup();
+    vi.mocked(readDeliverable).mockResolvedValue({
+      outputId: "output-2",
+      filename: "revenue.chart.json",
+      mediaType: CHART_MEDIA_TYPE,
+      revisionCount: 1,
+      revisionId: "rev-1",
+      content: JSON.stringify({
+        data: [{ type: "bar", x: ["Q1"], y: [3] }],
+        layout: { title: "Revenue" },
+      }),
+      truncated: false,
+    });
+
+    const { router } = await renderWithRouter(
+      <MessageList
+        messages={[chartExecMessage()]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(Plotly.react).toHaveBeenCalled();
+    });
+    expect(vi.mocked(Plotly.react).mock.calls[0]![1]).toEqual([
+      { type: "bar", x: ["Q1"], y: [3] },
+    ]);
+
+    await user.click(
+      screen.getByRole("button", { name: "Open output revenue.chart.json" }),
+    );
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({
+        tabs: "outputs.output-2",
+      });
+    });
+  });
+
+  /** Bytes that are not a figure leave the ordinary output card behind. */
+  it("falls back to the plain card when the chart cannot be read", async () => {
+    vi.mocked(readDeliverable).mockRejectedValue(new Error("gone"));
+    vi.spyOn(console, "error").mockImplementation(noop);
+
+    await renderWithRouter(
+      <MessageList
+        messages={[chartExecMessage()]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // The card the reader is left with is the ordinary output card — not the
+    // chart frame still holding its placeholder open.
+    await waitFor(() => {
+      expect(document.querySelector(".animate-pulse")).toBeNull();
+    });
+    expect(
+      screen.getByRole("button", { name: "Open output revenue.chart.json" }),
+    ).toBeInTheDocument();
+    expect(Plotly.react).not.toHaveBeenCalled();
   });
 
   it("opens the app the turn just created, from a card outside the accordion", async () => {
