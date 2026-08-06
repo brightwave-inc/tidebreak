@@ -178,6 +178,7 @@ RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
     && python3 /opt/openwave/exec-scripts/pptx_clean.py --help >/dev/null \
     && python3 /opt/openwave/exec-scripts/calc_uno.py --help >/dev/null \
     && python3 /opt/openwave/exec-scripts/xlsx_recalc.py --help >/dev/null \
+    && python3 /opt/openwave/exec-scripts/docx_clean.py --help >/dev/null \
     && python3 -c "import uno" \
     && node -e "require('pptxgenjs')"
 
