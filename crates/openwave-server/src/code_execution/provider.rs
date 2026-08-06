@@ -27,7 +27,7 @@ use crate::state::BlobWriteGuard;
 use super::config::*;
 use super::staging::{
     implicit_staged_paths, materialize_chat_attachments, prepare_execution_directories,
-    staged_set_note, StagedFolders, StagedTurn,
+    required_host_deps, staged_set_note, StagedFolders, StagedTurn,
 };
 
 pub struct ConfiguredCodeExecutionProvider {
@@ -586,20 +586,13 @@ impl ConfiguredCodeExecutionProvider {
             return;
         }
         let skills = self.enabled_skills(installed).await;
-        // Warm the staged skills' declared host tools while the turn runs:
-        // `ensure` is fire-and-forget with the broker's own discipline
-        // (serialized installs, remembered failures), so a declaration in a
-        // staged manifest is all it takes to start the managed install long
-        // before the QA loop needs it.
+        // Warm the staged skills' host tools while the turn runs: `ensure` is
+        // fire-and-forget with the broker's own discipline (serialized
+        // installs, remembered failures), so a staged manifest is all it takes
+        // to start the managed install long before the QA loop needs it.
         if let Some(broker) = self.host_tool_broker.as_deref() {
-            let mut warmed: Vec<openwave_code_execution::HostDep> = Vec::new();
-            for skill in &skills {
-                for dep in &skill.package.host_deps {
-                    if !warmed.contains(dep) {
-                        warmed.push(*dep);
-                        broker.ensure(*dep);
-                    }
-                }
+            for dep in required_host_deps(&skills) {
+                broker.ensure(dep);
             }
         }
         let host_dir = self.scratch_root.join(chat_id.to_string());
@@ -641,6 +634,55 @@ impl ConfiguredCodeExecutionProvider {
                 .await,
             openwave_code_execution::HostToolStatus::Available
         ))
+    }
+
+    /// Whether a Node runtime is real for this turn, for the operating
+    /// prompt's capability line.
+    ///
+    /// `None` when no staged skill declares npm packages — nothing this turn
+    /// would run Node, so the line would steer nothing. Otherwise the status
+    /// is stated exactly, including [`HostToolStatus::Installing`]: a runtime
+    /// that is still downloading is worth waiting a step for, and a model told
+    /// only "unavailable" would abandon the npm path for the rest of the turn.
+    ///
+    /// Every managed backend bakes Node into its image, so only the local
+    /// backend has anything to resolve; there, a host with no broker at all
+    /// (a headless embedding) reports the honest absence rather than letting
+    /// the model discover it one failed command at a time.
+    pub(crate) async fn node_runtime_status(
+        &self,
+    ) -> Option<openwave_code_execution::HostToolStatus> {
+        let needed = self
+            .current_skills()
+            .await
+            .iter()
+            .any(|skill| !skill.package.npm_deps.is_empty());
+        if !needed {
+            return None;
+        }
+        let provider = read_config(&*self.store)
+            .await
+            .ok()
+            .and_then(|c| c.provider);
+        if !matches!(provider, None | Some(CodeExecutionProviderKind::Local)) {
+            return Some(openwave_code_execution::HostToolStatus::Available);
+        }
+        let Some(broker) = self.host_tool_broker.as_deref() else {
+            return Some(openwave_code_execution::HostToolStatus::Unavailable(
+                "this host provides no managed Node runtime".into(),
+            ));
+        };
+        Some(broker.status(openwave_code_execution::HostDep::Node).await)
+    }
+
+    /// The managed Node runtime's directory, for the local sandbox to expose
+    /// read-only. `None` whenever one does not resolve right now, which is
+    /// simply a sandbox without `node` on its `PATH`.
+    async fn managed_node_dir(&self) -> Option<std::path::PathBuf> {
+        self.host_tool_broker
+            .as_deref()?
+            .managed_root(openwave_code_execution::HostDep::Node)
+            .await
     }
 
     /// The shared package cache keyspace for the local sandbox interpreter.
@@ -1094,7 +1136,8 @@ impl ConfiguredCodeExecutionProvider {
                     )?
                     .with_network_policy(network_policy.cloned().unwrap_or_default())
                     .with_document_scripts(self.document_scripts_source.clone())
-                    .with_shared_package_cache(package_cache),
+                    .with_shared_package_cache(package_cache)
+                    .with_managed_node(self.managed_node_dir().await),
                 )
             }
             CodeExecutionProviderKind::E2b => {

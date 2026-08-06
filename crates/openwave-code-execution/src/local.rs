@@ -58,6 +58,7 @@ pub struct LocalExecutionProvider {
     timeout: Duration,
     document_scripts_dir: Option<PathBuf>,
     shared_package_cache: Option<PathBuf>,
+    managed_node_dir: Option<PathBuf>,
     network_policy: NetworkPolicy,
 }
 
@@ -93,6 +94,7 @@ impl LocalExecutionProvider {
             timeout,
             document_scripts_dir: None,
             shared_package_cache: None,
+            managed_node_dir: None,
             network_policy: NetworkPolicy::Off,
         })
     }
@@ -117,6 +119,22 @@ impl LocalExecutionProvider {
     #[must_use]
     pub fn with_shared_package_cache(mut self, directory: Option<PathBuf>) -> Self {
         self.shared_package_cache = directory;
+        self
+    }
+
+    /// Expose a host-managed Node runtime rooted at `directory`: its subtree
+    /// becomes readable and `<directory>/bin` is prepended to the sandbox's
+    /// `PATH`.
+    ///
+    /// The sandbox already allows `process-exec`, so a read allowance is the
+    /// whole gate — without one, `node` is a path the process cannot open. The
+    /// runtime is a pinned install the host verified and keeps writing itself;
+    /// like the package cache, it is never listed as writable, so a sandbox
+    /// consumes the interpreter it is given and cannot replace it for the next
+    /// conversation.
+    #[must_use]
+    pub fn with_managed_node(mut self, directory: Option<PathBuf>) -> Self {
+        self.managed_node_dir = directory;
         self
     }
 
@@ -361,6 +379,13 @@ impl CodeExecutionProvider for LocalExecutionProvider {
                 })
             })
             .transpose()?;
+        // A runtime that has been uninstalled between turns simply drops out:
+        // the profile and PATH go back to what they were rather than failing
+        // the command over an absent convenience.
+        let managed_node_dir = self
+            .managed_node_dir
+            .as_ref()
+            .and_then(|path| fs::canonicalize(path).ok());
         let result = run_native(
             &request,
             &workspace,
@@ -369,6 +394,7 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             self.timeout,
             document_scripts_dir.as_deref(),
             shared_package_cache.as_deref(),
+            managed_node_dir.as_deref(),
             &folder_grants,
             &self.network_policy,
         )
@@ -772,6 +798,7 @@ async fn run_native(
     timeout: Duration,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     network_policy: &NetworkPolicy,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
@@ -787,6 +814,7 @@ async fn run_native(
         developer_dir.as_deref(),
         document_scripts_dir,
         shared_package_cache,
+        managed_node_dir,
         folder_grants,
         broker.as_ref().map(LocalEgressBroker::port),
     )?;
@@ -814,17 +842,13 @@ async fn run_native(
             .env("NO_PROXY", "")
             .env("no_proxy", "");
     }
-    if let Some(developer_dir) = developer_dir {
-        command.env("DEVELOPER_DIR", &developer_dir).env(
-            "PATH",
-            format!(
-                "{}/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                developer_dir.display()
-            ),
-        );
-    } else {
-        command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    if let Some(developer_dir) = developer_dir.as_deref() {
+        command.env("DEVELOPER_DIR", developer_dir);
     }
+    command.env(
+        "PATH",
+        sandbox_path(developer_dir.as_deref(), managed_node_dir),
+    );
     if let Some(directory) = document_scripts_dir {
         command.env("OPENWAVE_EXEC_SCRIPTS", directory);
     }
@@ -906,6 +930,7 @@ async fn run_native(
     _timeout: Duration,
     _document_scripts_dir: Option<&Path>,
     _shared_package_cache: Option<&Path>,
+    _managed_node_dir: Option<&Path>,
     _folder_grants: &[()],
     _network_policy: &NetworkPolicy,
 ) -> Result<CodeExecutionResponse, CodeExecutionError> {
@@ -982,12 +1007,34 @@ async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
 }
 
 #[cfg(target_os = "macos")]
+/// The sandbox's `PATH`, pinned to directories the host controls.
+///
+/// A managed Node runtime goes first: it is the pinned interpreter OpenWave
+/// installed and verified, and a skill's npm work should resolve it rather
+/// than whatever a system directory happens to hold. Everything after it is
+/// the fixed system set — the user's own shell `PATH` never reaches a
+/// sandboxed command.
+fn sandbox_path(developer_dir: Option<&Path>, managed_node_dir: Option<&Path>) -> String {
+    let mut entries = Vec::new();
+    if let Some(directory) = managed_node_dir {
+        entries.push(format!("{}/bin", directory.display()));
+    }
+    if let Some(directory) = developer_dir {
+        entries.push(format!("{}/usr/bin", directory.display()));
+    }
+    entries.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(str::to_owned));
+    entries.join(":")
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn macos_profile(
     workspace: &Path,
     env_home: &Path,
     developer_dir: Option<&Path>,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     broker_port: Option<u16>,
 ) -> Result<String, CodeExecutionError> {
@@ -1089,6 +1136,16 @@ fn macos_profile(
         .map(sandbox_subpath)
         .transpose()?
         .unwrap_or_default();
+    // The managed Node runtime joins the same read-only allowances, and for
+    // the same reason: `(allow process-exec)` above is unconditional, so being
+    // able to *open* the interpreter is the entire gate on running it. The
+    // host installed and verified this exact runtime and keeps sole write
+    // access to it, so a sandbox can run `node` without any conversation being
+    // able to swap out what the next one runs.
+    let managed_node = managed_node_dir
+        .map(sandbox_subpath)
+        .transpose()?
+        .unwrap_or_default();
     // `folder_grants` is the canonical, host-resolved list prepared above.
     // Command, arguments, cwd, and every other model-authored field are
     // deliberately absent from these profile clauses.
@@ -1139,7 +1196,7 @@ fn macos_profile(
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
          (allow file-read-metadata\n  {runtime_metadata}\n  {grant_metadata})\n\
-         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {package_cache}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
+         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {package_cache}\n  {managed_node}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
          (allow file-write*\n  {granted_writes}\n  {workspace}\n  {env_home}\n  (literal \"/dev/null\"))\n"
     ))
 }
@@ -1652,6 +1709,7 @@ mod tests {
             Some(Path::new(
                 "/Users/test/.code-execution-package-cache/cp39-darwin-arm64/wheels",
             )),
+            None,
             &[],
             None,
         )
@@ -1679,6 +1737,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &[],
             None,
         )
@@ -1690,12 +1749,88 @@ mod tests {
             None,
             None,
             None,
+            None,
             &[],
             Some(43127),
         )
         .unwrap();
         assert!(proxied.contains("(allow network-outbound (remote tcp \"localhost:43127\"))"));
         assert!(!proxied.contains("localhost:*"));
+    }
+
+    /// A managed Node runtime is a host-supplied slot like the package cache:
+    /// present only when the host hands one over, readable and never writable,
+    /// and first on `PATH` so a skill's npm work runs the pinned interpreter.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_node_is_read_only_and_leads_path_only_when_supplied() {
+        let node = Path::new("/Users/test/Library/Application Support/OpenWave/node/v22.11.0");
+        let profile = |managed_node| {
+            macos_profile(
+                Path::new("/Users/test/workspace"),
+                Path::new("/Users/test/env-home"),
+                None,
+                None,
+                None,
+                managed_node,
+                &[],
+                None,
+            )
+            .unwrap()
+        };
+
+        let with_node = profile(Some(node));
+        assert!(with_node.contains(&sandbox_subpath(node).unwrap()));
+        let write_rule = with_node
+            .split("(allow file-write*")
+            .nth(1)
+            .expect("profile has a write rule");
+        assert!(!write_rule.contains("OpenWave/node"));
+        assert!(!profile(None).contains("OpenWave/node"));
+
+        let developer_dir = Path::new("/Library/Developer/CommandLineTools");
+        assert_eq!(
+            sandbox_path(Some(developer_dir), Some(node)),
+            "/Users/test/Library/Application Support/OpenWave/node/v22.11.0/bin:\
+             /Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        assert_eq!(
+            sandbox_path(None, None),
+            "/usr/bin:/bin:/usr/sbin:/sbin",
+            "without a managed runtime the sandbox keeps the system PATH it always had"
+        );
+    }
+
+    /// The end of the same story, run for real: a runtime the host hands over
+    /// is executable inside Seatbelt purely because its subtree is readable,
+    /// and one the host withholds is not on `PATH` at all.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn managed_node_runs_in_the_sandbox_and_is_absent_without_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace = "chat-node";
+        fs::create_dir(scratch.path().join(workspace)).unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let bin = runtime.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("node"), "#!/bin/sh\nprintf v22.11.0\n").unwrap();
+        fs::set_permissions(bin.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = fs::canonicalize(runtime.path()).unwrap();
+
+        let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(5)).unwrap();
+        let script = "node --version || printf no-node";
+        let without = provider
+            .execute(request(workspace, "call-no-node", script))
+            .await
+            .unwrap();
+        assert_eq!(without.stdout, "no-node");
+
+        let provider = provider.with_managed_node(Some(runtime));
+        let with = provider
+            .execute(request(workspace, "call-node", script))
+            .await
+            .unwrap();
+        assert_eq!(with.stdout, "v22.11.0", "stderr: {}", with.stderr);
     }
 
     #[cfg(target_os = "macos")]
@@ -1714,6 +1849,7 @@ mod tests {
         let profile = macos_profile(
             Path::new("/Users/test/workspace"),
             Path::new("/Users/test/env-home"),
+            None,
             None,
             None,
             None,

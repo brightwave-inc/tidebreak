@@ -33,8 +33,14 @@ version is baked into the image and `NODE_PATH` points at it. On a local exec
 workspace, install it once with its own `exec` call:
 
 ```
-npm install pptxgenjs@4.0.1
+npm install --ignore-scripts pptxgenjs@4.0.1
 ```
+
+Keep `--ignore-scripts`: a local workspace runs on the user's own machine, and
+a package's install hooks are arbitrary code nobody asked to run. The Node
+runtime itself is host-managed on that backend — the turn's operating notes say
+whether it is available, being installed, or absent, so read them before
+choosing this path.
 
 Installs work only when this chat's network policy allows package managers,
 and they persist for the rest of the conversation. If an install is refused by

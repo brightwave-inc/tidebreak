@@ -288,6 +288,7 @@ impl openwave_code_execution::HostToolBroker for DesktopHostToolBroker {
             openwave_code_execution::HostDep::LibreOffice => {
                 warm_presentation_converter(self.app.clone());
             }
+            openwave_code_execution::HostDep::Node => {}
         }
     }
 
@@ -297,7 +298,22 @@ impl openwave_code_execution::HostToolBroker for DesktopHostToolBroker {
     ) -> openwave_code_execution::HostToolStatus {
         match tool {
             openwave_code_execution::HostDep::LibreOffice => libreoffice_status(&self.app).await,
+            openwave_code_execution::HostDep::Node => {
+                openwave_code_execution::HostToolStatus::Unavailable(
+                    "no managed Node runtime is installed".into(),
+                )
+            }
         }
+    }
+
+    async fn managed_root(
+        &self,
+        _tool: openwave_code_execution::HostDep,
+    ) -> Option<std::path::PathBuf> {
+        // Conversion runs on the host, so LibreOffice has no root anything
+        // downstream needs; the managed Node runtime the sandbox is handed is
+        // installed separately.
+        None
     }
 }
 
