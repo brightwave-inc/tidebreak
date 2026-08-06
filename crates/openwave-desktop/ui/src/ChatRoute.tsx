@@ -62,6 +62,7 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "./NativePickerLatch";
+import { PinnedOutputsStrip } from "./PinnedOutputsStrip";
 import { PanelFrame } from "./panel/PanelFrame";
 import { PanelLayout } from "./panel/PanelLayout";
 import type { PanelContent } from "./panel/panelTypes";
@@ -745,6 +746,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           onOpenAgents={() => openPanel({ type: "agents" })}
         />
       </header>
+      <PinnedOutputsStrip
+        chatId={chatId}
+        outputs={deliverables}
+        panelOpen={layout.tabs.length > 0}
+        onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
+        onOpenOutputs={() => openPanel({ type: "outputs" })}
+      />
       {/* Citations live in the transcript but open into the panel beside it,
           so the way there is provided above both slots. */}
       <SourceNavProvider value={sourceNav}>
