@@ -14,9 +14,18 @@ import {
   Image as ImageIcon,
   Mic,
   Square,
+  Sparkles,
+  Wand2,
   X,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
+import {
+  activeSlashQuery,
+  filterSlashOptions,
+  replaceSlashToken,
+  MAX_INVOKED_SKILLS,
+  type SlashOption,
+} from "./ComposerSlash";
 import {
   ComposerToolsMenu,
   type ComposerNetwork,
@@ -173,6 +182,23 @@ export type ComposerVoice = {
   onStop: () => void;
 };
 
+/**
+ * What typing `/` reaches, and which skills the next message will invoke.
+ *
+ * The composer owns the token and the list; the surface above it owns the
+ * catalog and the invoked names, because those have to survive this component
+ * — the chat route reads them again when it posts the turn.
+ */
+export type ComposerSlash = {
+  options: readonly SlashOption[];
+  /** Skill names invoked for the next send, in the order they were picked. */
+  invoked: readonly string[];
+  onInvoke: (name: string) => void;
+  onRemove: (name: string) => void;
+  /** One prompt's insertable text. A rejection leaves the draft as it was. */
+  loadPromptBody: (name: string) => Promise<string>;
+};
+
 /** Whether attached images stop this turn from being sent, and why. */
 export function imageSendBlocker(images: ComposerImages | undefined): string | null {
   if (!images || images.items.length === 0) return null;
@@ -198,6 +224,7 @@ export type ComposerProps = {
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
   plugins?: ComposerPlugins;
+  slash?: ComposerSlash;
   images?: ComposerImages;
   files?: ComposerFiles;
   folders?: ComposerFolders;
@@ -226,6 +253,7 @@ export function Composer({
   network,
   reasoning,
   plugins,
+  slash,
   images,
   files,
   folders,
@@ -249,6 +277,14 @@ export function Composer({
   const dragDepthRef = useRef(0);
   const selectionRef = useRef<{ start: number; end: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  // The `/` token under the caret, as a piece of state rather than a derived
+  // value: the caret moves without the draft changing, and a ref would leave
+  // the list open over a caret that has walked away from the token.
+  const [slashToken, setSlashToken] = useState<{
+    start: number;
+    query: string;
+  } | null>(null);
+  const [slashHighlight, setSlashHighlight] = useState(0);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const inputDisabled = disabled;
   const active = busy && activeTurnId !== null;
@@ -277,7 +313,125 @@ export function Composer({
   // means nothing in it.
   useLayoutEffect(() => {
     selectionRef.current = null;
+    setSlashToken(null);
   }, [resetKey]);
+
+  const invokedSkills = slash?.invoked ?? [];
+  const atSkillCap = invokedSkills.length >= MAX_INVOKED_SKILLS;
+  /**
+   * What this `/` can still reach.
+   *
+   * A skill already on the message is not offered again — the server refuses a
+   * duplicate — and neither is any skill once the turn's cap is reached, or
+   * while a turn is running: steering carries no invocation, so a pill picked
+   * there would silently apply to some later message. Prompts are text and stay
+   * available throughout.
+   */
+  const slashOptions = (slash?.options ?? []).filter((option) => {
+    if (option.kind === "prompt") return true;
+    if (active || atSkillCap) return false;
+    return !invokedSkills.includes(option.name);
+  });
+  const slashMatches = slashToken
+    ? filterSlashOptions(slashOptions, slashToken.query)
+    : [];
+  // Skills vanish from the list at the cap, which would otherwise read as a
+  // catalog that has lost them. The note says which bound was reached.
+  const slashCapNote = slashToken !== null && !active && atSkillCap;
+  // An open list with nothing in it is a panel over the draft saying nothing.
+  const slashOpen =
+    slashToken !== null && (slashMatches.length > 0 || slashCapNote);
+  const slashIndex = Math.min(slashHighlight, slashMatches.length - 1);
+
+  /** Re-read whether the caret sits inside a `/` token, and reset the cursor. */
+  function syncSlashToken(value: string, caret: number) {
+    const token = slash ? activeSlashQuery(value, caret) : null;
+    setSlashToken(token);
+    setSlashHighlight(0);
+  }
+
+  /**
+   * Take the `/query` out of the draft, and do what the row promised.
+   *
+   * A skill leaves a pill behind: the name travels beside the message rather
+   * than inside it, so nothing has to be parsed back out of prose. A prompt is
+   * text, so its body replaces the token — fetched only now, because the
+   * catalog deliberately carries no bodies.
+   */
+  function selectSlashOption(option: SlashOption) {
+    const token = slashToken;
+    if (!slash || !token) return;
+    const caret = token.start + 1 + token.query.length;
+    setSlashToken(null);
+    if (option.kind === "skill") {
+      applySlashReplacement(draft, token.start, caret, "");
+      slash.onInvoke(option.name);
+      return;
+    }
+    void (async () => {
+      let body: string;
+      try {
+        body = await slash.loadPromptBody(option.name);
+      } catch {
+        // Picking is not a place to raise an error: a body that cannot be read
+        // leaves the draft exactly as the reader typed it, `/` token and all.
+        return;
+      }
+      applySlashReplacement(draft, token.start, caret, body);
+    })();
+  }
+
+  function applySlashReplacement(
+    source: string,
+    start: number,
+    caret: number,
+    replacement: string,
+  ) {
+    const next = replaceSlashToken(source, start, caret, replacement);
+    selectionRef.current = { start: next.caret, end: next.caret };
+    onDraftChange(next.text);
+    window.requestAnimationFrame(() => {
+      const field = textareaRef.current;
+      if (!field || field.disabled) return;
+      field.focus();
+      field.setSelectionRange(next.caret, next.caret);
+    });
+  }
+
+  /** The list's own keys, taken before the textarea's send-on-Enter sees them. */
+  function handleSlashKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (event.key === "Escape") {
+      // Only claimed when there is a list to close, so Escape keeps whatever
+      // meaning the surrounding surface gives it the rest of the time.
+      if (slashToken === null) return false;
+      setSlashToken(null);
+      return true;
+    }
+    if (!slashOpen) return false;
+    // A list showing only the cap note has nothing to move through or pick, so
+    // Enter stays what it always is: send.
+    if (slashMatches.length === 0) return false;
+    if (event.key === "ArrowDown") {
+      setSlashHighlight((current) => (current + 1) % slashMatches.length);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      setSlashHighlight(
+        (current) =>
+          (Math.min(current, slashMatches.length - 1) +
+            slashMatches.length -
+            1) %
+          slashMatches.length,
+      );
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      const option = slashMatches[slashIndex];
+      if (option) selectSlashOption(option);
+      return true;
+    }
+    return false;
+  }
 
   async function submit(): Promise<void> {
     if (!canSubmit) return;
@@ -303,6 +457,7 @@ export function Composer({
 
   function onChange(event: ChangeEvent<HTMLTextAreaElement>) {
     rememberSelection(event.target);
+    syncSlashToken(event.target.value, event.target.selectionStart);
     onDraftChange(event.target.value);
   }
 
@@ -465,6 +620,78 @@ export function Composer({
           ))}
         </ul>
       )}
+      {slash && invokedSkills.length > 0 && (
+        <ul
+          className="m-0 flex list-none flex-wrap gap-2 p-0"
+          aria-label="Invoked skills"
+        >
+          {invokedSkills.map((name) => (
+            <InvokedSkillChip
+              key={name}
+              label={skillLabel(slash.options, name)}
+              onRemove={() => slash.onRemove(name)}
+            />
+          ))}
+        </ul>
+      )}
+      {slashOpen && (
+        // In flow above the field rather than floating over it: the composer
+        // clips its own overflow to keep its rounded edge, so a panel anchored
+        // above the box would be cut off at the border.
+        <ul
+          id="composer-slash-list"
+          role="listbox"
+          aria-label="Skills and prompts"
+          className="m-0 max-h-56 list-none overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          {slashMatches.map((option, index) => (
+            <li key={`${option.kind}:${option.name}`}>
+              <button
+                type="button"
+                id={`composer-slash-option-${index}`}
+                role="option"
+                aria-selected={index === slashIndex}
+                className={cn(
+                  "flex w-full items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
+                  index === slashIndex && "bg-accent text-accent-foreground",
+                )}
+                // Taken on mousedown so the field never loses the caret the
+                // insertion is about to be made at.
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => selectSlashOption(option)}
+              >
+                {option.kind === "skill" ? (
+                  <Wand2
+                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Sparkles
+                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                )}
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate">{option.label}</span>
+                  {option.description && (
+                    <span className="truncate text-xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  )}
+                </span>
+                <span className="ml-auto shrink-0 pl-2 text-[0.68rem] text-muted-foreground">
+                  {option.kind === "skill" ? "Skill" : "Prompt"}
+                </span>
+              </button>
+            </li>
+          ))}
+          {slashCapNote && (
+            <li className="px-2 py-1.5 text-xs text-muted-foreground">
+              {`A message can invoke at most ${MAX_INVOKED_SKILLS} skills.`}
+            </li>
+          )}
+        </ul>
+      )}
       <textarea
         ref={textareaRef}
         className={cn(
@@ -482,14 +709,29 @@ export function Composer({
                 : "Message OpenWave…"
         }
         aria-label="Message"
+        aria-controls={slashOpen ? "composer-slash-list" : undefined}
+        aria-activedescendant={
+          slashOpen ? `composer-slash-option-${slashIndex}` : undefined
+        }
         // A stable hook for the shell's focus-composer shortcut, which has to
         // find the field without a ref threaded up through every route.
         data-composer-input=""
         disabled={inputDisabled}
         onChange={onChange}
-        onSelect={(event) => rememberSelection(event.currentTarget)}
+        onSelect={(event) => {
+          rememberSelection(event.currentTarget);
+          syncSlashToken(
+            event.currentTarget.value,
+            event.currentTarget.selectionStart,
+          );
+        }}
+        onBlur={() => setSlashToken(null)}
         onPaste={onPaste}
         onKeyDown={(event) => {
+          if (handleSlashKey(event)) {
+            event.preventDefault();
+            return;
+          }
           if (!shouldSubmitComposerKey(event.nativeEvent)) return;
           event.preventDefault();
           void submit();
@@ -672,6 +914,54 @@ export function Composer({
       )}
       {confirmDialog}
     </form>
+  );
+}
+
+/** What the catalog calls a skill, falling back to its slug if it has gone. */
+function skillLabel(options: readonly SlashOption[], name: string): string {
+  const option = options.find(
+    (candidate) => candidate.kind === "skill" && candidate.name === name,
+  );
+  return option?.label ?? name;
+}
+
+/**
+ * One skill this message will invoke.
+ *
+ * A pill rather than words in the draft: the invocation is a field on the
+ * message, so it has to be visible and removable as one thing, not as text the
+ * reader could half-delete.
+ */
+function InvokedSkillChip({
+  label,
+  onRemove,
+}: {
+  label: string;
+  onRemove: () => void;
+}) {
+  return (
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
+      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
+        <Wand2 size={16} aria-hidden="true" />
+      </span>
+      <span className="grid min-w-0 gap-px">
+        <strong
+          className="max-w-[12rem] truncate text-xs font-semibold text-foreground"
+          title={label}
+        >
+          {label}
+        </strong>
+        <small className="text-[0.68rem]">Skill</small>
+      </span>
+      <button
+        type="button"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+        aria-label={`Remove ${label}`}
+        onClick={onRemove}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </li>
   );
 }
 

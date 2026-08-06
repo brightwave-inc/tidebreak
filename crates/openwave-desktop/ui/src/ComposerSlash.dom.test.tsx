@@ -1,0 +1,152 @@
+// @vitest-environment jsdom
+import { useState } from "react";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, expect, it, vi } from "vitest";
+
+import { Composer, type ComposerSlash } from "./Composer";
+import type { SlashOption } from "./ComposerSlash";
+
+afterEach(cleanup);
+
+const OPTIONS: SlashOption[] = [
+  {
+    kind: "skill",
+    name: "pptx",
+    label: "Pptx",
+    description: "Builds slide decks.",
+  },
+  {
+    kind: "skill",
+    name: "xlsx",
+    label: "Xlsx",
+    description: "Builds spreadsheets.",
+  },
+  {
+    kind: "prompt",
+    name: "weekly-update",
+    label: "Weekly update",
+    description: "The Monday note.",
+  },
+];
+
+function slash(overrides: Partial<ComposerSlash> = {}): ComposerSlash {
+  return {
+    options: OPTIONS,
+    invoked: [],
+    onInvoke: vi.fn(),
+    onRemove: vi.fn(),
+    loadPromptBody: vi.fn(async () => "Write this week's update covering:"),
+    ...overrides,
+  };
+}
+
+/**
+ * A composer whose draft is real state, so typing behaves the way it does in a
+ * route: the `/` token the list reads is whatever has actually been typed.
+ */
+function ComposerHarness({
+  slash: menu,
+  onDraftChange,
+}: {
+  slash: ComposerSlash;
+  onDraftChange?: (draft: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  return (
+    <Composer
+      activeTurnId={null}
+      busy={false}
+      cancelError={null}
+      cancelPending={false}
+      disabled={false}
+      draft={draft}
+      slash={menu}
+      onDraftChange={(next) => {
+        setDraft(next);
+        onDraftChange?.(next);
+      }}
+      onSend={vi.fn(async () => {})}
+      onSteer={vi.fn(async () => {})}
+      onStop={vi.fn(async () => {})}
+      resetKey="chat-1"
+      steerError={null}
+      steerPending={false}
+      steerStatus={null}
+    />
+  );
+}
+
+it("opens on a leading slash, narrows to what is typed, and closes on escape", async () => {
+  const user = userEvent.setup();
+  render(<ComposerHarness slash={slash()} />);
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("/");
+  expect(screen.getAllByRole("option")).toHaveLength(3);
+
+  await user.keyboard("ppt");
+  const narrowed = screen.getAllByRole("option");
+  expect(narrowed).toHaveLength(1);
+  expect(narrowed[0]).toHaveAccessibleName(/Pptx/);
+
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("option")).toBeNull();
+});
+
+it("leaves a slash inside ordinary text alone", async () => {
+  const user = userEvent.setup();
+  render(<ComposerHarness slash={slash()} />);
+
+  const field = screen.getByRole("textbox", { name: "Message" });
+  await user.click(field);
+  // Mid-word: a path is not someone reaching for the library.
+  await user.keyboard("read src/pptx");
+  expect(screen.queryByRole("option")).toBeNull();
+
+  // And a space ends the token: by then the reader is writing prose again.
+  await user.clear(field);
+  await user.keyboard("/pptx and");
+  expect(screen.queryByRole("option")).toBeNull();
+});
+
+it("replaces the token with the prompt body it fetches", async () => {
+  const user = userEvent.setup();
+  const menu = slash();
+  const onDraftChange = vi.fn();
+  render(<ComposerHarness slash={menu} onDraftChange={onDraftChange} />);
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+
+  expect(menu.loadPromptBody).toHaveBeenCalledWith("weekly-update");
+  expect(onDraftChange).toHaveBeenLastCalledWith(
+    "draft the Write this week's update covering:",
+  );
+  // A prompt is text, not an invocation: nothing is pinned to the message.
+  expect(menu.onInvoke).not.toHaveBeenCalled();
+});
+
+it("invokes a picked skill and shows it as a chip the reader can drop", async () => {
+  const user = userEvent.setup();
+  const onInvoke = vi.fn();
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness slash={slash({ onInvoke })} onDraftChange={onDraftChange} />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("make slides /pptx");
+  await user.click(screen.getByRole("option", { name: /Pptx/ }));
+
+  expect(onInvoke).toHaveBeenCalledWith("pptx");
+  // The token comes out of the prose; the invocation travels beside it.
+  expect(onDraftChange).toHaveBeenLastCalledWith("make slides ");
+
+  cleanup();
+  const onRemove = vi.fn();
+  render(<ComposerHarness slash={slash({ invoked: ["pptx"], onRemove })} />);
+  await user.click(screen.getByRole("button", { name: "Remove Pptx" }));
+  expect(onRemove).toHaveBeenCalledWith("pptx");
+});

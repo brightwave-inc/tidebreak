@@ -1795,6 +1795,10 @@ export class ApiClient {
    * `attachments` names images already published for this chat, in the order
    * they should be shown to the model. Only identity crosses: the server
    * re-derives every attachment's format and dimensions from the stored bytes.
+   *
+   * `invokedSkills` names the skills the reader explicitly reached for. A name
+   * the install cannot run refuses the whole turn rather than being dropped, so
+   * the caller must be ready to show the refusal.
    */
   postMessage(
     chatId: string,
@@ -1802,6 +1806,7 @@ export class ApiClient {
     content: string,
     attachments: readonly string[] = [],
     fileAttachments: readonly string[] = [],
+    invokedSkills: readonly string[] = [],
   ): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
@@ -1811,6 +1816,7 @@ export class ApiClient {
         content,
         attachments,
         file_attachments: fileAttachments,
+        invoked_skills: invokedSkills,
       }),
     });
   }

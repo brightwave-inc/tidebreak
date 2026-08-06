@@ -7,6 +7,7 @@ describe("first message handover", () => {
     text: "summarise the filing",
     images: [],
     files: [],
+    skills: [],
   };
 
   it("hands the message and attachments to the chat they were written for", () => {

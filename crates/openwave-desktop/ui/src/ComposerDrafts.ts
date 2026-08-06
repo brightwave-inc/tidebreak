@@ -58,12 +58,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export type ComposerAttachmentDraft = {
   images: ImageAttachment[];
   files: ImportedDocument[];
+  /** Skills the next message will invoke, by catalog name, in pick order. */
+  skills: string[];
   pendingChatId: string | null;
 };
 
 export const EMPTY_ATTACHMENT_DRAFT: ComposerAttachmentDraft = {
   images: [],
   files: [],
+  skills: [],
   pendingChatId: null,
 };
 
@@ -71,6 +74,7 @@ function isEmptyAttachmentDraft(draft: ComposerAttachmentDraft): boolean {
   return (
     draft.images.length === 0 &&
     draft.files.length === 0 &&
+    draft.skills.length === 0 &&
     draft.pendingChatId === null
   );
 }
@@ -91,6 +95,7 @@ function storableDraft(
       .filter((image) => image.status === "ready" && image.attachmentId !== null)
       .map((image) => ({ ...image, previewUrl: null })),
     files: draft.files,
+    skills: draft.skills,
     pendingChatId: draft.pendingChatId,
   };
 }
@@ -116,6 +121,9 @@ function parseStoredAttachmentDraft(value: string): ComposerAttachmentDraft | nu
     return {
       images,
       files,
+      skills: (Array.isArray(parsed.skills) ? parsed.skills : []).filter(
+        (skill): skill is string => typeof skill === "string",
+      ),
       pendingChatId:
         typeof parsed.pendingChatId === "string" ? parsed.pendingChatId : null,
     };
@@ -187,6 +195,7 @@ export type ComposerDraftStore = {
   clearDraft: (key: string) => void;
   setImages: (key: string, images: ImageAttachment[]) => void;
   setFiles: (key: string, files: ImportedDocument[]) => void;
+  setSkills: (key: string, skills: string[]) => void;
   setPendingChatId: (key: string, chatId: string | null) => void;
 };
 
@@ -230,6 +239,8 @@ export function createComposerDraftStore() {
         updateAttachments(key, (current) => ({ ...current, images })),
       setFiles: (key, files) =>
         updateAttachments(key, (current) => ({ ...current, files })),
+      setSkills: (key, skills) =>
+        updateAttachments(key, (current) => ({ ...current, skills })),
       setPendingChatId: (key, chatId) =>
         updateAttachments(key, (current) => ({
           ...current,
