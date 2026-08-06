@@ -995,6 +995,59 @@ describe("actionable tool results", () => {
       expect(router.state.location.pathname).toBe("/settings/web-search");
     });
   });
+
+  it("stands the provider-required card up once per turn", async () => {
+    await renderWithRouter(
+      <MessageList
+        messages={[
+          // Two searches issued in parallel, both refused for the same missing
+          // provider, then a fresh turn that hits the wall again.
+          {
+            id: "web-search-1",
+            role: "tool",
+            callId: "call-1",
+            name: "web_search",
+            status: "failed",
+            result: { tool: "web_search_provider_required" },
+          },
+          {
+            id: "web-search-2",
+            role: "tool",
+            callId: "call-2",
+            name: "web_search",
+            status: "failed",
+            result: { tool: "web_search_provider_required" },
+          },
+          { id: "user-2", role: "user", text: "Try again" },
+          {
+            id: "web-search-3",
+            role: "tool",
+            callId: "call-3",
+            name: "web_search",
+            status: "failed",
+            result: { tool: "web_search_provider_required" },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("heading", { name: "Web search needs a provider" }),
+    ).toHaveLength(2);
+  });
 });
 
 describe("citation anchors", () => {

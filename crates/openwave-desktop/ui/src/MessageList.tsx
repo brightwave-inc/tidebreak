@@ -560,6 +560,12 @@ export function groupMessageItems(
   // caller lift the last exchange into a pinned wrapper without re-deriving the
   // turn boundary. Stays -1 for a transcript that opens on activity alone.
   let lastTurnStart = -1;
+  // Cards whose whole content is the situation, not the call — a standing
+  // call-to-action the reader answers once. Parallel calls that all fail the
+  // same way would otherwise stack identical copies of it. The claim is per
+  // turn, not per transcript: the next turn hitting the same wall is a live
+  // prompt again, so a user message clears it.
+  let standingCardKeys = new Set<string>();
   let index = 0;
   let groupIndex = 0;
   let streamingAssistantId: string | undefined;
@@ -584,7 +590,10 @@ export function groupMessageItems(
     const message = messages[index];
 
     if (!isActivityMessage(message)) {
-      if (message.role === "user") lastTurnStart = items.length;
+      if (message.role === "user") {
+        lastTurnStart = items.length;
+        standingCardKeys = new Set<string>();
+      }
       items.push(
         <MessageBubble
           key={message.id}
@@ -628,6 +637,7 @@ export function groupMessageItems(
     const cards = surfacedCards(
       phase,
       parked,
+      standingCardKeys,
       onApproval,
       approvalState,
       chatId,
@@ -739,6 +749,12 @@ function isolatedCard(
 /** What deciding a card needs beyond the entry it is deciding about. */
 type CardContext = {
   parked: Set<string>;
+  /**
+   * Keys of the standing call-to-action cards already shown this turn, so the
+   * second call that fails the same way adds a rail row and nothing else.
+   * Written through by {@link surfacedCard} as it claims a key.
+   */
+  standingCardKeys: Set<string>;
   onApproval: (
     callId: string,
     decision: "approve" | "reject",
@@ -771,6 +787,7 @@ type CardContext = {
 function surfacedCards(
   phase: ChatMessage[],
   parked: Set<string>,
+  standingCardKeys: Set<string>,
   onApproval: (
     callId: string,
     decision: "approve" | "reject",
@@ -786,6 +803,7 @@ function surfacedCards(
 ): ReactNode[] {
   const context: CardContext = {
     parked,
+    standingCardKeys,
     onApproval,
     approvalState,
     chatId,
@@ -855,7 +873,14 @@ function surfacedAppCards(entry: ChatMessage): ReactNode {
 
 /** The card one entry earns, or `null` when it earns none. */
 function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
-  const { parked, onApproval, approvalState, chatId, imageClient } = context;
+  const {
+    parked,
+    standingCardKeys,
+    onApproval,
+    approvalState,
+    chatId,
+    imageClient,
+  } = context;
   if (entry.role === "approval") {
     if (entry.resolved) return null;
     return isolatedCard(
@@ -884,6 +909,13 @@ function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
     entry.result?.tool === "web_search_provider_required" &&
     !parked.has(entry.callId)
   ) {
+    // The card says nothing about the call that produced it — it asks the
+    // reader to configure a provider. Parallel searches all fail this way at
+    // once, so only the first of them stands the card up; the rest are already
+    // accounted for on the rail. A parked call renders no card at all and so
+    // never claims the turn's slot.
+    if (standingCardKeys.has("web_search_provider_required")) return null;
+    standingCardKeys.add("web_search_provider_required");
     return isolatedCard(entry.id, "", <WebSearchProviderRequiredCard />);
   }
   // An MCP App view is keyed on the *result*: the tool has no action
