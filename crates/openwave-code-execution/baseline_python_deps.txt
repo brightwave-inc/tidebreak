@@ -1,0 +1,22 @@
+# The baseline Python packages every exec backend guarantees, as exact pins.
+#
+# Skill pins say what one document skill needs; this set is what any script may
+# import without a skill in play, on every backend alike. It is baked into the
+# documents sandbox image (the generator reads this file, so the pins are
+# top-level entries of the hash-checked closure in
+# crates/openwave-sandbox-agent/documents-requirements.txt) and seeded into the
+# local backend's offline shared package cache alongside the per-skill pin sets.
+#
+# Changing a pin here means regenerating the image closure in lockstep:
+#   python3 scripts/generate-documents-requirements.py
+# scripts/sandbox-image-pins.test.mjs fails when the two drift apart.
+#
+# The versions are the newest each backend can carry in common: the local
+# sandbox runs the system interpreter (macOS CPython 3.9), so a pin without a
+# cp39 wheel is unusable there no matter what the image could hold. The
+# generator resolves this set for that runtime and fails regeneration when a
+# pin cannot install on it.
+
+numpy==2.0.2
+pillow==11.3.0
+pypdfium2==4.30.0

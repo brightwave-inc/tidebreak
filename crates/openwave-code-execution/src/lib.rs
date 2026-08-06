@@ -117,3 +117,46 @@ pub const DOCUMENT_SCRIPT_FILES: [&str; 5] = [
     "render_office.py",
     "analyze_xlsx.py",
 ];
+
+/// The baseline Python packages guaranteed on every execution backend, as
+/// exact `package==version` pins.
+///
+/// Skill pins cover what one document skill needs; these cover what an ad-hoc
+/// script may import with no skill in play. The declaration lives in
+/// `baseline_python_deps.txt` beside this crate because three consumers in two
+/// languages read it: the documents image closure generator, the local
+/// backend's offline package-cache population, and the operating prompt that
+/// tells the model which libraries it can count on.
+///
+/// Malformed lines are skipped rather than panicking a running host; the
+/// crate's own test and `scripts/sandbox-image-pins.test.mjs` are what make a
+/// bad edit loud.
+#[must_use]
+pub fn baseline_python_deps() -> &'static [&'static str] {
+    static PINS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+        include_str!("../baseline_python_deps.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter(|line| skills::is_pinned_python_dep(line))
+            .collect()
+    });
+    &PINS
+}
+
+#[cfg(test)]
+mod tests {
+    /// The declaration is read by pip, by the image generator, and by prompt
+    /// composition; a line that does not parse as an exact pin would drop out
+    /// of the set silently on every one of those paths.
+    #[test]
+    fn every_declared_baseline_line_is_an_exact_pin() {
+        let declared = include_str!("../baseline_python_deps.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>();
+        assert_eq!(declared, super::baseline_python_deps());
+        assert!(declared.iter().any(|pin| pin.starts_with("numpy==")));
+    }
+}
