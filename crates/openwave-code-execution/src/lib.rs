@@ -110,10 +110,13 @@ pub const PACKAGE_MANAGER_DOMAINS: &[&str] = &[
 ];
 
 /// Files copied as one indivisible helper library into an exec workspace.
-pub const DOCUMENT_SCRIPT_FILES: [&str; 5] = [
+pub const DOCUMENT_SCRIPT_FILES: [&str; 8] = [
     "_openwave_preview.py",
+    "_openwave_calc.py",
     "render_pdf.py",
     "extract_pdf_figures.py",
     "render_office.py",
     "analyze_xlsx.py",
+    "calc_uno.py",
+    "xlsx_recalc.py",
 ];

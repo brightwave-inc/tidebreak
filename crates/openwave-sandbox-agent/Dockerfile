@@ -173,6 +173,8 @@ COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
 
 RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
     && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null \
+    && python3 /opt/openwave/exec-scripts/calc_uno.py --help >/dev/null \
+    && python3 /opt/openwave/exec-scripts/xlsx_recalc.py --help >/dev/null \
     && python3 -c "import uno" \
     && node -e "require('pptxgenjs')"
 

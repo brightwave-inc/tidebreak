@@ -8,6 +8,11 @@ const SCRIPTS: [&str; 4] = [
     "analyze_xlsx.py",
 ];
 
+/// The Calc helpers produce no preview images, so they are held to the
+/// weaker contract the sandbox image's smoke check relies on: they import
+/// and answer `--help` on a machine with no UNO bridge at all.
+const CALC_SCRIPTS: [&str; 2] = ["calc_uno.py", "xlsx_recalc.py"];
+
 fn python() -> Option<PathBuf> {
     ["python3", "python"].into_iter().find_map(|candidate| {
         Command::new(candidate)
@@ -86,6 +91,31 @@ fn document_scripts_compile_and_expose_argparse_help() {
 }
 
 #[test]
+fn calc_scripts_expose_help_without_a_uno_bridge() {
+    let Some(python) = python() else {
+        eprintln!("skipping Calc helper contracts: Python is unavailable");
+        return;
+    };
+    let directory = scripts_dir();
+    for script in CALC_SCRIPTS {
+        let help = Command::new(&python)
+            .arg(directory.join(script))
+            .arg("--help")
+            .output()
+            .expect("Python starts");
+        assert!(
+            help.status.success(),
+            "{script} --help must succeed: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&help.stdout).starts_with("usage:"),
+            "{script} uses argparse"
+        );
+    }
+}
+
+#[test]
 fn missing_document_tooling_fails_concisely() {
     let Some(python) = python() else {
         eprintln!("skipping document script diagnostics: Python is unavailable");
@@ -123,5 +153,13 @@ fn missing_document_tooling_fails_concisely() {
         &directory.join("analyze_xlsx.py"),
         &xlsx,
         "openpyxl",
+    );
+    // Without a UNO bridge the recalculation helper must name the sandbox
+    // rather than leave the model looking for an openpyxl workaround.
+    run_missing_tool_case(
+        &python,
+        &directory.join("xlsx_recalc.py"),
+        &xlsx,
+        "python3-uno",
     );
 }

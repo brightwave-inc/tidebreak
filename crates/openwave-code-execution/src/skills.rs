@@ -866,10 +866,12 @@ Instructions.\n";
                 skill.package.name
             );
         }
-        // The office skills teach a LibreOffice-backed visual QA loop; the
-        // declaration is what drives the host-side install and the honest
-        // capability line, so losing it silently regresses both.
-        for name in ["presentations", "word-documents"] {
+        // The office skills teach a LibreOffice-backed loop — visual QA for
+        // the render paths, in-place editing and recalculation for
+        // spreadsheets. The declaration is what drives the host-side install
+        // and the honest capability line, so losing it silently regresses
+        // both.
+        for name in ["presentations", "spreadsheets", "word-documents"] {
             let skill = skills
                 .iter()
                 .find(|skill| skill.package.name == name)

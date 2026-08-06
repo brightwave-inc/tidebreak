@@ -10,6 +10,12 @@ in an exec workspace into concise stdout summaries and bounded images under
 | `extract_pdf_figures.py` | Extract embedded PDF raster figures and an overview | Python, Pillow, and Poppler `pdfimages` |
 | `render_office.py` | Convert DOCX/PPTX to PDF, then render selected pages | The PDF renderer above, plus LibreOffice in the sandbox or a host-converted PDF under `.openwave/render/` |
 | `analyze_xlsx.py` | Print sheet inventory, used ranges, and sample rows; thumbnail sheets | Python, openpyxl, and Pillow |
+| `calc_uno.py` | Inspect and edit an existing spreadsheet in place (cells, formulas, named ranges) | LibreOffice Calc plus its Python bridge (`python3-uno`) in the sandbox |
+| `xlsx_recalc.py` | Recalculate a workbook and report error cells and numbers stored as text | LibreOffice Calc plus `python3-uno` in the sandbox |
+
+`calc_uno.py` and `xlsx_recalc.py` share their soffice/UNO session plumbing in
+`_openwave_calc.py`, and both must run under the system `python3` — that is the
+interpreter LibreOffice's `uno` module is installed for.
 
 The desktop copies this directory into each exec workspace at
 `.openwave/exec-scripts`. The sandbox image exposes it at
