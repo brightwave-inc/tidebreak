@@ -1,13 +1,13 @@
 use chrono::Duration;
 use sea_orm::{
-    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, TransactionTrait,
+    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
 use crate::agent_tools::{
-    validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments,
-    SandboxAgentFileResource, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
-    SANDBOX_READ_DELEGATED_FILE_TOOL,
+    sandbox_call_is_parallel_eligible, validate_sandbox_exec_arguments,
+    validate_sandbox_read_delegated_file_arguments, SandboxAgentFileResource,
+    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL, SANDBOX_READ_DELEGATED_FILE_TOOL,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
@@ -27,66 +27,112 @@ use super::agent_run::{
     acquire_agent_run_claim_lock, agent_run_from_model, database_now, find_by_id_on,
 };
 
-pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
+/// Park every tool call one model step emitted as a single durable batch.
+///
+/// The step is the unit: its calls are inserted together under one park lease,
+/// carry their emission order as `batch_ordinal`, and are replayed together as
+/// one assistant message and one tool-result message. The run resumes when the
+/// last of them lands terminal, not when the first does.
+pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
     store: &DbStore,
     agent_run_id: AgentRunId,
     lease_token: uuid::Uuid,
-    entry: &SandboxToolCallParkEntry,
+    entries: &[SandboxToolCallParkEntry],
 ) -> Result<ParkSandboxToolCallOutcome> {
-    let SandboxToolCallParkEntry { call, resolution } = entry;
-    // A synthetic entry carries the model's own arguments verbatim so the
-    // replayed transcript shows what it actually sent. Only the identity
-    // fields are checked for it; the per-tool argument rules exist to keep an
-    // executor lane from inheriting work it can only fail on, and no lane will
-    // ever see this row.
-    let dispatchable = resolution.is_none();
-    if lease_token.is_nil()
-        || !call.is_well_formed()
-        || call.agent_run_id != agent_run_id
-        || (dispatchable
-            && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
-            && !validate_sandbox_read_delegated_file_arguments(&call.arguments))
-        // Exec arguments are checked here as well as in the executor: the
-        // checkpoint is immutable once parked, so an out-of-bounds command must
-        // never become a durable row the lane can only fail on.
-        || (dispatchable
-            && call.name == SANDBOX_EXEC_TOOL
-            && !validate_sandbox_exec_arguments(&call.arguments))
-    {
+    if entries.is_empty() || lease_token.is_nil() {
         return Err(AgentError::Store(
             "invalid sandbox tool checkpoint request".into(),
         ));
     }
-    if let Some(resolution) = resolution {
-        validate_resolution(resolution)?;
+    // Both are the batch's own identity keys: the ids key the rows and their
+    // receipts, and the provider ids key the replayed tool-use blocks the model
+    // reads back. A repeat of either would make the transcript ambiguous.
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_provider_ids = std::collections::HashSet::new();
+    for entry in entries {
+        if !seen_ids.insert(entry.call.id) || !seen_provider_ids.insert(&entry.call.provider_id) {
+            return Err(AgentError::Store(
+                "duplicate sandbox tool checkpoint in one step".into(),
+            ));
+        }
     }
+    for entry in entries {
+        let SandboxToolCallParkEntry { call, resolution } = entry;
+        // A synthetic entry carries the model's own arguments verbatim so the
+        // replayed transcript shows what it actually sent. Only the identity
+        // fields are checked for it; the per-tool argument rules exist to keep
+        // an executor lane from inheriting work it can only fail on, and no
+        // lane will ever see this row.
+        let dispatchable = resolution.is_none();
+        if !call.is_well_formed()
+            || call.agent_run_id != agent_run_id
+            || call.chat_id != entries[0].call.chat_id
+            || (dispatchable
+                && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
+                && !validate_sandbox_read_delegated_file_arguments(&call.arguments))
+            // Exec arguments are checked here as well as in the executor: the
+            // checkpoint is immutable once parked, so an out-of-bounds command
+            // must never become a durable row the lane can only fail on.
+            || (dispatchable
+                && call.name == SANDBOX_EXEC_TOOL
+                && !validate_sandbox_exec_arguments(&call.arguments))
+        {
+            return Err(AgentError::Store(
+                "invalid sandbox tool checkpoint request".into(),
+            ));
+        }
+        if let Some(resolution) = resolution {
+            validate_resolution(resolution)?;
+        }
+    }
+    let chat_id = entries[0].call.chat_id;
+    let needs_delegated_file = entries.iter().any(|entry| {
+        entry.resolution.is_none() && entry.call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
+    });
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
-    if dispatchable
-        && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
-        && !acquire_chat_write_lock(&transaction, call.chat_id).await?
-    {
+    if needs_delegated_file && !acquire_chat_write_lock(&transaction, chat_id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::DelegatedResourceUnavailable);
     }
     let now = database_now(&transaction).await?;
 
-    if let Some(existing) = entities::sandbox_tool_call::Entity::find_by_id(call.id.0)
+    if entities::sandbox_tool_call::Entity::find_by_id(entries[0].call.id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
+        .is_some()
     {
-        let receipt = entities::sandbox_tool_call_receipt::Entity::find_by_id(call.id.0)
-            .one(&transaction)
-            .await
-            .map_err(store_err)?;
-        // A synthetic park commits its row and its receipt together, so a
-        // recovered commit is only this exact park when both are present.
-        let exact = request_matches(&existing, call)
-            && existing.park_lease_token == lease_token
-            && resolution.as_ref().is_none_or(|resolution| {
-                receipt.is_some_and(|row| receipt_matches(&row, resolution))
-            });
+        // The batch commits as one transaction, so a recovered commit is this
+        // exact park only when every row — and every synthetic receipt it
+        // committed alongside — is present and matches.
+        let mut recovered = Vec::with_capacity(entries.len());
+        let mut exact = true;
+        for (ordinal, entry) in entries.iter().enumerate() {
+            let Some(existing) = entities::sandbox_tool_call::Entity::find_by_id(entry.call.id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+            else {
+                exact = false;
+                break;
+            };
+            let receipt = entities::sandbox_tool_call_receipt::Entity::find_by_id(entry.call.id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            if !request_matches(&existing, &entry.call)
+                || existing.park_lease_token != lease_token
+                || existing.batch_ordinal != ordinal_of(ordinal)?
+                || !entry.resolution.as_ref().is_none_or(|resolution| {
+                    receipt.is_some_and(|row| receipt_matches(&row, resolution))
+                })
+            {
+                exact = false;
+                break;
+            }
+            recovered.push(existing);
+        }
         let run = find_by_id_on(&transaction, agent_run_id).await?;
         transaction.commit().await.map_err(store_err)?;
         return if exact {
@@ -95,7 +141,10 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
             })?;
             Ok(ParkSandboxToolCallOutcome::Existing {
                 run: agent_run_from_model(run)?,
-                call: call_from_model(existing)?,
+                calls: recovered
+                    .into_iter()
+                    .map(call_from_model)
+                    .collect::<Result<Vec<_>>>()?,
             })
         } else {
             Ok(ParkSandboxToolCallOutcome::IdentityConflict)
@@ -106,16 +155,15 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::LeaseLost);
     };
-    if dispatchable
-        && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
-        && delegated_file_resource_on(&transaction, agent_run_id, call.chat_id)
+    if needs_delegated_file
+        && delegated_file_resource_on(&transaction, agent_run_id, chat_id)
             .await?
             .is_none()
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::DelegatedResourceUnavailable);
     }
-    if run.chat_id != call.chat_id.0
+    if run.chat_id != chat_id.0
         || run.tier != AgentRunTier::Background.as_str()
         || run.status != AgentRunStatus::Running.as_str()
         || run.lease_token != Some(lease_token)
@@ -125,10 +173,12 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::LeaseLost);
     }
-    // A run parks checkpoints one at a time: parking releases the lease, and the
-    // worker only regains it once the checkpoint resolves. So an unresolved
-    // sibling means this park came from a worker running on a stale view, and the
-    // chain is bounded because the worker replays all of it on every claim.
+    // A run parks one step's calls at a time: parking releases the lease, and
+    // the worker only regains it once every call in the step resolves. So an
+    // unresolved sibling means this park came from a worker running on a stale
+    // view, and the chain is bounded because the worker replays all of it on
+    // every claim. The caller truncates an oversized step before it gets here;
+    // this keeps the durable bound regardless of what the caller computed.
     let siblings = entities::sandbox_tool_call::Entity::find()
         .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(agent_run_id.0))
         .select_only()
@@ -140,59 +190,70 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
     let all_resolved = siblings
         .iter()
         .all(|status| status_from_db(status).is_ok_and(SandboxToolCallStatus::is_terminal));
-    if !all_resolved || siblings.len() >= MAX_SANDBOX_TOOL_CALLS {
+    if !all_resolved || siblings.len().saturating_add(entries.len()) > MAX_SANDBOX_TOOL_CALLS {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::IdentityConflict);
     }
-    let status = resolution
-        .as_ref()
-        .map_or(SandboxToolCallStatus::Accepted, |resolution| {
-            resolution_status(resolution)
-        });
-    entities::sandbox_tool_call::ActiveModel {
-        id: Set(call.id.0),
-        agent_run_id: Set(agent_run_id.0),
-        chat_id: Set(call.chat_id.0),
-        agent_run_depth: Set(1),
-        provider_id: Set(call.provider_id.clone()),
-        name: Set(call.name.clone()),
-        arguments: Set(call.arguments.clone()),
-        status: Set(status.as_str().into()),
-        park_lease_token: Set(lease_token),
-        park_attempt_count: Set(run.attempt_count),
-        park_claim_count: Set(run.claim_count),
-        executor_lease_token: Set(None),
-        executor_lease_expires_at: Set(None),
-        retry_at: Set(None),
-        created_at: Set(now),
-        resolved_at: Set(resolution.as_ref().map(|_| now)),
-    }
-    .insert(&transaction)
-    .await
-    .map_err(store_err)?;
-    if let Some(resolution) = resolution {
-        let (error_code, error_detail) = resolution_error(resolution);
-        entities::sandbox_tool_call_receipt::ActiveModel {
-            call_id: Set(call.id.0),
-            // No executor ever held this call, so its own park lease stands in
-            // as the producing authority — the convention terminalization on
-            // the host side already uses.
-            executor_lease_token: Set(lease_token),
+    let mut any_live = false;
+    for (ordinal, entry) in entries.iter().enumerate() {
+        let SandboxToolCallParkEntry { call, resolution } = entry;
+        let status = resolution
+            .as_ref()
+            .map_or(SandboxToolCallStatus::Accepted, |resolution| {
+                resolution_status(resolution)
+            });
+        any_live |= resolution.is_none();
+        entities::sandbox_tool_call::ActiveModel {
+            id: Set(call.id.0),
+            agent_run_id: Set(agent_run_id.0),
+            chat_id: Set(call.chat_id.0),
+            agent_run_depth: Set(1),
+            provider_id: Set(call.provider_id.clone()),
+            name: Set(call.name.clone()),
+            arguments: Set(call.arguments.clone()),
             status: Set(status.as_str().into()),
-            result: Set(resolution.result().to_owned()),
-            error_code: Set(error_code),
-            error_detail: Set(error_detail),
-            resolved_at: Set(now),
+            park_lease_token: Set(lease_token),
+            park_attempt_count: Set(run.attempt_count),
+            park_claim_count: Set(run.claim_count),
+            batch_ordinal: Set(ordinal_of(ordinal)?),
+            executor_lease_token: Set(None),
+            executor_lease_expires_at: Set(None),
+            retry_at: Set(None),
+            created_at: Set(now),
+            resolved_at: Set(resolution.as_ref().map(|_| now)),
         }
         .insert(&transaction)
         .await
         .map_err(store_err)?;
+        if let Some(resolution) = resolution {
+            let (error_code, error_detail) = resolution_error(resolution);
+            entities::sandbox_tool_call_receipt::ActiveModel {
+                call_id: Set(call.id.0),
+                // No executor ever held this call, so its own park lease stands
+                // in as the producing authority — the convention terminalization
+                // on the host side already uses.
+                executor_lease_token: Set(lease_token),
+                status: Set(status.as_str().into()),
+                result: Set(resolution.result().to_owned()),
+                error_code: Set(error_code),
+                error_detail: Set(error_detail),
+                resolved_at: Set(now),
+            }
+            .insert(&transaction)
+            .await
+            .map_err(store_err)?;
+        }
     }
     let mut update = entities::agent_run::Entity::update_many();
-    if resolution.is_some() {
-        // Nothing will resolve this row later, so parking it into `waiting`
+    if any_live {
+        update = update.col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Waiting.as_str()),
+        );
+    } else {
+        // Nothing will resolve these rows later, so parking into `waiting`
         // would strand the run there forever. It goes straight back on the
-        // schedule to consume the receipt it just committed.
+        // schedule to consume the receipts it just committed.
         update = update
             .col_expr(
                 entities::agent_run::Column::Status,
@@ -212,11 +273,6 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
                 entities::agent_run::Column::AvailableAt,
                 sea_orm::sea_query::Expr::value(now),
             );
-    } else {
-        update = update.col_expr(
-            entities::agent_run::Column::Status,
-            sea_orm::sea_query::Expr::value(AgentRunStatus::Waiting.as_str()),
-        );
     }
     let updated = update
         .col_expr(
@@ -252,16 +308,25 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
     let run = find_by_id_on(&transaction, agent_run_id)
         .await?
         .ok_or_else(|| AgentError::Store("parked sandbox run disappeared".into()))?;
-    let call = entities::sandbox_tool_call::Entity::find_by_id(call.id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store("sandbox tool checkpoint disappeared".into()))?;
+    let mut calls = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let call = entities::sandbox_tool_call::Entity::find_by_id(entry.call.id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| AgentError::Store("sandbox tool checkpoint disappeared".into()))?;
+        calls.push(call_from_model(call)?);
+    }
     transaction.commit().await.map_err(store_err)?;
     Ok(ParkSandboxToolCallOutcome::Parked {
         run: agent_run_from_model(run)?,
-        call: call_from_model(call)?,
+        calls,
     })
+}
+
+fn ordinal_of(index: usize) -> Result<i16> {
+    i16::try_from(index)
+        .map_err(|_| AgentError::Store("sandbox tool checkpoint batch is too large".into()))
 }
 
 pub(in crate::db) async fn claim_sandbox_tool_call(
@@ -396,6 +461,10 @@ pub(in crate::db) async fn claim_delegated_file_read(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimDelegatedFileReadOutcome::Unavailable);
     };
+    if exec_predecessor_is_live_on(&transaction, &existing).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(ClaimDelegatedFileReadOutcome::Unavailable);
+    }
     let expires_at = Ord::min(requested_expires_at, deadline);
     let mut active: entities::sandbox_tool_call::ActiveModel = existing.into();
     active.status = Set(SandboxToolCallStatus::Claimed.as_str().into());
@@ -481,6 +550,13 @@ async fn claim_sandbox_tool_call_matching(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimSandboxToolCallOutcome::Unavailable);
     };
+    // Not claimable *yet* rather than unusable: an earlier exec in the same
+    // step still owns the workspace. The lane rescans on its idle loop and
+    // picks this one up once its predecessor lands terminal.
+    if exec_predecessor_is_live_on(&transaction, &existing).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(ClaimSandboxToolCallOutcome::Unavailable);
+    }
     let expires_at = Ord::min(requested_expires_at, deadline);
     let mut active: entities::sandbox_tool_call::ActiveModel = existing.into();
     active.status = Set(SandboxToolCallStatus::Claimed.as_str().into());
@@ -739,38 +815,9 @@ pub(in crate::db) async fn resolve_sandbox_tool_call(
     call_active.executor_lease_expires_at = Set(None);
     call_active.resolved_at = Set(Some(now));
     call_active.update(&transaction).await.map_err(store_err)?;
-    let resumed = entities::agent_run::Entity::update_many()
-        .col_expr(
-            entities::agent_run::Column::Status,
-            sea_orm::sea_query::Expr::value(AgentRunStatus::RetryWait.as_str()),
-        )
-        .col_expr(
-            entities::agent_run::Column::LastErrorCode,
-            sea_orm::sea_query::Expr::value(Some("tool_checkpoint_resolved".to_owned())),
-        )
-        .col_expr(
-            entities::agent_run::Column::LastErrorDetail,
-            sea_orm::sea_query::Expr::value(Some(
-                "sandbox tool result receipt committed".to_owned(),
-            )),
-        )
-        .col_expr(
-            entities::agent_run::Column::AvailableAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .col_expr(
-            entities::agent_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::agent_run::Column::Id.eq(run.id))
-        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Waiting.as_str()))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
-    if resumed.rows_affected != 1 {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(ResolveSandboxToolCallOutcome::LeaseLost);
-    }
+    // The receipt and the call's own transition commit either way: a step whose
+    // other calls are still running simply has nothing to resume yet.
+    resume_waiting_run_if_batch_settled_on(&transaction, AgentRunId(run.id), now).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(ResolveSandboxToolCallOutcome::Resolved)
 }
@@ -1001,38 +1048,9 @@ pub(in crate::db) async fn resolve_delegated_file_read(
     call_active.executor_lease_expires_at = Set(None);
     call_active.resolved_at = Set(Some(now));
     call_active.update(&transaction).await.map_err(store_err)?;
-    let resumed = entities::agent_run::Entity::update_many()
-        .col_expr(
-            entities::agent_run::Column::Status,
-            sea_orm::sea_query::Expr::value(AgentRunStatus::RetryWait.as_str()),
-        )
-        .col_expr(
-            entities::agent_run::Column::LastErrorCode,
-            sea_orm::sea_query::Expr::value(Some("tool_checkpoint_resolved".to_owned())),
-        )
-        .col_expr(
-            entities::agent_run::Column::LastErrorDetail,
-            sea_orm::sea_query::Expr::value(Some(
-                "sandbox tool result receipt committed".to_owned(),
-            )),
-        )
-        .col_expr(
-            entities::agent_run::Column::AvailableAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .col_expr(
-            entities::agent_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::agent_run::Column::Id.eq(run.id))
-        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Waiting.as_str()))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
-    if resumed.rows_affected != 1 {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(ResolveSandboxToolCallOutcome::LeaseLost);
-    }
+    // The receipt and the call's own transition commit either way: a step whose
+    // other calls are still running simply has nothing to resume yet.
+    resume_waiting_run_if_batch_settled_on(&transaction, AgentRunId(run.id), now).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(ResolveSandboxToolCallOutcome::Resolved)
 }
@@ -1071,6 +1089,9 @@ pub(in crate::db) async fn list_sandbox_tool_calls_for_agent_run(
         // SQLite timestamps and random IDs, so it is the replay order.
         .order_by_asc(entities::sandbox_tool_call::Column::ParkAttemptCount)
         .order_by_asc(entities::sandbox_tool_call::Column::ParkClaimCount)
+        // Within one parked step, the ordinal is the order the model emitted
+        // the calls in, and the order its transcript replays them in.
+        .order_by_asc(entities::sandbox_tool_call::Column::BatchOrdinal)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -1194,12 +1215,9 @@ where
         .all(conn)
         .await
         .map_err(store_err)?;
-    if calls.len() > 1 {
-        return Err(AgentError::Store(
-            "sandbox run has multiple live tool calls".into(),
-        ));
-    }
-    if let Some(call) = calls.into_iter().next() {
+    // A step parks its calls together, so a run being fenced can have several
+    // live at once; every one of them gets the same terminal answer here.
+    for call in calls {
         terminalize_on(conn, call, error_code, now).await?;
     }
     Ok(())
@@ -1262,7 +1280,41 @@ where
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("terminal sandbox tool call disappeared".into()))?;
-    entities::agent_run::Entity::update_many()
+    resume_waiting_run_if_batch_settled_on(conn, AgentRunId(call.agent_run_id), now).await?;
+    Ok(())
+}
+
+/// Put a waiting sandbox run back on the schedule once its whole parked step
+/// has settled, and report whether it moved.
+///
+/// A step's calls resolve independently and in any order, so the first receipt
+/// to land is usually not the one that finishes the step. The run only resumes
+/// when no live call is left — the park gate keeps at most one step outstanding
+/// at a time, so counting the run's own non-terminal rows is the whole test.
+/// A caller that has just committed a receipt keeps it either way: not being
+/// ready to resume is the ordinary case, not a lost lease.
+async fn resume_waiting_run_if_batch_settled_on<C>(
+    conn: &C,
+    agent_run_id: AgentRunId,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let live = entities::sandbox_tool_call::Entity::find()
+        .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(agent_run_id.0))
+        .filter(entities::sandbox_tool_call::Column::Status.is_in([
+            SandboxToolCallStatus::Accepted.as_str(),
+            SandboxToolCallStatus::Claimed.as_str(),
+            SandboxToolCallStatus::RetryWait.as_str(),
+        ]))
+        .count(conn)
+        .await
+        .map_err(store_err)?;
+    if live > 0 {
+        return Ok(false);
+    }
+    let resumed = entities::agent_run::Entity::update_many()
         .col_expr(
             entities::agent_run::Column::Status,
             sea_orm::sea_query::Expr::value(AgentRunStatus::RetryWait.as_str()),
@@ -1285,12 +1337,44 @@ where
             entities::agent_run::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(entities::agent_run::Column::Id.eq(call.agent_run_id))
+        .filter(entities::agent_run::Column::Id.eq(agent_run_id.0))
         .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Waiting.as_str()))
         .exec(conn)
         .await
         .map_err(store_err)?;
-    Ok(())
+    Ok(resumed.rows_affected == 1)
+}
+
+/// Whether an earlier `exec` in this call's own parked step is still live.
+///
+/// Only execs gate each other, and only within one step: they share the run's
+/// single workspace, and the model emitted them expecting each to see the
+/// previous one's effects.
+async fn exec_predecessor_is_live_on<C>(
+    conn: &C,
+    call: &entities::sandbox_tool_call::Model,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    if sandbox_call_is_parallel_eligible(&call.name) {
+        return Ok(false);
+    }
+    let pending = entities::sandbox_tool_call::Entity::find()
+        .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(call.agent_run_id))
+        .filter(entities::sandbox_tool_call::Column::ParkAttemptCount.eq(call.park_attempt_count))
+        .filter(entities::sandbox_tool_call::Column::ParkClaimCount.eq(call.park_claim_count))
+        .filter(entities::sandbox_tool_call::Column::BatchOrdinal.lt(call.batch_ordinal))
+        .filter(entities::sandbox_tool_call::Column::Name.eq(SANDBOX_EXEC_TOOL))
+        .filter(entities::sandbox_tool_call::Column::Status.is_in([
+            SandboxToolCallStatus::Accepted.as_str(),
+            SandboxToolCallStatus::Claimed.as_str(),
+            SandboxToolCallStatus::RetryWait.as_str(),
+        ]))
+        .count(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(pending > 0)
 }
 
 async fn terminalize_active_delegated_read_on<C>(
@@ -1442,6 +1526,7 @@ fn call_from_model(model: entities::sandbox_tool_call::Model) -> Result<SandboxT
         park_lease_token: model.park_lease_token,
         park_attempt_count: model.park_attempt_count,
         park_claim_count: model.park_claim_count,
+        batch_ordinal: model.batch_ordinal,
         executor_lease_token: model.executor_lease_token,
         executor_lease_expires_at: model.executor_lease_expires_at,
         retry_at: model.retry_at,

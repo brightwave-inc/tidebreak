@@ -1889,6 +1889,9 @@ pub struct SandboxToolCall {
     pub park_lease_token: Uuid,
     pub park_attempt_count: i32,
     pub park_claim_count: i32,
+    /// Position of this call within the model step that parked it, from zero.
+    /// The transcript replays a step's calls in this order.
+    pub batch_ordinal: i16,
     pub executor_lease_token: Option<Uuid>,
     pub executor_lease_expires_at: Option<DateTime<Utc>>,
     /// When the call's single bounded retry becomes claimable. Set exactly

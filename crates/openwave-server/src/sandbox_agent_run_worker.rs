@@ -29,7 +29,7 @@ use openwave_core::{
     ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall, SandboxToolCallParkEntry,
     SandboxToolCallRequest, SandboxToolCallStatus, SecretProvider, StopReason, Store,
     SubmitAgentRunResultOutcome, ToolCallRecord, ToolCallResolution, TurnWebSearch,
-    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    MAX_SANDBOX_TOOL_CALLS, MAX_SANDBOX_TOOL_CALLS_PER_STEP, SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -588,11 +588,14 @@ impl SandboxAgentRunWorker {
             provider_executed,
         } = step;
         let run_id = run.id;
-        let depth = previous_calls.len();
+        // Progress keys are per model step, not per parked row: one step can now
+        // park several calls, and a replayed claim must land on the same key.
+        let depth = sandbox_call_steps(&previous_calls).len();
+        let previous_rows = previous_calls.len();
         let outcome = match completion {
             SandboxCompletion::Final(text) => self.submit_result(&run, lease_token, text).await,
-            SandboxCompletion::ToolCall(intent) => {
-                self.park_sandbox_tool_call(run, lease_token, intent, &narration)
+            SandboxCompletion::ToolCalls(intents) => {
+                self.park_sandbox_tool_calls(run, lease_token, intents, previous_rows, &narration)
                     .await
             }
             SandboxCompletion::Done { outputs, summary } => {
@@ -859,88 +862,169 @@ impl SandboxAgentRunWorker {
         }
     }
 
-    /// Park one tool call as a durable checkpoint and release the run's lease.
+    /// Park one model step's tool calls as a single durable batch and release
+    /// the run's lease.
     ///
     /// Every sandbox tool that needs an executor parks the same way — only the
     /// tool name differs — so they share this body rather than each carrying
     /// its own copy of the crash-recovery reasoning below. A call the host
-    /// refused parks the same way with its answer already attached, so the
+    /// refused parks alongside them with its answer already attached, so the
     /// next step of the run reads it as an ordinary error result.
-    async fn park_sandbox_tool_call(
+    ///
+    /// The step is trimmed to what the run's remaining tool budget can hold
+    /// before anything is written: rows are the durable cost, and a batch the
+    /// store would refuse is worse than one honest refusal the model can read.
+    async fn park_sandbox_tool_calls(
         &self,
         run: AgentRun,
         lease_token: uuid::Uuid,
-        intent: SandboxToolCallIntent,
+        intents: Vec<SandboxToolCallIntent>,
+        previous_rows: usize,
         narration: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
-        let SandboxToolCallIntent {
-            provider_id,
-            name,
-            arguments,
-            disposition,
-        } = intent;
-        let entry = SandboxToolCallParkEntry {
-            call: SandboxToolCallRequest {
-                id: CallId::new(),
-                agent_run_id: run.id,
-                chat_id: run.chat_id,
-                provider_id,
-                name,
-                arguments,
-            },
-            resolution: match disposition {
-                SandboxToolCallDisposition::Execute => None,
-                SandboxToolCallDisposition::Rejected {
-                    error_code,
-                    message,
-                } => Some(ToolCallResolution::Failed {
-                    result: rejection_result(&message),
-                    error_code: error_code.to_owned(),
-                    error_detail: None,
-                }),
-            },
-        };
-        let call = &entry.call;
+        let emitted = intents.len();
+        let remaining = MAX_SANDBOX_TOOL_CALLS.saturating_sub(previous_rows);
+        if emitted == 0 || remaining == 0 {
+            // Tool advertisement is withdrawn before the budget runs out, so a
+            // step arriving with nothing left to spend has ignored a request
+            // that offered it no dispatchable tool at all.
+            return self
+                .record_failure(
+                    &run,
+                    lease_token,
+                    AgentError::msg("sandbox tool checkpoint has no budget to park into"),
+                )
+                .await;
+        }
+        let capacity = Ord::min(MAX_SANDBOX_TOOL_CALLS_PER_STEP, remaining);
+        let mut intents = intents;
+        let mut dropped = 0;
+        if emitted > capacity {
+            // The last call the step can afford is answered rather than run, so
+            // the model learns why the rest are missing. Everything past it is
+            // dropped outright: the transcript is rebuilt from rows, so a call
+            // with no row simply never happened and leaves no dangling tool use.
+            dropped = emitted - capacity;
+            intents.truncate(capacity);
+            let last = intents
+                .last_mut()
+                .expect("capacity is at least one when a step parks");
+            let (error_code, message) = if capacity == remaining {
+                (
+                    "tool_budget_exhausted",
+                    format!(
+                        "This task's tool budget is exhausted: this call and {dropped} other \
+                         call(s) in this step were not run. Finish with done."
+                    ),
+                )
+            } else {
+                (
+                    "too_many_calls_in_step",
+                    format!(
+                        "A step may make at most {MAX_SANDBOX_TOOL_CALLS_PER_STEP} tool calls: \
+                         this call and {dropped} other call(s) in this step were not run. Re-send \
+                         them in a later step."
+                    ),
+                )
+            };
+            last.disposition = SandboxToolCallDisposition::Rejected {
+                error_code,
+                message,
+            };
+        }
+        let entries: Vec<SandboxToolCallParkEntry> = intents
+            .into_iter()
+            .map(|intent| {
+                let SandboxToolCallIntent {
+                    provider_id,
+                    name,
+                    arguments,
+                    disposition,
+                } = intent;
+                SandboxToolCallParkEntry {
+                    call: SandboxToolCallRequest {
+                        id: CallId::new(),
+                        agent_run_id: run.id,
+                        chat_id: run.chat_id,
+                        provider_id,
+                        name,
+                        arguments,
+                    },
+                    resolution: match disposition {
+                        SandboxToolCallDisposition::Execute => None,
+                        SandboxToolCallDisposition::Rejected {
+                            error_code,
+                            message,
+                        } => Some(ToolCallResolution::Failed {
+                            result: rejection_result(&message),
+                            error_code: error_code.to_owned(),
+                            error_detail: None,
+                        }),
+                    },
+                }
+            })
+            .collect();
         let outcome = match self
             .store
-            .park_agent_run_for_sandbox_tool_call(run.id, lease_token, &entry)
+            .park_agent_run_for_sandbox_tool_calls(run.id, lease_token, &entries)
             .await
         {
             Ok(outcome) => outcome,
             Err(error) => {
                 // The local transaction may have committed before its response
-                // was lost. Recover only a checkpoint whose immutable payload
-                // and producing lease match this exact model completion; never
+                // was lost. Recover only a batch whose immutable payload and
+                // producing lease match this exact model completion; never
                 // issue a second model call or tool checkpoint on ambiguity.
-                let recovered = self
+                let mut recovered = self
                     .store
                     .list_sandbox_tool_calls_for_agent_run(run.id)
                     .await?
                     .into_iter()
-                    .find(|existing| {
-                        existing.park_lease_token == lease_token
-                            && existing.provider_id == call.provider_id
-                            && existing.name == call.name
-                            && existing.arguments == call.arguments
+                    .filter(|existing| existing.park_lease_token == lease_token)
+                    .collect::<Vec<_>>();
+                recovered.sort_by_key(|call| call.batch_ordinal);
+                let matches = recovered.len() == entries.len()
+                    && recovered.iter().zip(&entries).all(|(existing, entry)| {
+                        existing.provider_id == entry.call.provider_id
+                            && existing.name == entry.call.name
+                            && existing.arguments == entry.call.arguments
                     });
-                if let Some(call) = recovered {
-                    self.publish_progress(run.id, call.id, narration).await;
+                if matches {
+                    let head = recovered[0].id;
+                    self.publish_progress(run.id, head, narration).await;
                     self.wake.notify_one();
-                    return Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id));
+                    return Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(head));
                 }
                 return Err(error);
             }
         };
         match outcome {
-            ParkSandboxToolCallOutcome::Parked { call, .. }
-            | ParkSandboxToolCallOutcome::Existing { call, .. } => {
-                self.publish_progress(run.id, call.id, narration).await;
+            ParkSandboxToolCallOutcome::Parked { calls, .. }
+            | ParkSandboxToolCallOutcome::Existing { calls, .. } => {
+                let head = calls
+                    .first()
+                    .ok_or_else(|| AgentError::msg("sandbox tool checkpoint parked no calls"))?
+                    .id;
+                // Keyed by the batch's first call so a replayed commit
+                // republishes nothing, exactly as a single checkpoint did.
+                self.publish_progress(run.id, head, narration).await;
+                if dropped > 0 {
+                    self.publish_note(
+                        run.id,
+                        &format!("call:{head}:dropped"),
+                        &format!(
+                            "Dropped {dropped} tool call(s) from this step: no room left in this \
+                             task's tool budget."
+                        ),
+                    )
+                    .await;
+                }
                 // This shared wake is only a latency hint; the dedicated
                 // executor's durable candidate scan remains the recovery path.
                 // A call the host already answered has no executor and simply
                 // ignores it.
                 self.wake.notify_one();
-                Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id))
+                Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(head))
             }
             ParkSandboxToolCallOutcome::IdentityConflict => {
                 self.record_failure(
@@ -979,12 +1063,18 @@ impl SandboxAgentRunWorker {
         call_id: CallId,
         narration: &str,
     ) {
+        self.publish_note(run_id, &format!("call:{call_id}"), narration)
+            .await;
+    }
+
+    /// Publish one observation under an exact idempotency key.
+    async fn publish_note(&self, run_id: openwave_core::AgentRunId, key: &str, narration: &str) {
         if narration.trim().is_empty() {
             return;
         }
         if let Err(error) = self
             .store
-            .append_agent_run_progress(run_id, &format!("call:{call_id}"), narration)
+            .append_agent_run_progress(run_id, key, narration)
             .await
         {
             eprintln!("openwave: could not publish progress for run {run_id}: {error}");
@@ -1085,6 +1175,31 @@ fn delegated_file_admission_matches(
         })
 }
 
+/// Split a run's parked calls into the model steps that produced them.
+///
+/// The list arrives ordered by park attempt, park claim, then batch ordinal, so
+/// each step is a contiguous run of rows sharing one park identity, and the
+/// ordinal is the order within it.
+fn sandbox_call_steps(calls: &[SandboxToolCall]) -> Vec<&[SandboxToolCall]> {
+    let mut steps = Vec::new();
+    let mut start = 0;
+    for index in 1..=calls.len() {
+        let boundary = index == calls.len()
+            || (
+                calls[index].park_attempt_count,
+                calls[index].park_claim_count,
+            ) != (
+                calls[start].park_attempt_count,
+                calls[start].park_claim_count,
+            );
+        if boundary {
+            steps.push(&calls[start..index]);
+            start = index;
+        }
+    }
+    steps
+}
+
 async fn sandbox_request(
     config: &AgentConfig,
     task: String,
@@ -1092,41 +1207,55 @@ async fn sandbox_request(
     store: &dyn Store,
     delegated_file_available: bool,
 ) -> Result<ChatRequest> {
-    if calls.len() > MAX_SANDBOX_TOOL_CALLS {
+    // Two different budgets ride on this list. Rows are what the run has spent
+    // of its durable tool allowance; steps are how many model completions it
+    // has already needed. One step can now hold several rows, so they diverge.
+    let rows = calls.len();
+    let steps = sandbox_call_steps(calls);
+    if rows > MAX_SANDBOX_TOOL_CALLS {
         return Err(AgentError::msg("sandbox tool budget exceeded"));
     }
-    if config.max_steps == 0 || calls.len().saturating_add(1) > config.max_steps {
+    if config.max_steps == 0 || steps.len().saturating_add(1) > config.max_steps {
         return Err(AgentError::msg("sandbox model-step budget exceeded"));
     }
     let mut messages = vec![ChatMessage::text(Role::User, task)];
-    for call in calls {
+    for step in &steps {
         // The row's name is the model's own emitted name — dispatch data, not
         // a replay contract. A call the host refused replays exactly like one
         // an executor ran: what matters is that it is finished and has an
         // answer to hand back.
-        if !call.status.is_terminal() {
-            return Err(AgentError::msg("sandbox checkpoint cannot be resumed"));
-        }
-        let receipt = store
-            .get_sandbox_tool_call_receipt(call.id)
-            .await?
-            .ok_or_else(|| AgentError::msg("sandbox checkpoint is missing its receipt"))?;
-        messages.push(ChatMessage {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
+        let mut tool_uses = Vec::with_capacity(step.len());
+        let mut tool_results = Vec::with_capacity(step.len());
+        for call in *step {
+            if !call.status.is_terminal() {
+                return Err(AgentError::msg("sandbox checkpoint cannot be resumed"));
+            }
+            let receipt = store
+                .get_sandbox_tool_call_receipt(call.id)
+                .await?
+                .ok_or_else(|| AgentError::msg("sandbox checkpoint is missing its receipt"))?;
+            tool_uses.push(ContentBlock::ToolUse {
                 id: call.provider_id.clone(),
                 name: call.name.clone(),
                 input: call.arguments.clone(),
-            }],
+            });
+            tool_results.push(ContentBlock::ToolResult {
+                tool_use_id: call.provider_id.clone(),
+                content: receipt.result,
+                is_error: receipt.status != SandboxToolCallStatus::Completed,
+            });
+        }
+        // One step is one assistant message carrying all of its tool uses, then
+        // one message carrying all of their results — the shape the model
+        // produced, so the shape it reads back.
+        messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: tool_uses,
             reasoning: MessageReasoning::default(),
         });
         messages.push(ChatMessage {
             role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: call.provider_id.clone(),
-                content: receipt.result,
-                is_error: receipt.status != SandboxToolCallStatus::Completed,
-            }],
+            content: tool_results,
             reasoning: MessageReasoning::default(),
         });
     }
@@ -1144,8 +1273,7 @@ async fn sandbox_request(
         // can pay for both — never advertise work the budget cannot consume. The
         // checkpoint count is bounded separately: the whole chain is replayed on
         // every claim, so it is a working budget rather than an open loop.
-        tools: if calls.len() < MAX_SANDBOX_TOOL_CALLS
-            && calls.len().saturating_add(2) <= config.max_steps
+        tools: if rows < MAX_SANDBOX_TOOL_CALLS && steps.len().saturating_add(2) <= config.max_steps
         {
             let mut tools = vec![sandbox_exec_tool_spec()];
             // The host tool and the provider's own search are one capability
@@ -1162,7 +1290,7 @@ async fn sandbox_request(
                 tools.push(sandbox_read_delegated_file_tool_spec());
             }
             tools
-        } else if calls.len().saturating_add(1) <= config.max_steps {
+        } else if steps.len().saturating_add(1) <= config.max_steps {
             // Both of these terminate the run in place of a final answer, so
             // they need no follow-up completion and stay available to the last
             // step. Submission especially: a run that spent its budget writing
@@ -1246,8 +1374,10 @@ enum SandboxCompletion {
         outputs: Vec<String>,
         summary: String,
     },
-    /// One tool call the model made, to dispatch or to answer in place.
-    ToolCall(SandboxToolCallIntent),
+    /// Every tool call one model step made, in the order it emitted them.
+    /// Each is either dispatched or answered in place; the step parks as one
+    /// batch either way. Never empty.
+    ToolCalls(Vec<SandboxToolCallIntent>),
     FolderAccessProposal {
         request: RequestFolderAccessArgs,
     },
@@ -1429,22 +1559,32 @@ async fn complete_sandbox_task(
                     ));
                 }
                 if reason == StopReason::ToolUse {
-                    if calls.len() != 1 {
+                    if calls.is_empty() {
                         return Err(AgentError::msg(
-                            "sandbox agent emitted an ambiguous tool checkpoint",
+                            "sandbox agent stopped for tool use without a tool call",
                         ));
                     }
-                    let (_, (provider_id, name, arguments)) = calls.into_iter().next().unwrap();
-                    let intent = classify_sandbox_tool_call(
-                        provider_id,
-                        name,
-                        &arguments,
-                        &advertised_tools,
-                    )?;
+                    // The map is keyed by the provider's own call index, so
+                    // draining it in order is the order the model emitted them
+                    // — which becomes the batch's durable order.
+                    let mut intents = Vec::with_capacity(calls.len());
+                    for (_, (provider_id, name, arguments)) in calls {
+                        intents.push(classify_sandbox_tool_call(
+                            provider_id,
+                            name,
+                            &arguments,
+                            &advertised_tools,
+                        )?);
+                    }
                     // These two end the run in place rather than parking work,
                     // so they are consumed here and their narration is dropped
-                    // — the result they carry already speaks for the run.
-                    if matches!(intent.disposition, SandboxToolCallDisposition::Execute) {
+                    // — the result they carry already speaks for the run. That
+                    // only works when the step asked for nothing else: a run
+                    // cannot both finish and still have work outstanding.
+                    if intents.len() == 1
+                        && matches!(intents[0].disposition, SandboxToolCallDisposition::Execute)
+                    {
+                        let intent = intents.remove(0);
                         if intent.name == openwave_core::SANDBOX_DONE_TOOL {
                             let arguments =
                                 serde_json::from_value::<openwave_core::SandboxDoneArgs>(
@@ -1476,10 +1616,35 @@ async fn complete_sandbox_task(
                                 provider_executed,
                             });
                         }
+                        intents.push(intent);
+                    } else {
+                        // A terminal tool that arrived with company is answered
+                        // rather than obeyed. Its siblings are real work the
+                        // model asked for and still get run; only the attempt to
+                        // finish in the same breath is refused.
+                        for intent in &mut intents {
+                            if !matches!(intent.disposition, SandboxToolCallDisposition::Execute) {
+                                continue;
+                            }
+                            let terminal = intent.name == openwave_core::SANDBOX_DONE_TOOL
+                                || intent.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL;
+                            if terminal {
+                                let name = &intent.name;
+                                let message = format!(
+                                    "{name} must be the only tool call in a step. The other calls \
+                                     in this step were run; call {name} alone once you have their \
+                                     results."
+                                );
+                                intent.disposition = SandboxToolCallDisposition::Rejected {
+                                    error_code: "must_be_alone",
+                                    message,
+                                };
+                            }
+                        }
                     }
                     return Ok(SandboxStep {
                         narration: text,
-                        completion: SandboxCompletion::ToolCall(intent),
+                        completion: SandboxCompletion::ToolCalls(intents),
                         provider_executed,
                     });
                 }
@@ -1740,6 +1905,72 @@ mod tests {
                 vec![
                     ProviderEvent::TextDelta {
                         text: "answer from two searches".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// One step that emits three calls at once: a command, a search, and a tool
+    /// the run was never offered. The step after it finishes the run.
+    #[derive(Default)]
+    struct ThreeCallStepThenFinalProvider {
+        requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ThreeCallStepThenFinalProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("sandbox-batch")
+        }
+
+        async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let call_number = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            let events = if call_number == 1 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "exec_1".into(),
+                        name: SANDBOX_EXEC_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"command":"ls"}"#.into(),
+                    },
+                    ProviderEvent::ToolCallStarted {
+                        index: 1,
+                        id: "search_1".into(),
+                        name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 1,
+                        fragment: r#"{"query":"OpenWave"}"#.into(),
+                    },
+                    ProviderEvent::ToolCallStarted {
+                        index: 2,
+                        id: "read_1".into(),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 2,
+                        fragment: r#"{"path":"notes.md"}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "answer from one parallel step".into(),
                     },
                     ProviderEvent::Stop {
                         reason: StopReason::EndTurn,
@@ -2458,6 +2689,146 @@ mod tests {
         );
     }
 
+    /// A step that asks for several things at once. The whole point of the
+    /// batch: three calls park together, the run stays parked until the last
+    /// live one is answered, and the next request replays the step as the model
+    /// produced it — one assistant message holding all three tool uses, one
+    /// message holding all three results, in emission order.
+    #[tokio::test]
+    async fn one_step_parks_its_calls_as_a_batch_and_replays_them_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        let provider = Arc::new(ThreeCallStepThenFinalProvider::default());
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            test_secrets(),
+            Arc::new(FixedResolver(provider.clone())),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            AgentConfig {
+                model: "sandbox-model".into(),
+                max_steps: 4,
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        let spawn = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+        admit_sandbox(&store, chat.id, spawn, "Do three things.").await;
+
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
+        ));
+        let parked = store
+            .list_sandbox_tool_calls_for_agent_run(id)
+            .await
+            .unwrap();
+        assert_eq!(
+            parked
+                .iter()
+                .map(|call| (call.batch_ordinal, call.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, SANDBOX_EXEC_TOOL),
+                (1, openwave_core::SANDBOX_WEB_SEARCH_TOOL),
+                (2, "read_file"),
+            ]
+        );
+        // The unadvertised call is answered inside the same park, so it lands
+        // terminal with its receipt already attached and no lane ever sees it.
+        assert!(parked[2].status.is_terminal());
+        let refusal = store
+            .get_sandbox_tool_call_receipt(parked[2].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refusal.status, SandboxToolCallStatus::Failed);
+        assert_eq!(
+            store.get_agent_run(id).await.unwrap().unwrap().status,
+            AgentRunStatus::Waiting
+        );
+
+        for (index, result) in [(0, "exec output"), (1, "{\"results\":[]}")] {
+            let executor_lease = uuid::Uuid::new_v4();
+            store
+                .claim_sandbox_tool_call(
+                    parked[index].id,
+                    executor_lease,
+                    chrono::Duration::minutes(1),
+                )
+                .await
+                .unwrap();
+            store
+                .resolve_sandbox_tool_call(
+                    parked[index].id,
+                    executor_lease,
+                    &ToolCallResolution::Completed {
+                        result: result.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            // The run resumes on the last receipt of the step, not the first.
+            let expected = if index == 0 {
+                AgentRunStatus::Waiting
+            } else {
+                AgentRunStatus::RetryWait
+            };
+            assert_eq!(
+                store.get_agent_run(id).await.unwrap().unwrap().status,
+                expected
+            );
+        }
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(id)
+        );
+        let after = store.get_agent_run(id).await.unwrap().unwrap();
+        assert_eq!(after.attempt_count, 1);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let replay = &requests[1].messages;
+        let uses: Vec<&str> = replay[1]
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => id.as_str(),
+                other => panic!("unexpected assistant block: {other:?}"),
+            })
+            .collect();
+        assert_eq!(uses, vec!["exec_1", "search_1", "read_1"]);
+        let results: Vec<(&str, bool)> = replay[2]
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } => (tool_use_id.as_str(), *is_error),
+                other => panic!("unexpected result block: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            results,
+            vec![("exec_1", false), ("search_1", false), ("read_1", true)]
+        );
+        assert_eq!(replay.len(), 3);
+    }
+
     #[tokio::test]
     async fn refuses_malformed_sandbox_tool_events_without_checkpointing() {
         let request = ChatRequest {
@@ -2474,21 +2845,6 @@ mod tests {
             ..Default::default()
         };
         for events in [
-            vec![
-                ProviderEvent::ToolCallStarted {
-                    index: 0,
-                    id: "one".into(),
-                    name: "web_search".into(),
-                },
-                ProviderEvent::ToolCallStarted {
-                    index: 1,
-                    id: "two".into(),
-                    name: "web_search".into(),
-                },
-                ProviderEvent::Stop {
-                    reason: StopReason::ToolUse,
-                },
-            ],
             vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
@@ -2570,9 +2926,10 @@ mod tests {
         .await
         .unwrap()
         .completion;
-        let SandboxCompletion::ToolCall(intent) = completion else {
+        let SandboxCompletion::ToolCalls(intents) = completion else {
             panic!("an unadvertised tool must still produce a tool call");
         };
+        let [intent] = <[_; 1]>::try_from(intents).expect("one call");
         assert_eq!(intent.name, "read_file");
         let SandboxToolCallDisposition::Rejected {
             error_code,
@@ -2655,15 +3012,16 @@ mod tests {
         store.request_agent_run_cancellation(id).await.unwrap();
         assert_eq!(
             worker
-                .park_sandbox_tool_call(
+                .park_sandbox_tool_calls(
                     run,
                     lease,
-                    SandboxToolCallIntent {
+                    vec![SandboxToolCallIntent {
                         provider_id: "search_1".into(),
                         name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
                         arguments: serde_json::json!({"query":"OpenWave"}),
                         disposition: SandboxToolCallDisposition::Execute,
-                    },
+                    }],
+                    0,
                     "",
                 )
                 .await
@@ -3456,9 +3814,10 @@ mod tests {
             .await
             .unwrap()
             .completion;
-        let SandboxCompletion::ToolCall(intent) = completion else {
+        let SandboxCompletion::ToolCalls(intents) = completion else {
             panic!("a withdrawn tool must still produce a tool call");
         };
+        let [intent] = <[_; 1]>::try_from(intents).expect("one call");
         assert!(matches!(
             intent.disposition,
             SandboxToolCallDisposition::Rejected {
@@ -3518,13 +3877,17 @@ mod tests {
         ]));
         assert!(matches!(
             complete_sandbox_task(provider, request).await.unwrap().completion,
-            SandboxCompletion::ToolCall(SandboxToolCallIntent {
-                ref name,
-                ref arguments,
-                disposition: SandboxToolCallDisposition::Execute,
-                ..
-            }) if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
-                && *arguments == serde_json::json!({})
+            SandboxCompletion::ToolCalls(ref intents)
+                if matches!(
+                    intents.as_slice(),
+                    [SandboxToolCallIntent {
+                        name,
+                        arguments,
+                        disposition: SandboxToolCallDisposition::Execute,
+                        ..
+                    }] if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+                        && *arguments == serde_json::json!({})
+                )
         ));
     }
 
@@ -3561,9 +3924,10 @@ mod tests {
             .await
             .unwrap()
             .completion;
-        let SandboxCompletion::ToolCall(intent) = completion else {
+        let SandboxCompletion::ToolCalls(intents) = completion else {
             panic!("invalid delegated-file arguments must stay a tool call");
         };
+        let [intent] = <[_; 1]>::try_from(intents).expect("one call");
         assert_eq!(intent.arguments, serde_json::json!({"path":"secret"}));
         assert!(
             matches!(

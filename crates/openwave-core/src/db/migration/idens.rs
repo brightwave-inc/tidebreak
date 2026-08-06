@@ -375,6 +375,7 @@ pub(crate) enum SandboxToolCall {
     ParkLeaseToken,
     ParkAttemptCount,
     ParkClaimCount,
+    BatchOrdinal,
     ExecutorLeaseToken,
     ExecutorLeaseExpiresAt,
     RetryAt,

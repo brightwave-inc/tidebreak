@@ -249,6 +249,15 @@ pub(super) fn sandbox_tool_call_table() -> TableCreateStatement {
                 .integer()
                 .not_null(),
         )
+        // Position of this call within the model step that parked it. The step
+        // emits its calls in one completion, and the transcript replays them in
+        // that order, so the order has to survive as data rather than as a
+        // property of insertion.
+        .col(
+            ColumnDef::new(SandboxToolCall::BatchOrdinal)
+                .small_integer()
+                .not_null(),
+        )
         .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseToken).uuid())
         .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseExpiresAt).timestamp_with_time_zone())
         .col(ColumnDef::new(SandboxToolCall::RetryAt).timestamp_with_time_zone())
@@ -288,6 +297,7 @@ pub(super) fn sandbox_tool_call_table() -> TableCreateStatement {
         )
         .check(Expr::col(SandboxToolCall::AgentRunDepth).eq(1))
         .check(Expr::col(SandboxToolCall::ParkAttemptCount).gte(1))
+        .check(Expr::col(SandboxToolCall::BatchOrdinal).gte(0))
         .check(
             Expr::col(SandboxToolCall::ParkClaimCount)
                 .gte(Expr::col(SandboxToolCall::ParkAttemptCount)),
@@ -324,6 +334,17 @@ pub(super) fn sandbox_tool_call_indexes() -> Vec<IndexCreateStatement> {
             .col(SandboxToolCall::ExecutorLeaseExpiresAt)
             .col(SandboxToolCall::CreatedAt)
             .col(SandboxToolCall::Id)
+            .to_owned(),
+        // One position per step: a recovered park that re-ran its insert cannot
+        // land a second row at an ordinal the first one already occupies.
+        Index::create()
+            .name("idx_sandbox_tool_call_batch")
+            .table(SandboxToolCall::Table)
+            .col(SandboxToolCall::AgentRunId)
+            .col(SandboxToolCall::ParkAttemptCount)
+            .col(SandboxToolCall::ParkClaimCount)
+            .col(SandboxToolCall::BatchOrdinal)
+            .unique()
             .to_owned(),
     ]
 }

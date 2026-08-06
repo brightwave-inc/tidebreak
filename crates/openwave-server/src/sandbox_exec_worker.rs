@@ -710,10 +710,10 @@ mod tests {
         };
         assert!(matches!(
             store
-                .park_agent_run_for_sandbox_tool_call(
+                .park_agent_run_for_sandbox_tool_calls(
                     run.id,
                     worker_lease,
-                    &crate::tests::dispatchable(&request)
+                    &[crate::tests::dispatchable(&request)]
                 )
                 .await
                 .unwrap(),

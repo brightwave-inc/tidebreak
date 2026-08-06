@@ -477,11 +477,12 @@ pub enum CheckpointSandboxSpawnOutcome {
 pub enum ParkSandboxToolCallOutcome {
     Parked {
         run: AgentRun,
-        call: crate::model::SandboxToolCall,
+        /// The step's calls, in the order the model emitted them.
+        calls: Vec<crate::model::SandboxToolCall>,
     },
     Existing {
         run: AgentRun,
-        call: crate::model::SandboxToolCall,
+        calls: Vec<crate::model::SandboxToolCall>,
     },
     IdentityConflict,
     DelegatedResourceUnavailable,
@@ -2324,18 +2325,22 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
-    /// Atomically accept canonical sandbox tool arguments, record the exact
-    /// originating sandbox lease, and release that lease into `waiting`.
-    /// Exact retries recover the checkpoint after the call resolves.
+    /// Atomically accept one model step's canonical sandbox tool arguments,
+    /// record the exact originating sandbox lease, and release that lease into
+    /// `waiting`. Exact retries recover the checkpoint after the calls resolve.
+    ///
+    /// The step's calls are one durable batch: they share a park lease, carry
+    /// their emission order as `batch_ordinal`, and the run resumes only once
+    /// every one of them is terminal.
     ///
     /// An entry carrying a resolution lands terminal with its receipt in the
-    /// same transaction and releases the lease into `retry_wait` instead: the
-    /// host already answered the call and no executor lane will see it.
-    async fn park_agent_run_for_sandbox_tool_call(
+    /// same transaction; a batch in which every entry does releases the lease
+    /// into `retry_wait` instead, since no executor lane will see any of them.
+    async fn park_agent_run_for_sandbox_tool_calls(
         &self,
         _agent_run_id: AgentRunId,
         _lease_token: uuid::Uuid,
-        _entry: &crate::model::SandboxToolCallParkEntry,
+        _entries: &[crate::model::SandboxToolCallParkEntry],
     ) -> Result<ParkSandboxToolCallOutcome> {
         agent_run_storage_unavailable()
     }
