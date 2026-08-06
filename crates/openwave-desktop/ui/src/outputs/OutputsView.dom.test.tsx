@@ -4,6 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { Toaster } from "@/components/ui/sonner";
 import type { DeliverableSummary, DeliverablesCatalog } from "@/deliverables";
 import { OutputsView, type OutputsApis } from "./OutputsView";
 
@@ -80,7 +81,12 @@ describe("OutputsView", () => {
     const apis = outputApis([output()]);
     const user = userEvent.setup();
 
-    render(<OutputsView chatId="chat-1" apis={apis} />);
+    render(
+      <>
+        <OutputsView chatId="chat-1" apis={apis} />
+        <Toaster richColors />
+      </>,
+    );
     await user.click(
       await screen.findByRole("button", { name: "More options for Research brief.md" }),
     );
@@ -94,7 +100,12 @@ describe("OutputsView", () => {
     const apis = outputApis([output({ producingRunId: ids.sheet })]);
     const user = userEvent.setup();
 
-    render(<OutputsView chatId="chat-1" apis={apis} />);
+    render(
+      <>
+        <OutputsView chatId="chat-1" apis={apis} />
+        <Toaster richColors />
+      </>,
+    );
     await user.click(
       await screen.findByRole("button", { name: "More options for Research brief.md" }),
     );
@@ -122,14 +133,20 @@ describe("OutputsView", () => {
     });
     const user = userEvent.setup();
 
-    render(<OutputsView chatId="chat-1" apis={apis} />);
+    render(
+      <>
+        <OutputsView chatId="chat-1" apis={apis} />
+        <Toaster richColors />
+      </>,
+    );
     await user.click(
       await screen.findByRole("button", { name: "More options for Research brief.md" }),
     );
     await user.click(await screen.findByRole("menuitem", { name: "Save as…" }));
 
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("save destination is no longer available");
+    expect(
+      await screen.findByText(/save destination is no longer available/),
+    ).toBeVisible();
   });
 
   it("ignores a stale catalog response after the conversation changes", async () => {
@@ -147,7 +164,12 @@ describe("OutputsView", () => {
           }),
     );
 
-    const view = render(<OutputsView chatId="chat-1" apis={apis} />);
+    const view = render(
+      <>
+        <OutputsView chatId="chat-1" apis={apis} />
+        <Toaster richColors />
+      </>,
+    );
     await waitFor(() => expect(apis.list).toHaveBeenCalledWith("chat-1"));
 
     view.rerender(<OutputsView chatId="chat-2" apis={apis} />);

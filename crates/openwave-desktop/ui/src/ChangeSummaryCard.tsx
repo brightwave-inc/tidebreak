@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import {
   AlertTriangle,
   Check,
@@ -31,7 +32,6 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
   const [rows, setRows] = useState(files);
   const [working, setWorking] = useState<Set<string>>(new Set());
   const [undoingAll, setUndoingAll] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => setRows(files), [files]);
 
@@ -80,7 +80,6 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
   }
 
   async function undoOne(file: ExecFileChangeSummary) {
-    setError(null);
     setWorking((current) => new Set(current).add(file.snapshot_id));
     try {
       applyOutcomes([
@@ -91,7 +90,7 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
         ),
       ]);
     } catch {
-      setError(`Could not undo ${file.relative_path}.`);
+      toast.error(`Could not undo ${file.relative_path}.`);
     } finally {
       setWorking((current) => {
         const next = new Set(current);
@@ -102,13 +101,12 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
   }
 
   async function undoAll() {
-    setError(null);
     setUndoingAll(true);
     try {
       const outcome = await client.undoTurnFileChanges(chatId, turnId);
       applyOutcomes(outcome.files);
     } catch {
-      setError("Could not undo these changes.");
+      toast.error("Could not undo these changes.");
     } finally {
       setUndoingAll(false);
     }
@@ -157,11 +155,6 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
           />
         ))}
       </div>
-      {error && (
-        <p className="border-t border-border px-3 py-2 text-xs text-destructive" role="alert">
-          {error}
-        </p>
-      )}
     </section>
   );
 }

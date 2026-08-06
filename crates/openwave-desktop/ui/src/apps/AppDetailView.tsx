@@ -1,5 +1,6 @@
 import { ChevronLeft, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import type { AppDetail, AppGrantState } from "@/api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
@@ -92,12 +93,11 @@ export function AppDetailView({
 
   async function onRevoke() {
     setBusy(true);
-    setActionError(null);
     try {
       await apis.revoke(appId);
       setGrant(await apis.grantState(appId));
     } catch (caught) {
-      setActionError(friendlyAppsError(caught, "Could not revoke access."));
+      toast.error(friendlyAppsError(caught, "Could not revoke access."));
     } finally {
       setBusy(false);
     }
@@ -118,12 +118,11 @@ export function AppDetailView({
 
   async function onDelete() {
     setBusy(true);
-    setActionError(null);
     try {
       await apis.deleteApp(appId);
       onBack();
     } catch (caught) {
-      setActionError(friendlyAppsError(caught, "Could not delete this app."));
+      toast.error(friendlyAppsError(caught, "Could not delete this app."));
       setBusy(false);
     }
   }
@@ -168,12 +167,6 @@ export function AppDetailView({
                 error={actionError}
                 onConsent={() => void onConsent()}
               />
-            )}
-
-            {grant.granted && actionError && (
-              <p className="text-critical mx-4 text-sm" role="alert">
-                {actionError}
-              </p>
             )}
 
             <footer className="mx-4 flex flex-wrap items-center gap-x-4 gap-y-2">

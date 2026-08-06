@@ -1,6 +1,7 @@
 import { formatDistanceToNow } from "date-fns";
 import { ArrowLeftIcon, DownloadIcon, HistoryIcon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { PanelBreadcrumb } from "@/components/PanelHeader";
 import { Badge } from "@/components/ui/badge";
@@ -95,16 +96,11 @@ export function OutputDetailRoot({
   /** The non-current version being previewed, if any. */
   const [previewRevision, setPreviewRevision] = useState<OutputRevisionInfo | null>(null);
   const [revisionPreview, setRevisionPreview] = useState<DeliverablePreview | null>(null);
-  const [saveStatus, setSaveStatus] = useState<{
-    message: string;
-    error: boolean;
-  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setPreview(null);
     setLoadError(null);
-    setSaveStatus(null);
     setRevisions(null);
     setPreviewRevision(null);
     setRevisionPreview(null);
@@ -127,24 +123,20 @@ export function OutputDetailRoot({
   async function onSave() {
     if (saving) return;
     if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.exportOutput)) {
-      setSaveStatus({ message: PICKER_BUSY_MESSAGE, error: true });
+      toast.error(PICKER_BUSY_MESSAGE);
       return;
     }
     setSaving(true);
-    setSaveStatus(null);
     try {
       const result = await apis.export(chatId, outputId);
       const filename = preview?.filename ?? "Output";
       if (result.status === "completed") {
-        setSaveStatus({ message: `${filename} was saved.`, error: false });
+        toast.success(`${filename} was saved.`);
       } else if (result.status === "failed") {
-        setSaveStatus({ message: exportFailureMessage(result.reason), error: true });
+        toast.error(exportFailureMessage(result.reason));
       }
     } catch (caught) {
-      setSaveStatus({
-        message: friendlyOutputError(caught, "Could not save that output."),
-        error: true,
-      });
+      toast.error(friendlyOutputError(caught, "Could not save that output."));
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.exportOutput);
       setSaving(false);
@@ -159,10 +151,9 @@ export function OutputDetailRoot({
       setRevisions(catalog.revisions);
     } catch (caught) {
       setHistoryOpen(false);
-      setSaveStatus({
-        message: friendlyOutputError(caught, "Could not load this output's versions."),
-        error: true,
-      });
+      toast.error(
+        friendlyOutputError(caught, "Could not load this output's versions."),
+      );
     }
   }
 
@@ -180,17 +171,13 @@ export function OutputDetailRoot({
       setRevisionPreview(content);
     } catch (caught) {
       setPreviewRevision(null);
-      setSaveStatus({
-        message: friendlyOutputError(caught, "Could not preview that version."),
-        error: true,
-      });
+      toast.error(friendlyOutputError(caught, "Could not preview that version."));
     }
   }
 
   async function onRestore() {
     if (!previewRevision || restoring) return;
     setRestoring(true);
-    setSaveStatus(null);
     try {
       await apis.restoreRevision(chatId, outputId, previewRevision.revisionId);
       const restoredOrdinal = previewRevision.ordinal;
@@ -199,15 +186,9 @@ export function OutputDetailRoot({
       setRevisions(null);
       const next = await apis.read(chatId, outputId);
       setPreview(next);
-      setSaveStatus({
-        message: `Restored version ${restoredOrdinal} as the latest version.`,
-        error: false,
-      });
+      toast.success(`Restored version ${restoredOrdinal} as the latest version.`);
     } catch (caught) {
-      setSaveStatus({
-        message: friendlyOutputError(caught, "Could not restore that version."),
-        error: true,
-      });
+      toast.error(friendlyOutputError(caught, "Could not restore that version."));
     } finally {
       setRestoring(false);
     }
@@ -349,18 +330,6 @@ export function OutputDetailRoot({
       ) : (
         <p className="p-6 text-sm text-muted-foreground" role="status">
           {previewRevision ? "Loading that version…" : "Loading this output…"}
-        </p>
-      )}
-      {saveStatus && (
-        <p
-          className={
-            saveStatus.error
-              ? "shrink-0 px-6 pb-2 text-sm text-critical"
-              : "shrink-0 px-6 pb-2 text-sm text-muted-foreground"
-          }
-          role={saveStatus.error ? "alert" : "status"}
-        >
-          {saveStatus.message}
         </p>
       )}
     </PanelFrame>

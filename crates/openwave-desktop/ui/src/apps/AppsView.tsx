@@ -13,6 +13,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { friendlyErrorMessage } from "@/lib/utils";
 import type { AppsApis } from "./appsApis";
 
 /**
@@ -163,6 +164,5 @@ export function updatedLabel(updatedAt: string): string {
 }
 
 export function friendlyAppsError(error: unknown, fallback: string): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
-  return message && message.length <= 240 ? message : fallback;
+  return friendlyErrorMessage(error, fallback);
 }
