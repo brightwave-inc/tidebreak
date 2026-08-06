@@ -20,6 +20,8 @@ use crate::mcp_curated::{curation_for, McpCuration};
 
 use super::*;
 
+use super::validation::{connection_diagnostic, validate_servers};
+
 use openwave_core::DbStore;
 
 fn parse(json: &str) -> Result<ConfiguredMcpServers> {

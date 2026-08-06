@@ -26,6 +26,27 @@ use crate::state::SandboxAttemptGuard;
 
 use super::*;
 
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+use std::task::{Context, Poll};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use futures::stream::{self, BoxStream};
+use openwave_core::{
+    Chat, ChatId, DbStore, ProviderId, ReasoningEffort, TurnCheckpointProgress, TurnId,
+    TurnRunStatus, Usage,
+};
+
+use super::config::{
+    sandbox_system_prompt, SandboxAgentRunWorkerOutcome, SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
+};
+use super::model_step::{
+    complete_sandbox_task, delegated_file_admission_matches, sandbox_request, SandboxCompletion,
+    SandboxToolCallDisposition, SandboxToolCallIntent,
+};
+
 #[derive(Default)]
 struct RecordingProvider {
     requests: Mutex<Vec<ChatRequest>>,

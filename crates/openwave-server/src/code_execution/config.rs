@@ -211,7 +211,7 @@ impl EgressConfig {
     /// Returns an error rather than silently opening egress when a stored
     /// pattern does not parse, so an invalid grant fails closed at the network
     /// boundary instead of degrading to unrestricted.
-    fn to_policy(&self) -> std::result::Result<Option<EgressPolicy>, EgressError> {
+    pub(super) fn to_policy(&self) -> std::result::Result<Option<EgressPolicy>, EgressError> {
         match self {
             Self::Open => Ok(None),
             Self::Allowlist { domains, cidrs } => {
@@ -285,7 +285,7 @@ impl Default for CodeExecutionConfig {
 }
 
 impl CodeExecutionConfig {
-    fn disabled() -> Self {
+    pub(super) fn disabled() -> Self {
         Self {
             provider: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -295,7 +295,7 @@ impl CodeExecutionConfig {
         }
     }
 
-    fn validate(&self) -> std::result::Result<(), ServerError> {
+    pub(super) fn validate(&self) -> std::result::Result<(), ServerError> {
         if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&self.timeout_ms) {
             return Err(ServerError::bad_request(format!(
                 "code execution timeout_ms must be between {MIN_TIMEOUT_MS} and {MAX_TIMEOUT_MS}"

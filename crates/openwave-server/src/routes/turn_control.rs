@@ -235,6 +235,7 @@ fn require_image_input(policy: &providers::ResolvedModelPolicy) -> Result<(), Se
 mod image_capability_tests {
     use super::*;
     use crate::model_registry::{InputModality, ModelSpec};
+    use crate::providers::ProviderKind;
 
     const TEXT_ONLY: ModelSpec = ModelSpec {
         id: "text-only-model",
