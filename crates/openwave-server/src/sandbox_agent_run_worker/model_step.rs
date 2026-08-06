@@ -1,7 +1,5 @@
 //! Model-step request assembly and completion for sandbox agent runs.
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
