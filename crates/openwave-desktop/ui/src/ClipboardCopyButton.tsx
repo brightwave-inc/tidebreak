@@ -4,6 +4,8 @@ import { WithTooltip } from "@/components/ui/tooltip";
 
 export type ClipboardWriter = {
   writeText(text: string): Promise<void>;
+  /** Present only where the richer, multi-flavour clipboard API exists. */
+  write?(items: ClipboardItem[]): Promise<void>;
 };
 
 type CopyState = "idle" | "copied" | "failed";
@@ -14,17 +16,24 @@ type TimerApi = {
 };
 
 type ClipboardCopyButtonProps = {
-  value: string;
   label: string;
   copiedAnnouncement: string;
   failedAnnouncement: string;
   className?: string;
-};
+} & (
+  | { value: string; copy?: never }
+  /**
+   * Produce and write the payload at click time — for a control whose content
+   * is only known from the rendered DOM, or that writes more than plain text.
+   */
+  | { value?: never; copy: () => Promise<void> }
+);
 
 export const COPY_STATE_RESET_MS = 3_000;
 
 export function ClipboardCopyButton({
   value,
+  copy,
   label,
   copiedAnnouncement,
   failedAnnouncement,
@@ -39,7 +48,8 @@ export function ClipboardCopyButton({
 
   async function onCopy() {
     try {
-      await copyPlainText(value);
+      if (copy) await copy();
+      else await copyPlainText(value ?? "");
       setCopyState("copied");
     } catch {
       setCopyState("failed");
@@ -86,6 +96,36 @@ export async function copyPlainText(
     throw new Error("Clipboard access is unavailable");
   }
   await clipboard.writeText(text);
+}
+
+/**
+ * Write one selection under two flavours, so the paste target picks the one it
+ * understands: `text/html` for a rich editor, `text/plain` for an editor, a
+ * terminal, or a spreadsheet reading tab-separated cells.
+ *
+ * Falls back to the plain flavour alone wherever the multi-flavour API is
+ * missing or refuses the write, which is the payload every target accepts.
+ */
+export async function copyRichText(
+  html: string,
+  text: string,
+  clipboard: ClipboardWriter | undefined = globalThis.navigator?.clipboard,
+  item: typeof ClipboardItem | undefined = globalThis.ClipboardItem,
+): Promise<void> {
+  if (clipboard?.write && item) {
+    try {
+      await clipboard.write([
+        new item({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Fall through: a browser that rejects the richer write still takes text.
+    }
+  }
+  await copyPlainText(text, clipboard);
 }
 
 export function scheduleCopyStateReset(
