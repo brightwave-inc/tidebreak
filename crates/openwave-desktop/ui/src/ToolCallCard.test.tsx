@@ -150,7 +150,7 @@ describe("ToolCommandCard", () => {
     );
   });
 
-  it("renders exec preview images inside the output surface", () => {
+  it("does not surface exec preview images in the command card", () => {
     const markup = renderToStaticMarkup(
       <ToolCommandCard
         name="exec"
@@ -172,17 +172,12 @@ describe("ToolCommandCard", () => {
             },
           ],
         }}
-        imageClient={{
-          getChatImageAttachment: async () => new Blob([], { type: "image/png" }),
-        }}
-        chatId="chat-1"
       />,
     );
 
-    expect(markup).toContain('aria-label="Command preview images"');
-    expect(markup).toContain(
-      'aria-label="Command preview 1: 800 by 600 pixels"',
-    );
+    expect(markup).not.toContain("Command preview");
+    expect(markup).not.toContain("preview-1");
+    expect(markup).toContain('aria-expanded="false"');
   });
 });
 
