@@ -1210,7 +1210,7 @@ pub(crate) fn mcp_error(context: impl AsRef<str>, error: impl std::fmt::Display)
 mod tests {
     use std::path::PathBuf;
 
-    use openwave_core::{ChatId, ToolCallExecution};
+    use openwave_core::{ChatId, ToolCallExecution, ToolErrorCategory};
     use tokio::io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
@@ -1301,6 +1301,91 @@ mod tests {
                 tools_list_changed: true
             }
         );
+
+        drop(registry);
+        drop(client);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mounted_tool_validates_advertised_arguments_before_forwarding() {
+        let (client_stream, server_stream) = duplex(16 * 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let (forwarded_tx, forwarded_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = split(server_stream);
+            let mut lines = BufReader::new(reader).lines();
+            let mut forwarded_tx = Some(forwarded_tx);
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let Some(id) = request.get("id").cloned() else {
+                    assert_eq!(request["method"], "notifications/initialized");
+                    continue;
+                };
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => json!({
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "schema-fixture", "version": "1"}
+                    }),
+                    "tools/list" => json!({
+                        "tools": [{
+                            "name": "search",
+                            "description": "Search the fixture",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                                "required": ["query"],
+                                "additionalProperties": false,
+                                "x-fixture-constraint": {"mode": "advisory"}
+                            }
+                        }]
+                    }),
+                    "tools/call" => {
+                        assert_eq!(request["params"]["name"], "search");
+                        let arguments = request["params"]["arguments"].clone();
+                        forwarded_tx.take().unwrap().send(arguments).unwrap();
+                        json!({
+                            "content": [{"type": "text", "text": "found"}],
+                            "isError": false
+                        })
+                    }
+                    method => panic!("unexpected method: {method}"),
+                };
+                let mut response = serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }))
+                .unwrap();
+                response.push(b'\n');
+                writer.write_all(&response).await.unwrap();
+                writer.flush().await.unwrap();
+            }
+        });
+
+        let client = McpClient::connect("schema", client_reader, client_writer)
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        client.mount(&mut registry);
+        let tool = registry.get("mcp__schema__search").unwrap();
+        let context =
+            ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("unused-by-mcp"));
+
+        let refused = tool.execute(&context, json!({"query": 42})).await.unwrap();
+        assert!(refused.is_error);
+        assert_eq!(
+            refused.error_category,
+            Some(ToolErrorCategory::InvalidArguments)
+        );
+
+        // The unsupported extension is ignored, while the conforming payload
+        // reaches the MCP server without normalization or field loss.
+        let valid = json!({"query": "waves"});
+        let accepted = tool.execute(&context, valid.clone()).await.unwrap();
+        assert!(!accepted.is_error);
+        assert_eq!(forwarded_rx.await.unwrap(), valid);
 
         drop(registry);
         drop(client);

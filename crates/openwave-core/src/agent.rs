@@ -16,11 +16,12 @@
 //! - context reduction is deterministic floor+restore (no LLM summarization);
 //!   retries with progressive reduction on provider prompt-too-long errors.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use futures::channel::{mpsc::UnboundedSender, oneshot};
 use futures::future::{self, Either};
@@ -126,19 +127,48 @@ struct RegisteredSpec {
 
 impl RegisteredSpec {
     fn new(spec: ToolSpec) -> Self {
-        // OpenWave's schemars-generated ToolSpec schemas target draft 2020-12,
-        // but their compact provider form deliberately omits `$schema`, so pin
-        // the draft instead of relying on auto-detection. External MCP schemas
-        // share this registration path and draft-07 is common in the wild; in
-        // particular, its tuple-form `items` has different 2020-12 semantics.
-        // Such incompatible schemas must fail compilation and therefore remain
-        // unvalidated, rather than being mis-validated under the wrong draft.
-        // Invalid schemas fail open because refusing every call would make one
-        // misconfigured tool permanently unusable.
-        let validator = jsonschema::options()
-            .with_draft(jsonschema::Draft::Draft202012)
-            .build(&spec.input_schema)
-            .ok();
+        // The provider-facing schemas generated in this crate deliberately omit
+        // `$schema` and are 2020-12. MCP servers may declare an older supported
+        // dialect explicitly, so honor that declaration instead of applying
+        // 2020-12 semantics to (for example) draft-07 tuple-form `items`.
+        let validator = match advertised_schema_draft(&spec.input_schema) {
+            Ok(draft) => {
+                let unsupported = unsupported_schema_keywords(&spec.input_schema, draft);
+                if !unsupported.is_empty() {
+                    tracing::warn!(
+                        tool = %spec.name,
+                        keywords = %unsupported.into_iter().collect::<Vec<_>>().join(", "),
+                        "tool argument schema contains unsupported keywords; ignoring them while enforcing supported constraints"
+                    );
+                }
+                match jsonschema::options()
+                    .with_draft(draft)
+                    .build(&spec.input_schema)
+                {
+                    Ok(validator) => Some(validator),
+                    Err(error) => {
+                        // A bad advertised schema is the tool/server's bug, not
+                        // the model's. Bricking every call would break working
+                        // MCP servers, so compilation failures are observable
+                        // but fail open.
+                        tracing::warn!(
+                            tool = %spec.name,
+                            %error,
+                            "tool argument schema could not be compiled; calls will proceed without schema validation"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    tool = %spec.name,
+                    %error,
+                    "tool argument schema declares an unsupported dialect; calls will proceed without schema validation"
+                );
+                None
+            }
+        };
         Self { spec, validator }
     }
 
@@ -148,6 +178,95 @@ impl RegisteredSpec {
             .validate(arguments)
             .err()
             .map(|error| error.to_string())
+    }
+}
+
+fn advertised_schema_draft(schema: &Value) -> std::result::Result<jsonschema::Draft, String> {
+    let Some(declared) = schema.as_object().and_then(|schema| schema.get("$schema")) else {
+        return Ok(jsonschema::Draft::Draft202012);
+    };
+    let Some(uri) = declared.as_str() else {
+        return Err("$schema must be a string".to_owned());
+    };
+    let draft = jsonschema::Draft::from_schema_uri(uri);
+    if draft == jsonschema::Draft::Unknown {
+        return Err(format!("unrecognized $schema URI: {uri}"));
+    }
+    Ok(draft)
+}
+
+/// Keywords that the validator treats as annotations rather than constraints.
+///
+/// `Draft::is_known_keyword` intentionally reports validation/applicator/core
+/// keywords only. These standard annotations must not be diagnosed as custom
+/// extensions just because they do not affect acceptance.
+const SCHEMA_ANNOTATION_KEYWORDS: &[&str] = &[
+    "$comment",
+    "$vocabulary",
+    "default",
+    "deprecated",
+    "description",
+    "examples",
+    "readOnly",
+    "title",
+    "writeOnly",
+];
+
+fn unsupported_schema_keywords(schema: &Value, draft: jsonschema::Draft) -> BTreeSet<String> {
+    fn visit(schema: &Value, draft: jsonschema::Draft, unsupported: &mut BTreeSet<String>) {
+        if let Some(object) = schema.as_object() {
+            for keyword in object.keys() {
+                if !draft.is_known_keyword(keyword)
+                    && !SCHEMA_ANNOTATION_KEYWORDS.contains(&keyword.as_str())
+                {
+                    unsupported.insert(keyword.clone());
+                }
+            }
+        }
+        for subschema in draft.subresources_of(schema) {
+            visit(subschema, draft, unsupported);
+        }
+    }
+
+    let mut unsupported = BTreeSet::new();
+    visit(schema, draft, &mut unsupported);
+    unsupported
+}
+
+/// Registry-owned guard around every server-side tool executor.
+///
+/// The foreground agent and MCP server validate before their approval gates so
+/// a malformed call never asks for consent. This wrapper is the final dispatch
+/// boundary for every other registry consumer, including mounted MCP proxies:
+/// direct callers receive the same typed correction instead of bypassing the
+/// advertised contract and forwarding the call.
+struct SchemaValidatedTool {
+    inner: Arc<dyn Tool>,
+    registered: RegisteredSpec,
+}
+
+#[async_trait]
+impl Tool for SchemaValidatedTool {
+    fn spec(&self) -> ToolSpec {
+        self.registered.spec.clone()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        self.inner.approval_class()
+    }
+
+    async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if let Some(mismatch) = self.registered.mismatch(&args) {
+            return Ok(ToolOutput::failed(
+                ToolErrorCategory::InvalidArguments,
+                format!(
+                    "arguments for {} do not satisfy its schema: {mismatch}; re-send the call \
+                     with arguments matching this schema: {}",
+                    self.registered.spec.name, self.registered.spec.input_schema
+                ),
+            ));
+        }
+        self.inner.execute(ctx, args).await
     }
 }
 
@@ -190,12 +309,13 @@ impl ToolRegistry {
     /// Register a tool under its advertised name (replacing any existing one).
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         let registered = RegisteredSpec::new(tool.spec());
+        let tool: Arc<dyn Tool> = Arc::new(SchemaValidatedTool {
+            inner: Arc::from(tool),
+            registered: registered.clone(),
+        });
         self.tools.insert(
             registered.spec.name.clone(),
-            RegisteredTool::Server {
-                tool: Arc::from(tool),
-                registered,
-            },
+            RegisteredTool::Server { tool, registered },
         );
     }
 
@@ -7994,6 +8114,68 @@ mod tests {
             self.ran.fetch_add(1, Ordering::SeqCst);
             Ok(ToolOutput::text("counted"))
         }
+    }
+
+    struct SchemaRecordingTool {
+        calls: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for SchemaRecordingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "schema_recorder".into(),
+                description: "records schema-validated arguments".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": false,
+                    "x-fixture-constraint": {"mode": "advisory"}
+                }),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+            self.calls.lock().unwrap().push(args);
+            Ok(ToolOutput::text("recorded"))
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_dispatch_rejects_schema_mismatches_and_preserves_valid_arguments() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let registry = ToolRegistry::new().with(Box::new(SchemaRecordingTool {
+            calls: calls.clone(),
+        }));
+        let tool = registry.get("schema_recorder").unwrap();
+        let context = ToolCtx::new_legacy_workspace(
+            ChatId::new(),
+            None,
+            std::path::PathBuf::from("unused-by-schema-recorder"),
+        );
+
+        let refused = tool
+            .execute(&context, serde_json::json!({"query": 42}))
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert_eq!(
+            refused.error_category,
+            Some(ToolErrorCategory::InvalidArguments)
+        );
+        assert!(calls.lock().unwrap().is_empty());
+
+        // The unrecognized extension is advisory: supported constraints still
+        // apply, while a conforming call crosses the boundary byte-for-byte.
+        let valid = serde_json::json!({"query": "waves"});
+        let accepted = tool.execute(&context, valid.clone()).await.unwrap();
+        assert!(!accepted.is_error);
+        assert_eq!(*calls.lock().unwrap(), vec![valid]);
     }
 
     #[test]
