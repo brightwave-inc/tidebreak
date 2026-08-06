@@ -36,10 +36,14 @@ mod tool;
 mod types;
 
 pub use agent_plugins::{
-    is_valid_agent_plugin_name, parse_agent_plugin_manifest, AgentPluginManifest,
-    AgentPluginParseError, IgnoredManifestField, ParsedAgentPluginManifest,
-    AGENT_PLUGIN_MANIFEST_FILE, AGENT_PLUGIN_SCHEMA_ID, AGENT_PLUGIN_SKILLS_DIR,
-    AGENT_PLUGIN_SPEC_VERSION, OPENWAVE_EXTENSION_NAMESPACE,
+    canonical_mcp_config, is_valid_agent_plugin_name, load_plugin_mcp_config,
+    parse_agent_plugin_manifest, parse_plugin_mcp_config, AgentPluginManifest,
+    AgentPluginParseError, IgnoredManifestField, McpConfigError, McpHttpServer, McpServer,
+    McpStdioServer, McpTransport, ParsedAgentPluginManifest, ParsedPluginMcpConfig,
+    PluginMcpConfig, SkippedMcpServer, AGENT_PLUGIN_MANIFEST_FILE, AGENT_PLUGIN_MCP_FILE,
+    AGENT_PLUGIN_MCP_SCHEMA_ID, AGENT_PLUGIN_SCHEMA_ID, AGENT_PLUGIN_SKILLS_DIR,
+    AGENT_PLUGIN_SPEC_VERSION, OPENWAVE_EXTENSION_NAMESPACE, PLUGIN_DATA_VARIABLE,
+    PLUGIN_ROOT_VARIABLE,
 };
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};

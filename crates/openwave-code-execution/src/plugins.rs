@@ -144,8 +144,9 @@ pub enum PluginCapability {
     LiveControl,
     /// Bundles an MCP server, and so whatever that server exposes.
     ///
-    /// Like [`Self::LiveControl`], nothing derives this yet — plugins bundle
-    /// only skills today. It lands when MCPB-backed components do.
+    /// Derived from the validated `mcp.json` an import retained beside the
+    /// manifest — see [`PluginPackage::mcp_servers`] — never from anything the
+    /// manifest says.
     Mcp,
 }
 
@@ -335,6 +336,12 @@ pub fn derived_capabilities(
     if members.iter().any(|skill| !skill.host_deps.is_empty()) {
         capabilities.insert(PluginCapability::HostInstall);
     }
+    if plugin.mcp_servers > 0 {
+        // The bundle carries at least one server entry that validated at
+        // import. What that server exposes is not knowable from here, which is
+        // exactly what the badge is telling the user.
+        capabilities.insert(PluginCapability::Mcp);
+    }
     capabilities.into_iter().collect()
 }
 
@@ -372,6 +379,13 @@ pub struct PluginPackage {
     /// Optional line emitted above the member skills in the prompt catalog,
     /// telling the model how to choose among them.
     pub router_preamble: Option<String>,
+    /// How many MCP servers the bundle's retained configuration declares.
+    ///
+    /// Host-derived like [`Self::compatibility`]: the loader counts the
+    /// entries in the `mcp.json` an import validated and retained, and the
+    /// manifest's closed key set has nothing that could state it. Zero for
+    /// every bundle that ships no server configuration.
+    pub mcp_servers: usize,
     /// Where the package was loaded from.
     pub origin: PluginOrigin,
     /// Static sandbox-compatibility disclosure. Imported user bundles read a
@@ -557,6 +571,9 @@ pub fn parse_plugin_manifest(
         skills,
         prompts,
         router_preamble,
+        // Host-derived from the retained configuration, which the loader
+        // reads separately; a manifest cannot state it.
+        mcp_servers: 0,
         origin,
         compatibility: match origin {
             PluginOrigin::Builtin => PluginCompatibility::compatible(),
@@ -774,6 +791,8 @@ pub fn load_plugins(
             continue;
         }
         package.compatibility = installed_compatibility(&entry.path(), origin);
+        package.mcp_servers = crate::agent_plugins::load_plugin_mcp_config(&entry.path())
+            .map_or(0, |config| config.servers.len());
         if let Some(missing) = package
             .skills
             .iter()
@@ -1244,6 +1263,7 @@ router-preamble: Pick by the file the user needs.\n\
                 skills: members.iter().map(|skill| skill.name.clone()).collect(),
                 prompts: Vec::new(),
                 router_preamble: None,
+                mcp_servers: 0,
                 origin: PluginOrigin::Builtin,
                 compatibility: PluginCompatibility::compatible(),
             };
@@ -1258,9 +1278,10 @@ router-preamble: Pick by the file the user needs.\n\
             );
         }
 
-        // `live-control` and `mcp` exist in the vocabulary with no deriving
-        // source yet; nothing a plugin can contain today produces them.
-        let everything = PluginPackage {
+        // `mcp` comes from the server configuration an import validated and
+        // retained, counted by the loader — not from anything the manifest
+        // says. `live-control` still has no deriving source at all.
+        let mut everything = PluginPackage {
             name: "bundle".to_owned(),
             display_name: "Bundle".to_owned(),
             description: "A bundle.".to_owned(),
@@ -1268,12 +1289,15 @@ router-preamble: Pick by the file the user needs.\n\
             skills: vec!["both".to_owned()],
             prompts: Vec::new(),
             router_preamble: None,
+            mcp_servers: 0,
             origin: PluginOrigin::Builtin,
             compatibility: PluginCompatibility::compatible(),
         };
         let derived = derived_capabilities(&everything, &[&both]);
         assert!(!derived.contains(&PluginCapability::LiveControl));
         assert!(!derived.contains(&PluginCapability::Mcp));
+        everything.mcp_servers = 1;
+        assert!(derived_capabilities(&everything, &[&both]).contains(&PluginCapability::Mcp));
 
         // A manifest that tries to declare its own badges is rejected whole.
         assert!(parse_plugin_manifest(
