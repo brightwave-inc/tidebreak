@@ -116,11 +116,10 @@ impl CreateAppTool {
             .ok_or_else(|| ToolOutput::error("this call is not recorded in this conversation"))
     }
 
-    /// Check that every manifest binding names a configured connected app and
-    /// speaks the one live vocabulary: operation bindings resolve to a
-    /// `rest_api` record with each pinned `operationId` declared by its
-    /// ingested catalog. Tools bindings are refused outright — the vocabulary
-    /// is retired (#1332).
+    /// Check that every manifest binding names a configured connected app or
+    /// approved folder and speaks a live vocabulary: operation bindings
+    /// resolve to a `rest_api` record with each pinned `operationId` declared
+    /// by its ingested catalog.
     async fn check_bindings(&self, manifest: &AppManifest) -> std::result::Result<(), String> {
         if manifest.bindings.is_empty() {
             return Ok(());
@@ -189,19 +188,6 @@ impl CreateAppTool {
                 // Handled above — a folder binding has no connected app to
                 // resolve.
                 AppBinding::Folder(_) => {}
-                // The tools vocabulary is retired (#1332): MCP was the only
-                // bindable kind when local apps shipped, and REST operations
-                // replaced it as the app-facing surface. The grammar still
-                // parses `tools` (stored manifests carry it), but nothing new
-                // may pin it — refused here with the alternative spelled out.
-                AppBinding::Tools(_) => {
-                    return Err(format!(
-                        "connected app {} ({}) is bound with `tools`, but local apps \
-                         no longer bind mounted MCP tools; bind a rest_api connected \
-                         app's declared operations with `operation_ids` instead",
-                        app.id, app.name
-                    ));
-                }
                 AppBinding::Operations(binding) => {
                     if app.kind != ConnectedAppKind::RestApi {
                         return Err(format!(
@@ -734,9 +720,9 @@ mod tests {
             refused.content
         );
 
-        // Tools bindings are retired (#1332): refused at the door no matter
-        // which kind of connected app they name, with the live vocabulary
-        // spelled out.
+        // The tools vocabulary is removed (#1332, #1589): a manifest pinning
+        // `tools` no longer parses as any binding shape, and the refusal
+        // carries the live schema so the model sees what is bindable.
         for connected in [fixture.sentry, fixture.issues] {
             let (_, ctx) = fixture.recorded_call().await;
             let tools_manifest = json!({
@@ -749,7 +735,7 @@ mod tests {
             let refused = fixture.tool.execute(&ctx, tools_manifest).await.unwrap();
             assert!(refused.is_error);
             assert!(
-                refused.content.contains("no longer bind mounted MCP tools"),
+                refused.content.contains("invalid arguments"),
                 "{}",
                 refused.content
             );

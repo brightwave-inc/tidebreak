@@ -20,7 +20,6 @@ export const MCP_APPS_PROTOCOL_VERSION = "2026-01-26";
 
 import {
   AppInvokeRefusalError,
-  type AppInvokeResult,
   type AppFolderInvokeResult,
   type AppRestInvokeResult,
   type McpAppPayload,
@@ -29,21 +28,13 @@ import {
 export type { McpAppPayload };
 
 /**
- * Executes one tool call on the embedded view's behalf. Local-app hosts wire
- * this to `POST /apps/{id}/invoke`; both the arguments and the result are
- * opaque passthrough the bridge forwards without interpreting. A rejection
- * becomes a JSON-RPC error reply — a typed [`AppInvokeRefusalError`] keeps
- * its machine-readable kind in `error.data` (the refusal envelope is
- * host-authored, so surfacing it is not interpretation).
- */
-export type AppToolInvoker = (tool: string, args: unknown) => Promise<AppInvokeResult>;
-
-/**
- * Executes one granted REST operation on the embedded view's behalf — the
- * `operations/call` sibling of [`AppToolInvoker`], wired to the same invoke
- * route. Parameters, body, and the `{status, content_type, body_base64}`
- * result are opaque passthrough in both directions; rejections map to
- * JSON-RPC errors exactly as tool-call rejections do.
+ * Executes one granted REST operation on the embedded view's behalf,
+ * wired to `POST /apps/{id}/invoke`. Parameters, body, and the
+ * `{status, content_type, body_base64}` result are opaque passthrough in
+ * both directions; a rejection becomes a JSON-RPC error reply — a typed
+ * [`AppInvokeRefusalError`] keeps its machine-readable kind in `error.data`
+ * (the refusal envelope is host-authored, so surfacing it is not
+ * interpretation).
  */
 export type AppOperationInvoker = (
   operationId: string,
@@ -53,9 +44,9 @@ export type AppOperationInvoker = (
 
 /**
  * Executes one granted folder operation on the embedded view's behalf — the
- * `fs/*` sibling of the other two invokers, wired to the same invoke route.
+ * `fs/*` sibling of the operation invoker, wired to the same invoke route.
  * Content crosses base64-encoded in both directions; rejections map to
- * JSON-RPC errors exactly as tool- and operation-call rejections do.
+ * JSON-RPC errors exactly as operation-call rejections do.
  */
 export type AppFolderInvoker = (
   folder: string,
@@ -85,17 +76,10 @@ export function createMcpAppBridge(options: {
   theme: () => "light" | "dark";
   onHeight?: (height: number) => void;
   /**
-   * When present, the view may call `tools/call` and the bridge forwards it
-   * here. Absent — the MCP App transcript card — `tools/call` refuses with
-   * method-not-found exactly as before: a view only gets the methods its
-   * host deliberately declared.
-   */
-  invokeTool?: AppToolInvoker;
-  /**
    * When present, the view may call `operations/call` and the bridge
-   * forwards it here — the REST sibling of `invokeTool`, under the same
-   * rule: absent, the method refuses with method-not-found, so a view only
-   * gets the methods its host deliberately declared.
+   * forwards it here. Absent — the MCP App transcript card —
+   * `operations/call` refuses with method-not-found: a view only gets the
+   * methods its host deliberately declared.
    */
   invokeOperation?: AppOperationInvoker;
   /**
@@ -170,58 +154,6 @@ export function createMcpAppBridge(options: {
         case "ping":
           post({ jsonrpc: "2.0", id, result: {} });
           break;
-        case "tools/call": {
-          const invoke = options.invokeTool;
-          if (!invoke) {
-            post({
-              jsonrpc: "2.0",
-              id,
-              error: { code: -32601, message: "Method not found" },
-            });
-            break;
-          }
-          const params = isRecord(message.params) ? message.params : {};
-          const tool = typeof params.name === "string" ? params.name : null;
-          if (!tool) {
-            post({
-              jsonrpc: "2.0",
-              id,
-              error: { code: -32602, message: "tools/call needs a string name" },
-            });
-            break;
-          }
-          // The reply is asynchronous; `post` already refuses after dispose,
-          // so a result landing after unmount goes nowhere.
-          void invoke(tool, params.arguments).then(
-            (result) =>
-              post({
-                jsonrpc: "2.0",
-                id,
-                result: {
-                  content: [{ type: "text", text: result.content }],
-                  ...(result.structured_content === undefined ||
-                  result.structured_content === null
-                    ? {}
-                    : { structuredContent: result.structured_content }),
-                  isError: result.is_error,
-                },
-              }),
-            (error: unknown) =>
-              post({
-                jsonrpc: "2.0",
-                id,
-                error:
-                  error instanceof AppInvokeRefusalError
-                    ? {
-                        code: -32000,
-                        message: error.message,
-                        data: { kind: error.kind },
-                      }
-                    : { code: -32000, message: String(error) },
-              }),
-          );
-          break;
-        }
         case "operations/call": {
           const invoke = options.invokeOperation;
           if (!invoke) {

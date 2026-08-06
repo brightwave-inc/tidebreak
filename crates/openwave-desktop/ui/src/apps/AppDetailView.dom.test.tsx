@@ -22,12 +22,11 @@ const GRANTED: AppGrantState = {
   granted: true,
   bindings: [
     {
-      app: "11111111-1111-4111-8111-111111111111",
+      app: "22222222-2222-4222-8222-222222222222",
       folder: null,
       access: null,
-      name: "cmd",
-      tools: ["mcp__cmd__doit"],
-      operation_ids: null,
+      name: "issues",
+      operation_ids: ["listIssues"],
       granted: true,
       definition_changed: false,
     },
@@ -42,8 +41,7 @@ const STALE: AppGrantState = {
       folder: null,
       access: null,
       name: "cmd",
-      tools: ["mcp__cmd__doit"],
-      operation_ids: null,
+      operation_ids: ["doThing"],
       granted: false,
       definition_changed: true,
     },
@@ -52,7 +50,6 @@ const STALE: AppGrantState = {
       folder: null,
       access: null,
       name: "issues",
-      tools: null,
       operation_ids: ["listIssues"],
       granted: false,
       definition_changed: false,
@@ -72,13 +69,6 @@ function apisWith(grant: AppGrantState): AppsApis {
     viewSession: vi
       .fn()
       .mockResolvedValue({ frame_path: "/apps/view-frames/token-1" }),
-    invoke: vi
-      .fn()
-      .mockResolvedValue({
-        content: '{"ok":true}',
-        structured_content: { ok: true },
-        is_error: false,
-      }),
     invokeOperation: vi.fn().mockResolvedValue({
       status: 200,
       content_type: "application/json",
@@ -98,7 +88,7 @@ afterEach(() => {
 });
 
 describe("AppDetailView", () => {
-  it("opens a granted app and drives one invoke round trip through the bridge", async () => {
+  it("opens a granted app and drives one REST operation round trip through the bridge", async () => {
     const apis = apisWith(GRANTED);
     render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
 
@@ -114,51 +104,12 @@ describe("AppDetailView", () => {
     expect(frame).toHaveAttribute("sandbox", "allow-scripts");
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
 
-    // The frame asks for a tool call; the parent forwards it to the invoke
-    // route and posts the result back — both directions opaque passthrough.
-    const contentWindow = frame.contentWindow!;
-    const posted = vi.spyOn(contentWindow, "postMessage");
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          jsonrpc: "2.0",
-          id: 3,
-          method: "tools/call",
-          params: { name: "mcp__cmd__doit", arguments: { q: 1 } },
-        },
-        source: contentWindow,
-      }),
-    );
-    await waitFor(() => expect(posted).toHaveBeenCalled());
-    expect(apis.invoke).toHaveBeenCalledWith("app-1", "mcp__cmd__doit", {
-      q: 1,
-    });
-    expect(posted).toHaveBeenCalledWith(
-      {
-        jsonrpc: "2.0",
-        id: 3,
-        result: {
-          content: [{ type: "text", text: '{"ok":true}' }],
-          structuredContent: { ok: true },
-          isError: false,
-        },
-      },
-      "*",
-    );
-  });
-
-  it("drives one REST operation round trip through the bridge", async () => {
-    const apis = apisWith(GRANTED);
-    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
-
-    const frame = (await screen.findByTitle(
-      "App: Fixture app",
-    )) as HTMLIFrameElement;
     const contentWindow = frame.contentWindow!;
     const posted = vi.spyOn(contentWindow, "postMessage");
 
     // The frame asks for a REST operation; the parent forwards it to the
-    // same invoke route and posts the REST result back verbatim.
+    // invoke route and posts the REST result back verbatim — both
+    // directions opaque passthrough.
     window.dispatchEvent(
       new MessageEvent("message", {
         data: {
@@ -301,10 +252,10 @@ describe("AppDetailView", () => {
     render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
 
     // The sheet renders the server projection: the connected app's display
-    // name and tools, and the marker for a
+    // name and operation ids, and the marker for a
     // definition that changed since the previous consent.
-    expect(await screen.findByText("mcp__cmd__doit")).toBeInTheDocument();
-    // A rest_api binding renders its operation ids in the same list.
+    expect(await screen.findByText("doThing")).toBeInTheDocument();
+    // The second rest_api binding renders its operation ids in the same list.
     expect(screen.getByText("listIssues")).toBeInTheDocument();
     expect(
       screen.getByText("Reconfigured since you agreed"),
@@ -328,7 +279,6 @@ describe("AppDetailView", () => {
           folder: "33333333-3333-4333-8333-333333333333",
           access: "read_write",
           name: "Tax documents",
-          tools: null,
           operation_ids: null,
           granted: false,
           definition_changed: false,
@@ -338,7 +288,6 @@ describe("AppDetailView", () => {
           folder: null,
           access: null,
           name: "issues",
-          tools: null,
           operation_ids: ["listIssues"],
           granted: false,
           definition_changed: false,

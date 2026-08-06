@@ -9,8 +9,8 @@ import type { AppsApis } from "./appsApis";
  * The running app: one stored revision in the same sandbox the MCP App card
  * uses — `sandbox="allow-scripts"` without `allow-same-origin`, so the bundle
  * runs with an opaque origin and no reach into OpenWave's DOM, storage, or
- * bearer — plus the host bridge with both invoke legs wired in. The frame
- * posts `tools/call` or `operations/call`; the bridge forwards either to the
+ * bearer — plus the host bridge with the invoke legs wired in. The frame
+ * posts `operations/call` or `fs/*`; the bridge forwards either to the
  * bearer-authenticated invoke route and posts the result back, both
  * directions opaque passthrough.
  *
@@ -55,19 +55,6 @@ export function AppFrame({
       frame: () => frameRef.current?.contentWindow ?? null,
       theme: () => themeRef.current,
       onHeight: setFrameHeight,
-      invokeTool: async (tool, args) => {
-        try {
-          return await apis.invoke(appId, tool, args);
-        } catch (error) {
-          if (
-            error instanceof AppInvokeRefusalError &&
-            error.kind === "consent_required"
-          ) {
-            onConsentRequiredRef.current?.();
-          }
-          throw error;
-        }
-      },
       invokeOperation: async (operationId, parameters, body) => {
         try {
           return await apis.invokeOperation(appId, operationId, parameters, body);

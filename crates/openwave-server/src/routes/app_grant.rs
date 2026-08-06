@@ -6,7 +6,7 @@
 //! manifest and the connected-app definitions and folder registrations
 //! *current* at that moment, so a stale sheet can never grant capabilities
 //! the manifest no longer pins or pin a definition that has since changed.
-//! State (`GET`) is renderer-safe metadata: connected-app, folder, tool, and
+//! State (`GET`) is renderer-safe metadata: connected-app, folder, and
 //! operation *names* with coverage/staleness booleans, never definitions,
 //! never paths, and never environment or credential values.
 
@@ -48,11 +48,10 @@ pub struct AppGrantState {
 /// One current-manifest binding, projected for the consent sheet.
 ///
 /// Exactly one of `app` and `folder` is present, matching what the binding
-/// names. An app-keyed row carries `tools` or `operation_ids` per its
-/// vocabulary; a folder row carries `access`. The sheet derives the
-/// combined-consent exfiltration warning (docs/folder-bindings.md) from the
-/// rows themselves: a manifest with both a folder row and an operations row
-/// can read files and reach the network.
+/// names. An app-keyed row carries `operation_ids`; a folder row carries
+/// `access`. The sheet derives the combined-consent exfiltration warning
+/// (docs/folder-bindings.md) from the rows themselves: a manifest with both a
+/// folder row and an operations row can read files and reach the network.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantBindingState {
     /// Connected app the manifest binds, by record id, for an app-keyed
@@ -67,9 +66,6 @@ pub struct AppGrantBindingState {
     /// nothing configured or approved answers to the id — the sheet says so
     /// instead of showing a raw id alone.
     pub name: Option<String>,
-    /// Full mounted tool names the current manifest pins under this app, for
-    /// an `mcp_server` binding.
-    pub tools: Option<Vec<String>>,
     /// Catalog `operationId`s the current manifest pins under this app, for a
     /// `rest_api` binding.
     pub operation_ids: Option<Vec<String>>,
@@ -131,22 +127,6 @@ pub async fn post_app_grant(
                     access: binding.access,
                     fingerprint: folder_fingerprint(binding.folder, binding.access),
                 }));
-            }
-            // Mounted-tool bindings are retired: MCP was the only bindable
-            // kind when local apps shipped, and the REST vocabulary has since
-            // replaced it as the app-facing surface (#1332). A manifest still
-            // pinning tools cannot be granted — the failure direction is
-            // "revise the app", never "grant the legacy surface".
-            AppBinding::Tools(binding) => {
-                let name = current
-                    .apps
-                    .get(&binding.app)
-                    .map_or_else(|| binding.app.to_string(), |app| app.name.clone());
-                return Err(ServerError::conflict(format!(
-                    "connected app {name:?} is bound by mounted MCP tools, which local \
-                     apps no longer support; publish a revision binding a rest_api \
-                     connected app's operations instead"
-                )));
             }
             AppBinding::Operations(binding) => {
                 // A binding whose connected app is not configured cannot be
@@ -246,15 +226,11 @@ async fn current_live_app(
 /// Whether a granted binding covers everything a current-manifest binding
 /// pins, in the same vocabulary. A grant kept under another vocabulary
 /// covers nothing: consent named operations or a folder at an access level,
-/// never "whatever the target now speaks". A tools binding is never covered —
-/// the vocabulary is retired (#1332), so a grant recorded before the
-/// retirement reads as ungranted rather than keeping the legacy surface
-/// invokable. A `read_write` folder grant covers a `read` pin: a revision
-/// that narrows its access stays granted, mirroring how a narrowed operation
-/// set stays covered.
+/// never "whatever the target now speaks". A `read_write` folder grant
+/// covers a `read` pin: a revision that narrows its access stays granted,
+/// mirroring how a narrowed operation set stays covered.
 fn binding_covered(pinned: &AppBinding, granted: &AppGrantBinding) -> bool {
     match (pinned, granted) {
-        (AppBinding::Tools(_), _) => false,
         (AppBinding::Operations(pinned), AppGrantBinding::Operations(granted)) => pinned
             .operation_ids
             .iter()
@@ -303,12 +279,9 @@ pub(crate) fn grant_state(
             let covered = granted_binding.is_some_and(|granted| binding_covered(binding, granted));
             let target_current =
                 granted_binding.is_some_and(|granted| current.grant_binding_current(granted));
-            let (tools, operation_ids, access) = match binding {
-                AppBinding::Tools(binding) => (Some(binding.tools.clone()), None, None),
-                AppBinding::Operations(binding) => {
-                    (None, Some(binding.operation_ids.clone()), None)
-                }
-                AppBinding::Folder(binding) => (None, None, Some(binding.access)),
+            let (operation_ids, access) = match binding {
+                AppBinding::Operations(binding) => (Some(binding.operation_ids.clone()), None),
+                AppBinding::Folder(binding) => (None, Some(binding.access)),
             };
             let name = match binding {
                 AppBinding::Folder(binding) => current.folders.get(&binding.folder).cloned(),
@@ -325,7 +298,6 @@ pub(crate) fn grant_state(
                 },
                 access,
                 name,
-                tools,
                 operation_ids,
                 granted: covered && target_current,
                 definition_changed: granted_binding.is_some() && !target_current,

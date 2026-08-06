@@ -158,7 +158,6 @@ export function AppDetailView({
                     Allowed to use{" "}
                     {grant.bindings
                       .flatMap((binding) => [
-                        ...(binding.tools ?? []),
                         ...(binding.operation_ids ?? []),
                         ...(binding.folder !== null
                           ? [

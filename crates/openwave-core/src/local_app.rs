@@ -8,7 +8,7 @@
 //!
 //! Each revision pairs an untrusted HTML bundle (bytes on disk, recorded here
 //! as length + digest) with a trusted, structurally validated manifest naming
-//! the mounted MCP tools the app may call.
+//! the connected-app operations and folders the app may call.
 
 use std::path::PathBuf;
 
@@ -43,9 +43,6 @@ pub const MAX_APP_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_APP_REVISIONS: u32 = 100;
 /// Largest app display name accepted by the manifest.
 pub const MAX_APP_NAME_CHARS: usize = 120;
-/// Provider-safe bound every mounted tool name already obeys, reused verbatim
-/// for manifest bindings so a pinned name can always match a mounted one.
-pub const MAX_MOUNTED_TOOL_NAME_BYTES: usize = 64;
 /// Largest `operationId` a `rest_api` binding may pin, in bytes.
 ///
 /// A deliberate mirror of the OpenAPI ingest module's bound
@@ -131,7 +128,7 @@ pub struct AppRevision {
     pub app_id: AppId,
     /// One-based position in the app's revision history.
     pub ordinal: u32,
-    /// The trusted manifest: display name and pinned tool bindings.
+    /// The trusted manifest: display name and pinned capability bindings.
     pub manifest: AppManifest,
     /// Exact byte length of the revision's bundle.
     pub byte_len: u64,
@@ -199,9 +196,9 @@ pub struct CreateApp {
 }
 
 /// The durable consent object for one app: the granted binding set —
-/// `(app, tools[])` or `(app, operation_ids[])` per bound connected app —
-/// with each bound connected app pinned to a fingerprint of its definition as
-/// it was configured at consent time.
+/// `(app, operation_ids[])` per bound connected app, or `(folder, access)`
+/// per bound folder — with each bound connected app pinned to a fingerprint
+/// of its definition as it was configured at consent time.
 ///
 /// One grant per app, replaced wholesale by a fresh consent and deleted by
 /// revocation. The fingerprint is what keeps consent honest: a Settings edit
@@ -229,8 +226,6 @@ pub struct AppGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AppGrantBinding {
-    /// `{ app, tools[], fingerprint }` — granted mounted MCP tools.
-    Tools(AppToolsGrantBinding),
     /// `{ app, operation_ids[], fingerprint }` — granted REST operations.
     Operations(AppOperationsGrantBinding),
     /// `{ folder, access, fingerprint }` — granted folder access.
@@ -243,7 +238,6 @@ impl AppGrantBinding {
     #[must_use]
     pub fn app(&self) -> Option<ConnectedAppId> {
         match self {
-            Self::Tools(binding) => Some(binding.app),
             Self::Operations(binding) => Some(binding.app),
             Self::Folder(_) => None,
         }
@@ -253,28 +247,10 @@ impl AppGrantBinding {
     #[must_use]
     pub fn fingerprint(&self) -> [u8; 32] {
         match self {
-            Self::Tools(binding) => binding.fingerprint,
             Self::Operations(binding) => binding.fingerprint,
             Self::Folder(binding) => binding.fingerprint,
         }
     }
-}
-
-/// The granted mounted tools under one `mcp_server` connected app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AppToolsGrantBinding {
-    /// Connected app the consent names, matching the manifest binding it
-    /// covers.
-    pub app: ConnectedAppId,
-    /// Full mounted tool names (`mcp__{namespace}__{tool}`) the grant covers.
-    pub tools: Vec<String>,
-    /// SHA-256 fingerprint of the connected app's definition as configured at
-    /// consent time, computed by the host over a canonical serialization that
-    /// carries configuration *names and structure* only — never environment
-    /// or token values. Persisted as lowercase hex.
-    #[serde(with = "hex_fingerprint")]
-    pub fingerprint: [u8; 32],
 }
 
 /// The granted declared operations under one `rest_api` connected app.
@@ -347,10 +323,6 @@ mod hex_fingerprint {
 /// validator would have refused.
 pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String> {
     validate_binding_set(grant.bindings.iter().map(|binding| match binding {
-        AppGrantBinding::Tools(binding) => (
-            BindingKey::App(binding.app),
-            BindingCapabilities::Tools(&binding.tools),
-        ),
         AppGrantBinding::Operations(binding) => (
             BindingKey::App(binding.app),
             BindingCapabilities::Operations(&binding.operation_ids),
@@ -363,8 +335,8 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
 }
 
-/// The trusted half of an app revision: a display name and the exact mounted
-/// tools the app may call.
+/// The trusted half of an app revision: a display name and the exact
+/// capabilities the app may call.
 ///
 /// The manifest — not the bundle — is what the user consents to and what the
 /// host enforces per call, so its shape is closed (`deny_unknown_fields`) and
@@ -377,13 +349,13 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
 pub struct AppManifest {
     /// Display name shown in the transcript card and the Apps library.
     pub name: String,
-    /// Pinned tool bindings, grouped by connected app.
+    /// Pinned capability bindings, grouped by connected app or folder.
     pub bindings: Vec<AppBinding>,
 }
 
 /// The capabilities one binding contributes to a local app: declared REST
-/// operations of a `rest_api` connected app, bounded access to a connected
-/// folder, or — retired (#1332) but still parseable — mounted MCP tools.
+/// operations of a `rest_api` connected app, or bounded access to a
+/// connected folder.
 ///
 /// Untagged and closed: the shapes are distinguished by their differing
 /// field names, each variant refuses unknown fields, and a body mixing
@@ -391,8 +363,6 @@ pub struct AppManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum AppBinding {
-    /// `{ app, tools[] }` — mounted MCP tools of an `mcp_server` record.
-    Tools(AppToolsBinding),
     /// `{ app, operation_ids[] }` — declared operations of a `rest_api`
     /// record.
     Operations(AppOperationsBinding),
@@ -406,29 +376,10 @@ impl AppBinding {
     #[must_use]
     pub fn app(&self) -> Option<ConnectedAppId> {
         match self {
-            Self::Tools(binding) => Some(binding.app),
             Self::Operations(binding) => Some(binding.app),
             Self::Folder(_) => None,
         }
     }
-}
-
-/// The mounted tools one `mcp_server` connected app contributes to a local
-/// app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AppToolsBinding {
-    /// Id of the connected app the tools belong to. The available ids are
-    /// listed in the `create_app` tool description.
-    #[schemars(description = "Id of the mcp_server connected app these tools belong to.")]
-    pub app: ConnectedAppId,
-    /// Full mounted tool names, each `mcp__{namespace}__{tool}` under the
-    /// bound connected app's namespace.
-    #[schemars(
-        description = "Full mounted tool names (`mcp__{namespace}__{tool}`), all \
-                       under the bound connected app's namespace."
-    )]
-    pub tools: Vec<String>,
 }
 
 /// The declared operations one `rest_api` connected app contributes to a
@@ -532,18 +483,11 @@ pub trait ApprovedFolderSource: Send + Sync {
 
 /// Validate an app manifest structurally and return the JSON to store.
 ///
-/// Checks the display name, the mounted-tool grammar of every binding, and the
-/// serialized size bound. Tool names must be full mounted names under the
-/// binding's server namespace and fit the provider-safe 64-byte
-/// `[A-Za-z0-9_-]` contract every mounted tool already obeys, so a pinned name
-/// that could never match a mounted tool is refused at the door.
+/// Checks the display name, the grammar of every binding, and the serialized
+/// size bound.
 pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value, String> {
     validate_app_name(&manifest.name)?;
     validate_binding_set(manifest.bindings.iter().map(|binding| match binding {
-        AppBinding::Tools(binding) => (
-            BindingKey::App(binding.app),
-            BindingCapabilities::Tools(&binding.tools),
-        ),
         AppBinding::Operations(binding) => (
             BindingKey::App(binding.app),
             BindingCapabilities::Operations(&binding.operation_ids),
@@ -574,24 +518,19 @@ enum BindingKey {
 
 /// One binding's capability list, by vocabulary, for the shared grammar check.
 enum BindingCapabilities<'a> {
-    Tools(&'a [String]),
     Operations(&'a [String]),
     Folder,
 }
 
 /// The binding grammar shared by manifests and grants: no duplicate connected
 /// apps or folders (one binding per record or root, whichever vocabulary),
-/// every tool shaped like a full mounted name, and every operation id within
-/// the ingest module's `operationId` grammar. A folder binding has no list to
-/// validate — its access level is closed by type.
+/// and every operation id within the ingest module's `operationId` grammar. A
+/// folder binding has no list to validate — its access level is closed by
+/// type.
 ///
-/// A namespace may itself contain `_`, so a mounted name cannot be split
-/// unambiguously without knowing the namespace — and the bound record lives
-/// behind the store. The grammar here is therefore structural only; the exact
-/// `mcp__{namespace}__` cross-check against the bound connected app's
-/// configuration — and the catalog membership check for operation ids —
-/// belongs to the host layers that resolve ids (the `create_app` door, grant
-/// computation, the invoke gate).
+/// The grammar here is structural only; the catalog membership check for
+/// operation ids belongs to the host layers that resolve ids (the
+/// `create_app` door, grant computation, the invoke gate).
 fn validate_binding_set<'a>(
     bindings: impl Iterator<Item = (BindingKey, BindingCapabilities<'a>)>,
 ) -> Result<(), String> {
@@ -611,24 +550,6 @@ fn validate_binding_set<'a>(
         }
         keys.insert(key);
         match capabilities {
-            BindingCapabilities::Tools(binding_tools) => {
-                let mut tools = std::collections::HashSet::new();
-                for tool in binding_tools {
-                    if tool.len() > MAX_MOUNTED_TOOL_NAME_BYTES || !is_mounted_name_charset(tool) {
-                        return Err(format!(
-                            "tool {tool:?} must be at most {MAX_MOUNTED_TOOL_NAME_BYTES} bytes of [A-Za-z0-9_-]"
-                        ));
-                    }
-                    if !is_mounted_name_shape(tool) {
-                        return Err(format!(
-                            "tool {tool:?} is not a mounted `mcp__{{namespace}}__{{tool}}` name"
-                        ));
-                    }
-                    if !tools.insert(tool.as_str()) {
-                        return Err(format!("duplicate tool {tool:?}"));
-                    }
-                }
-            }
             BindingCapabilities::Operations(binding_operations) => {
                 let mut operations = std::collections::HashSet::new();
                 for operation_id in binding_operations {
@@ -654,31 +575,6 @@ fn validate_binding_set<'a>(
     Ok(())
 }
 
-/// Whether a name is shaped like `mcp__{namespace}__{tool}` with a non-empty
-/// namespace and tool segment under *some* split — the namespace itself may
-/// contain `_`, so the exact split is only decidable against a configured
-/// record.
-fn is_mounted_name_shape(name: &str) -> bool {
-    let Some(qualified) = name.strip_prefix("mcp__") else {
-        return false;
-    };
-    qualified
-        .match_indices("__")
-        .any(|(index, _)| index > 0 && index + 2 < qualified.len())
-}
-
-/// The bare tool segment of `name` when it is mounted under exactly
-/// `namespace` — the host-side half of the binding grammar, shared by the
-/// `create_app` door, grant computation, and the invoke gate so every layer
-/// applies the same exact-prefix reading.
-#[must_use]
-pub fn mounted_tool_under<'a>(namespace: &str, name: &'a str) -> Option<&'a str> {
-    name.strip_prefix("mcp__")?
-        .strip_prefix(namespace)?
-        .strip_prefix("__")
-        .filter(|tool| !tool.is_empty())
-}
-
 fn validate_app_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.chars().count() > MAX_APP_NAME_CHARS {
         return Err(format!(
@@ -692,11 +588,6 @@ fn validate_app_name(name: &str) -> Result<(), String> {
         return Err("app name may not contain control characters".into());
     }
     Ok(())
-}
-
-fn is_mounted_name_charset(name: &str) -> bool {
-    name.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// The ingest module's `operationId` charset, mirrored (see
@@ -739,62 +630,13 @@ mod tests {
     }
 
     #[test]
-    fn manifests_enforce_the_mounted_tool_grammar() {
-        let app = ConnectedAppId::new();
-        let manifest = |tools: &[&str]| AppManifest {
-            name: "Sentry triage".into(),
-            bindings: vec![AppBinding::Tools(AppToolsBinding {
-                app,
-                tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-            })],
-        };
-
-        assert!(validate_app_manifest(&manifest(&[
-            "mcp__sentry__list_issues",
-            "mcp__sentry__get_issue"
-        ]))
-        .is_ok());
-        // Bindings may be empty: a static app pins no tools.
+    fn manifests_enforce_the_name_grammar() {
+        // Bindings may be empty: a static app pins no capabilities.
         assert!(validate_app_manifest(&AppManifest {
             name: "Static".into(),
             bindings: Vec::new(),
         })
         .is_ok());
-
-        for tool in [
-            "list_issues",                               // bare name, not mounted
-            "mcp__sentry__",                             // empty tool segment
-            "mcp____tool",                               // empty namespace segment
-            "mcp__sentry__bad name",                     // charset
-            &format!("mcp__sentry__{}", "x".repeat(64)), // over the 64-byte bound
-        ] {
-            assert!(validate_app_manifest(&manifest(&[tool])).is_err(), "{tool}");
-        }
-        assert!(
-            validate_app_manifest(&manifest(&[
-                "mcp__sentry__list_issues",
-                "mcp__sentry__list_issues"
-            ]))
-            .is_err(),
-            "duplicate pins are refused"
-        );
-        assert!(
-            validate_app_manifest(&AppManifest {
-                name: "Twice".into(),
-                bindings: vec![
-                    AppBinding::Tools(AppToolsBinding {
-                        app,
-                        tools: Vec::new()
-                    }),
-                    AppBinding::Tools(AppToolsBinding {
-                        app,
-                        tools: Vec::new()
-                    }),
-                ],
-            })
-            .is_err(),
-            "duplicate connected-app bindings are refused"
-        );
 
         for name in ["", " padded ", "line\nbreak", &"x".repeat(121)] {
             assert!(
@@ -835,15 +677,15 @@ mod tests {
             validate_app_manifest(&manifest(&["listIssues", "listIssues"])).is_err(),
             "duplicate pins are refused"
         );
-        // One binding per connected app holds across vocabularies: the same
-        // record cannot be bound once for tools and once for operations.
+        // One binding per connected app: the same record cannot be bound
+        // twice.
         assert!(
             validate_app_manifest(&AppManifest {
                 name: "Twice".into(),
                 bindings: vec![
-                    AppBinding::Tools(AppToolsBinding {
+                    AppBinding::Operations(AppOperationsBinding {
                         app,
-                        tools: Vec::new()
+                        operation_ids: Vec::new()
                     }),
                     AppBinding::Operations(AppOperationsBinding {
                         app,
@@ -852,7 +694,7 @@ mod tests {
                 ],
             })
             .is_err(),
-            "duplicate connected-app bindings are refused across binding kinds"
+            "duplicate connected-app bindings are refused"
         );
     }
 
@@ -861,17 +703,16 @@ mod tests {
         use serde_json::json;
 
         let app = ConnectedAppId::new();
-        let tools: AppBinding =
-            serde_json::from_value(json!({ "app": app, "tools": ["mcp__srv__viewer"] })).unwrap();
-        assert!(matches!(tools, AppBinding::Tools(_)));
         let operations: AppBinding =
             serde_json::from_value(json!({ "app": app, "operation_ids": ["listIssues"] })).unwrap();
         assert!(matches!(operations, AppBinding::Operations(_)));
-        // Both vocabularies in one binding, or any unknown field, match
-        // neither closed variant.
+        // The retired tools vocabulary (#1332, removed in #1589), a binding
+        // mixing vocabularies, any unknown field, and a bare app all match no
+        // closed variant.
         for body in [
+            json!({ "app": app, "tools": ["mcp__srv__viewer"] }),
             json!({ "app": app, "tools": [], "operation_ids": [] }),
-            json!({ "app": app, "tools": [], "extra": true }),
+            json!({ "app": app, "operation_ids": [], "extra": true }),
             json!({ "app": app }),
         ] {
             assert!(
@@ -888,10 +729,16 @@ mod tests {
         .unwrap();
         assert!(matches!(granted, AppGrantBinding::Operations(_)));
         assert_eq!(granted.fingerprint(), [0xab; 32]);
-        assert!(serde_json::from_value::<AppGrantBinding>(
-            json!({ "app": app, "tools": [], "operation_ids": [], "fingerprint": fingerprint })
-        )
-        .is_err());
+        // A pre-removal tools grant reads as unparseable, not as any variant.
+        for body in [
+            json!({ "app": app, "tools": ["mcp__srv__viewer"], "fingerprint": fingerprint }),
+            json!({ "app": app, "tools": [], "operation_ids": [], "fingerprint": fingerprint }),
+        ] {
+            assert!(
+                serde_json::from_value::<AppGrantBinding>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
     }
 
     /// The folder vocabulary joins the same untagged, closed grammar: its
@@ -977,20 +824,5 @@ mod tests {
             json!({ "folder": folder, "access": "read" })
         )
         .is_err());
-    }
-
-    #[test]
-    fn the_exact_namespace_reading_is_prefix_anchored() {
-        // A namespace may contain `_`, so only the exact-prefix reading is
-        // sound — this is the check the host layers apply once the bound
-        // record's namespace is known.
-        assert_eq!(
-            mounted_tool_under("my_server", "mcp__my_server__tool"),
-            Some("tool")
-        );
-        assert_eq!(mounted_tool_under("my", "mcp__my_server__tool"), None);
-        assert_eq!(mounted_tool_under("sentry", "mcp__github__list"), None);
-        assert_eq!(mounted_tool_under("sentry", "mcp__sentry__"), None);
-        assert_eq!(mounted_tool_under("sentry", "sentry__tool"), None);
     }
 }
