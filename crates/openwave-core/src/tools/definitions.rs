@@ -14,26 +14,31 @@ pub(super) const WRITE_FILE: &str = "write_file";
 pub(super) fn read_file() -> ToolSpec {
     ToolSpec::for_args::<read_file_tool::Arguments>(
         READ_FILE,
-        "Read a UTF-8 text file, relative to the private scratch directory. Files under \
-         output/ are readable here, but only exec can write them.",
+        "Read a UTF-8 text file, relative to the private scratch directory. Use this, not \
+         an exec command, to read workspace text. Files under output/ are readable here, \
+         but only exec can write them.",
     )
 }
 
 pub(super) fn list_dir() -> ToolSpec {
     ToolSpec::for_args::<list_dir_tool::Arguments>(
         LIST_DIR,
-        "List the entries of a private scratch directory (defaults to the root).",
+        "List the entries of a private scratch directory (defaults to the root). Scratch \
+         holds intermediate work: apart from output/ and preview/, what is listed here \
+         may not still be there in a later command or turn.",
     )
 }
 
 pub(super) fn write_file() -> ToolSpec {
     ToolSpec::for_args::<write_file_tool::Arguments>(
         WRITE_FILE,
-        "Write a UTF-8 text file into private scratch, creating parent directories. \
-         Overwrites an existing file. Scratch files are intermediate work, not \
-         user-visible outputs: output/ is reserved and a write there is refused, \
-         because a user-visible output is published by saving it into output/ from \
-         an exec command.",
+        "Write a UTF-8 text file into private scratch, creating parent directories. Use \
+         this, not an exec command, to write workspace text. Overwrites an existing file \
+         in place: the last write wins. Scratch is an ephemeral working space — anything \
+         outside output/ and preview/ is intermediate and may not survive to a later \
+         command or turn. Only output/ is durable, and it is reserved: a write there is \
+         refused, because a user-visible output is published by saving it into output/ \
+         from an exec command, which versions it.",
     )
 }
 
