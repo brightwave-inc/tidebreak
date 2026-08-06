@@ -260,8 +260,9 @@ export type AppGrantState = {
 /**
  * Whether a live grant fully covers the current manifest with every
  * bound definition unchanged since consent — the "no sheet needed"
- * verdict. When `false`, (re-)consent is required before every pinned
- * capability is invokable.
+ * verdict. A manifest with no bindings is vacuously granted: there is
+ * nothing to consent to, so no sheet is shown. When `false`,
+ * (re-)consent is required before every pinned capability is invokable.
  */
 granted: boolean, 
 /**

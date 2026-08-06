@@ -72,6 +72,12 @@ pub trait StagedFolders: Send + Sync {
     ) -> bool;
 }
 
+/// Host infrastructure staged into every managed workspace regardless of the
+/// model's listed set: the conventional-directory markers that make `output/`
+/// and `preview/` exist remotely so commands can write into them, and the
+/// bundled document helpers the tool description tells the model to invoke
+/// without listing. All of it is host-authored, bounded, and digest-skipped on
+/// a reused session.
 pub(super) fn implicit_staged_paths(
     with_document_scripts: bool,
     with_skills: bool,
