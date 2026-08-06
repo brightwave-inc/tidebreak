@@ -1887,6 +1887,9 @@ pub struct ChatTerminalTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub invoked_skills: Option<Vec<String>>,
+    /// Token accounting for the turn, so a freshly opened chat can show
+    /// context usage without waiting for the next turn to finish.
+    pub usage: crate::event_projection::RendererTurnUsage,
     pub finished_at: chrono::DateTime<Utc>,
 }
 
@@ -1924,6 +1927,7 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
             file_changes: Vec::new(),
             invoked_skills: (!snapshot.invoked_skills.is_empty())
                 .then_some(snapshot.invoked_skills),
+            usage: snapshot.usage.into(),
             finished_at: snapshot.finished_at,
         }
     }

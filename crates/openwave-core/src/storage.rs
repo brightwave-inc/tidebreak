@@ -120,6 +120,10 @@ pub struct ChatTerminalTurnSnapshot {
     /// Skills the user explicitly invoked when the turn was accepted, in
     /// submitted order. Empty for a turn that named none.
     pub invoked_skills: Vec<String>,
+    /// Token accounting recorded when the turn resolved. Lets a client that
+    /// opened the chat after the fact show context usage without waiting for
+    /// another turn to run.
+    pub usage: crate::provider::Usage,
     pub finished_at: chrono::DateTime<chrono::Utc>,
 }
 

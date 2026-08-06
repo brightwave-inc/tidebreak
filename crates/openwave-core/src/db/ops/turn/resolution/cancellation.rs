@@ -537,6 +537,31 @@ async fn finish_turn_cancellation_inner(
             sea_orm::sea_query::Expr::value(Some(message_id)),
         );
     }
+    // A cancelled turn spent tokens before it stopped, and until now they
+    // reached the journal without ever reaching the row. That left the turn's
+    // durable accounting reading zero for a stopped turn, so anything rebuilt
+    // from storage — the transcript's context usage among them — understated
+    // it. `validate_terminal_usage` above has already established that this
+    // total covers the row's checkpoint, so the write stays monotonic.
+    if let Some(AgentEvent::TurnCancelled { usage }) = terminal_event {
+        cancelled = cancelled
+            .col_expr(
+                entities::turn_run::Column::InputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::OutputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::CacheReadInputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::CacheCreationInputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
+            );
+    }
     let cancelled = cancelled
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))

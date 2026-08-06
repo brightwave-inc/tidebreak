@@ -13,6 +13,20 @@ import { TURN_CANCELLED_NOTICE } from "./MessageList";
 
 const NOW = "2026-07-23T12:00:00.000Z";
 
+/** Token counts for a fixture whose subject is not the counts themselves. */
+const NO_USAGE = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
+const TRUNCATED = {
+  type: "context_truncated",
+  original_tokens: 128_000,
+  fitted_tokens: 96_000,
+} as const;
+
 function makeDeps(): ChatSessionDeps {
   let seq = 0;
   return {
@@ -183,7 +197,7 @@ describe("text_delta", () => {
     const mid = play([TURN, { type: "text_delta", text: "Answer :cit[the" }]);
     const done = reduceChatSessionEvent(
       mid.state,
-      framed(mid.state.lastSeq + 1, { type: "turn_completed" }),
+      framed(mid.state.lastSeq + 1, { type: "turn_completed", usage: NO_USAGE }),
       makeDeps(),
     );
     const last = done.state.messages[done.state.messages.length - 1];
@@ -481,7 +495,7 @@ describe("user_steered", () => {
 
 describe("terminal events", () => {
   it("turn_completed resolves the turn and requests hydration", () => {
-    const { state, effects } = play([TURN, { type: "turn_completed" }]);
+    const { state, effects } = play([TURN, { type: "turn_completed", usage: NO_USAGE }]);
     expect(state.busy).toBe(false);
     expect(state.activeTurnId).toBeNull();
     expect(effects).toEqual([
@@ -498,6 +512,7 @@ describe("terminal events", () => {
       {
         type: "turn_refused",
         refusal: { category: "cyber", partial_output: false },
+        usage: NO_USAGE,
       },
     ]);
 
@@ -528,6 +543,7 @@ describe("terminal events", () => {
       {
         type: "turn_refused",
         refusal: { category: "general_harms", partial_output: true },
+        usage: NO_USAGE,
       },
     ]);
 
@@ -562,7 +578,7 @@ describe("terminal events", () => {
         approval: "search_may_share_query_and_excerpts",
         class: "sensitive",
       },
-      { type: "turn_cancelled" },
+      { type: "turn_cancelled", usage: NO_USAGE },
     ]);
     expect(state.busy).toBe(false);
     expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
@@ -727,9 +743,9 @@ describe("context truncation notice", () => {
   it("inserts one notice above the streaming bubble and keeps the answer whole", () => {
     const { state } = play([
       TURN,
-      { type: "context_truncated" },
+      TRUNCATED,
       { type: "text_delta", text: "the answer" },
-      { type: "context_truncated" },
+      TRUNCATED,
       { type: "text_delta", text: " continues" },
     ]);
     const notices = state.messages.filter(
@@ -744,11 +760,11 @@ describe("context truncation notice", () => {
   });
 
   it("resets the once-per-turn dedup at the next turn", () => {
-    const first = play([TURN, { type: "context_truncated" }]);
+    const first = play([TURN, TRUNCATED]);
     const second = play(
       [
         { type: "turn_started", turn_id: "turn-2" },
-        { type: "context_truncated" },
+        TRUNCATED,
       ],
       first.state,
     );

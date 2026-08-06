@@ -14,6 +14,16 @@
 //! `reasoning_content`/`reasoning`, which a gateway sets for exactly this
 //! purpose. Withholding it cost the transcript the account of how an answer was
 //! reached without protecting anything the provider was not already publishing.
+//!
+//! Token counts are the other deliberate widening. A turn's [`Usage`] is four
+//! integers with no provider diagnostics, no host state, and nothing derived
+//! from the model's output; the reader is the one paying for them, and without
+//! them the desktop cannot say how much of the context window is spoken for.
+//! They cross in full on the terminal events, and so do the two estimates on
+//! [`AgentEvent::ContextTruncated`] — a notice that earlier conversation was
+//! dropped is close to useless without the size of what was dropped.
+//!
+//! [`Usage`]: openwave_core::Usage
 
 use openwave_core::{
     AgentEvent, ApprovalClass, CallId, MessageId, RendererToolName, SequencedEvent,
@@ -77,6 +87,46 @@ impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
 pub(crate) struct RendererSequencedEvent {
     pub seq: i64,
     pub event: RendererAgentEvent,
+}
+
+/// A turn's token accounting, as the renderer needs it.
+///
+/// The four counts are disjoint. Every adapter normalizes to the same split
+/// before the count reaches the journal: `input_tokens` is the *fresh*,
+/// uncached prompt only, and never includes `cache_read_input_tokens` or
+/// `cache_creation_input_tokens`. Anthropic reports that split natively; the
+/// OpenAI, OpenAI-compatible, and Gemini paths all subtract the cached portion
+/// out of the provider's prompt total before filling `input_tokens`. So the
+/// tokens that occupied the model's context for this turn are the plain sum of
+/// all four fields — no term is double-counted and none is missing.
+///
+/// One caveat a reader of these numbers has to hold: they are the turn's
+/// totals, summed over every model call the agent made, not a snapshot of the
+/// final prompt. A turn that ran ten tool calls re-sent its transcript ten
+/// times, so the sum exceeds what was resident in the window at any one moment.
+/// It is a faithful measure of what the turn cost and a ceiling on what the
+/// window held.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub(crate) struct RendererTurnUsage {
+    /// Fresh prompt tokens, excluding both cache figures below.
+    pub input_tokens: u32,
+    /// Tokens the model generated.
+    pub output_tokens: u32,
+    /// Prompt tokens served from the provider's cache.
+    pub cache_read_input_tokens: u32,
+    /// Prompt tokens written to the provider's cache.
+    pub cache_creation_input_tokens: u32,
+}
+
+impl From<openwave_core::Usage> for RendererTurnUsage {
+    fn from(value: openwave_core::Usage) -> Self {
+        Self {
+            input_tokens: value.input_tokens,
+            output_tokens: value.output_tokens,
+            cache_read_input_tokens: value.cache_read_input_tokens,
+            cache_creation_input_tokens: value.cache_creation_input_tokens,
+        }
+    }
 }
 
 /// Bounded refusal metadata safe to present in the desktop transcript.
@@ -181,9 +231,12 @@ pub(crate) enum RendererAgentEvent {
         #[ts(optional)]
         result: Option<ToolResultPreview>,
     },
-    TurnCompleted,
+    TurnCompleted {
+        usage: RendererTurnUsage,
+    },
     TurnRefused {
         refusal: RendererRefusal,
+        usage: RendererTurnUsage,
     },
     TurnFailed {
         /// Why the turn failed, at the only resolution a client can act on.
@@ -193,14 +246,21 @@ pub(crate) enum RendererAgentEvent {
         #[ts(optional)]
         model: Option<RendererModelIdentity>,
     },
-    TurnCancelled,
+    TurnCancelled {
+        usage: RendererTurnUsage,
+    },
     /// The message body is available through the transcript endpoint. Keeping
     /// only its durable id lets clients reconcile without duplicating content.
     UserSteered {
         message_id: MessageId,
         text: String,
     },
-    ContextTruncated,
+    ContextTruncated {
+        /// Estimated transcript tokens before the reduction.
+        original_tokens: u32,
+        /// Estimated transcript tokens after fitting to the budget.
+        fitted_tokens: u32,
+    },
     /// Fail-closed marker for a newer internal event until it gets an explicit
     /// renderer projection. The sequence still advances without dropping it.
     EventOmitted,
@@ -331,15 +391,20 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 action: action.clone(),
                 result: result.clone(),
             },
-            AgentEvent::TurnCompleted { .. } => RendererAgentEvent::TurnCompleted,
-            AgentEvent::TurnRefused { refusal, .. } => RendererAgentEvent::TurnRefused {
+            AgentEvent::TurnCompleted { usage, .. } => RendererAgentEvent::TurnCompleted {
+                usage: (*usage).into(),
+            },
+            AgentEvent::TurnRefused { refusal, usage } => RendererAgentEvent::TurnRefused {
                 refusal: refusal.into(),
+                usage: (*usage).into(),
             },
             AgentEvent::TurnFailed { error } => RendererAgentEvent::TurnFailed {
                 category: TurnFailureCategory::from_kind(&error.kind),
                 model: None,
             },
-            AgentEvent::TurnCancelled { .. } => RendererAgentEvent::TurnCancelled,
+            AgentEvent::TurnCancelled { usage } => RendererAgentEvent::TurnCancelled {
+                usage: (*usage).into(),
+            },
             AgentEvent::UserSteered {
                 message_id,
                 content,
@@ -347,7 +412,13 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 message_id: *message_id,
                 text: content.clone(),
             },
-            AgentEvent::ContextTruncated { .. } => RendererAgentEvent::ContextTruncated,
+            AgentEvent::ContextTruncated {
+                original_tokens,
+                fitted_tokens,
+            } => RendererAgentEvent::ContextTruncated {
+                original_tokens: *original_tokens,
+                fitted_tokens: *fitted_tokens,
+            },
             _ => RendererAgentEvent::EventOmitted,
         };
 
@@ -399,12 +470,57 @@ mod tests {
                         category: Some("general_harms".into()),
                         partial_output: true,
                     },
+                    usage: RendererTurnUsage {
+                        input_tokens: 42,
+                        output_tokens: 7,
+                        ..RendererTurnUsage::default()
+                    },
                 },
             }
         );
-        let json = serde_json::to_string(&projected).unwrap();
-        assert!(!json.contains("input_tokens"), "{json}");
-        assert!(!json.contains("output_tokens"), "{json}");
+    }
+
+    /// The desktop's context meter reads these four counts, so the terminal
+    /// events have to carry every one of them across the boundary intact —
+    /// and `ContextTruncated` has to carry the before/after sizes that make
+    /// its notice mean anything. Each was dropped by this projection once.
+    #[test]
+    fn terminal_events_carry_token_counts_to_the_renderer() {
+        let usage = Usage {
+            input_tokens: 1_100,
+            output_tokens: 220,
+            cache_read_input_tokens: 33_000,
+            cache_creation_input_tokens: 4_400,
+        };
+        let expected = RendererTurnUsage {
+            input_tokens: 1_100,
+            output_tokens: 220,
+            cache_read_input_tokens: 33_000,
+            cache_creation_input_tokens: 4_400,
+        };
+        let project = |event| RendererSequencedEvent::from(&SequencedEvent { seq: 1, event }).event;
+
+        assert_eq!(
+            project(AgentEvent::TurnCompleted {
+                usage,
+                stop_reason: openwave_core::StopReason::EndTurn,
+            }),
+            RendererAgentEvent::TurnCompleted { usage: expected }
+        );
+        assert_eq!(
+            project(AgentEvent::TurnCancelled { usage }),
+            RendererAgentEvent::TurnCancelled { usage: expected }
+        );
+        assert_eq!(
+            project(AgentEvent::ContextTruncated {
+                original_tokens: 128_000,
+                fitted_tokens: 96_000,
+            }),
+            RendererAgentEvent::ContextTruncated {
+                original_tokens: 128_000,
+                fitted_tokens: 96_000,
+            }
+        );
     }
 
     #[test]

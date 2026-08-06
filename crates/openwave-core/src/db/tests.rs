@@ -6169,6 +6169,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             failure_kind: None,
             model: "gpt-5".into(),
             invoked_skills: Vec::new(),
+            usage,
             finished_at: acknowledged_at,
         }]
     );
