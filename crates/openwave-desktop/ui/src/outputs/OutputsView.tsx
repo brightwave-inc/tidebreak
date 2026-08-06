@@ -1,5 +1,6 @@
 import { FileOutputIcon, RotateCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "@/NativePickerLatch";
+import { friendlyErrorMessage } from "@/lib/utils";
 import { useRefreshSignals } from "@/RefreshSignals";
 import { OutputsTable } from "./OutputsTable";
 
@@ -68,12 +70,6 @@ export function OutputsView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyOutputId, setBusyOutputId] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<{
-    message: string;
-    error: boolean;
-    /** A delete offers an inline undo that restores the output. */
-    undo?: () => void;
-  } | null>(null);
   const [countSuffix, setCountSuffix] = useState("");
   const generationRef = useRef(0);
   // Bumped when the event stream reports the catalog moved — an exec call
@@ -99,7 +95,6 @@ export function OutputsView({
   useEffect(() => {
     setCatalog({ deliverables: [], truncated: false });
     setError(null);
-    setSaveStatus(null);
     setBusyOutputId(null);
     void refresh(true);
     return () => {
@@ -118,23 +113,19 @@ export function OutputsView({
     async (output: DeliverableSummary) => {
       if (busyOutputId) return;
       if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.exportOutput)) {
-        setSaveStatus({ message: PICKER_BUSY_MESSAGE, error: true });
+        toast.error(PICKER_BUSY_MESSAGE);
         return;
       }
       setBusyOutputId(output.outputId);
-      setSaveStatus(null);
       try {
         const result = await apis.export(chatId, output.outputId);
         if (result.status === "completed") {
-          setSaveStatus({ message: `${output.filename} was saved.`, error: false });
+          toast.success(`${output.filename} was saved.`);
         } else if (result.status === "failed") {
-          setSaveStatus({ message: exportFailureMessage(result.reason), error: true });
+          toast.error(exportFailureMessage(result.reason));
         }
       } catch (caught) {
-        setSaveStatus({
-          message: friendlyOutputError(caught, "Could not save that output."),
-          error: true,
-        });
+        toast.error(friendlyOutputError(caught, "Could not save that output."));
       } finally {
         useNativePickerLatch.getState().release(PICKER_HOLDERS.exportOutput);
         setBusyOutputId(null);
@@ -147,13 +138,10 @@ export function OutputsView({
     async (output: DeliverableSummary) => {
       try {
         await apis.restore(chatId, output.outputId);
-        setSaveStatus({ message: `${output.filename} was restored.`, error: false });
+        toast.success(`${output.filename} was restored.`);
         void refresh();
       } catch (caught) {
-        setSaveStatus({
-          message: friendlyOutputError(caught, "Could not restore that output."),
-          error: true,
-        });
+        toast.error(friendlyOutputError(caught, "Could not restore that output."));
       }
     },
     [apis, chatId],
@@ -163,20 +151,15 @@ export function OutputsView({
     async (output: DeliverableSummary) => {
       if (busyOutputId) return;
       setBusyOutputId(output.outputId);
-      setSaveStatus(null);
       try {
         await apis.delete(chatId, output.outputId);
-        setSaveStatus({
-          message: `${output.filename} was deleted from this conversation.`,
-          error: false,
-          undo: () => void onRestore(output),
+        toast.success(`${output.filename} was deleted from this conversation.`, {
+          // A delete stays reversible for as long as the toast is up.
+          action: { label: "Undo", onClick: () => void onRestore(output) },
         });
         void refresh();
       } catch (caught) {
-        setSaveStatus({
-          message: friendlyOutputError(caught, "Could not delete that output."),
-          error: true,
-        });
+        toast.error(friendlyOutputError(caught, "Could not delete that output."));
       } finally {
         setBusyOutputId(null);
       }
@@ -212,28 +195,6 @@ export function OutputsView({
       </PanelSecondaryHeader>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2 pt-4">
-        {saveStatus && (
-          <div
-            className={
-              saveStatus.error
-                ? "mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
-                : "mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-info-background px-3 py-2 text-sm text-info-foreground-muted"
-            }
-            role={saveStatus.error ? "alert" : "status"}
-          >
-            <span>{saveStatus.message}</span>
-            {saveStatus.undo && (
-              <Button
-                variant="outline"
-                size="xs"
-                className="shrink-0"
-                onClick={saveStatus.undo}
-              >
-                Undo
-              </Button>
-            )}
-          </div>
-        )}
         {error && (
           <div
             className="mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
@@ -302,6 +263,5 @@ export function exportFailureMessage(
 }
 
 export function friendlyOutputError(error: unknown, fallback: string): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
-  return message && message.length <= 240 ? message : fallback;
+  return friendlyErrorMessage(error, fallback);
 }

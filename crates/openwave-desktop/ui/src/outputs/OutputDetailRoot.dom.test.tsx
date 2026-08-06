@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DeliverablePreview, OutputRevisionInfo } from "@/deliverables";
+import { Toaster } from "@/components/ui/sonner";
 import { renderWithRouter } from "@/test/router";
 import { OutputDetailRoot, type OutputDetailApis } from "./OutputDetailRoot";
 
@@ -96,7 +97,10 @@ function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis
 
 async function openOutput(apis: OutputDetailApis, id = outputId) {
   return renderWithRouter(
-    <OutputDetailRoot chatId="chat-1" outputId={id} apis={apis} />,
+    <>
+      <OutputDetailRoot chatId="chat-1" outputId={id} apis={apis} />
+      <Toaster richColors />
+    </>,
     { initialUrl: `/c/chat-1?tabs=outputs.${id}` },
   );
 }

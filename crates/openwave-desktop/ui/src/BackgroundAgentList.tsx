@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Bot, ChevronDown, ChevronRight, Square } from "lucide-react";
+import { toast } from "sonner";
 
 import type { AgentActivityHistoryEntry, AgentRun } from "./api";
 import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
@@ -9,6 +10,7 @@ import {
   getAgentRunDotClass,
   RUNNING_AGENT_STATUSES,
 } from "./AgentRunDisplay";
+import { friendlyErrorMessage } from "./lib/utils";
 import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import type { ToolCallStatus } from "./ToolCallCard";
 import { Button } from "@/components/ui/button";
@@ -269,10 +271,11 @@ function BackgroundAgentRow({
     setStopping(true);
     try {
       await onCancel(run.id);
-    } catch {
+    } catch (caught) {
       // The durable request did not commit; return the control so the reader
       // can try again rather than leave a run stuck reading "Stopping".
       setStopping(false);
+      toast.error(friendlyErrorMessage(caught, "Could not stop that agent."));
     }
   };
 
