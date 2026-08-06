@@ -11,6 +11,25 @@ in [agent runs](agent-runs.md); the broker and capability model this design
 reuses in [host access](host-access.md). This document is the design that
 connects them.
 
+## Status: explicitly deferred
+
+The sandbox-resident run tier is **deferred** as of 2026-08, tracked in
+[#1749](https://github.com/brightwave-inc/openwave/issues/1749). The shipped
+code — the local Docker backend, the container run driver, the admission gate,
+and their post-merge e2e lane — stays in the tree and is kept green, but no
+further roadmap step below is being built, and the tier remains opt-in
+(`OPENWAVE_CONTAINER_EXECUTION_ENABLED`) and attached-only. In-process
+background agent runs are the supported path.
+
+The deferral covers the durable operation log (#858, #859),
+managed-provider run hosts with detached admission (step 7.2), and the
+self-hosted backend surface (step 7.3). It is a deliberate park, not an
+abandonment: where sandbox provisioning ultimately lives is an open
+architectural question, and both finishing and deleting this tier would
+pre-empt that answer. The *execution provider* tier below is unaffected and
+under active development, and the published sandbox image with its pin
+automation stays fully maintained — the execution providers depend on it.
+
 ## Tiers and vocabulary
 
 "Sandbox" currently names two unrelated mechanisms.
