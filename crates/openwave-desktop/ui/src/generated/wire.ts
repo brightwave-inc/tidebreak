@@ -1516,7 +1516,15 @@ plugins: Array<PluginInfo>,
 /**
  * Skills no bundle claims — user-authored packages land here.
  */
-skills: Array<PluginSkillInfo>, };
+skills: Array<PluginSkillInfo>, 
+/**
+ * Every installed prompt, bundled or standalone, in one flat list.
+ *
+ * Flat rather than nested under its bundle because the consumer is a
+ * picker over the whole library; a plugin's members are the entries whose
+ * `plugin` names it.
+ */
+prompts: Array<PluginPromptInfo>, };
 
 /**
  * What kind of work a plugin bundles, from a closed vocabulary.
@@ -1564,6 +1572,37 @@ enabled: boolean,
 skills: Array<PluginSkillInfo>, };
 
 /**
+ * One reusable prompt, as a picker or a management surface renders it.
+ *
+ * Deliberately without a body: the text is fetched from
+ * [`get_prompt_body`] when the user actually picks one, so the catalog stays
+ * bytes per entry no matter how long the prompts are.
+ */
+export type PluginPromptInfo = { 
+/**
+ * The slug the body route addresses it by.
+ */
+name: string, 
+/**
+ * The tip a card or popover shows.
+ */
+description: string, 
+/**
+ * Where the package was loaded from; host-derived, never claimed.
+ */
+origin: PromptOrigin, 
+/**
+ * The bundle that claims this prompt, if any. `None` is a standalone
+ * package — every user-authored prompt is one.
+ */
+plugin: string | null, 
+/**
+ * Whether the prompt is offered. A prompt has no flag of its own: a
+ * bundled one follows its bundle, and a standalone one is always on.
+ */
+enabled: boolean, };
+
+/**
  * One skill, inside a bundle or standing alone.
  */
 export type PluginSkillInfo = { name: string, description: string, 
@@ -1609,6 +1648,28 @@ created_at: string, };
  * Identifies a project: an optional grouping a chat may belong to.
  */
 export type ProjectId = string;
+
+/**
+ * One prompt's insertable text, fetched when the user picks it.
+ *
+ * Its own route for the same reason skill instructions have one: the catalog
+ * is fetched far more often than any one prompt is inserted.
+ */
+export type PromptBody = { name: string, 
+/**
+ * The `PROMPT.md` markdown below the frontmatter — exactly what goes into
+ * the composer. It is never composed into the model's operating prompt;
+ * it reaches a model only if the user sends the message.
+ */
+body: string, };
+
+/**
+ * Which source a validated prompt package was loaded from.
+ *
+ * Host-derived from the load path, never from manifest content, so a user
+ * package cannot claim to be built-in.
+ */
+export type PromptOrigin = "builtin" | "user";
 
 /**
  * Public view of a provider — never includes the credential itself.

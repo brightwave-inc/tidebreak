@@ -910,6 +910,13 @@ pub struct ConfiguredCodeExecutionProvider {
     /// staging so an added or edited skill is picked up on the next turn
     /// without a restart. `None` disables user skills entirely.
     user_skills_dir: Option<PathBuf>,
+    /// Built-in reusable prompts validated once at configuration. Unlike
+    /// skills, nothing here reaches the model or a sandbox: a prompt is text
+    /// the user inserts, so this exists only to be listed and fetched.
+    prompts: Arc<Vec<openwave_code_execution::LoadedPrompt>>,
+    /// Per-install directory of user-authored prompt packages, re-read on each
+    /// listing so an added or edited prompt appears without a restart.
+    user_prompts_dir: Option<PathBuf>,
     /// Built-in plugins validated once at configuration against the built-in
     /// skills, grouping them in the prompt catalog. Empty when no plugin tree
     /// is configured, which leaves every skill standalone.
@@ -1115,6 +1122,8 @@ impl ConfiguredCodeExecutionProvider {
             document_scripts_source: None,
             skills: Arc::new(Vec::new()),
             user_skills_dir: None,
+            prompts: Arc::new(Vec::new()),
+            user_prompts_dir: None,
             plugins: Arc::new(Vec::new()),
             folder_grant_resolver: None,
             office_converter: None,
@@ -1184,6 +1193,42 @@ impl ConfiguredCodeExecutionProvider {
         self
     }
 
+    /// Load and install the built-in reusable prompt packages. Call before
+    /// [`Self::with_plugins`]: a bundle's `prompts:` members are resolved
+    /// against the prompts already loaded.
+    #[must_use]
+    pub fn with_prompts(mut self, source: Option<PathBuf>) -> Self {
+        self.prompts = Arc::new(
+            source
+                .as_deref()
+                .map(|source| {
+                    openwave_code_execution::load_prompts(
+                        source,
+                        openwave_code_execution::PromptOrigin::Builtin,
+                    )
+                })
+                .unwrap_or_default(),
+        );
+        self
+    }
+
+    /// Install the per-install directory user-authored prompt packages are
+    /// loaded from. The directory is created here (best effort) so the user
+    /// has a place to drop a prompt; its contents are re-read on each listing.
+    #[must_use]
+    pub fn with_user_prompts(mut self, source: Option<PathBuf>) -> Self {
+        if let Some(source) = source.as_deref() {
+            if let Err(error) = std::fs::create_dir_all(source) {
+                tracing::warn!(
+                    "user prompts directory {} could not be created: {error}",
+                    source.display()
+                );
+            }
+        }
+        self.user_prompts_dir = source;
+        self
+    }
+
     /// Load the built-in plugins that group the built-in skills in the prompt
     /// catalog. Call after [`Self::with_skills`]: membership is resolved
     /// against the skills already loaded, and a plugin naming one that is not
@@ -1193,7 +1238,9 @@ impl ConfiguredCodeExecutionProvider {
         self.plugins = Arc::new(
             source
                 .as_deref()
-                .map(|source| openwave_code_execution::load_plugins(source, &self.skills))
+                .map(|source| {
+                    openwave_code_execution::load_plugins(source, &self.skills, &self.prompts)
+                })
                 .unwrap_or_default(),
         );
         self
@@ -1236,6 +1283,16 @@ impl ConfiguredCodeExecutionProvider {
             .iter()
             .map(|plugin| plugin.package.clone())
             .collect()
+    }
+
+    /// Every installed prompt, before the install's enable flags apply: the
+    /// built-in packages merged with a fresh read of the user prompts
+    /// directory, exactly as [`Self::installed_skills`] does.
+    ///
+    /// There is no filtered counterpart. A prompt is never staged and never
+    /// advertised, so this one listing is the whole consumer surface.
+    pub(crate) fn installed_prompts(&self) -> Vec<openwave_code_execution::LoadedPrompt> {
+        openwave_code_execution::merged_prompts(&self.prompts, self.user_prompts_dir.as_deref())
     }
 
     /// The bundle that claims `skill`, if any.

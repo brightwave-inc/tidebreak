@@ -1050,6 +1050,7 @@ mod tests {
             description: "Bundle.".into(),
             category: openwave_code_execution::PluginCategory::Other,
             skills: members.iter().map(|member| (*member).into()).collect(),
+            prompts: Vec::new(),
             router_preamble: Some(preamble.into()),
         };
         let plugins = vec![

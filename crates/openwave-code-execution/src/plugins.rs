@@ -1,4 +1,5 @@
-//! Plugins: thin manifests that group skills into one installable bundle.
+//! Plugins: thin manifests that group skills and prompts into one installable
+//! bundle.
 //!
 //! A skill stays the model's routing unit — the prompt catalog still lists
 //! `(name, description)` lines and the instruction body still reaches the
@@ -8,6 +9,13 @@
 //! *router preamble* — a single line emitted above its skills in the catalog
 //! when they are alternatives for the same intent and the model needs help
 //! choosing between them.
+//!
+//! A bundle may also claim member **prompts** (see [`crate::prompts`]), which
+//! are the opposite kind of thing: inert user-side text a person inserts into
+//! the composer, with no catalog line and no staged bytes. They are members
+//! here only so a bundle can ship the starting messages that go with its
+//! skills, and so switching the bundle off takes them out of the library
+//! together. A bundle may carry skills, prompts, or both.
 //!
 //! Plugins are packaging, not a prompt concept. A skill claimed by no plugin
 //! keeps working exactly as before, which is what keeps user-authored skills
@@ -27,6 +35,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::prompts::{is_valid_prompt_name, LoadedPrompt};
 use crate::skills::{is_valid_skill_name, LoadedSkill, SkillPackage};
 
 /// The manifest file every plugin package is defined by.
@@ -37,6 +46,7 @@ const MAX_DISPLAY_NAME_BYTES: usize = 64;
 const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_ROUTER_PREAMBLE_BYTES: usize = 300;
 const MAX_MEMBER_SKILLS: usize = 16;
+const MAX_MEMBER_PROMPTS: usize = 32;
 
 /// What kind of work a plugin bundles, from a closed vocabulary.
 ///
@@ -161,6 +171,9 @@ pub struct PluginPackage {
     pub category: PluginCategory,
     /// Member skill slugs, in manifest order, each one a loaded skill.
     pub skills: Vec<String>,
+    /// Member prompt slugs, in manifest order, each one a loaded prompt.
+    /// Empty for a skills-only bundle, which is every bundle we ship.
+    pub prompts: Vec<String>,
     /// Optional line emitted above the member skills in the prompt catalog,
     /// telling the model how to choose among them.
     pub router_preamble: Option<String>,
@@ -219,12 +232,13 @@ pub fn is_valid_plugin_router_preamble(preamble: &str) -> bool {
 /// Parse one `PLUGIN.md` source: strict frontmatter between `---` fences.
 ///
 /// Recognized keys are exactly `name`, `display-name`, `description`,
-/// `category`, the single-line flow list `skills: ["a", "b"]`, and the
-/// optional `router-preamble`. Anything else — an unknown key, a duplicate, a
-/// member that is not a well-formed skill slug, a control character in a
-/// rendered line — rejects the whole manifest. The body below the frontmatter
-/// is documentation for whoever opens the file; it is never staged and never
-/// reaches the model, so it may be empty.
+/// `category`, the single-line flow lists `skills: ["a", "b"]` and
+/// `prompts: ["c"]`, and the optional `router-preamble`. Either member list
+/// may be omitted, but a bundle that claims nothing is rejected. Anything
+/// else — an unknown key, a duplicate, a member that is not a well-formed
+/// slug, a control character in a rendered line — rejects the whole manifest.
+/// The body below the frontmatter is documentation for whoever opens the file;
+/// it is never staged and never reaches the model, so it may be empty.
 pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseError> {
     if source.len() > crate::MAX_WORKSPACE_FILE_BYTES {
         return Err(invalid("manifest exceeds the workspace file limit"));
@@ -241,6 +255,7 @@ pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseE
     let mut description = None;
     let mut category = None;
     let mut skills = None;
+    let mut prompts = None;
     let mut router_preamble = None;
     for line in frontmatter.lines() {
         if line.trim().is_empty() {
@@ -272,8 +287,17 @@ pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseE
                 }
             }
             "skills" => {
-                if skills.replace(parse_member_skills(value)?).is_some() {
+                let members =
+                    parse_members(value, "skills", MAX_MEMBER_SKILLS, is_valid_skill_name)?;
+                if skills.replace(members).is_some() {
                     return Err(invalid("duplicate 'skills'"));
+                }
+            }
+            "prompts" => {
+                let members =
+                    parse_members(value, "prompts", MAX_MEMBER_PROMPTS, is_valid_prompt_name)?;
+                if prompts.replace(members).is_some() {
+                    return Err(invalid("duplicate 'prompts'"));
                 }
             }
             "router-preamble" => {
@@ -303,7 +327,13 @@ pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseE
     let Some(category) = PluginCategory::parse(category) else {
         return Err(invalid(format!("unknown 'category': {category:?}")));
     };
-    let skills = skills.ok_or_else(|| invalid("missing 'skills'"))?;
+    // Either list alone is a legitimate bundle — a skills-only one is what we
+    // ship — but a manifest claiming neither describes nothing.
+    let skills = skills.unwrap_or_default();
+    let prompts = prompts.unwrap_or_default();
+    if skills.is_empty() && prompts.is_empty() {
+        return Err(invalid("bundle claims no 'skills' and no 'prompts'"));
+    }
     let router_preamble = router_preamble
         .map(|preamble| {
             is_valid_plugin_router_preamble(preamble)
@@ -317,16 +347,28 @@ pub fn parse_plugin_manifest(source: &str) -> Result<PluginPackage, PluginParseE
         description: description.to_owned(),
         category,
         skills,
+        prompts,
         router_preamble,
     })
 }
 
 /// Parse the single-line flow form `["word-documents", "pdf-documents"]`.
 ///
-/// Every item is a double-quoted skill slug; the slug grammar admits neither
-/// `"` nor `]`, so the list cannot be malformed into something that parses.
-fn parse_member_skills(value: &str) -> Result<Vec<String>, PluginParseError> {
-    let malformed = || invalid("'skills' must be `[\"skill-name\", ...]` with at least one member");
+/// Every item is a double-quoted slug checked by `valid`; the slug grammar
+/// admits neither `"` nor `]`, so the list cannot be malformed into something
+/// that parses. An empty list is rejected rather than treated as absent: it
+/// reads as an intent the manifest does not express.
+fn parse_members(
+    value: &str,
+    key: &str,
+    limit: usize,
+    valid: fn(&str) -> bool,
+) -> Result<Vec<String>, PluginParseError> {
+    let malformed = || {
+        invalid(format!(
+            "'{key}' must be `[\"name\", ...]` with at least one member"
+        ))
+    };
     let items = value
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
@@ -335,41 +377,45 @@ fn parse_member_skills(value: &str) -> Result<Vec<String>, PluginParseError> {
     if items.is_empty() {
         return Err(malformed());
     }
-    let mut skills: Vec<String> = Vec::new();
+    let mut members: Vec<String> = Vec::new();
     for item in items.split(',') {
-        let skill = item
+        let member = item
             .trim()
             .strip_prefix('"')
             .and_then(|rest| rest.strip_suffix('"'))
             .ok_or_else(malformed)?;
-        if !is_valid_skill_name(skill) {
+        if !valid(member) {
             return Err(invalid(format!(
-                "'skills' member is not a kebab-case slug: {skill:?}"
+                "'{key}' member is not a kebab-case slug: {member:?}"
             )));
         }
-        if skills.iter().any(|existing| existing == skill) {
-            return Err(invalid(format!("duplicate 'skills' member: {skill:?}")));
+        if members.iter().any(|existing| existing == member) {
+            return Err(invalid(format!("duplicate '{key}' member: {member:?}")));
         }
-        skills.push(skill.to_owned());
+        members.push(member.to_owned());
     }
-    if skills.len() > MAX_MEMBER_SKILLS {
-        return Err(invalid("'skills' lists too many members"));
+    if members.len() > limit {
+        return Err(invalid(format!("'{key}' lists too many members")));
     }
-    Ok(skills)
+    Ok(members)
 }
 
 /// Load every valid plugin under `source`, one directory per plugin, against
-/// the skills that actually loaded.
+/// the skills and prompts that actually loaded.
 ///
 /// A plugin is skipped with a warning — never half-applied — when its manifest
 /// is unreadable or rejected, when the directory name disagrees with the
-/// manifest, when a member skill is not among `skills`, or when a member is
-/// already claimed by another plugin. Claims resolve in name order so the same
-/// tree always produces the same grouping. Skills no plugin claims stay
-/// standalone; that is the supported shape for a bare skill directory, not a
-/// degraded one.
+/// manifest, when a member is not among `skills` or `prompts`, or when a
+/// member is already claimed by another plugin. Claims resolve in name order
+/// so the same tree always produces the same grouping. Members no plugin
+/// claims stay standalone; that is the supported shape for a bare skill or
+/// prompt directory, not a degraded one.
 #[must_use]
-pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> {
+pub fn load_plugins(
+    source: &Path,
+    skills: &[LoadedSkill],
+    prompts: &[LoadedPrompt],
+) -> Vec<LoadedPlugin> {
     let entries = match std::fs::read_dir(source) {
         Ok(entries) => entries,
         Err(error) => {
@@ -380,9 +426,13 @@ pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> 
             return Vec::new();
         }
     };
-    let known: BTreeSet<&str> = skills
+    let known_skills: BTreeSet<&str> = skills
         .iter()
         .map(|skill| skill.package.name.as_str())
+        .collect();
+    let known_prompts: BTreeSet<&str> = prompts
+        .iter()
+        .map(|prompt| prompt.package.name.as_str())
         .collect();
     let mut parsed: Vec<PluginPackage> = Vec::new();
     for entry in entries.flatten() {
@@ -428,10 +478,20 @@ pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> 
         if let Some(missing) = package
             .skills
             .iter()
-            .find(|skill| !known.contains(skill.as_str()))
+            .find(|skill| !known_skills.contains(skill.as_str()))
         {
             tracing::warn!(
                 "skipping plugin '{directory_name}': member skill {missing:?} did not load"
+            );
+            continue;
+        }
+        if let Some(missing) = package
+            .prompts
+            .iter()
+            .find(|prompt| !known_prompts.contains(prompt.as_str()))
+        {
+            tracing::warn!(
+                "skipping plugin '{directory_name}': member prompt {missing:?} did not load"
             );
             continue;
         }
@@ -439,13 +499,14 @@ pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> 
     }
 
     parsed.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    let mut claimed_skills: BTreeSet<String> = BTreeSet::new();
+    let mut claimed_prompts: BTreeSet<String> = BTreeSet::new();
     let mut plugins = Vec::new();
     for package in parsed {
         if let Some(taken) = package
             .skills
             .iter()
-            .find(|skill| claimed.contains(skill.as_str()))
+            .find(|skill| claimed_skills.contains(skill.as_str()))
         {
             tracing::warn!(
                 "skipping plugin '{}': skill {taken:?} is already claimed by another plugin",
@@ -453,7 +514,19 @@ pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> 
             );
             continue;
         }
-        claimed.extend(package.skills.iter().cloned());
+        if let Some(taken) = package
+            .prompts
+            .iter()
+            .find(|prompt| claimed_prompts.contains(prompt.as_str()))
+        {
+            tracing::warn!(
+                "skipping plugin '{}': prompt {taken:?} is already claimed by another plugin",
+                package.name
+            );
+            continue;
+        }
+        claimed_skills.extend(package.skills.iter().cloned());
+        claimed_prompts.extend(package.prompts.iter().cloned());
         plugins.push(LoadedPlugin { package });
     }
     plugins
@@ -462,6 +535,7 @@ pub fn load_plugins(source: &Path, skills: &[LoadedSkill]) -> Vec<LoadedPlugin> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompts::{load_prompts, PromptOrigin, PROMPT_MANIFEST_FILE};
     use crate::skills::{load_skills, SkillOrigin, SKILL_MANIFEST_FILE};
     use crate::HostDep;
 
@@ -486,6 +560,16 @@ router-preamble: Pick by the file the user needs.\n\
         .unwrap();
     }
 
+    fn write_prompt(dir: &Path, name: &str) {
+        let prompt = dir.join(name);
+        std::fs::create_dir(&prompt).unwrap();
+        std::fs::write(
+            prompt.join(PROMPT_MANIFEST_FILE),
+            format!("---\nname: {name}\ndescription: Starts a {name}.\n---\nBody.\n"),
+        )
+        .unwrap();
+    }
+
     fn write_plugin(dir: &Path, name: &str, manifest: &str) {
         let plugin = dir.join(name);
         std::fs::create_dir(&plugin).unwrap();
@@ -499,6 +583,7 @@ router-preamble: Pick by the file the user needs.\n\
         assert_eq!(package.display_name, "Documents");
         assert_eq!(package.category, PluginCategory::Documents);
         assert_eq!(package.skills, ["word-documents", "pdf-documents"]);
+        assert_eq!(package.prompts, [""; 0]);
         assert_eq!(
             package.router_preamble.as_deref(),
             Some("Pick by the file the user needs.")
@@ -511,6 +596,14 @@ router-preamble: Pick by the file the user needs.\n\
             parse_plugin_manifest(minimal).unwrap().router_preamble,
             None
         );
+
+        // Either member list alone is a bundle: prompts-only is as valid as
+        // the skills-only shape we ship.
+        let prompts_only = "---\nname: writing\ndisplay-name: Writing\ndescription: Starters.\n\
+                            category: other\nprompts: [\"weekly-update\"]\n---\n";
+        let package = parse_plugin_manifest(prompts_only).unwrap();
+        assert_eq!(package.skills, [""; 0]);
+        assert_eq!(package.prompts, ["weekly-update"]);
     }
 
     #[test]
@@ -528,7 +621,15 @@ router-preamble: Pick by the file the user needs.\n\
                 "missing display-name",
                 "---\nname: a\ndescription: b\ncategory: other\nskills: [\"c\"]\n---\n".to_owned(),
             ),
-            ("missing skills", format!("{head}---\n")),
+            ("no members at all", format!("{head}---\n")),
+            (
+                "empty prompts list",
+                format!("{head}skills: [\"c\"]\nprompts: []\n---\n"),
+            ),
+            (
+                "non-kebab prompt member",
+                format!("{head}prompts: [\"Weekly Update\"]\n---\n"),
+            ),
             (
                 "unknown category",
                 "---\nname: a\ndisplay-name: A\ndescription: b\ncategory: wizardry\nskills: [\"c\"]\n---\n".to_owned(),
@@ -567,9 +668,11 @@ router-preamble: Pick by the file the user needs.\n\
         }
     }
 
-    /// Contract: membership is checked against the skills that actually
-    /// loaded, and one skill belongs to at most one plugin — a second
+    /// Contract: membership is checked against the skills and prompts that
+    /// actually loaded, and a member belongs to at most one plugin — a second
     /// claimant is skipped whole rather than producing overlapping groups.
+    /// Prompts are members on exactly those terms, so both rules are asserted
+    /// against them too.
     #[test]
     fn loader_rejects_dangling_members_and_double_claims() {
         let skills_dir = tempfile::tempdir().unwrap();
@@ -577,9 +680,19 @@ router-preamble: Pick by the file the user needs.\n\
             write_skill(skills_dir.path(), name);
         }
         let skills = load_skills(skills_dir.path(), SkillOrigin::Builtin);
+        let prompts_dir = tempfile::tempdir().unwrap();
+        write_prompt(prompts_dir.path(), "weekly-update");
+        let prompts = load_prompts(prompts_dir.path(), PromptOrigin::Builtin);
 
         let plugins_dir = tempfile::tempdir().unwrap();
-        write_plugin(plugins_dir.path(), "documents", VALID);
+        write_plugin(
+            plugins_dir.path(),
+            "documents",
+            &VALID.replace(
+                "router-preamble:",
+                "prompts: [\"weekly-update\"]\nrouter-preamble:",
+            ),
+        );
         // Claims a skill 'documents' already owns: skipped entirely, so its
         // uncontested member stays standalone rather than half-grouped.
         write_plugin(
@@ -588,6 +701,13 @@ router-preamble: Pick by the file the user needs.\n\
             "---\nname: zzz-later\ndisplay-name: Later\ndescription: Steals a member.\n\
              category: other\nskills: [\"charts\", \"pdf-documents\"]\n---\n",
         );
+        // Claims a prompt 'documents' already owns.
+        write_plugin(
+            plugins_dir.path(),
+            "zzz-writing",
+            "---\nname: zzz-writing\ndisplay-name: Writing\ndescription: Steals a prompt.\n\
+             category: other\nprompts: [\"weekly-update\"]\n---\n",
+        );
         // Names a skill that did not load.
         write_plugin(
             plugins_dir.path(),
@@ -595,10 +715,17 @@ router-preamble: Pick by the file the user needs.\n\
             "---\nname: ghosts\ndisplay-name: Ghosts\ndescription: Dangling member.\n\
              category: other\nskills: [\"spreadsheets\"]\n---\n",
         );
+        // Names a prompt that did not load.
+        write_plugin(
+            plugins_dir.path(),
+            "phantoms",
+            "---\nname: phantoms\ndisplay-name: Phantoms\ndescription: Dangling prompt.\n\
+             category: other\nprompts: [\"standup\"]\n---\n",
+        );
         // Directory disagrees with the manifest.
         write_plugin(plugins_dir.path(), "mislabeled", VALID);
 
-        let plugins = load_plugins(plugins_dir.path(), &skills);
+        let plugins = load_plugins(plugins_dir.path(), &skills, &prompts);
         assert_eq!(
             plugins
                 .iter()
@@ -610,6 +737,7 @@ router-preamble: Pick by the file the user needs.\n\
             plugins[0].package.skills,
             ["word-documents", "pdf-documents"]
         );
+        assert_eq!(plugins[0].package.prompts, ["weekly-update"]);
     }
 
     /// Contract: a badge row is a function of what the member skills declare,
@@ -666,6 +794,7 @@ router-preamble: Pick by the file the user needs.\n\
                 description: "A bundle.".to_owned(),
                 category: PluginCategory::Other,
                 skills: members.iter().map(|skill| skill.name.clone()).collect(),
+                prompts: Vec::new(),
                 router_preamble: None,
             };
             let mut passed: Vec<&SkillPackage> = members;
@@ -687,6 +816,7 @@ router-preamble: Pick by the file the user needs.\n\
             description: "A bundle.".to_owned(),
             category: PluginCategory::Other,
             skills: vec!["both".to_owned()],
+            prompts: Vec::new(),
             router_preamble: None,
         };
         let derived = derived_capabilities(&everything, &[&both]);
@@ -715,7 +845,7 @@ router-preamble: Pick by the file the user needs.\n\
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
             .count();
-        let plugins = load_plugins(&source, &skills);
+        let plugins = load_plugins(&source, &skills, &[]);
         assert_eq!(
             plugins.len(),
             directories,

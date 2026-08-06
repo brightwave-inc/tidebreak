@@ -191,7 +191,9 @@ fn verify_required_plugins(skills_dir: &Path, plugins_dir: &Path) -> Result<(), 
         skills_dir,
         openwave_code_execution::SkillOrigin::Builtin,
     );
-    let plugins = openwave_code_execution::load_plugins(plugins_dir, &skills);
+    // The bundle ships no built-in prompts; a manifest claiming one would be
+    // skipped, which this check would then see as a missing plugin.
+    let plugins = openwave_code_execution::load_plugins(plugins_dir, &skills, &[]);
     let loaded: Vec<&str> = plugins
         .iter()
         .map(|plugin| plugin.package.name.as_str())

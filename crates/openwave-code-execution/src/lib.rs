@@ -25,6 +25,7 @@ pub mod overlay;
 pub mod package_cache;
 pub mod plugins;
 mod preview;
+pub mod prompts;
 mod receipt;
 mod remote;
 pub mod sbpl;
@@ -60,6 +61,10 @@ pub use plugins::{
     PluginParseError, PLUGIN_MANIFEST_FILE,
 };
 pub use preview::{scan_preview_directory, PreviewScan};
+pub use prompts::{
+    is_valid_prompt_name, load_prompts, merged_prompts, parse_prompt_manifest, LoadedPrompt,
+    PromptOrigin, PromptPackage, PromptParseError, MAX_PROMPT_BODY_BYTES, PROMPT_MANIFEST_FILE,
+};
 pub use remote::RemoteSessionPool;
 pub use skills::{
     is_valid_skill_description, is_valid_skill_name, load_skills, merged_skills,

@@ -2794,3 +2794,138 @@ async fn the_plugin_catalog_reports_badges_and_persists_toggles() {
     .await;
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 }
+
+/// Contract: reusable prompts reach the client as one flat, attributed list
+/// whose entries a bundle's flag gates, and their bodies come from their own
+/// route. Both halves are wire shape a composer depends on, and the gating is
+/// the only behavior a prompt has — a bundled prompt surviving its bundle
+/// being switched off would be invisible until someone read the catalog JSON.
+#[tokio::test]
+async fn the_catalog_lists_prompts_and_serves_their_bodies() {
+    let (dir, store) = temp_db_store("prompts.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+
+    let trees = tempfile::tempdir().unwrap();
+    let write = |kind: &str, name: &str, source: String| {
+        let package = trees.path().join(kind).join(name);
+        std::fs::create_dir_all(&package).unwrap();
+        let manifest = match kind {
+            "skills" => "SKILL.md",
+            "prompts" => "PROMPT.md",
+            _ => "PLUGIN.md",
+        };
+        std::fs::write(package.join(manifest), source).unwrap();
+    };
+    write(
+        "skills",
+        "charts",
+        "---\nname: charts\ndescription: Plots.\n---\nBody.\n".to_owned(),
+    );
+    write(
+        "prompts",
+        "weekly-update",
+        "---\nname: weekly-update\ndescription: Draft this week's update.\n---\n\
+         Cover what shipped, what slipped, and what is next.\n"
+            .to_owned(),
+    );
+    write(
+        "plugins",
+        "reporting",
+        "---\nname: reporting\ndisplay-name: Reporting\ndescription: Status reporting.\n\
+         category: other\nskills: [\"charts\"]\nprompts: [\"weekly-update\"]\n---\n"
+            .to_owned(),
+    );
+    // A user-authored prompt, from the per-install directory rather than the
+    // bundled tree, claimed by no plugin.
+    std::fs::create_dir_all(dir.path().join("prompts/standup")).unwrap();
+    std::fs::write(
+        dir.path().join("prompts/standup/PROMPT.md"),
+        "---\nname: standup\ndescription: My standup format.\n---\nYesterday, today, blockers.\n",
+    )
+    .unwrap();
+
+    let secrets = Arc::new(MemSecrets::default());
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code_execution = Some(Arc::new(
+        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            store,
+            secrets,
+            dir.path().join("scratch"),
+        )
+        .with_skills(Some(trees.path().join("skills")))
+        .with_prompts(Some(trees.path().join("prompts")))
+        .with_plugins(Some(trees.path().join("plugins")))
+        .with_user_prompts(Some(dir.path().join("prompts"))),
+    ));
+    let token = state.token.clone();
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+
+    let prompt = |catalog: &serde_json::Value, name: &str| {
+        catalog["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|prompt| prompt["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .clone()
+    };
+    let catalog = get_plugins(&router, &bearer).await;
+    let bundled = prompt(&catalog, "weekly-update");
+    assert_eq!(bundled["plugin"], "reporting");
+    assert_eq!(bundled["origin"], "builtin");
+    assert_eq!(bundled["enabled"], true);
+    let standalone = prompt(&catalog, "standup");
+    assert_eq!(standalone["plugin"], serde_json::Value::Null);
+    assert_eq!(standalone["origin"], "user");
+    assert_eq!(standalone["enabled"], true);
+
+    // The bundle's flag is the only thing that gates a prompt.
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"reporting": false}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let catalog: serde_json::Value = json_body(response).await;
+    assert_eq!(prompt(&catalog, "weekly-update")["enabled"], false);
+    assert_eq!(prompt(&catalog, "standup")["enabled"], true);
+
+    let body = |name: &str| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        let uri = format!("/plugins/prompts/{name}/body");
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let response = body("standup").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let fetched: serde_json::Value = json_body(response).await;
+    assert_eq!(fetched["body"], "Yesterday, today, blockers.");
+    assert_eq!(body("does-not-exist").await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body("Not%20A%20Slug").await.status(),
+        StatusCode::BAD_REQUEST
+    );
+}

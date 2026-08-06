@@ -1,10 +1,16 @@
-//! `/plugins` — the install-wide plugin and skill management surface.
+//! `/plugins` — the install-wide plugin, skill, and prompt management surface.
 //!
 //! One read route projects everything installed: each bundle with its display
 //! identity, its host-derived capability badges, and its member skills with
 //! their own enable state, plus the skills no bundle claims. A disabled
 //! component is still listed — a management surface that hid it would offer no
 //! way to turn it back on — with `enabled: false` saying so.
+//!
+//! Reusable prompts ride the same read route as a flat list. They are
+//! user-side text with no catalog line and no staged bytes, so there is
+//! nothing to gate per prompt: a bundled one follows its bundle's flag and a
+//! standalone one is always offered. Bodies come from their own route, fetched
+//! when a prompt is actually picked.
 //!
 //! One write route sets flags. It is a merge patch, not a replacement: a body
 //! names only the components it means to change, so two clients toggling
@@ -17,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use openwave_code_execution::{
-    derived_capabilities, is_valid_plugin_name, is_valid_skill_name, PluginCapability,
-    PluginCategory, SkillOrigin, SkillPackage,
+    derived_capabilities, is_valid_plugin_name, is_valid_prompt_name, is_valid_skill_name,
+    PluginCapability, PluginCategory, PromptOrigin, PromptPackage, SkillOrigin, SkillPackage,
 };
 
 use crate::error::ServerError;
@@ -37,6 +43,12 @@ pub struct PluginCatalog {
     pub plugins: Vec<PluginInfo>,
     /// Skills no bundle claims — user-authored packages land here.
     pub skills: Vec<PluginSkillInfo>,
+    /// Every installed prompt, bundled or standalone, in one flat list.
+    ///
+    /// Flat rather than nested under its bundle because the consumer is a
+    /// picker over the whole library; a plugin's members are the entries whose
+    /// `plugin` names it.
+    pub prompts: Vec<PluginPromptInfo>,
 }
 
 /// One bundle, as a management surface renders it.
@@ -69,6 +81,27 @@ pub struct PluginSkillInfo {
     pub enabled: bool,
 }
 
+/// One reusable prompt, as a picker or a management surface renders it.
+///
+/// Deliberately without a body: the text is fetched from
+/// [`get_prompt_body`] when the user actually picks one, so the catalog stays
+/// bytes per entry no matter how long the prompts are.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct PluginPromptInfo {
+    /// The slug the body route addresses it by.
+    pub name: String,
+    /// The tip a card or popover shows.
+    pub description: String,
+    /// Where the package was loaded from; host-derived, never claimed.
+    pub origin: PromptOrigin,
+    /// The bundle that claims this prompt, if any. `None` is a standalone
+    /// package — every user-authored prompt is one.
+    pub plugin: Option<String>,
+    /// Whether the prompt is offered. A prompt has no flag of its own: a
+    /// bundled one follows its bundle, and a standalone one is always on.
+    pub enabled: bool,
+}
+
 /// Body of `PUT /plugins/enabled`. Absent names are left alone.
 #[derive(Debug, Default, Deserialize, ts_rs::TS)]
 pub struct PluginEnableUpdate {
@@ -92,6 +125,7 @@ pub async fn get_plugins(
         return Ok(Json(PluginCatalog {
             plugins: Vec::new(),
             skills: Vec::new(),
+            prompts: Vec::new(),
         }));
     };
     let installed: Vec<SkillPackage> = exec
@@ -103,6 +137,10 @@ pub async fn get_plugins(
 
     let mut claimed: Vec<&str> = Vec::new();
     let mut plugins = Vec::new();
+    // Which bundle claims each prompt, and whether that bundle is on. Built
+    // while walking the bundles so the flat prompt list below can attribute
+    // and gate each entry without a second pass over the manifests.
+    let mut prompt_owners: BTreeMap<String, (String, bool)> = BTreeMap::new();
     for plugin in exec.installed_plugins() {
         let members: Vec<&SkillPackage> = plugin
             .skills
@@ -110,9 +148,13 @@ pub async fn get_plugins(
             .filter_map(|member| by_name(member))
             .collect();
         claimed.extend(members.iter().map(|skill| skill.name.as_str()));
+        let plugin_enabled = flags.plugin_enabled(&plugin.name);
+        for prompt in &plugin.prompts {
+            prompt_owners.insert(prompt.clone(), (plugin.name.clone(), plugin_enabled));
+        }
         plugins.push(PluginInfo {
             capabilities: derived_capabilities(&plugin, &members),
-            enabled: flags.plugin_enabled(&plugin.name),
+            enabled: plugin_enabled,
             skills: members
                 .into_iter()
                 .map(|skill| skill_info(skill, &flags))
@@ -128,7 +170,31 @@ pub async fn get_plugins(
         .filter(|skill| !claimed.contains(&skill.name.as_str()))
         .map(|skill| skill_info(skill, &flags))
         .collect();
-    Ok(Json(PluginCatalog { plugins, skills }))
+    let prompts = exec
+        .installed_prompts()
+        .into_iter()
+        .map(|prompt| prompt_info(&prompt.package, &prompt_owners))
+        .collect();
+    Ok(Json(PluginCatalog {
+        plugins,
+        skills,
+        prompts,
+    }))
+}
+
+fn prompt_info(
+    prompt: &PromptPackage,
+    owners: &BTreeMap<String, (String, bool)>,
+) -> PluginPromptInfo {
+    let owner = owners.get(&prompt.name);
+    PluginPromptInfo {
+        name: prompt.name.clone(),
+        description: prompt.description.clone(),
+        origin: prompt.origin,
+        plugin: owner.map(|(plugin, _)| plugin.clone()),
+        // A standalone prompt has nothing that could switch it off yet.
+        enabled: owner.is_none_or(|(_, enabled)| *enabled),
+    }
 }
 
 fn skill_info(
@@ -190,6 +256,44 @@ fn manifest_body(manifest: &str) -> &str {
         .and_then(|rest| rest.split_once("\n---\n"))
         .map_or(manifest, |(_, body)| body)
         .trim()
+}
+
+/// One prompt's insertable text, fetched when the user picks it.
+///
+/// Its own route for the same reason skill instructions have one: the catalog
+/// is fetched far more often than any one prompt is inserted.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct PromptBody {
+    pub name: String,
+    /// The `PROMPT.md` markdown below the frontmatter — exactly what goes into
+    /// the composer. It is never composed into the model's operating prompt;
+    /// it reaches a model only if the user sends the message.
+    pub body: String,
+}
+
+/// `GET /plugins/prompts/{name}/body`.
+pub async fn get_prompt_body(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<PromptBody>, ServerError> {
+    if !is_valid_prompt_name(&name) {
+        return Err(ServerError::bad_request(format!(
+            "not a prompt name: {name:?}"
+        )));
+    }
+    let prompt = state
+        .code_execution
+        .as_ref()
+        .and_then(|exec| {
+            exec.installed_prompts()
+                .into_iter()
+                .find(|prompt| prompt.package.name == name)
+        })
+        .ok_or_else(|| ServerError::not_found(format!("no prompt named {name:?}")))?;
+    Ok(Json(PromptBody {
+        name,
+        body: prompt.body,
+    }))
 }
 
 /// `PUT /plugins/enabled` — set the named flags, returning the fresh catalog.

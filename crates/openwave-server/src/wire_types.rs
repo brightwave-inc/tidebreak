@@ -367,6 +367,8 @@ mod tests {
         // Its own endpoint root: a skill's instruction body is fetched on
         // demand rather than carried in the catalog.
         generate::collect_from::<crate::routes::SkillInstructions>(&cfg, &mut out);
+        // Likewise for a reusable prompt's insertable text.
+        generate::collect_from::<crate::routes::PromptBody>(&cfg, &mut out);
         // The Connected apps settings listing: per-kind health/catalog
         // projections and credential *status* — never definitions or values.
         generate::collect_from::<crate::routes::ConnectedAppsInfo>(&cfg, &mut out);
