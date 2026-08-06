@@ -1034,6 +1034,7 @@ async fn bind_inner(
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
         state.store.clone(),
+        state.secrets.clone(),
         state.resolver.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
