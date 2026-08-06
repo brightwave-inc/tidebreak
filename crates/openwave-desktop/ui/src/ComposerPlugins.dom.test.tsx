@@ -17,6 +17,7 @@ const DOCUMENTS: PluginInfo = {
   category: "documents",
   origin: "builtin",
   capabilities: [],
+  compatibility: { status: "unchecked", issues: [] },
   enabled: false,
   skills: [],
 };

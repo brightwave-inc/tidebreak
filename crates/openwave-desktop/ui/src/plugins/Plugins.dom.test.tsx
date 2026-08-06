@@ -19,6 +19,7 @@ const CATALOG: PluginCatalog = {
       category: "documents",
       origin: "builtin",
       capabilities: ["write-files", "host-install"],
+      compatibility: { status: "unchecked", issues: [] },
       enabled: false,
       skills: [
         {
