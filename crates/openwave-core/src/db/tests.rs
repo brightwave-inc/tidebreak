@@ -2175,6 +2175,7 @@ async fn make_queued_turn(
         input_message_id: Set(input_message_id.0),
         output_message_id: Set(None),
         model: Set(model.into()),
+        invoked_skills: Set(serde_json::json!([])),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
         max_attempts: Set(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
@@ -6167,6 +6168,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             refusal: None,
             failure_kind: None,
             model: "gpt-5".into(),
+            invoked_skills: Vec::new(),
             finished_at: acknowledged_at,
         }]
     );

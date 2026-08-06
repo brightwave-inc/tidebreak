@@ -3075,6 +3075,7 @@ mod tests {
                 "inspect these",
                 &[],
                 &[first_id, second_id, oversized_id],
+                &[],
             )
             .await
             .unwrap();

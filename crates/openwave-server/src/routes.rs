@@ -1876,6 +1876,11 @@ pub struct ChatTerminalTurnSnapshot {
     #[ts(optional)]
     pub failure_model: Option<crate::event_projection::RendererModelIdentity>,
     pub file_changes: Vec<ExecFileChangeSummary>,
+    /// Skills the user explicitly invoked for this turn, in submitted order.
+    /// Absent for the ordinary turn that invoked none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub invoked_skills: Option<Vec<String>>,
     pub finished_at: chrono::DateTime<Utc>,
 }
 
@@ -1911,6 +1916,8 @@ impl From<openwave_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot 
             failure_category,
             failure_model,
             file_changes: Vec::new(),
+            invoked_skills: (!snapshot.invoked_skills.is_empty())
+                .then_some(snapshot.invoked_skills),
             finished_at: snapshot.finished_at,
         }
     }
@@ -2971,6 +2978,59 @@ pub struct PostMessage {
     /// Chat-owned document ids returned by the file ingest endpoint.
     #[serde(default)]
     pub file_attachments: Vec<DocumentId>,
+    /// Skills the user explicitly invoked for this turn, by name.
+    ///
+    /// Absent or empty is the ordinary send, where the model routes on the
+    /// prompt's skill catalog itself. Every name must be a currently enabled
+    /// skill; one that is not refuses the turn rather than being dropped.
+    #[serde(default)]
+    pub invoked_skills: Vec<String>,
+}
+
+/// Refuse a turn that invokes a skill the install cannot actually run.
+///
+/// The catalog the user picked from and the catalog this turn will stage are
+/// read at different moments, and a skill can be disabled or uninstalled in
+/// between. Honouring the rest of the list would send the turn with an
+/// instruction to read a manifest that is not there, so an unknown or disabled
+/// name refuses the whole submission before any model call — the same posture
+/// as a turn carrying images a model cannot see. The refusal names the skill
+/// so a client can drop it and resubmit.
+async fn require_invocable_skills(state: &AppState, invoked: &[String]) -> Result<(), ServerError> {
+    if invoked.is_empty() {
+        return Ok(());
+    }
+    if invoked.len() > openwave_core::TurnRun::MAX_INVOKED_SKILLS {
+        return Err(ServerError::bad_request_kind(
+            "too_many_invoked_skills",
+            format!(
+                "a turn may invoke at most {} skills",
+                openwave_core::TurnRun::MAX_INVOKED_SKILLS
+            ),
+        ));
+    }
+    let mut distinct = std::collections::HashSet::with_capacity(invoked.len());
+    for name in invoked {
+        if !distinct.insert(name.as_str()) {
+            return Err(ServerError::bad_request_kind(
+                "duplicate_invoked_skill",
+                format!("skill `{name}` was invoked more than once"),
+            ));
+        }
+    }
+    let available = match state.code_execution.as_ref() {
+        Some(exec) => exec.skill_catalog().await,
+        None => Vec::new(),
+    };
+    for name in invoked {
+        if !available.iter().any(|skill| skill.name == *name) {
+            return Err(ServerError::bad_request_kind(
+                "invoked_skill_unavailable",
+                format!("skill `{name}` is not installed or is not enabled"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve published attachment ids into authoritative image identity.
@@ -3196,6 +3256,7 @@ pub async fn post_message(
         };
         validate_model_selection(&state, &selected, true).await?
     };
+    require_invocable_skills(&state, &body.invoked_skills).await?;
     let images = resolve_message_attachments(&state, &body.attachments).await?;
     let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
     if images.len().saturating_add(documents.len()) > openwave_core::MAX_MESSAGE_ATTACHMENTS {
@@ -3211,7 +3272,15 @@ pub async fn post_message(
         require_image_capable_model(&state, &model).await?;
     }
     match store
-        .accept_turn_with_attachments(body.turn_id, id, &model, &body.content, &images, &documents)
+        .accept_turn_with_attachments(
+            body.turn_id,
+            id,
+            &model,
+            &body.content,
+            &images,
+            &documents,
+            &body.invoked_skills,
+        )
         .await?
     {
         AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
@@ -3238,6 +3307,7 @@ pub async fn post_message(
                             &body.content,
                             &images,
                             &documents,
+                            &body.invoked_skills,
                         )
                         .await?,
                     AcceptTurnOutcome::Existing(_)

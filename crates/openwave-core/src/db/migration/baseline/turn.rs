@@ -223,6 +223,14 @@ pub(super) fn turn_run_table() -> TableCreateStatement {
                 .string_len(crate::model::TurnRun::MAX_MODEL_LEN as u32)
                 .not_null(),
         )
+        // The skills the user named for this turn, as a JSON array of slugs.
+        // Empty is the common case and the default, so an accepted turn always
+        // has an honest value rather than a null standing in for "none".
+        .col(
+            ColumnDef::new(TurnRun::InvokedSkills)
+                .json_binary()
+                .not_null(),
+        )
         .col(
             ColumnDef::new(TurnRun::Status)
                 .string_len(32)

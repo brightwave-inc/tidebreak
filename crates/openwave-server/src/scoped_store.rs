@@ -209,6 +209,7 @@ impl ScopedStore {
     }
 
     /// [`Store::accept_turn_with_attachments`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn accept_turn_with_attachments(
         &self,
         id: TurnId,
@@ -217,9 +218,18 @@ impl ScopedStore {
         content: &str,
         images: &[ImageRef],
         documents: &[DocumentId],
+        invoked_skills: &[String],
     ) -> Result<AcceptTurnOutcome> {
         self.store
-            .accept_turn_with_attachments(id, chat_id, model, content, images, documents)
+            .accept_turn_with_attachments(
+                id,
+                chat_id,
+                model,
+                content,
+                images,
+                documents,
+                invoked_skills,
+            )
             .await
     }
 

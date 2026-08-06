@@ -1357,7 +1357,7 @@ impl Store for DbStore {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, &[], &[]).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, &[], &[], &[]).await
     }
 
     async fn accept_turn_with_attachments(
@@ -1368,8 +1368,19 @@ impl Store for DbStore {
         content: &str,
         images: &[ImageRef],
         documents: &[DocumentId],
+        invoked_skills: &[String],
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, images, documents).await
+        ops::turn::accept_turn(
+            self,
+            id,
+            chat_id,
+            model,
+            content,
+            images,
+            documents,
+            invoked_skills,
+        )
+        .await
     }
 
     async fn claim_turn_run(

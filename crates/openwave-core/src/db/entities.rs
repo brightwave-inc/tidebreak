@@ -920,6 +920,8 @@ pub mod turn_run {
         pub input_message_id: Uuid,
         pub output_message_id: Option<Uuid>,
         pub model: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub invoked_skills: Json,
         pub status: String,
         pub attempt_count: i32,
         pub max_attempts: i32,

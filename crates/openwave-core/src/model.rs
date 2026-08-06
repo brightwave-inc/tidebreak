@@ -1926,6 +1926,14 @@ pub struct TurnRun {
     pub output_message_id: Option<MessageId>,
     /// Model selected when the turn was accepted.
     pub model: String,
+    /// Skills the user explicitly invoked for this turn, in submitted order.
+    ///
+    /// Empty for an ordinary turn, where the model routes on the prompt's skill
+    /// catalog by itself. A non-empty list is a user instruction captured with
+    /// the turn, exactly like the model selection above, so a reloaded
+    /// transcript still shows what the turn was told to use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invoked_skills: Vec<String>,
     /// Durable delivery state.
     pub status: TurnRunStatus,
     /// Failure attempts already started. Client-execution resumptions stay
@@ -1976,6 +1984,15 @@ impl TurnRun {
     pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
     /// Maximum persisted model identifier length.
     pub const MAX_MODEL_LEN: usize = 512;
+    /// Maximum skills one turn may explicitly invoke.
+    ///
+    /// A bound, not a product limit: a user picks a couple of skills for a
+    /// turn, and this keeps one accepted turn's persisted instruction finite.
+    pub const MAX_INVOKED_SKILLS: usize = 8;
+    /// Maximum persisted invoked skill name length. Matches the skill parser's
+    /// own name bound, so a name that could never name a staged skill is
+    /// refused before it reaches storage.
+    pub const MAX_INVOKED_SKILL_NAME_LEN: usize = 64;
     /// Maximum persisted machine-readable error code length.
     pub const MAX_ERROR_CODE_LEN: usize = 128;
     /// Maximum persisted diagnostic detail length.
