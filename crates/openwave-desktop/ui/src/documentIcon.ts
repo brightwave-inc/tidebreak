@@ -1,4 +1,5 @@
 import {
+  ChartColumn,
   File,
   FileAudio,
   FileImage,
@@ -33,6 +34,9 @@ export function documentIcon(mediaType: string | null | undefined): LucideIcon {
   if (type.includes("presentationml") || type === "application/vnd.ms-powerpoint") {
     return Presentation;
   }
+  // Charts are JSON on disk, but a reader scanning a catalog is looking for the
+  // figure, not the encoding — so they get their own glyph ahead of JSON.
+  if (type === "application/vnd.openwave.chart+json") return ChartColumn;
   if (
     type === "application/json" ||
     type.endsWith("+json") ||
