@@ -873,6 +873,14 @@ async fn bind_inner(
     let instance_lock = InstanceLock::acquire(&config)?;
     let sandbox_container_admission = sandbox_admission::resolve(&config);
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
+    // Asked before the store is opened, because opening it creates the file:
+    // a launch that found no store is a fresh install, and the background
+    // provisioning pass below stays off for it. Built-in plugins default to
+    // enabled, so an ungated pass would start a several-hundred-megabyte
+    // managed install the first time a new install is opened. Fresh profiles
+    // warm on the first plugin enable and through the existing lazy paths
+    // instead.
+    let returning_install = desktop_schema::store_exists(&config);
     let store = connect_store(&config).await?;
     let secrets = secret_provider(&config);
     // The product boot path is where this platform's OS-managed (MDM) policy
@@ -1008,6 +1016,12 @@ async fn bind_inner(
     // A no-op when `initialize` already derived the slice; the safety net for
     // the paths that return early (a managed profile ignoring its boot file).
     state.mcp.reconcile_plugin_servers().await;
+    // Start making the enabled plugins' dependencies real while the app comes
+    // up. Nothing waits on it: the pass only spawns, and the work behind it is
+    // already fire-and-forget.
+    if returning_install {
+        code_execution.spawn_dependency_provisioning();
+    }
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
     let blob_retirement_worker = blob_retirement_worker::BlobRetirementWorker::new(

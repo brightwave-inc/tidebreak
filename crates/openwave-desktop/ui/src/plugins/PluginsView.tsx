@@ -16,6 +16,10 @@ import { Switch } from "@/components/ui/switch";
 import type { PluginsApis } from "./pluginsApis";
 import { capabilityShortLabel, categoryIcon } from "./pluginVocabulary";
 import { SkillDialog } from "./SkillDialog";
+import {
+  hostToolProvisioningLabel,
+  useHostToolProvisioning,
+} from "./useHostToolProvisioning";
 import type { PluginCatalogState } from "./usePluginCatalog";
 
 /**
@@ -42,6 +46,7 @@ export function PluginsView({
   onOpen: (pluginId: string) => void;
 }) {
   const { catalog, loading, error, reload, setEnabled } = state;
+  const provisioning = useHostToolProvisioning();
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
   const yourPlugins = catalog?.plugins.filter((plugin) => plugin.origin === "user") ?? [];
   const otherPlugins =
@@ -64,6 +69,12 @@ export function PluginsView({
       </PanelSecondaryHeader>
 
       <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pt-4 pb-4">
+        {provisioning && (
+          <p className="text-muted-foreground shrink-0 px-4 text-xs" role="status">
+            {hostToolProvisioningLabel(provisioning)}
+          </p>
+        )}
+
         {error && (
           <div
             className="mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"

@@ -2632,6 +2632,14 @@ async fn a_superseded_gateway_session_never_reads_usable() {
 /// The catalog routes are only interesting against a real load: what they
 /// project is exactly what staging and prompt composition read.
 fn plugin_app(store: Arc<dyn Store>, data_dir: &std::path::Path) -> (Router, Arc<str>) {
+    plugin_app_with_broker(store, data_dir, None)
+}
+
+fn plugin_app_with_broker(
+    store: Arc<dyn Store>,
+    data_dir: &std::path::Path,
+    host_tool_broker: Option<Arc<dyn openwave_code_execution::HostToolBroker>>,
+) -> (Router, Arc<str>) {
     let secrets = Arc::new(MemSecrets::default());
     let mut state = AppState::new(
         Config::desktop(data_dir),
@@ -2652,7 +2660,8 @@ fn plugin_app(store: Arc<dyn Store>, data_dir: &std::path::Path) -> (Router, Arc
             data_dir.join("scratch"),
         )
         .with_skills(Some(root.join("skills")))
-        .with_plugins(Some(root.join("plugins"))),
+        .with_plugins(Some(root.join("plugins")))
+        .with_host_tool_broker(host_tool_broker),
     ));
     let token = state.token.clone();
     (app(state), token)
@@ -3447,6 +3456,97 @@ async fn the_plugin_catalog_reports_badges_and_persists_toggles() {
     )
     .await;
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Contract: switching a bundle back on starts making it real. The host tools
+/// its members declare are ensured through the broker on the same write that
+/// moved the flag — including the Node runtime, which only becomes required
+/// because the bundle brought a skill with npm pins back to life — so nothing
+/// waits for the first turn that reaches for them. A write that switches
+/// nothing on provisions nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
+    #[derive(Default)]
+    struct RecordingBroker {
+        ensured: std::sync::Mutex<Vec<openwave_code_execution::HostDep>>,
+    }
+
+    #[async_trait]
+    impl openwave_code_execution::HostToolBroker for RecordingBroker {
+        fn ensure(&self, tool: openwave_code_execution::HostDep) {
+            self.ensured.lock().unwrap().push(tool);
+        }
+
+        async fn status(
+            &self,
+            _tool: openwave_code_execution::HostDep,
+        ) -> openwave_code_execution::HostToolStatus {
+            openwave_code_execution::HostToolStatus::Available
+        }
+
+        async fn managed_root(
+            &self,
+            _tool: openwave_code_execution::HostDep,
+        ) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    let (dir, store) = temp_db_store("plugin-provisioning.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    // No execution provider selected, so the pass stops at the host tools
+    // instead of driving pip against a real package index from a unit test.
+    store
+        .set_setting(
+            crate::code_execution::CODE_EXECUTION_SETTING,
+            &serde_json::json!({"provider": null, "timeout_ms": 60_000}),
+        )
+        .await
+        .unwrap();
+    let mut flags = crate::plugin_state::read_plugin_enable_state(&*store).await;
+    flags.set_plugin("documents", false);
+    crate::plugin_state::write_plugin_enable_state(&*store, &flags)
+        .await
+        .unwrap();
+
+    let broker = Arc::new(RecordingBroker::default());
+    let (router, token) = plugin_app_with_broker(store.clone(), dir.path(), Some(broker.clone()));
+    let bearer = format!("Bearer {token}");
+
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"documents": true}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The pass is spawned rather than awaited, so the response can land first.
+    let ensured = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let ensured = broker.ensured.lock().unwrap().clone();
+            if ensured.contains(&openwave_code_execution::HostDep::Node) {
+                return ensured;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the enable write should provision the bundle's host tools");
+    assert!(ensured.contains(&openwave_code_execution::HostDep::LibreOffice));
+
+    // Re-asserting the same state switches nothing on, so nothing is
+    // provisioned again.
+    broker.ensured.lock().unwrap().clear();
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"documents": true}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(broker.ensured.lock().unwrap().is_empty());
 }
 
 /// Contract: a bundle the user wrote in their data directory reaches the

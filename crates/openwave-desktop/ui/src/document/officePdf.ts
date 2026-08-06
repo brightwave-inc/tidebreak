@@ -171,6 +171,24 @@ export function warmPresentationConverter(): void {
   });
 }
 
+/**
+ * Watch the host's managed-install progress without asking for an install.
+ *
+ * The same events [`installPresentationConverter`] renders a bar from, but for
+ * a bystander: a provisioning pass the host started on its own (app launch, or
+ * a plugin being enabled) is the only thing driving them, and a surface that
+ * merely wants to say "this is being prepared" must not itself request an
+ * install. Resolves to an unsubscribe; a host with no event bridge (a browser
+ * build) simply never fires.
+ */
+export async function observeConverterInstallProgress(
+  onProgress: (progress: ConverterInstallProgress) => void,
+): Promise<() => void> {
+  return listen<ConverterInstallProgress>(INSTALL_PROGRESS_EVENT, (event) =>
+    onProgress(event.payload),
+  );
+}
+
 /** Test seam: drop the shared install/warm state between cases. */
 export function resetConverterInstallStateForTest(): void {
   installInFlight = null;
