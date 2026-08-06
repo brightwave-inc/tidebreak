@@ -38,6 +38,22 @@ impl Tool for WriteFile {
             Ok(arguments) => arguments,
             Err(output) => return Ok(output),
         };
+        // Same cap the sandbox-resident write_file enforces, checked before any
+        // path work so the two variants refuse the same content for the same
+        // reason. Content this size is a program's product, not a text edit.
+        if arguments.content.len() > crate::MAX_WRITE_FILE_BYTES {
+            return Ok(ToolOutput::failed(
+                ToolErrorCategory::InvalidArguments,
+                format!(
+                    "content is {} and write_file accepts at most {}: produce a file this large \
+                     from an exec command that saves it into {}/, where it is published as a \
+                     durable, versioned output.",
+                    crate::preview::format_bytes(arguments.content.len() as u64),
+                    crate::preview::format_bytes(crate::MAX_WRITE_FILE_BYTES as u64),
+                    crate::EXEC_OUTPUT_DIRECTORY
+                ),
+            ));
+        }
         let path = match relative_path(&arguments.path) {
             Ok(path) => path,
             Err(message) => return Ok(ToolOutput::error(message)),
