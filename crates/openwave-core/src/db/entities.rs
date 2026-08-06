@@ -796,6 +796,7 @@ pub mod sandbox_tool_call {
         pub park_lease_token: Uuid,
         pub park_attempt_count: i32,
         pub park_claim_count: i32,
+        pub batch_ordinal: i16,
         pub executor_lease_token: Option<Uuid>,
         pub executor_lease_expires_at: Option<DateTimeUtc>,
         pub retry_at: Option<DateTimeUtc>,

@@ -1144,17 +1144,17 @@ impl Store for DbStore {
         ops::agent_run::heartbeat_agent_run(self, id, lease_token, lease_duration).await
     }
 
-    async fn park_agent_run_for_sandbox_tool_call(
+    async fn park_agent_run_for_sandbox_tool_calls(
         &self,
         agent_run_id: AgentRunId,
         lease_token: uuid::Uuid,
-        entry: &SandboxToolCallParkEntry,
+        entries: &[SandboxToolCallParkEntry],
     ) -> Result<ParkSandboxToolCallOutcome> {
-        ops::sandbox_tool::park_agent_run_for_sandbox_tool_call(
+        ops::sandbox_tool::park_agent_run_for_sandbox_tool_calls(
             self,
             agent_run_id,
             lease_token,
-            entry,
+            entries,
         )
         .await
     }

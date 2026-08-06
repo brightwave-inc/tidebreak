@@ -2309,10 +2309,15 @@ pub struct AgentActivitySnapshot {
 }
 
 fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> {
-    // A sandbox can have at most one live checkpoint. Inspecting the latest
-    // durable live checkpoint also prevents an older, completed activity from
-    // lingering in the UI after the run has advanced.
-    let call = calls.iter().rev().find(|call| !call.status.is_terminal())?;
+    // A sandbox has at most one parked step outstanding, but that step can hold
+    // several calls at once. The one being executed is what the run is actually
+    // doing, so it wins; otherwise the first still-live call in emission order
+    // stands for the step. Terminal checkpoints produce nothing, so an older
+    // completed activity cannot linger after the run has advanced.
+    let call = calls
+        .iter()
+        .find(|call| call.status == SandboxToolCallStatus::Claimed)
+        .or_else(|| calls.iter().find(|call| !call.status.is_terminal()))?;
     let kind = match call.name.as_str() {
         openwave_core::SANDBOX_EXEC_TOOL => AgentActivityKind::Exec,
         "web_search" => AgentActivityKind::WebSearch,

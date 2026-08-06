@@ -54,6 +54,24 @@ pub const MAX_WAIT_FOR_AGENTS_CHILDREN: usize = TurnAgentRunWaitSet::MAX_CHILDRE
 /// then several commands to produce a file — so the bound is a working budget,
 /// not the one-call fence it replaced.
 pub const MAX_SANDBOX_TOOL_CALLS: usize = 16;
+/// Maximum tool calls one model step may park as a single batch.
+///
+/// A step's calls are parked together and replayed together, so this bounds how
+/// much a single completion can commit against the run's total budget above.
+pub const MAX_SANDBOX_TOOL_CALLS_PER_STEP: usize = 8;
+
+/// Whether a sandbox tool call may run alongside its batch siblings.
+///
+/// Every tool in a step is dispatched as soon as it is parked except `exec`,
+/// which mutates the run's one shared workspace: two commands running at once
+/// would race over the same files, and the model wrote them expecting the
+/// earlier one's effects. Execs therefore serialize in the order the step
+/// emitted them, while read-only tools — web search, delegated file reads —
+/// are claimed the moment they land.
+#[must_use]
+pub fn sandbox_call_is_parallel_eligible(name: &str) -> bool {
+    name != SANDBOX_EXEC_TOOL
+}
 /// Maximum web-search query length advertised to a model.
 pub const MAX_WEB_SEARCH_QUERY_CHARS: usize = 400;
 /// Maximum requested web-search result count.
