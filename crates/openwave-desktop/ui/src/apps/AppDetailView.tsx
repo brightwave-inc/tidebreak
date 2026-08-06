@@ -10,6 +10,24 @@ import { friendlyAppsError, updatedLabel } from "./AppsView";
 import type { AppsApis } from "./appsApis";
 
 /**
+ * The footer's one-line revision readout: the current revision and its date,
+ * with a total when history has more than one entry. The full list lives in
+ * the element's `title`.
+ */
+function revisionSummary(detail: AppDetail): string {
+  const current = detail.revisions.find(
+    (revision) => revision.id === detail.current_revision,
+  );
+  const count =
+    detail.revisions.length === 1
+      ? null
+      : `${detail.revisions.length} revisions`;
+  if (!current) return count ?? "1 revision";
+  const label = `Revision ${current.ordinal} · ${updatedLabel(current.created_at)}`;
+  return count ? `${label} · ${count}` : label;
+}
+
+/**
  * One app, as the panel addressed `apps.{appId}`: the running frame (behind
  * its consent gate), the grant controls, the revision history, and deletion.
  *
@@ -92,7 +110,9 @@ export function AppDetailView({
     try {
       setGrant(await apis.grantState(appId));
     } catch {
-      setGrant((current) => (current ? { ...current, granted: false } : current));
+      setGrant((current) =>
+        current ? { ...current, granted: false } : current,
+      );
     }
   }
 
@@ -150,73 +170,75 @@ export function AppDetailView({
               />
             )}
 
-            {grant.granted && (
-              <section className="mx-4 flex flex-col gap-2" aria-label="Access">
-                <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
-                  <ShieldCheck className="size-3.5 shrink-0" aria-hidden="true" />
-                  <span>
-                    Allowed to use{" "}
-                    {grant.bindings
-                      .flatMap((binding) => [
-                        ...(binding.operation_ids ?? []),
-                        ...(binding.folder !== null
-                          ? [
-                              `${binding.name ?? "a folder"} (${
-                                binding.access === "read_write"
-                                  ? "read & write"
-                                  : "read"
-                              })`,
-                            ]
-                          : []),
-                      ])
-                      .join(", ") || "no tools"}
-                  </span>
-                </div>
-                {actionError && (
-                  <p className="text-critical text-sm" role="alert">
-                    {actionError}
-                  </p>
-                )}
-                <div>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    disabled={busy}
-                    onClick={() => void onRevoke()}
-                  >
-                    Revoke access
-                  </Button>
-                </div>
-              </section>
+            {grant.granted && actionError && (
+              <p className="text-critical mx-4 text-sm" role="alert">
+                {actionError}
+              </p>
             )}
 
-            <section className="mx-4 flex flex-col gap-1" aria-label="Revisions">
-              <h2 className="text-sm font-medium">
-                {detail.revisions.length === 1
-                  ? "1 revision"
-                  : `${detail.revisions.length} revisions`}
-              </h2>
-              <ul className="flex flex-col gap-0.5">
-                {detail.revisions.map((revision) => (
-                  <li
-                    key={revision.id}
-                    className="text-muted-foreground flex items-center gap-2 text-xs"
-                  >
-                    <span className="tabular-nums">
-                      Revision {revision.ordinal}
-                    </span>
-                    <span>{updatedLabel(revision.created_at)}</span>
-                    {revision.id === detail.current_revision && (
-                      <span className="text-foreground">current</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </section>
+            <footer className="mx-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div
+                className="flex min-w-0 flex-1 items-center gap-3"
+                aria-label="Access"
+              >
+                {grant.granted && (
+                  <>
+                    <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs">
+                      <ShieldCheck
+                        className="size-3.5 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span className="truncate">
+                        Allowed to use{" "}
+                        {grant.bindings
+                          .flatMap((binding) => [
+                            ...(binding.operation_ids ?? []),
+                            ...(binding.folder !== null
+                              ? [
+                                  `${binding.name ?? "a folder"} (${
+                                    binding.access === "read_write"
+                                      ? "read & write"
+                                      : "read"
+                                  })`,
+                                ]
+                              : []),
+                          ])
+                          .join(", ") || "no tools"}
+                      </span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      disabled={busy}
+                      onClick={() => void onRevoke()}
+                    >
+                      Revoke access
+                    </Button>
+                  </>
+                )}
+              </div>
 
-            <section className="mx-4" aria-label="Delete app">
+              <p
+                className="text-muted-foreground text-xs"
+                aria-label="Revisions"
+                title={detail.revisions
+                  .map(
+                    (revision) =>
+                      `Revision ${revision.ordinal} · ${updatedLabel(
+                        revision.created_at,
+                      )}${
+                        revision.id === detail.current_revision
+                          ? " (current)"
+                          : ""
+                      }`,
+                  )
+                  .join("\n")}
+              >
+                {revisionSummary(detail)}{" "}
+              </p>
+
               <Button
-                variant="outline"
+                variant="destructive"
                 size="xs"
                 disabled={busy}
                 onClick={() => void onDelete()}
@@ -224,7 +246,7 @@ export function AppDetailView({
                 <Trash2 className="size-3.5" aria-hidden="true" />
                 Delete app
               </Button>
-            </section>
+            </footer>
           </>
         )}
       </div>
