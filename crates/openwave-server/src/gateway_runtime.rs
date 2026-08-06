@@ -1140,6 +1140,89 @@ mod tests {
         assert_eq!(policy.display_name, "Sample Claude");
     }
 
+    /// A gateway that serves a model under its upstream id is serving that
+    /// curated model over a different route, so the row inherits the curated
+    /// capabilities instead of being presented as an anonymous unverified
+    /// endpoint. The deployment's own limits still win, and an id the registry
+    /// does not carry keeps the conservative treatment.
+    #[tokio::test]
+    async fn a_gateway_model_matching_a_curated_id_inherits_its_capabilities() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (_runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        providers::write_gateway_snapshot(
+            &*store,
+            &providers::GatewayModelSnapshot {
+                gateway_url: base.clone(),
+                models: vec![
+                    CustomModelConfig {
+                        id: "claude-opus-5".to_string(),
+                        display_name: Some("Opus (gateway)".to_string()),
+                        context_window: 200_000,
+                        max_output_tokens: 32_000,
+                    },
+                    CustomModelConfig {
+                        id: "anthropic-us-claude-opus-5".to_string(),
+                        display_name: None,
+                        context_window: 200_000,
+                        max_output_tokens: 32_000,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        let matched =
+            providers::resolve_model_policy(&*store, "model_gateway::claude-opus-5", false)
+                .await
+                .unwrap()
+                .expect("the gateway row resolves");
+        assert_eq!(
+            matched.provider,
+            crate::providers::ProviderKind::ModelGateway,
+            "the gateway still serves the request"
+        );
+        assert_eq!(
+            matched.vendor,
+            Some(crate::providers::ProviderKind::Anthropic)
+        );
+        assert_eq!(matched.key, "model_gateway::claude-opus-5");
+        assert_eq!(matched.display_name, "Claude Opus 5");
+        assert_eq!(
+            matched.verification,
+            crate::model_registry::VerificationTier::Verified
+        );
+        assert!(matched
+            .input_modalities
+            .contains(&crate::model_registry::InputModality::Image));
+        assert!(matched.supports_reasoning);
+        assert!(!matched.reasoning_efforts.is_empty());
+        // The deployment's reported limits, not the curated model's.
+        assert_eq!(matched.context_window, 200_000);
+        assert_eq!(matched.max_output_tokens, 32_000);
+
+        let unmatched = providers::resolve_model_policy(
+            &*store,
+            "model_gateway::anthropic-us-claude-opus-5",
+            false,
+        )
+        .await
+        .unwrap()
+        .expect("the unmatched gateway row still resolves");
+        assert_eq!(unmatched.vendor, None);
+        assert_eq!(
+            unmatched.verification,
+            crate::model_registry::VerificationTier::Unverified
+        );
+        assert_eq!(
+            unmatched.input_modalities,
+            vec![crate::model_registry::InputModality::Text]
+        );
+        assert!(!unmatched.supports_reasoning);
+    }
+
     /// The background loop's first attempt is immediate — the boot case it
     /// exists for: a signed-in profile gets a fresh snapshot without anyone
     /// pressing Refresh.

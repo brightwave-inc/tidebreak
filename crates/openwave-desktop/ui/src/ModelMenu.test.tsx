@@ -16,6 +16,7 @@ const MODELS: ModelInfo[] = [
     id: "claude-sonnet-4",
     display_name: "Claude Sonnet 4",
     provider: "anthropic",
+    vendor: null,
     verification: "verified",
     context_window: 200_000,
     max_output_tokens: 64_000,
@@ -30,6 +31,7 @@ const MODELS: ModelInfo[] = [
     id: "gpt-4o",
     display_name: "GPT-4o",
     provider: "openai",
+    vendor: null,
     verification: "verified",
     context_window: 128_000,
     max_output_tokens: 16_384,
@@ -91,6 +93,7 @@ describe("ModelMenu", () => {
           id: "local-model",
           display_name: "Local Model",
           provider: "openai_compatible",
+          vendor: null,
           verification: "unverified",
         }}
       />,
@@ -172,6 +175,34 @@ describe("ProviderIcon", () => {
     );
     expect(throughGateway).toBe(throughCompatible);
     expect(throughGateway).not.toBe(unbranded);
+  });
+});
+
+describe("model marks", () => {
+  it("brands a gateway model by the vendor it matched, not by the gateway", () => {
+    const gatewayClaude: ModelInfo = {
+      ...MODELS[0],
+      key: "model_gateway::claude-sonnet-4",
+      provider: "model_gateway",
+      vendor: "anthropic",
+    };
+    const trigger = renderToStaticMarkup(
+      <ModelMenu
+        models={[gatewayClaude]}
+        value={gatewayClaude.key}
+        defaultKey={null}
+        onChange={() => {}}
+      />,
+    );
+    expect(trigger).toContain(
+      renderToStaticMarkup(
+        <ProviderIcon
+          provider="anthropic"
+          modelId={gatewayClaude.id}
+          className="size-4"
+        />,
+      ),
+    );
   });
 });
 

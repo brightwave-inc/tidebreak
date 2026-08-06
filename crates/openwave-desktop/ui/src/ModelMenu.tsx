@@ -216,7 +216,7 @@ export function ModelMenu({
         >
           {pillModel ? (
             <ProviderIcon
-              provider={pillModel.provider}
+              provider={pillModel.vendor ?? pillModel.provider}
               modelId={pillModel.id}
               className="size-4"
             />
@@ -290,7 +290,7 @@ export function ModelMenu({
                     )}
                   >
                     <ProviderIcon
-                      provider={model.provider}
+                      provider={model.vendor ?? model.provider}
                       modelId={model.id}
                       className="size-4 shrink-0"
                     />
