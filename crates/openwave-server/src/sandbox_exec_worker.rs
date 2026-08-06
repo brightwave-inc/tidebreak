@@ -710,7 +710,11 @@ mod tests {
         };
         assert!(matches!(
             store
-                .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+                .park_agent_run_for_sandbox_tool_call(
+                    run.id,
+                    worker_lease,
+                    &crate::tests::dispatchable(&request)
+                )
                 .await
                 .unwrap(),
             ParkSandboxToolCallOutcome::Parked { .. }

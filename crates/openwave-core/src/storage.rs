@@ -2304,11 +2304,15 @@ pub trait Store: Send + Sync {
     /// Atomically accept canonical sandbox tool arguments, record the exact
     /// originating sandbox lease, and release that lease into `waiting`.
     /// Exact retries recover the checkpoint after the call resolves.
+    ///
+    /// An entry carrying a resolution lands terminal with its receipt in the
+    /// same transaction and releases the lease into `retry_wait` instead: the
+    /// host already answered the call and no executor lane will see it.
     async fn park_agent_run_for_sandbox_tool_call(
         &self,
         _agent_run_id: AgentRunId,
         _lease_token: uuid::Uuid,
-        _call: &crate::model::SandboxToolCallRequest,
+        _entry: &crate::model::SandboxToolCallParkEntry,
     ) -> Result<ParkSandboxToolCallOutcome> {
         agent_run_storage_unavailable()
     }

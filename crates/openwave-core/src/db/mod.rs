@@ -37,8 +37,8 @@ use crate::model::{
     Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
     MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt,
-    SandboxToolCallRequest, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
+    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
+    SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
     TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(test)]
@@ -1139,13 +1139,13 @@ impl Store for DbStore {
         &self,
         agent_run_id: AgentRunId,
         lease_token: uuid::Uuid,
-        call: &SandboxToolCallRequest,
+        entry: &SandboxToolCallParkEntry,
     ) -> Result<ParkSandboxToolCallOutcome> {
         ops::sandbox_tool::park_agent_run_for_sandbox_tool_call(
             self,
             agent_run_id,
             lease_token,
-            call,
+            entry,
         )
         .await
     }

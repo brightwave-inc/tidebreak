@@ -138,7 +138,11 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &checkpoint)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                worker_lease,
+                &crate::tests::dispatchable(&checkpoint)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
@@ -246,7 +250,11 @@ async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files()
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &exec)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                worker_lease,
+                &crate::tests::dispatchable(&exec)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
@@ -300,7 +308,11 @@ async fn agent_run_activity_history_is_ordered_typed_and_names_submitted_files()
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, search_worker_lease, &search)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                search_worker_lease,
+                &crate::tests::dispatchable(&search)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
@@ -696,7 +708,11 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
         arguments: serde_json::json!({}),
     };
     store
-        .park_agent_run_for_sandbox_tool_call(child.id, worker_lease, &call)
+        .park_agent_run_for_sandbox_tool_call(
+            child.id,
+            worker_lease,
+            &crate::tests::dispatchable(&call),
+        )
         .await
         .unwrap();
 
@@ -1177,7 +1193,11 @@ async fn parent_turn_cancellation_signals_its_exact_running_child_search() {
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, model_lease, &request)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                model_lease,
+                &crate::tests::dispatchable(&request)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }

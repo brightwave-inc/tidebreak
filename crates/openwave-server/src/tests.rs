@@ -2345,3 +2345,13 @@ async fn app_view_frames_serve_stored_revisions_under_the_same_contract() {
     let deleted = router.oneshot(mint(app_id, Some(&bearer))).await.unwrap();
     assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
 }
+
+/// A checkpoint the host expects an executor lane to run.
+pub(crate) fn dispatchable(
+    call: &SandboxToolCallRequest,
+) -> openwave_core::SandboxToolCallParkEntry {
+    openwave_core::SandboxToolCallParkEntry {
+        call: call.clone(),
+        resolution: None,
+    }
+}

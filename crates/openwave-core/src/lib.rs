@@ -177,13 +177,13 @@ pub use model::{
     Role, RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
     RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
     RootAttachmentSubjectKind, SandboxAgentAdmission, SandboxSpawnCheckpoint,
-    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
-    SandboxToolCallStatus, SourceReadiness, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress,
-    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
-    TurnRunStatus, TurnSteer, TurnSteerStatus, EXEC_SNAPSHOT_RETAINED_TURNS,
-    MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES, MAX_EXEC_WORKSPACE_FILE_BYTES,
-    MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallParkEntry,
+    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, SourceReadiness,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWaitSet,
+    TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
+    EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES,
+    MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(feature = "tools")]
 pub use output_scan::{

@@ -2102,14 +2102,22 @@ async fn sandbox_tool_checkpoint_is_lease_fenced_and_receipt_idempotent() {
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+            .park_agent_run_for_sandbox_tool_call(
+                sandbox.id,
+                worker_lease,
+                &super::dispatchable(&request)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
     ));
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+            .park_agent_run_for_sandbox_tool_call(
+                sandbox.id,
+                worker_lease,
+                &super::dispatchable(&request)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Existing { .. }
@@ -2220,7 +2228,11 @@ async fn a_sandbox_run_may_checkpoint_repeatedly_up_to_a_bounded_chain() {
         assert!(
             matches!(
                 store
-                    .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+                    .park_agent_run_for_sandbox_tool_call(
+                        sandbox.id,
+                        worker_lease,
+                        &super::dispatchable(&request)
+                    )
                     .await
                     .unwrap(),
                 ParkSandboxToolCallOutcome::Parked { .. }
@@ -2260,7 +2272,11 @@ async fn a_sandbox_run_may_checkpoint_repeatedly_up_to_a_bounded_chain() {
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &over_budget)
+            .park_agent_run_for_sandbox_tool_call(
+                sandbox.id,
+                worker_lease,
+                &super::dispatchable(&over_budget)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::IdentityConflict
@@ -2295,7 +2311,11 @@ async fn cancelling_waiting_sandbox_fences_claimed_tool_work() {
         arguments: serde_json::json!({"query": "cancel"}),
     };
     store
-        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(
+            sandbox.id,
+            worker_lease,
+            &super::dispatchable(&request),
+        )
         .await
         .unwrap();
     let executor_lease = uuid::Uuid::new_v4();
@@ -2355,7 +2375,11 @@ async fn expired_sandbox_tool_claim_is_recoverable_and_fences_stale_executor() {
         arguments: serde_json::json!({"query": "expiry"}),
     };
     store
-        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(
+            sandbox.id,
+            worker_lease,
+            &super::dispatchable(&request),
+        )
         .await
         .unwrap();
     let stale_executor = uuid::Uuid::new_v4();
@@ -2440,7 +2464,11 @@ async fn waiting_sandbox_deadline_fences_tool_and_delivers_parent_failure() {
         arguments: serde_json::json!({"query": "deadline"}),
     };
     store
-        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(
+            sandbox.id,
+            worker_lease,
+            &super::dispatchable(&request),
+        )
         .await
         .unwrap();
     force_expired_agent_deadline(&store, sandbox.id).await;
@@ -2558,4 +2586,71 @@ async fn active_work_counts_gate_host_quiescence() {
     settled_run.update(&store.conn).await.unwrap();
 
     assert!(store.count_active_work().await.unwrap().is_quiescent());
+}
+
+/// A call the host answered itself never reaches an executor, so it has to
+/// land terminal with its receipt and put the run straight back on the
+/// schedule — parking it as live work would strand the run in `waiting`.
+#[tokio::test]
+async fn a_pre_resolved_sandbox_park_lands_terminal_and_reschedules_the_run() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+    let worker_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+        .await
+        .unwrap();
+    let entry = crate::SandboxToolCallParkEntry {
+        call: SandboxToolCallRequest {
+            id: CallId::new(),
+            agent_run_id: sandbox.id,
+            chat_id: chat.id,
+            provider_id: "provider-call-refused".into(),
+            // The model's own emitted name, not one this host dispatches.
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "notes.md"}),
+        },
+        resolution: Some(ToolCallResolution::Failed {
+            result: "read_file is not available to a background task.".into(),
+            error_code: "unavailable_tool".into(),
+            error_detail: None,
+        }),
+    };
+    let call_id = entry.call.id;
+    let ParkSandboxToolCallOutcome::Parked { run, call } = store
+        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &entry)
+        .await
+        .unwrap()
+    else {
+        panic!("a pre-resolved entry must park");
+    };
+    assert_eq!(run.status, AgentRunStatus::RetryWait);
+    assert_eq!(
+        run.last_error_code.as_deref(),
+        Some("tool_checkpoint_resolved")
+    );
+    assert!(call.status.is_terminal());
+    assert!(call.resolved_at.is_some());
+    let receipt = store
+        .get_sandbox_tool_call_receipt(call_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.error_code.as_deref(), Some("unavailable_tool"));
+    // No lane may claim work the host already answered.
+    assert!(store
+        .list_sandbox_tool_call_candidates(8)
+        .await
+        .unwrap()
+        .is_empty());
+    // The same commit replayed recovers the identical checkpoint.
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &entry)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Existing { .. }
+    ));
 }

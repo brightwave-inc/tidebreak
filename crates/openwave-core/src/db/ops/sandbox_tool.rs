@@ -12,8 +12,9 @@ use crate::agent_tools::{
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
 use crate::model::{
-    AgentRunStatus, AgentRunTier, DelegatedFileReadClaim, SandboxToolCall, SandboxToolCallReceipt,
-    SandboxToolCallRequest, SandboxToolCallStatus, ToolCallRecord, ToolCallResolution,
+    AgentRunStatus, AgentRunTier, DelegatedFileReadClaim, SandboxToolCall,
+    SandboxToolCallParkEntry, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SandboxToolCallStatus, ToolCallRecord, ToolCallResolution,
 };
 use crate::storage::{
     ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ParkSandboxToolCallOutcome,
@@ -30,25 +31,39 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
     store: &DbStore,
     agent_run_id: AgentRunId,
     lease_token: uuid::Uuid,
-    call: &SandboxToolCallRequest,
+    entry: &SandboxToolCallParkEntry,
 ) -> Result<ParkSandboxToolCallOutcome> {
+    let SandboxToolCallParkEntry { call, resolution } = entry;
+    // A synthetic entry carries the model's own arguments verbatim so the
+    // replayed transcript shows what it actually sent. Only the identity
+    // fields are checked for it; the per-tool argument rules exist to keep an
+    // executor lane from inheriting work it can only fail on, and no lane will
+    // ever see this row.
+    let dispatchable = resolution.is_none();
     if lease_token.is_nil()
         || !call.is_well_formed()
         || call.agent_run_id != agent_run_id
-        || (call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
+        || (dispatchable
+            && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
             && !validate_sandbox_read_delegated_file_arguments(&call.arguments))
         // Exec arguments are checked here as well as in the executor: the
         // checkpoint is immutable once parked, so an out-of-bounds command must
         // never become a durable row the lane can only fail on.
-        || (call.name == SANDBOX_EXEC_TOOL && !validate_sandbox_exec_arguments(&call.arguments))
+        || (dispatchable
+            && call.name == SANDBOX_EXEC_TOOL
+            && !validate_sandbox_exec_arguments(&call.arguments))
     {
         return Err(AgentError::Store(
             "invalid sandbox tool checkpoint request".into(),
         ));
     }
+    if let Some(resolution) = resolution {
+        validate_resolution(resolution)?;
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
-    if call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
+    if dispatchable
+        && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
         && !acquire_chat_write_lock(&transaction, call.chat_id).await?
     {
         transaction.commit().await.map_err(store_err)?;
@@ -61,7 +76,17 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         .await
         .map_err(store_err)?
     {
-        let exact = request_matches(&existing, call) && existing.park_lease_token == lease_token;
+        let receipt = entities::sandbox_tool_call_receipt::Entity::find_by_id(call.id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        // A synthetic park commits its row and its receipt together, so a
+        // recovered commit is only this exact park when both are present.
+        let exact = request_matches(&existing, call)
+            && existing.park_lease_token == lease_token
+            && resolution.as_ref().is_none_or(|resolution| {
+                receipt.is_some_and(|row| receipt_matches(&row, resolution))
+            });
         let run = find_by_id_on(&transaction, agent_run_id).await?;
         transaction.commit().await.map_err(store_err)?;
         return if exact {
@@ -81,7 +106,8 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::LeaseLost);
     };
-    if call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
+    if dispatchable
+        && call.name == SANDBOX_READ_DELEGATED_FILE_TOOL
         && delegated_file_resource_on(&transaction, agent_run_id, call.chat_id)
             .await?
             .is_none()
@@ -118,6 +144,11 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::IdentityConflict);
     }
+    let status = resolution
+        .as_ref()
+        .map_or(SandboxToolCallStatus::Accepted, |resolution| {
+            resolution_status(resolution)
+        });
     entities::sandbox_tool_call::ActiveModel {
         id: Set(call.id.0),
         agent_run_id: Set(agent_run_id.0),
@@ -126,7 +157,7 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         provider_id: Set(call.provider_id.clone()),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
-        status: Set(SandboxToolCallStatus::Accepted.as_str().into()),
+        status: Set(status.as_str().into()),
         park_lease_token: Set(lease_token),
         park_attempt_count: Set(run.attempt_count),
         park_claim_count: Set(run.claim_count),
@@ -134,16 +165,60 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         executor_lease_expires_at: Set(None),
         retry_at: Set(None),
         created_at: Set(now),
-        resolved_at: Set(None),
+        resolved_at: Set(resolution.as_ref().map(|_| now)),
     }
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    let updated = entities::agent_run::Entity::update_many()
-        .col_expr(
+    if let Some(resolution) = resolution {
+        let (error_code, error_detail) = resolution_error(resolution);
+        entities::sandbox_tool_call_receipt::ActiveModel {
+            call_id: Set(call.id.0),
+            // No executor ever held this call, so its own park lease stands in
+            // as the producing authority — the convention terminalization on
+            // the host side already uses.
+            executor_lease_token: Set(lease_token),
+            status: Set(status.as_str().into()),
+            result: Set(resolution.result().to_owned()),
+            error_code: Set(error_code),
+            error_detail: Set(error_detail),
+            resolved_at: Set(now),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
+    }
+    let mut update = entities::agent_run::Entity::update_many();
+    if resolution.is_some() {
+        // Nothing will resolve this row later, so parking it into `waiting`
+        // would strand the run there forever. It goes straight back on the
+        // schedule to consume the receipt it just committed.
+        update = update
+            .col_expr(
+                entities::agent_run::Column::Status,
+                sea_orm::sea_query::Expr::value(AgentRunStatus::RetryWait.as_str()),
+            )
+            .col_expr(
+                entities::agent_run::Column::LastErrorCode,
+                sea_orm::sea_query::Expr::value(Some("tool_checkpoint_resolved".to_owned())),
+            )
+            .col_expr(
+                entities::agent_run::Column::LastErrorDetail,
+                sea_orm::sea_query::Expr::value(Some(
+                    "sandbox tool result receipt committed".to_owned(),
+                )),
+            )
+            .col_expr(
+                entities::agent_run::Column::AvailableAt,
+                sea_orm::sea_query::Expr::value(now),
+            );
+    } else {
+        update = update.col_expr(
             entities::agent_run::Column::Status,
             sea_orm::sea_query::Expr::value(AgentRunStatus::Waiting.as_str()),
-        )
+        );
+    }
+    let updated = update
         .col_expr(
             entities::agent_run::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
