@@ -4,15 +4,12 @@
 //! The first tool execution outside a model turn: the sandboxed app frame
 //! posts a call to the trusted renderer, the renderer forwards it here on its
 //! bearer, and the server executes the pinned operation through the governed
-//! REST executor — minus the turn. The `tool` surface still parses (stored
-//! manifests may pin mounted MCP tools) but refuses before dispatch: tool
-//! bindings are retired (#1332), and REST operations are the one invocable
-//! surface. Enforcement is entirely server-side and fails closed, in a fixed
-//! order: the app must exist with a current revision, the requested
-//! capability must be pinned in that revision's manifest bindings, and a live
-//! app grant must cover the call — including that every granted connected
-//! app's current definition still matches the fingerprint recorded at
-//! consent.
+//! REST executor — minus the turn. Enforcement is entirely server-side and
+//! fails closed, in a fixed order: the app must exist with a current
+//! revision, the requested capability must be pinned in that revision's
+//! manifest bindings, and a live app grant must cover the call — including
+//! that every granted connected app's current definition still matches the
+//! fingerprint recorded at consent.
 //!
 //! Chat approval gates, permission modes, and plan mode deliberately do not
 //! apply: there is no chat. The app grant is the whole policy.
@@ -25,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use openwave_core::id::AppId;
 use openwave_core::local_app::{AppBinding, AppGrantBinding, AppRecord, AppRevision};
-use openwave_core::{AgentError, ChatId, ToolCtx};
+use openwave_core::AgentError;
 
 use crate::connected_apps::{current_fingerprints, current_rest_definitions};
 use crate::error::ServerError;
@@ -34,28 +31,23 @@ use crate::rest_executor::{RestExecuteError, RestOperationRequest};
 use crate::state::AppState;
 
 /// Body bound for an invoke request: a capability name plus its opaque
-/// arguments. Generous for a tool call, far below the MCP client's own 2 MiB
-/// JSON-RPC frame bound so an admitted request can always be forwarded, and
-/// exactly the governed REST executor's request-body cap.
+/// arguments. Far below the governed REST executor's request-body cap, and
+/// exactly that cap.
 pub(crate) const MAX_APP_INVOKE_BODY_BYTES: usize = 256 * 1024;
 
-/// Body of `POST /apps/{id}/invoke` — one of the two invocable surfaces.
+/// Body of `POST /apps/{id}/invoke` — one of the invocable surfaces.
 ///
-/// Either `tool` (with optional `arguments`) for a mounted MCP tool, or
-/// `operation_id` (with optional `parameters`/`body`) for a declared REST
-/// operation — never both, never neither. The passthrough halves
-/// (`arguments`, `parameters`, `body`) are opaque JSON authored inside the
-/// sandboxed app frame; the server hands them to the executor verbatim and
-/// the renderer never interprets them, so — like [`super::McpAppPayload`] —
-/// this request has a hand-written TS twin rather than a generated wire type:
-/// the generator's precision guard rightly refuses `any`-shaped fields.
+/// Either `operation_id` (with optional `parameters`/`body`) for a declared
+/// REST operation, or `folder` (with `op` and its fields) for a connected
+/// folder — never both, never neither. The passthrough halves (`parameters`,
+/// `body`) are opaque JSON authored inside the sandboxed app frame; the
+/// server hands them to the executor verbatim and the renderer never
+/// interprets them, so — like [`super::McpAppPayload`] — this request has a
+/// hand-written TS twin rather than a generated wire type: the generator's
+/// precision guard rightly refuses `any`-shaped fields.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppInvokeRequest {
-    /// Full mounted name (`mcp__{server}__{tool}`) of the pinned tool to run.
-    pub tool: Option<String>,
-    /// Opaque arguments for the tool, passed through untouched.
-    pub arguments: Option<serde_json::Value>,
     /// Catalog `operationId` of the pinned REST operation to execute.
     pub operation_id: Option<String>,
     /// Declared parameter values for the operation, name → JSON scalar.
@@ -76,27 +68,9 @@ pub struct AppInvokeRequest {
     pub replace: Option<bool>,
 }
 
-/// Result of a granted MCP-tool invoke, packaged for the sandboxed app frame.
-///
-/// Deliberately not a generated wire type, for the same reason as the
-/// request: `structured_content` is opaque passthrough the renderer forwards
-/// to the frame without reading. Both halves have already crossed the MCP
-/// client's result clamp, so nothing here exceeds the 1 MiB call-result bound.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct AppInvokeResult {
-    /// The call result's text content, clamped by the MCP client.
-    pub content: String,
-    /// The call's structured content, absent when the server sent none or the
-    /// clamp dropped an oversized payload (the text then carries a marker).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub structured_content: Option<serde_json::Value>,
-    /// Whether the external tool reported its own failure.
-    pub is_error: bool,
-}
-
 /// Result of a granted REST-operation invoke, packaged for the sandboxed app
-/// frame — [`AppInvokeResult`]'s sibling for the `rest_api` surface, and a
-/// hand-written TS twin for the same reason.
+/// frame — a hand-written TS twin rather than a generated wire type, for the
+/// same passthrough reason as the request.
 ///
 /// An executed operation crosses as opaque passthrough: whatever status the
 /// API answered (including 4xx/5xx and unfollowed redirects) with
@@ -141,8 +115,8 @@ pub enum AppInvokeRefusalKind {
     NotPinned,
     /// The pinned capability is not covered by a live app grant.
     ConsentRequired,
-    /// The pinned name does not resolve to a mounted MCP tool or a declared
-    /// catalog operation right now.
+    /// The pinned name does not resolve to a declared catalog operation or an
+    /// available connected folder right now.
     UnknownTool,
 }
 
@@ -201,10 +175,6 @@ impl IntoResponse for AppInvokeError {
 
 /// Which surface one admitted request names.
 enum InvokeSurface {
-    Tool {
-        tool: String,
-        arguments: serde_json::Value,
-    },
     Operation(RestOperationRequest),
     Folder {
         folder: openwave_core::id::HostRootId,
@@ -237,25 +207,9 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
             message,
         ))
     };
-    match (request.tool, request.operation_id, request.folder) {
-        (Some(tool), None, None) => {
-            if request.parameters.is_some()
-                || request.body.is_some()
-                || request.op.is_some()
-                || request.path.is_some()
-                || request.content_base64.is_some()
-                || request.replace.is_some()
-            {
-                return Err(invalid("a tool invoke takes arguments and nothing else"));
-            }
-            Ok(InvokeSurface::Tool {
-                tool,
-                arguments: request.arguments.unwrap_or_default(),
-            })
-        }
-        (None, Some(operation_id), None) => {
-            if request.arguments.is_some()
-                || request.op.is_some()
+    match (request.operation_id, request.folder) {
+        (Some(operation_id), None) => {
+            if request.op.is_some()
                 || request.path.is_some()
                 || request.content_base64.is_some()
                 || request.replace.is_some()
@@ -272,9 +226,8 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
                 body: request.body,
             }))
         }
-        (None, None, Some(folder)) => {
-            if request.arguments.is_some() || request.parameters.is_some() || request.body.is_some()
-            {
+        (None, Some(folder)) => {
+            if request.parameters.is_some() || request.body.is_some() {
                 return Err(invalid(
                     "a folder invoke takes op, path, content_base64, and replace \
                      and nothing else",
@@ -314,7 +267,7 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
             Ok(InvokeSurface::Folder { folder, path, op })
         }
         _ => Err(invalid(
-            "exactly one of tool, operation_id, or folder must be provided",
+            "exactly one of operation_id or folder must be provided",
         )),
     }
 }
@@ -334,13 +287,6 @@ pub async fn post_app_invoke(
     let surface = requested_surface(request)?;
     let (app, revision) = current_app_revision(&state, app_id).await?;
     match surface {
-        InvokeSurface::Tool { tool, arguments } => {
-            require_pinned_tool(&revision, &tool)?;
-            require_app_grant(&state, &app, &revision, &Pinned::Tool(&tool)).await?;
-            dispatch_mounted_tool(&state, &tool, arguments)
-                .await
-                .map(|result| Json(result).into_response())
-        }
         InvokeSurface::Operation(request) => {
             require_pinned_operation(&revision, &request.operation_id)?;
             require_app_grant(
@@ -401,25 +347,6 @@ async fn current_app_revision(
     Ok((app, revision))
 }
 
-/// Refuse any tool the current revision's manifest does not pin.
-fn require_pinned_tool(revision: &AppRevision, tool: &str) -> Result<(), AppInvokeError> {
-    let pinned = revision
-        .manifest
-        .bindings
-        .iter()
-        .any(|binding| match binding {
-            AppBinding::Tools(binding) => binding.tools.iter().any(|pinned| pinned == tool),
-            AppBinding::Operations(_) | AppBinding::Folder(_) => false,
-        });
-    if pinned {
-        return Ok(());
-    }
-    Err(AppInvokeError::refused(
-        AppInvokeRefusalKind::NotPinned,
-        format!("{tool:?} is not pinned in this app's current manifest"),
-    ))
-}
-
 /// Refuse any operation the current revision's manifest does not pin.
 fn require_pinned_operation(
     revision: &AppRevision,
@@ -434,7 +361,7 @@ fn require_pinned_operation(
                 .operation_ids
                 .iter()
                 .any(|pinned| pinned == operation_id),
-            AppBinding::Tools(_) | AppBinding::Folder(_) => false,
+            AppBinding::Folder(_) => false,
         });
     if pinned {
         return Ok(());
@@ -463,7 +390,7 @@ fn require_pinned_folder(
                     && (!writes
                         || binding.access == openwave_core::local_app::FolderAccess::ReadWrite)
             }
-            AppBinding::Tools(_) | AppBinding::Operations(_) => false,
+            AppBinding::Operations(_) => false,
         });
     if pinned {
         return Ok(());
@@ -480,7 +407,6 @@ fn require_pinned_folder(
 
 /// The invoked capability, for the grant gate.
 enum Pinned<'a> {
-    Tool(&'a str),
     Operation(&'a str),
     Folder {
         folder: openwave_core::id::HostRootId,
@@ -491,7 +417,6 @@ enum Pinned<'a> {
 impl Pinned<'_> {
     fn description(&self) -> String {
         match self {
-            Self::Tool(tool) => format!("{tool:?}"),
             Self::Operation(operation_id) => format!("operation {operation_id:?}"),
             Self::Folder { folder, writes } => {
                 if *writes {
@@ -529,19 +454,6 @@ async fn require_app_grant(
 ) -> Result<(), AppInvokeError> {
     let consent_required =
         |message: String| AppInvokeError::refused(AppInvokeRefusalKind::ConsentRequired, message);
-    // Mounted-tool bindings are retired (#1332): the consent route no longer
-    // grants them, and a grant recorded before the retirement must not keep
-    // the legacy surface invokable. Refusing here — before the grant is even
-    // read — is what makes the retirement hold for pre-existing grants, and
-    // `consent_required` is deliberate: it routes the user to the sheet,
-    // whose refusal explains what the app must be revised to bind.
-    if let Pinned::Tool(_) = pinned {
-        return Err(consent_required(
-            "mounted MCP tools are no longer invokable from apps; this app must be \
-             revised to bind a rest_api connected app's operations"
-                .into(),
-        ));
-    }
     let Some(grant) = state.store.get_app_grant(app.id).await? else {
         return Err(consent_required(format!(
             "no live app grant covers {}",
@@ -571,9 +483,6 @@ async fn require_app_grant(
                 .bindings
                 .iter()
                 .find(|binding| match (binding, pinned) {
-                    (AppBinding::Tools(binding), Pinned::Tool(tool)) => {
-                        binding.tools.iter().any(|held| held == tool)
-                    }
                     (AppBinding::Operations(binding), Pinned::Operation(operation_id)) => binding
                         .operation_ids
                         .iter()
@@ -586,10 +495,6 @@ async fn require_app_grant(
                     .bindings
                     .iter()
                     .any(|binding| match (binding, pinned) {
-                        (AppGrantBinding::Tools(binding), Pinned::Tool(tool)) => {
-                            binding.app == connected_app
-                                && binding.tools.iter().any(|granted| granted == tool)
-                        }
                         (AppGrantBinding::Operations(binding), Pinned::Operation(operation_id)) => {
                             binding.app == connected_app
                                 && binding
@@ -626,46 +531,6 @@ async fn require_app_grant(
         }
     }
     Ok(())
-}
-
-/// Resolve a pinned name against the current MCP snapshot and execute it.
-///
-/// This path invokes mounted MCP tools only. The name must carry the mounted
-/// `mcp__{server}__{tool}` shape — which no built-in server tool does — and
-/// must resolve to a server-executed registration; a client-executed contract
-/// has no executor here and refuses. The execution context is deliberately
-/// inert: no chat owns this call and no scratch is attached, so nothing
-/// dispatched from here could reach a workspace capability. The synthetic
-/// chat id is process-stable rather than per-call: gateway tools resolve a
-/// per-chat call credential from it, and a fresh id per invoke would mint a
-/// fresh gateway attestation context per invoke — pure token churn, since an
-/// app invoke has no model emission to attest and gateway-attested tools
-/// refuse it regardless (the recorded Direct-endpoints-only limitation).
-/// Results cross back through the MCP client's own 1 MiB call-result clamp.
-pub(crate) async fn dispatch_mounted_tool(
-    state: &AppState,
-    tool_name: &str,
-    arguments: serde_json::Value,
-) -> Result<AppInvokeResult, AppInvokeError> {
-    let unknown = || {
-        AppInvokeError::refused(
-            AppInvokeRefusalKind::UnknownTool,
-            format!("{tool_name:?} is not a mounted MCP tool"),
-        )
-    };
-    if !is_mounted_mcp_name(tool_name) {
-        return Err(unknown());
-    }
-    let registry = state.mcp.snapshot();
-    let tool = registry.get(tool_name).ok_or_else(unknown)?;
-    static APP_INVOKE_CHAT: std::sync::LazyLock<ChatId> = std::sync::LazyLock::new(ChatId::new);
-    let ctx = ToolCtx::without_private_scratch(*APP_INVOKE_CHAT, None);
-    let output = tool.execute(&ctx, arguments).await?;
-    Ok(AppInvokeResult {
-        content: output.content,
-        structured_content: output.data,
-        is_error: output.is_error,
-    })
 }
 
 /// Resolve the pinned operation's `rest_api` record and run the governed
@@ -850,16 +715,5 @@ async fn dispatch_folder_op(
                 Err(error) => AppFolderInvokeResult::failure(error),
             }
         }
-    })
-}
-
-/// Whether a name has the mounted `mcp__{server}__{tool}` shape.
-///
-/// The same grammar the manifest validator enforces on pins; repeated here so
-/// dispatch is independently safe when driven without the pin check.
-fn is_mounted_mcp_name(name: &str) -> bool {
-    name.strip_prefix("mcp__").is_some_and(|rest| {
-        rest.split_once("__")
-            .is_some_and(|(server, tool)| !server.is_empty() && !tool.is_empty())
     })
 }

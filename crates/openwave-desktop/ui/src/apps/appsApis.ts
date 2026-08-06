@@ -2,7 +2,6 @@ import type {
   ApiClient,
   AppDetail,
   AppGrantState,
-  AppInvokeResult,
   AppLibrary,
   AppFolderInvokeResult,
   AppRestInvokeResult,
@@ -25,7 +24,6 @@ export type AppsApis = {
   consent(appId: string): Promise<AppGrantState>;
   revoke(appId: string): Promise<void>;
   viewSession(appId: string): Promise<AppViewSessionInfo>;
-  invoke(appId: string, tool: string, args: unknown): Promise<AppInvokeResult>;
   invokeOperation(
     appId: string,
     operationId: string,
@@ -52,7 +50,6 @@ export function appsApisFromClient(client: ApiClient): AppsApis {
     consent: (appId) => client.consentAppGrant(appId),
     revoke: (appId) => client.revokeAppGrant(appId),
     viewSession: (appId) => client.createAppViewFrame(appId),
-    invoke: (appId, tool, args) => client.invokeApp(appId, tool, args),
     invokeOperation: (appId, operationId, parameters, body) =>
       client.invokeAppOperation(appId, operationId, parameters, body),
     invokeFolder: (appId, folder, op, path, contentBase64, replace) =>

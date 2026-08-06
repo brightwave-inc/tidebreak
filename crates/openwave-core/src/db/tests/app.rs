@@ -1,7 +1,7 @@
 use super::*;
 use crate::id::{AgentRunId, AppId, AppRevisionId, ConnectedAppId};
 use crate::local_app::{
-    AppBinding, AppManifest, AppToolsBinding, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
+    AppBinding, AppManifest, AppOperationsBinding, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
     MAX_APP_REVISIONS,
 };
 
@@ -16,9 +16,9 @@ fn digest(seed: u8) -> [u8; 32] {
 fn manifest(name: &str) -> AppManifest {
     AppManifest {
         name: name.to_owned(),
-        bindings: vec![AppBinding::Tools(AppToolsBinding {
+        bindings: vec![AppBinding::Operations(AppOperationsBinding {
             app: ConnectedAppId(uuid::Uuid::from_u128(1)),
-            tools: vec!["mcp__sentry__list_issues".into()],
+            operation_ids: vec!["listIssues".into()],
         })],
     }
 }
@@ -178,14 +178,14 @@ async fn a_revision_records_one_producer_and_dangling_conversation_provenance() 
 async fn malformed_manifests_and_out_of_bounds_bundles_are_refused() {
     let (_dir, store) = temp_store().await;
 
-    // A pinned name that is not shaped like a mounted tool can never match
-    // one, so the store refuses it at the door.
-    let mut bare_tool = create_request(1);
-    bare_tool.revision.manifest.bindings[0] = AppBinding::Tools(AppToolsBinding {
+    // A pinned id outside the operationId grammar can never match a declared
+    // operation, so the store refuses it at the door.
+    let mut bare_operation = create_request(1);
+    bare_operation.revision.manifest.bindings[0] = AppBinding::Operations(AppOperationsBinding {
         app: ConnectedAppId(uuid::Uuid::from_u128(1)),
-        tools: vec!["list_issues".into()],
+        operation_ids: vec!["not an operation id".into()],
     });
-    assert!(store.create_app(&bare_tool).await.is_err());
+    assert!(store.create_app(&bare_operation).await.is_err());
 
     let mut empty_bundle = create_request(1);
     empty_bundle.revision.byte_len = 0;
@@ -199,9 +199,9 @@ async fn malformed_manifests_and_out_of_bounds_bundles_are_refused() {
     let mut oversized_manifest = create_request(1);
     oversized_manifest.revision.manifest.bindings = (0..2_000)
         .map(|index| {
-            AppBinding::Tools(AppToolsBinding {
+            AppBinding::Operations(AppOperationsBinding {
                 app: ConnectedAppId::new(),
-                tools: vec![format!("mcp__server_{index:04}__tool_padding_padding")],
+                operation_ids: vec![format!("operation_{index:04}_padding_padding")],
             })
         })
         .collect();

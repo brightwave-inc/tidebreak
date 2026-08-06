@@ -14,7 +14,7 @@ const PAYLOAD: McpAppPayload = {
 
 function harness(
   theme: "light" | "dark" = "dark",
-  invokeTool?: Parameters<typeof createMcpAppBridge>[0]["invokeTool"],
+  invokeOperation?: Parameters<typeof createMcpAppBridge>[0]["invokeOperation"],
 ) {
   const postMessage = vi.fn();
   const frame = { postMessage } as unknown as Window;
@@ -24,7 +24,7 @@ function harness(
     frame: () => frame,
     theme: () => currentTheme,
     onHeight,
-    invokeTool,
+    invokeOperation,
   });
   const fromView = (data: unknown, source: unknown = frame) =>
     bridge.handleMessage({ data, source } as MessageEvent);
@@ -123,29 +123,37 @@ describe("createMcpAppBridge", () => {
     expect(sent()).toHaveLength(1);
   });
 
-  it("refuses tools/call without an invoker, and undeclared methods with one", () => {
-    // The transcript card wires no invoker: tools/call stays method-not-found
-    // there, exactly as before the app-open flow existed.
+  it("refuses operations/call without an invoker, and undeclared methods with one", () => {
+    // The transcript card wires no invoker: operations/call stays
+    // method-not-found there.
     const bare = harness();
     bare.fromView({
       jsonrpc: "2.0",
       id: 1,
-      method: "tools/call",
-      params: { name: "mcp__cmd__doit", arguments: {} },
+      method: "operations/call",
+      params: { operation_id: "listIssues" },
     });
     expect(bare.sent()).toEqual([
       { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } },
     ]);
 
-    // Wiring the invoker declares tools/call and nothing else: any other
-    // method still fails closed rather than acquiring a handler by accident.
-    const invokeTool = vi.fn();
-    const wired = harness("dark", invokeTool);
+    // Wiring the invoker declares operations/call and nothing else: any
+    // other method — including the removed tools/call verb — still fails
+    // closed rather than acquiring a handler by accident.
+    const invokeOperation = vi.fn();
+    const wired = harness("dark", invokeOperation);
     wired.fromView({ jsonrpc: "2.0", id: 2, method: "resources/read", params: {} });
+    wired.fromView({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "mcp__cmd__doit", arguments: {} },
+    });
     expect(wired.sent()).toEqual([
       { jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found" } },
+      { jsonrpc: "2.0", id: 3, error: { code: -32601, message: "Method not found" } },
     ]);
-    expect(invokeTool).not.toHaveBeenCalled();
+    expect(invokeOperation).not.toHaveBeenCalled();
   });
 
   it("answers ping and clamps size-changed heights", () => {

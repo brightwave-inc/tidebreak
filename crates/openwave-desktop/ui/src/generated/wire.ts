@@ -204,11 +204,10 @@ revisions: Array<AppRevisionSummary>, };
  * One current-manifest binding, projected for the consent sheet.
  *
  * Exactly one of `app` and `folder` is present, matching what the binding
- * names. An app-keyed row carries `tools` or `operation_ids` per its
- * vocabulary; a folder row carries `access`. The sheet derives the
- * combined-consent exfiltration warning (docs/folder-bindings.md) from the
- * rows themselves: a manifest with both a folder row and an operations row
- * can read files and reach the network.
+ * names. An app-keyed row carries `operation_ids`; a folder row carries
+ * `access`. The sheet derives the combined-consent exfiltration warning
+ * (docs/folder-bindings.md) from the rows themselves: a manifest with both a
+ * folder row and an operations row can read files and reach the network.
  */
 export type AppGrantBindingState = { 
 /**
@@ -231,11 +230,6 @@ access: FolderAccess | null,
  * instead of showing a raw id alone.
  */
 name: string | null, 
-/**
- * Full mounted tool names the current manifest pins under this app, for
- * an `mcp_server` binding.
- */
-tools: Array<string> | null, 
 /**
  * Catalog `operationId`s the current manifest pins under this app, for a
  * `rest_api` binding.

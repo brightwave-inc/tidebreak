@@ -594,21 +594,12 @@ export type AppGrantState = WireAppGrantState;
 export type AppViewSessionInfo = AppViewSession;
 
 /**
- * Result of a granted app invoke, forwarded verbatim to the sandboxed frame.
+ * Result of a granted REST-operation invoke, forwarded verbatim to the
+ * sandboxed frame.
  *
  * Hand-written on purpose, like [`McpAppPayload`] and for the same reason:
- * `structured_content` is opaque passthrough the renderer never interprets,
- * which the wire-type generator's precision guard refuses.
- */
-export type AppInvokeResult = {
-  content: string;
-  structured_content?: unknown;
-  is_error: boolean;
-};
-
-/**
- * Result of a granted REST-operation invoke — {@link AppInvokeResult}'s
- * sibling for `rest_api` bindings, hand-written for the same reason.
+ * the response is opaque passthrough the renderer never interprets, which
+ * the wire-type generator's precision guard refuses.
  *
  * An executed operation is opaque passthrough: whatever HTTP status the API
  * answered (4xx/5xx included) with `is_error: false` and the raw response
@@ -1315,27 +1306,12 @@ export class ApiClient {
   }
 
   /**
-   * Execute one of an app's pinned tools outside any turn. `args` and the
-   * result are opaque passthrough between the sandboxed frame and the server;
-   * a typed refusal surfaces as {@link AppInvokeRefusalError} so the caller
-   * can branch on `consent_required` without string-matching prose.
-   */
-  async invokeApp(
-    appId: string,
-    tool: string,
-    args: unknown,
-  ): Promise<AppInvokeResult> {
-    return (await this.postAppInvoke(appId, {
-      tool,
-      arguments: args,
-    })) as AppInvokeResult;
-  }
-
-  /**
-   * Execute one of an app's pinned REST operations outside any turn — the
-   * `operation_id` sibling of {@link invokeApp}, with the same opaque
-   * passthrough and refusal contract. The response body crosses base64-
-   * encoded in `body_base64` (see {@link AppRestInvokeResult}).
+   * Execute one of an app's pinned REST operations outside any turn.
+   * `parameters`, `body`, and the result are opaque passthrough between the
+   * sandboxed frame and the server; a typed refusal surfaces as
+   * {@link AppInvokeRefusalError} so the caller can branch on
+   * `consent_required` without string-matching prose. The response body
+   * crosses base64-encoded in `body_base64` (see {@link AppRestInvokeResult}).
    */
   async invokeAppOperation(
     appId: string,
@@ -1351,9 +1327,10 @@ export class ApiClient {
 
   /**
    * Execute one folder operation of an app's granted folder binding — the
-   * `folder` sibling of {@link invokeApp}, with the same refusal contract.
-   * File content crosses base64-encoded in both directions; failures come
-   * back as `is_error` results in the host's closed vocabulary.
+   * `folder` sibling of {@link invokeAppOperation}, with the same refusal
+   * contract. File content crosses base64-encoded in both directions;
+   * failures come back as `is_error` results in the host's closed
+   * vocabulary.
    */
   async invokeAppFolder(
     appId: string,

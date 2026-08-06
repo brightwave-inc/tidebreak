@@ -2,9 +2,9 @@
 
 Agent-generated mini-apps that live in the profile: a bounded HTML document
 rendered in the sandboxed view-frame machinery, plus a manifest that pins the
-exact mounted MCP tools the app may call. The user asks for "a Sentry triage
-view" once; the result is a durable, revisable surface they can reopen from the
-sidebar instead of a conversation they re-run.
+exact connected-app operations and folders the app may call. The user asks
+for "a Sentry triage view" once; the result is a durable, revisable surface
+they can reopen from the sidebar instead of a conversation they re-run.
 
 This page is the design overview for the local-first slice. Sharing is
 deliberately out of scope: the eventual sharing plane is a model gateway
@@ -13,15 +13,16 @@ deliberately out of scope: the eventual sharing plane is a model gateway
 ## Product flow
 
 1. In a conversation, the foreground agent calls `create_app` with a name, an
-   HTML bundle, and a manifest naming the tools the app uses. The transcript
-   shows an app card; revisions of the same app append, never overwrite.
+   HTML bundle, and a manifest naming the capabilities the app uses. The
+   transcript shows an app card; revisions of the same app append, never
+   overwrite.
 2. The user opens the app — from the card or from an **Apps** library on the
-   home sidebar. First open (and any open after the app's tool needs change)
-   presents a consent sheet listing exactly which servers and tools the app may
-   call. Consent is per-app, durable, and revocable from the library.
-3. The app renders in a sandboxed frame and drives its pinned tools through the
-   host. Results render however the app likes; the app never holds a
-   credential and has no network of its own.
+   home sidebar. First open (and any open after the app's capability needs
+   change) presents a consent sheet listing exactly what the app may call.
+   Consent is per-app, durable, and revocable from the library.
+3. The app renders in a sandboxed frame and drives its pinned capabilities
+   through the host. Results render however the app likes; the app never
+   holds a credential and has no network of its own.
 
 ## Two parts, two trust levels
 
@@ -31,10 +32,11 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
   prefetched MCP view). It is assumed hostile: prompt injection anywhere in a
   conversation can author it.
 - The manifest is small, structural JSON: a display name and
-  `bindings: [{ app, tools[] }]` naming mounted tool names under the
+  `bindings: [{ app, operation_ids[] }]` naming declared operations under the
   connected-app records ([connected-apps.md](connected-apps.md)) that
-  contribute them. The manifest — not the bundle — is what the user consents
-  to and what the host enforces per call.
+  contribute them, or `{ folder, access }` naming a connected folder. The
+  manifest — not the bundle — is what the user consents to and what the host
+  enforces per call.
 
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,
@@ -153,14 +155,12 @@ covered better, and their consentable universe was the wrong shape for apps:
 a manifest could pin tools of *any* mounted transport — local stdio, remote
 HTTP, or gateway endpoints — putting "run a local process on this machine"
 inside the app-grantable world, while gateway-attested endpoints refused
-app-driven session-token calls regardless. The doors now refuse the
-vocabulary end to end: `create_app` refuses to author a `tools` binding, the
-consent route conflicts instead of granting one, and the invoke route
-refuses the tool surface even under a grant recorded before the retirement —
-the failure direction is re-ask, never widen. The grammar still parses
-stored manifests, which read as ungrantable on every surface; full removal
-of the vocabulary (types, wire shapes, the frame bridge's `tools/call` verb)
-is a separate mechanical change.
+app-driven session-token calls regardless. #1332 first refused the vocabulary
+at every door (authoring, consent, invoke) while keeping stored manifests
+parseable; #1589 then removed it end to end — the types, the shared binding
+grammar's tools arm, the invoke route's tool surface, the frame bridge's
+`tools/call` verb, and the wire shapes are gone, and the pre-v1 schema epoch
+was bumped so profiles carrying the old vocabulary are rebuilt.
 
 Mounted MCP servers themselves are unchanged: chats keep their full tool
 surface. The retirement narrows what an *app manifest* may pin, nothing

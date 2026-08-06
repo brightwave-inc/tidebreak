@@ -206,10 +206,6 @@ impl CurrentFingerprints {
     /// match.
     pub(crate) fn grant_binding_current(&self, binding: &AppGrantBinding) -> bool {
         match binding {
-            AppGrantBinding::Tools(binding) => self
-                .apps
-                .get(&binding.app)
-                .is_some_and(|app| app.fingerprint == binding.fingerprint),
             AppGrantBinding::Operations(binding) => self
                 .apps
                 .get(&binding.app)
