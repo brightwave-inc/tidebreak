@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 
 use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
-    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, ResponseFormat,
-    StopReason, ToolChoice, Usage,
+    provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider, ProviderEvent,
+    ProviderId, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
@@ -361,7 +361,17 @@ fn extend_openai_messages(
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Text { text } => Some(text.clone()),
+            // Chat Completions has no item for a call another provider ran
+            // server-side, so it rides along as one compact line of prose.
+            ContentBlock::ProviderExecutedToolCall {
+                name,
+                input,
+                output,
+                is_error,
+            } => Some(provider_executed_tool_call_text(
+                name, input, output, *is_error,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>()

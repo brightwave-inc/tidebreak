@@ -153,6 +153,62 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// A tool call the provider executed on its own infrastructure during the
+    /// turn.
+    ///
+    /// Both the call and its result are already final — there is no client
+    /// execution loop and nothing to answer. Hosts persist and display it like
+    /// an ordinary tool call, but must never dispatch it to the tool registry:
+    /// the work is done, and re-running it would repeat an effect the provider
+    /// already had.
+    ProviderExecutedToolCall {
+        /// Tool name as shown to users and the journal, e.g. `web_search`.
+        name: String,
+        /// The arguments the provider ran the tool with.
+        input: Value,
+        /// The result, normalized to the shape the host's own tool of that
+        /// name produces, so one renderer draws both.
+        output: Value,
+        /// Whether the provider's tool failed.
+        #[serde(default)]
+        is_error: bool,
+    },
+}
+
+/// Render a provider-executed tool call as one line of assistant prose.
+///
+/// Adapters whose wire format has no place for a call the *other* provider ran
+/// send this instead, so replayed history keeps the fact that a search
+/// happened and what it found rather than dropping it silently. Compact by
+/// design: it rides in the model's context on every later request.
+#[must_use]
+pub fn provider_executed_tool_call_text(
+    name: &str,
+    input: &Value,
+    output: &Value,
+    is_error: bool,
+) -> String {
+    /// Cap on the rendered subject, so an unbounded input cannot grow the
+    /// prompt one line at a time.
+    const MAX_SUBJECT_CHARS: usize = 200;
+
+    let subject = match input.get("query").and_then(Value::as_str) {
+        Some(query) => query.to_owned(),
+        None => input.to_string(),
+    };
+    let subject: String = subject.chars().take(MAX_SUBJECT_CHARS).collect();
+    let outcome = if is_error {
+        match output.get("error_code").and_then(Value::as_str) {
+            Some(code) => format!("failed ({code})"),
+            None => "failed".to_owned(),
+        }
+    } else {
+        match output.get("results").and_then(Value::as_array) {
+            Some(results) => format!("{} results", results.len()),
+            None => "done".to_owned(),
+        }
+    };
+    format!("[{name}: {subject} -> {outcome}]")
 }
 
 /// A single message in the conversation sent to a provider.
@@ -527,6 +583,22 @@ pub enum ProviderEvent {
         /// Partial JSON to concatenate.
         fragment: String,
     },
+    /// A tool the provider ran server-side, call and result both complete.
+    ///
+    /// Nothing downstream executes it — see
+    /// [`ContentBlock::ProviderExecutedToolCall`], which this becomes. An
+    /// adapter emits it only once the provider has reported the result, so a
+    /// consumer never has to correlate it with anything.
+    ProviderExecutedToolCall {
+        /// Tool name as shown to users and the journal, e.g. `web_search`.
+        name: String,
+        /// The arguments the provider ran the tool with.
+        input: Value,
+        /// The result, normalized to the host tool's own output shape.
+        output: Value,
+        /// Whether the provider's tool failed.
+        is_error: bool,
+    },
     /// Final token usage for the completion.
     Usage(Usage),
     /// The completion has stopped.
@@ -586,6 +658,39 @@ mod tests {
         let json = serde_json::to_value(ContentBlock::Text { text: "hi".into() }).unwrap();
         assert_eq!(json["type"], "text");
         assert_eq!(json["text"], "hi");
+    }
+
+    #[test]
+    fn a_provider_executed_call_renders_as_one_bounded_line() {
+        // Adapters with no wire form for another provider's server-side call
+        // send this instead, and it rides in context on every later request.
+        let results = serde_json::json!({"provider": "anthropic", "results": [{}, {}]});
+        assert_eq!(
+            provider_executed_tool_call_text(
+                "web_search",
+                &serde_json::json!({"query": "rust 2027"}),
+                &results,
+                false
+            ),
+            "[web_search: rust 2027 -> 2 results]"
+        );
+        assert_eq!(
+            provider_executed_tool_call_text(
+                "web_search",
+                &serde_json::json!({"query": "q"}),
+                &serde_json::json!({"error_code": "max_uses_exceeded"}),
+                true
+            ),
+            "[web_search: q -> failed (max_uses_exceeded)]"
+        );
+        // An unbounded input cannot grow the prompt one line at a time.
+        let long = provider_executed_tool_call_text(
+            "web_search",
+            &serde_json::json!({"query": "x".repeat(10_000)}),
+            &results,
+            false,
+        );
+        assert!(long.chars().count() < 300, "{}", long.chars().count());
     }
 
     #[test]

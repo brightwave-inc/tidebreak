@@ -43,6 +43,20 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
             content,
             ..
         } => TOOL_RESULT_OVERHEAD + estimate_tokens(tool_use_id) + estimate_tokens(content),
+        // Call and result both ride in one block, so it costs about what a
+        // tool-use plus its result would.
+        ContentBlock::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            ..
+        } => {
+            TOOL_USE_OVERHEAD
+                + TOOL_RESULT_OVERHEAD
+                + estimate_tokens(name)
+                + estimate_tokens(&input.to_string())
+                + estimate_tokens(&output.to_string())
+        }
     }
 }
 
@@ -341,6 +355,7 @@ fn block_overhead(block: &ContentBlock) -> usize {
         ContentBlock::Image { .. } => IMAGE_OVERHEAD,
         ContentBlock::ToolUse { .. } => TOOL_USE_OVERHEAD,
         ContentBlock::ToolResult { .. } => TOOL_RESULT_OVERHEAD,
+        ContentBlock::ProviderExecutedToolCall { .. } => TOOL_USE_OVERHEAD + TOOL_RESULT_OVERHEAD,
     }
 }
 
@@ -550,6 +565,28 @@ fn truncate_block(block: &ContentBlock, target_tokens: usize) -> ContentBlock {
             ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content: truncate_str(content, budget),
+                is_error: *is_error,
+            }
+        }
+        // The result is the compressible half — the call's own arguments are
+        // small and identify what was run.
+        ContentBlock::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            is_error,
+        } => {
+            let fixed = TOOL_USE_OVERHEAD
+                + TOOL_RESULT_OVERHEAD
+                + estimate_tokens(name)
+                + estimate_tokens(&input.to_string());
+            let budget = target_tokens.saturating_sub(fixed);
+            let output_str = output.to_string();
+            let truncated = truncate_str(&output_str, budget);
+            ContentBlock::ProviderExecutedToolCall {
+                name: name.clone(),
+                input: input.clone(),
+                output: serde_json::json!({ "truncated_output": truncated }),
                 is_error: *is_error,
             }
         }

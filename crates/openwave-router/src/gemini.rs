@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
-    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
-    ResponseFormat, StopReason, ToolChoice, Usage,
+    provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider, ProviderEvent,
+    ProviderId, RefusalDetails, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
@@ -886,6 +886,17 @@ fn gemini_contents(
                         },
                     }));
                 }
+                // Gemini has no part for a call another provider ran
+                // server-side, and its own grounding is a different mechanism
+                // entirely. One line of text keeps the fact of the search.
+                ContentBlock::ProviderExecutedToolCall {
+                    name,
+                    input,
+                    output,
+                    is_error,
+                } => parts.push(json!({
+                    "text": provider_executed_tool_call_text(name, input, output, *is_error),
+                })),
                 // `ContentBlock` is deliberately open for new provider-neutral
                 // variants. Dropping one here would silently change the model
                 // prompt, so make the adapter fail until that new variant gains

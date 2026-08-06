@@ -84,6 +84,9 @@ struct StreamAttempt {
     end: StreamEnd,
     text: String,
     calls: Vec<PendingCall>,
+    /// Tool calls the provider ran server-side, already complete. Never
+    /// dispatched — see [`ContentBlock::ProviderExecutedToolCall`].
+    provider_executed: Vec<ContentBlock>,
     reasoning: Vec<Value>,
     stop_reason: StopReason,
     refusal_details: Option<RefusalDetails>,
@@ -1480,6 +1483,7 @@ impl Agent {
                 end: stream_end,
                 text,
                 mut calls,
+                provider_executed,
                 mut reasoning,
                 stop_reason,
                 refusal_details,
@@ -1793,6 +1797,10 @@ impl Agent {
                     self.persist_assistant(chat.id, turn_id, &candidate).await?;
                 }
             }
+            // Searches the provider ran on its own infrastructure during this
+            // step. They sit between the prose and the calls the loop is about
+            // to make, which is where they happened. Nothing dispatches them.
+            blocks.extend(provider_executed);
             for call in &calls {
                 // The transcript block stays the coerced value: it goes back
                 // to the provider, whose tool-use input must be valid JSON.
@@ -2716,6 +2724,7 @@ impl Agent {
     ) -> Result<StreamAttempt> {
         let mut text = String::new();
         let mut calls = Vec::new();
+        let mut provider_executed = Vec::new();
         let mut reasoning = Vec::new();
         let mut by_index = HashMap::new();
         let mut stop_reason = StopReason::EndTurn;
@@ -2774,6 +2783,23 @@ impl Agent {
                     })?;
                     progress.usage = *total_usage;
                 }
+                // The provider already ran this one and reported its result.
+                // It joins the assistant message as a record of what happened;
+                // it never becomes a `PendingCall`, so no dispatch path can
+                // reach it.
+                ProviderEvent::ProviderExecutedToolCall {
+                    name,
+                    input,
+                    output,
+                    is_error,
+                } => {
+                    provider_executed.push(ContentBlock::ProviderExecutedToolCall {
+                        name,
+                        input,
+                        output,
+                        is_error,
+                    });
+                }
                 ProviderEvent::Stop { reason } => stop_reason = reason,
                 ProviderEvent::Refusal { details } => {
                     stop_reason = StopReason::Refusal;
@@ -2791,6 +2817,7 @@ impl Agent {
             end,
             text,
             calls,
+            provider_executed,
             reasoning,
             stop_reason,
             refusal_details,
@@ -4225,6 +4252,7 @@ impl Agent {
                 | ProviderEvent::Refusal { .. }
                 | ProviderEvent::Failed { .. }
                 | ProviderEvent::ToolCallStarted { .. }
+                | ProviderEvent::ProviderExecutedToolCall { .. }
                 | ProviderEvent::ToolCallArgsDelta { .. } => return None,
             }
         }
