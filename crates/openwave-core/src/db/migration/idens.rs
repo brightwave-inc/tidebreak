@@ -538,6 +538,7 @@ pub(crate) enum TurnRun {
     InputMessageId,
     OutputMessageId,
     Model,
+    InvokedSkills,
     Status,
     AttemptCount,
     MaxAttempts,

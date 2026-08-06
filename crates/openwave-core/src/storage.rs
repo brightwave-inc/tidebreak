@@ -117,6 +117,9 @@ pub struct ChatTerminalTurnSnapshot {
     pub failure_kind: Option<String>,
     /// Provider-qualified model selection captured when the turn was accepted.
     pub model: String,
+    /// Skills the user explicitly invoked when the turn was accepted, in
+    /// submitted order. Empty for a turn that named none.
+    pub invoked_skills: Vec<String>,
     pub finished_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -2585,7 +2588,7 @@ pub trait Store: Send + Sync {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        self.accept_turn_with_attachments(id, chat_id, model, content, &[], &[])
+        self.accept_turn_with_attachments(id, chat_id, model, content, &[], &[], &[])
             .await
     }
 
@@ -2598,10 +2601,18 @@ pub trait Store: Send + Sync {
     /// recorded at its position in its media-specific list, which is the order
     /// a reloaded transcript replays it in.
     ///
+    /// `invoked_skills` names the skills the user explicitly asked this turn to
+    /// use. It is accepted input like the model and the attachments, so it is
+    /// part of the same idempotency proof: a retry naming different skills is a
+    /// conflict rather than a silent acceptance of the first submission's list.
+    /// Whether each name is a live skill is the caller's decision; storage only
+    /// bounds the list and the shape of each name.
+    ///
     /// Recording an attachment makes its blob live: any queued retirement for
     /// that blob is cancelled in the same transaction. Because blob ids are
     /// content-derived, re-submitting identical bytes re-references the existing
     /// blob rather than storing a second copy.
+    #[allow(clippy::too_many_arguments)]
     async fn accept_turn_with_attachments(
         &self,
         _id: TurnId,
@@ -2610,6 +2621,7 @@ pub trait Store: Send + Sync {
         _content: &str,
         _images: &[ImageRef],
         _documents: &[DocumentId],
+        _invoked_skills: &[String],
     ) -> Result<AcceptTurnOutcome> {
         turn_storage_unavailable()
     }

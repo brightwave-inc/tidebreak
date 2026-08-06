@@ -102,17 +102,13 @@ impl AgentActivityDetail {
     #[must_use]
     pub fn build(tool_name: &str, arguments: &Value) -> Option<Self> {
         match ToolActionPreview::build(tool_name, arguments) {
-            Some(ToolActionPreview::Exec { command, args, .. }) => {
-                return Some(Self::Exec {
-                    command,
-                    args,
-                    exit_code: None,
-                    output: None,
-                });
-            }
-            Some(ToolActionPreview::WebSearch { query, .. }) => {
-                return Some(Self::Search { query });
-            }
+            Some(ToolActionPreview::Exec { command, args, .. }) => Some(Self::Exec {
+                command,
+                args,
+                exit_code: None,
+                output: None,
+            }),
+            Some(ToolActionPreview::WebSearch { query, .. }) => Some(Self::Search { query }),
             _ => None,
         }
     }

@@ -807,6 +807,7 @@ mod tests {
                 input_message_id: MessageId(uuid(5)),
                 output_message_id: None,
                 model: "claude-sonnet-4-5".to_owned(),
+                invoked_skills: Vec::new(),
                 status: TurnRunStatus::Failed,
                 attempt_count: 5,
                 max_attempts: 5,

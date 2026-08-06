@@ -2929,3 +2929,85 @@ async fn the_catalog_lists_prompts_and_serves_their_bodies() {
         StatusCode::BAD_REQUEST
     );
 }
+
+/// POST a message that explicitly invokes skills by name, returning the raw
+/// response so a refusal's typed kind can be read.
+async fn send_message_invoking(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    invoked: &[&str],
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{chat}/messages"))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "turn_id": TurnId::new(),
+                        "content": "build the deck",
+                        "invoked_skills": invoked,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Contract: a turn may name the skills it must use, and the names are checked
+/// against the catalog the turn will actually stage. A skill the install has
+/// switched off is not a live capability, so invoking it refuses the whole
+/// submission rather than sending a turn told to read a manifest that staging
+/// has already removed.
+#[tokio::test]
+async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
+    let (dir, store) = temp_db_store("invoked-skills.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (router, token) = plugin_app(store.clone(), dir.path());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    let accepted = send_message_invoking(&router, &bearer, chat.id, &["presentations"]).await;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let turns = store.list_turn_runs(chat.id).await.unwrap();
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.invoked_skills.clone())
+            .collect::<Vec<_>>(),
+        [vec!["presentations".to_owned()]],
+        "the invocation is captured with the turn, not just used to build a prompt"
+    );
+
+    // Switching the skill off makes the same submission a refusal.
+    let toggled = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"skills": {"presentations": false}}),
+    )
+    .await;
+    assert_eq!(toggled.status(), StatusCode::OK);
+
+    let refused = send_message_invoking(&router, &bearer, chat.id, &["presentations"]).await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(refused).await;
+    assert_eq!(error.kind, "invoked_skill_unavailable");
+
+    let unknown = send_message_invoking(&router, &bearer, chat.id, &["no-such-skill"]).await;
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(unknown).await;
+    assert_eq!(error.kind, "invoked_skill_unavailable");
+
+    // Refused, not partially honoured: one bad name in a list that is otherwise
+    // live takes the whole turn down, and neither submission was recorded.
+    let mixed =
+        send_message_invoking(&router, &bearer, chat.id, &["charts", "no-such-skill"]).await;
+    assert_eq!(mixed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+}

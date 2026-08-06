@@ -482,7 +482,12 @@ origin: RootAttachmentOrigin, };
  * cancelled turns have no message, but remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
-export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, finished_at: string, };
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, 
+/**
+ * Skills the user explicitly invoked for this turn, in submitted order.
+ * Absent for the ordinary turn that invoked none.
+ */
+invoked_skills?: Array<string>, finished_at: string, };
 
 export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
 

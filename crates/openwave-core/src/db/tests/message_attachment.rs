@@ -22,7 +22,7 @@ async fn accept_turn_with_images(
     images: &[ImageRef],
 ) -> TurnRun {
     match store
-        .accept_turn_with_attachments(TurnId::new(), chat_id, "gpt-5", content, images, &[])
+        .accept_turn_with_attachments(TurnId::new(), chat_id, "gpt-5", content, images, &[], &[])
         .await
         .unwrap()
     {
@@ -119,7 +119,15 @@ async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proo
     let turn_id = TurnId::new();
     let documents = [first.id, second.id];
     let accepted = store
-        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "compare these", &[], &documents)
+        .accept_turn_with_attachments(
+            turn_id,
+            chat.id,
+            "gpt-5",
+            "compare these",
+            &[],
+            &documents,
+            &[],
+        )
         .await
         .unwrap();
     assert!(matches!(accepted, AcceptTurnOutcome::Accepted(_)));
@@ -165,6 +173,7 @@ async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proo
                 "compare these",
                 &[],
                 &documents,
+                &[],
             )
             .await
             .unwrap(),
@@ -179,6 +188,7 @@ async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proo
                 "compare these",
                 &[],
                 &[second.id, first.id],
+                &[],
             )
             .await
             .unwrap(),
@@ -196,7 +206,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
     let other = image_for(b"a different attachment", 640, 480);
 
     let accepted = match store
-        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[])
+        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[], &[])
         .await
         .unwrap()
     {
@@ -207,7 +217,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
     // A byte-identical retry re-references the same blob instead of recording
     // the attachment twice.
     let existing = match store
-        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[])
+        .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[], &[])
         .await
         .unwrap()
     {
@@ -224,7 +234,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
     // acceptance of the first submission's attachments.
     assert!(matches!(
         store
-            .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[other], &[])
+            .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[other], &[], &[])
             .await
             .unwrap(),
         AcceptTurnOutcome::IdentityConflict
@@ -237,6 +247,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
                 "gpt-5",
                 "describe",
                 &[image, other],
+                &[],
                 &[],
             )
             .await
@@ -265,7 +276,15 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
         .map(|index| image_for(format!("attachment {index}").as_bytes(), 16, 16))
         .collect();
     assert!(store
-        .accept_turn_with_attachments(TurnId::new(), chat.id, "gpt-5", "too many", &oversized, &[],)
+        .accept_turn_with_attachments(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "too many",
+            &oversized,
+            &[],
+            &[]
+        )
         .await
         .is_err());
 
@@ -280,6 +299,7 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
             "gpt-5",
             "degenerate",
             &[degenerate],
+            &[],
             &[],
         )
         .await
@@ -296,6 +316,7 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
             "gpt-5",
             "nil blob",
             &[nil_blob],
+            &[],
             &[],
         )
         .await

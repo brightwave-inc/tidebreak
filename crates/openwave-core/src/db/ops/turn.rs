@@ -104,6 +104,7 @@ pub(in crate::db) async fn recover_exact_terminal_event(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn accept_turn(
     store: &DbStore,
     id: TurnId,
@@ -112,8 +113,9 @@ pub(in crate::db) async fn accept_turn(
     content: &str,
     images: &[ImageRef],
     documents: &[DocumentId],
+    invoked_skills: &[String],
 ) -> Result<AcceptTurnOutcome> {
-    validate_turn_input(id, model, content)?;
+    validate_turn_input(id, model, content, invoked_skills)?;
     message_attachment_ops::validate(images)?;
     message_document_attachment_ops::validate_count(images.len(), documents)?;
 
@@ -139,6 +141,7 @@ pub(in crate::db) async fn accept_turn(
             content,
             images,
             documents,
+            invoked_skills,
         )
         .await?;
         transaction.commit().await.map_err(store_err)?;
@@ -221,6 +224,7 @@ pub(in crate::db) async fn accept_turn(
         input_message_id: Set(input_message_id.0),
         output_message_id: Set(None),
         model: Set(model.into()),
+        invoked_skills: Set(serde_json::json!(invoked_skills)),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
         max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
@@ -260,6 +264,7 @@ pub(in crate::db) async fn accept_turn(
                     content,
                     images,
                     documents,
+                    invoked_skills,
                 )
                 .await;
             }
@@ -946,7 +951,12 @@ fn turn_run_due_order(
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn validate_turn_input(id: TurnId, model: &str, content: &str) -> Result<()> {
+fn validate_turn_input(
+    id: TurnId,
+    model: &str,
+    content: &str,
+    invoked_skills: &[String],
+) -> Result<()> {
     if id.0.is_nil() {
         return Err(AgentError::Store("turn id must not be nil".into()));
     }
@@ -963,6 +973,22 @@ fn validate_turn_input(id: TurnId, model: &str, content: &str) -> Result<()> {
         return Err(AgentError::Store(
             "turn content must be non-empty and contain no NUL characters".into(),
         ));
+    }
+    if invoked_skills.len() > TurnRun::MAX_INVOKED_SKILLS {
+        return Err(AgentError::Store(format!(
+            "a turn may invoke at most {} skills",
+            TurnRun::MAX_INVOKED_SKILLS
+        )));
+    }
+    if invoked_skills.iter().any(|skill| {
+        skill.trim().is_empty()
+            || skill.len() > TurnRun::MAX_INVOKED_SKILL_NAME_LEN
+            || skill.chars().any(char::is_control)
+    }) {
+        return Err(AgentError::Store(format!(
+            "an invoked skill name must be 1 to {} characters with no control characters",
+            TurnRun::MAX_INVOKED_SKILL_NAME_LEN
+        )));
     }
     Ok(())
 }
@@ -1001,6 +1027,7 @@ async fn exact_accepted_turn_on<C>(
     content: &str,
     images: &[ImageRef],
     documents: &[DocumentId],
+    invoked_skills: &[String],
 ) -> Result<AcceptTurnOutcome>
 where
     C: ConnectionTrait,
@@ -1039,7 +1066,8 @@ where
         && existing.model == model
         && message.content == content
         && accepted_images == images
-        && accepted_documents == documents;
+        && accepted_documents == documents
+        && invoked_skills_from_model(&existing)? == invoked_skills;
     Ok(if exact {
         AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
     } else {
@@ -1049,6 +1077,7 @@ where
 
 pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
     let usage = usage_from_turn_model(&model)?;
+    let invoked_skills = invoked_skills_from_model(&model)?;
     Ok(TurnRun {
         id: TurnId(model.id),
         chat_id: ChatId(model.chat_id),
@@ -1056,6 +1085,7 @@ pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Re
         input_message_id: MessageId(model.input_message_id),
         output_message_id: model.output_message_id.map(MessageId),
         model: model.model,
+        invoked_skills,
         status: turn_run_status_from_db(&model.status)?,
         attempt_count: model.attempt_count,
         max_attempts: model.max_attempts,
@@ -1073,6 +1103,22 @@ pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Re
         last_steer_applied_at: model.last_steer_applied_at,
         created_at: model.created_at,
         updated_at: model.updated_at,
+    })
+}
+
+/// Read back the skills the user invoked when the turn was accepted.
+///
+/// A row whose value is not an array of strings is corrupt rather than merely
+/// unusual: the turn's accepted input can no longer be described honestly, so
+/// this fails instead of degrading to "no skills were invoked".
+pub(in crate::db) fn invoked_skills_from_model(
+    model: &entities::turn_run::Model,
+) -> Result<Vec<String>> {
+    serde_json::from_value(model.invoked_skills.clone()).map_err(|error| {
+        AgentError::Store(format!(
+            "turn {} has unreadable invoked skills: {error}",
+            TurnId(model.id)
+        ))
     })
 }
 

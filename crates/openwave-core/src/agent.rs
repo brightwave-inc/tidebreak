@@ -13119,6 +13119,7 @@ mod image_hydration_tests {
                 "what is in this screenshot?",
                 &[image],
                 &[],
+                &[],
             )
             .await
             .unwrap();
@@ -13155,7 +13156,15 @@ mod image_hydration_tests {
         let pixels = b"pixels".to_vec();
         let image = image_ref(uuid::Uuid::from_u128(9), &pixels);
         store
-            .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image], &[])
+            .accept_turn_with_attachments(
+                TurnId::new(),
+                chat.id,
+                "fake",
+                "look",
+                &[image],
+                &[],
+                &[],
+            )
             .await
             .unwrap();
 
@@ -13192,6 +13201,7 @@ mod image_hydration_tests {
                     "fake",
                     &format!("image {index}"),
                     &[image_ref(blob_id, &pixels)],
+                    &[],
                     &[],
                 )
                 .await

@@ -904,13 +904,22 @@ impl Store for PauseTerminalStore {
         content: &str,
         images: &[openwave_core::ImageRef],
         documents: &[openwave_core::DocumentId],
+        invoked_skills: &[String],
     ) -> Result<openwave_core::AcceptTurnOutcome> {
         if self.pause_accept.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
         self.inner
-            .accept_turn_with_attachments(id, chat_id, model, content, images, documents)
+            .accept_turn_with_attachments(
+                id,
+                chat_id,
+                model,
+                content,
+                images,
+                documents,
+                invoked_skills,
+            )
             .await
     }
     async fn accept_turn_steer(
