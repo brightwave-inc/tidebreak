@@ -34,6 +34,17 @@ pub const MAX_BINARY_DELIVERABLE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_DELIVERABLE_NAME_CHARS: usize = 120;
 /// Largest declared media type accepted for a binary workspace artifact.
 pub const MAX_DELIVERABLE_MEDIA_TYPE_CHARS: usize = 127;
+/// Media type of a native chart deliverable: JSON describing one figure rather
+/// than an opaque data document, so a renderer can draw it instead of showing
+/// its source.
+pub const CHART_MEDIA_TYPE: &str = "application/vnd.openwave.chart+json";
+/// Compound filename suffix that selects [`CHART_MEDIA_TYPE`].
+///
+/// A compound suffix rather than a bare extension keeps a chart file ordinary
+/// JSON on disk — anything that reads `.json` still reads it — while giving the
+/// catalog an unambiguous signal that the bytes describe a figure. Only the full
+/// suffix qualifies: `chart.json` on its own is plain `application/json`.
+pub const CHART_FILENAME_SUFFIX: &str = ".chart.json";
 /// Largest number of revisions one output retains.
 ///
 /// Reaching the bound is a product decision rather than a storage failure: the
@@ -290,12 +301,17 @@ fn is_media_type_token(token: &str) -> bool {
 }
 
 /// Whether a media type is one of the curated text types whose outputs use the
-/// text size ceiling.
+/// text size ceiling and the bounded text preview.
 #[must_use]
 pub fn media_type_is_text(media_type: &str) -> bool {
     matches!(
         media_type,
-        "text/markdown" | "text/plain" | "text/csv" | "application/json" | "text/html"
+        "text/markdown"
+            | "text/plain"
+            | "text/csv"
+            | "application/json"
+            | "text/html"
+            | CHART_MEDIA_TYPE
     )
 }
 
@@ -312,10 +328,18 @@ pub fn revision_byte_ceiling(media_type: &str) -> usize {
 }
 
 /// Return the fixed media type for one supported deliverable filename.
+///
+/// The compound suffix [`CHART_FILENAME_SUFFIX`] is matched before the plain
+/// extension, so `revenue.chart.json` is a chart while `data.json` — and the
+/// bare name `chart.json`, which does not carry the leading dot — stay
+/// `application/json`. Matching is case-insensitive.
 #[must_use]
 pub fn deliverable_media_type(name: &str) -> Option<&'static str> {
-    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
-    match extension.as_str() {
+    let lowercased = name.to_ascii_lowercase();
+    if lowercased.ends_with(CHART_FILENAME_SUFFIX) {
+        return Some(CHART_MEDIA_TYPE);
+    }
+    match lowercased.rsplit_once('.')?.1 {
         "md" => Some("text/markdown"),
         "txt" => Some("text/plain"),
         "csv" => Some("text/csv"),
@@ -416,6 +440,27 @@ mod tests {
         assert_eq!(deliverable_media_type("brief.MD"), Some("text/markdown"));
         assert_eq!(deliverable_media_type("table.csv"), Some("text/csv"));
         assert_eq!(deliverable_media_type("archive.zip"), None);
+        // The chart suffix is compound, and only the full suffix qualifies.
+        assert_eq!(
+            deliverable_media_type("sales.chart.json"),
+            Some(CHART_MEDIA_TYPE)
+        );
+        assert_eq!(
+            deliverable_media_type("Q3.CHART.JSON"),
+            Some(CHART_MEDIA_TYPE)
+        );
+        assert_eq!(
+            deliverable_media_type("chart.json"),
+            Some("application/json")
+        );
+        assert_eq!(
+            deliverable_media_type("data.json"),
+            Some("application/json")
+        );
+        // A chart is a curated text type, so it is refused as a binary artifact
+        // and reaches the text preview and ceiling.
+        assert!(validate_deliverable_media_type(CHART_MEDIA_TYPE).is_ok());
+        assert!(validate_binary_deliverable("figure.bin", CHART_MEDIA_TYPE).is_err());
     }
 
     #[test]
@@ -462,6 +507,10 @@ mod tests {
         );
         assert_eq!(
             revision_byte_ceiling("application/json"),
+            MAX_DELIVERABLE_BYTES
+        );
+        assert_eq!(
+            revision_byte_ceiling(CHART_MEDIA_TYPE),
             MAX_DELIVERABLE_BYTES
         );
         assert_eq!(

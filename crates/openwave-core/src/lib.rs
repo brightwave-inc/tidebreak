@@ -130,9 +130,9 @@ pub use deliverable::{
     output_revision_relative_path, revision_byte_ceiling, validate_binary_deliverable,
     validate_deliverable_media_type, validate_deliverable_name, validate_portable_filename,
     CreateOutput, DeliverableKind, NewOutputRevision, OutputRecord, OutputRevision,
-    RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
-    MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS,
-    OUTPUTS_DIRECTORY,
+    RevisionProducer, CHART_FILENAME_SUFFIX, CHART_MEDIA_TYPE, MAX_BINARY_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS,
+    MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
 #[cfg(feature = "tools")]
 pub use deliverable_acceptance::{

@@ -17,6 +17,7 @@ function fence(language: string, content: string): string {
 export function codeLanguageForMediaType(mediaType: string): string {
   switch (mediaType.split(";", 1)[0]!.trim().toLowerCase()) {
     case "application/json":
+    case "application/vnd.openwave.chart+json":
       return "json";
     case "text/html":
       return "xml";
