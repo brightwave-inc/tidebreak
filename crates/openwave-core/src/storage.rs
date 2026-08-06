@@ -2213,6 +2213,29 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// The still-ungated tail of the spawn batch the previous claim segment
+    /// parked on, for the claim that resumes it.
+    ///
+    /// A model step can name several delegations at once and each one is
+    /// approved on its own, so the turn parks once per admitted spawn. The
+    /// siblings that have not reached the gate travel with the checkpoint
+    /// rather than being re-derived from the model, which keeps every spawn on
+    /// the call id it was streamed with and spends no provider call per
+    /// approval. Returns empty for any claim that is not the immediate
+    /// successor of a spawn park.
+    ///
+    /// The default is empty rather than unimplemented: a store that never
+    /// admits sandbox children can never have parked on a spawn checkpoint
+    /// either, and this read runs on every claim.
+    async fn resumed_sandbox_spawn_batch(
+        &self,
+        _turn_id: TurnId,
+        _attempt_count: i32,
+        _claim_count: i32,
+    ) -> Result<Vec<crate::agent::SandboxAgentSpawnRequest>> {
+        Ok(Vec::new())
+    }
+
     /// Fetch immutable origin ownership for an admitted sandbox child.
     async fn get_sandbox_agent_admission(
         &self,

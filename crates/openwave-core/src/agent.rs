@@ -896,7 +896,12 @@ pub enum AgentTurnOutcome {
 }
 
 /// One model proposal to create a durable depth-one sandbox child.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The serialized form is the one carried across an approval park: a batch's
+/// still-ungated tail is written with the spawn checkpoint that parks the turn
+/// and handed back to the claim that resumes it, so every sibling the model
+/// named is answered under the call id it was streamed with.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SandboxAgentSpawnRequest {
     /// Stable call identity emitted by the model stream.
     pub call_id: CallId,

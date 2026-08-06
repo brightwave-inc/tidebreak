@@ -445,6 +445,7 @@ fn postgres_spawn_checkpoint_request(
         max_active_background_agents: AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         execution_location: openwave_core::AgentRunExecutionLocation::InProcess,
         approval_gated: false,
+        remaining_requests: Vec::new(),
     }
 }
 
@@ -482,6 +483,19 @@ async fn postgres_concurrent_exact_nonblocking_spawn_checkpoint_converges_once()
     let (turn, lease) = postgres_live_turn(store.as_ref(), chat.id).await;
     append_postgres_turn_started(store.as_ref(), &turn, lease).await;
     let request = postgres_spawn_checkpoint_request(&turn, lease, CallId::new(), "race exactly");
+    // The still-ungated tail of the batch rides along in a JSONB column and
+    // has to survive the round trip on this store too — it is what the next
+    // claim gates instead of asking the model again.
+    let carried_call_id = CallId::new();
+    let mut request = request;
+    request.remaining_requests = vec![openwave_core::SandboxAgentSpawnRequest {
+        call_id: carried_call_id,
+        provider_id: format!("postgres-{carried_call_id}"),
+        child_run_id: AgentRunId::sandbox_for_spawn_call(carried_call_id),
+        task: "carried sibling".into(),
+        arguments: serde_json::json!({"task": "carried sibling"}),
+        approval_gated: false,
+    }];
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut tasks = Vec::new();
     for _ in 0..2 {
@@ -507,6 +521,16 @@ async fn postgres_concurrent_exact_nonblocking_spawn_checkpoint_converges_once()
         }
     }
     assert_eq!((committed, existing), (1, 1));
+    assert_eq!(
+        store
+            .resumed_sandbox_spawn_batch(turn.id, turn.attempt_count, turn.claim_count + 1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.call_id)
+            .collect::<Vec<_>>(),
+        vec![carried_call_id]
+    );
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
     assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
     cleanup_postgres_sandbox_chat(store.as_ref(), chat.id).await;

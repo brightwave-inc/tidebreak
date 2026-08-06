@@ -1072,6 +1072,15 @@ impl Store for DbStore {
         ops::turn::checkpoint_sandbox_spawn(self, request, now).await
     }
 
+    async fn resumed_sandbox_spawn_batch(
+        &self,
+        turn_id: TurnId,
+        attempt_count: i32,
+        claim_count: i32,
+    ) -> Result<Vec<crate::agent::SandboxAgentSpawnRequest>> {
+        ops::turn::resumed_sandbox_spawn_batch(self, turn_id, attempt_count, claim_count).await
+    }
+
     async fn get_sandbox_agent_admission(
         &self,
         child_run_id: AgentRunId,

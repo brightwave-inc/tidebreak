@@ -335,6 +335,75 @@ impl ModelProvider for SandboxRoundTripProvider {
     }
 }
 
+/// Names two delegations in one model step, so the batch has to survive the
+/// approval park between them. Counts foreground invocations: a resumed claim
+/// that re-invokes the model to recover the tail is the bug this exists to
+/// catch.
+#[derive(Default)]
+struct GatedSpawnBatchProvider {
+    foreground_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for GatedSpawnBatchProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("gated-spawn-batch")
+    }
+
+    async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let foreground = request
+            .tools
+            .iter()
+            .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL);
+        if !foreground {
+            return Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "child result".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed());
+        }
+        let events = if self.foreground_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "delegate-1".into(),
+                    name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"task":"Research the first question."}"#.into(),
+                },
+                ProviderEvent::ToolCallStarted {
+                    index: 1,
+                    id: "delegate-2".into(),
+                    name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 1,
+                    fragment: r#"{"task":"Research the second question."}"#.into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "both delegations are running".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
 /// A provider that records the model each request asked for, then answers
 /// like `FakeProvider`. Lets a test assert which model a turn ran against.
 #[derive(Clone, Default)]

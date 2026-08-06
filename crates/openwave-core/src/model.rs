@@ -1465,6 +1465,11 @@ pub struct SandboxSpawnCheckpoint {
     pub steer_revision: i64,
     pub event_ordinal: i32,
     pub progress: TurnCheckpointProgress,
+    /// The rest of the batch this spawn came from, in model order, still
+    /// ungated. Carried durably so the claim that resumes the parked turn
+    /// gates them under their original call ids instead of asking the model
+    /// again.
+    pub remaining_requests: Vec<crate::agent::SandboxAgentSpawnRequest>,
     pub event_seq: i64,
     pub committed_at: DateTime<Utc>,
 }
@@ -1485,6 +1490,10 @@ pub struct SandboxSpawnCheckpointRequest {
     pub result: String,
     pub event_ordinal: i32,
     pub progress: TurnCheckpointProgress,
+    /// The rest of the batch the model named in this step, in model order and
+    /// not yet through the approval gate. The parked turn's next claim reads
+    /// them back and gates them without a further model call.
+    pub remaining_requests: Vec<crate::agent::SandboxAgentSpawnRequest>,
     /// Settings-resolved per-chat ceiling on nonterminal background runs.
     pub max_active_background_agents: u32,
     /// Host-resolved execution location for the child admitted by this atomic

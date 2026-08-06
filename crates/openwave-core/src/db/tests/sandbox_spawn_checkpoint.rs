@@ -70,6 +70,7 @@ fn request(
         .unwrap(),
         event_ordinal: ordinal,
         progress,
+        remaining_requests: Vec::new(),
         max_active_background_agents: AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
         execution_location: crate::AgentRunExecutionLocation::InProcess,
     }

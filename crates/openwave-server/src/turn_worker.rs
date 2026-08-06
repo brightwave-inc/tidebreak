@@ -590,8 +590,18 @@ impl TurnWorker {
         let mut checkpoint_usage = openwave_core::Usage::default();
         let mut checkpoint_steps = 0_usize;
         let mut continuation_instruction = None;
-        let mut pending_sandbox_spawns = Vec::new();
-        let mut pending_sandbox_spawn_steer_revision = None;
+        // A spawn batch the previous claim segment parked on is picked up
+        // here, before any provider call: the model already named these
+        // delegations, and re-asking it would orphan the tool calls it
+        // streamed for them. The turn's durable steer revision is the one the
+        // resumed gate has to agree with, exactly as a live generation reads
+        // it before checkpointing.
+        let mut pending_sandbox_spawns = self
+            .store
+            .resumed_sandbox_spawn_batch(turn.id, turn.attempt_count, turn.claim_count)
+            .await?;
+        let mut pending_sandbox_spawn_steer_revision =
+            (!pending_sandbox_spawns.is_empty()).then_some(turn.steer_revision);
         // A segment arriving with zero remaining steps is not refused: the
         // budget was spent by earlier segments — a checkpoint parked on the
         // last budgeted step, or a wrap-up whose provider call failed
@@ -1631,6 +1641,7 @@ impl TurnWorker {
                         })?,
                         event_ordinal: ordinal,
                         progress,
+                        remaining_requests: pending_sandbox_spawns.clone(),
                         max_active_background_agents:
                             crate::routes::read_max_active_background_agents(&*self.store).await?,
                         execution_location: self.config.sandbox_spawn_execution_location,
