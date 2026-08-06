@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 
 use openwave_core::error::{AgentError, ProviderErrorInfo, Result};
 use openwave_core::provider::{
-    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
-    ResponseFormat, StopReason, ToolChoice, Usage,
+    provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider, ProviderEvent,
+    ProviderId, RefusalDetails, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
@@ -241,6 +241,21 @@ fn extend_input(
                     "output": output,
                 }));
             }
+            // A call another provider ran server-side has no Responses item to
+            // replay it as, and the Responses API rejects a `function_call`
+            // without a matching output from this conversation. One line of
+            // prose keeps the fact of the search in context instead.
+            ContentBlock::ProviderExecutedToolCall {
+                name,
+                input,
+                output,
+                is_error,
+            } => {
+                message_parts.push(json!({
+                    "type": "input_text",
+                    "text": provider_executed_tool_call_text(name, input, output, *is_error),
+                }));
+            }
             other => {
                 return Err(AgentError::Provider(format!(
                     "openai cannot express content block {other:?}"
@@ -267,7 +282,7 @@ fn extend_assistant_input(
     let mut calls = Vec::new();
     for block in &message.content {
         match block {
-            ContentBlock::Text { text } => texts.push(text.as_str()),
+            ContentBlock::Text { text } => texts.push(text.clone()),
             ContentBlock::Image { .. } => {
                 return Err(AgentError::Provider(
                     "openai cannot express an image in assistant history".into(),
@@ -297,6 +312,16 @@ fn extend_assistant_input(
                     "output": output,
                 }));
             }
+            // No Responses item replays another provider's server-side call,
+            // so it joins the assistant prose as one compact line.
+            ContentBlock::ProviderExecutedToolCall {
+                name,
+                input,
+                output,
+                is_error,
+            } => texts.push(provider_executed_tool_call_text(
+                name, input, output, *is_error,
+            )),
             other => {
                 return Err(AgentError::Provider(format!(
                     "openai cannot express content block {other:?}"
