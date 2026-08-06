@@ -102,11 +102,19 @@ impl EventSink<'_> {
         }
     }
 
-    pub(crate) fn send_committed_proposed(&self, ordinal: i32, event: SequencedEvent) -> Result<()> {
+    pub(crate) fn send_committed_proposed(
+        &self,
+        ordinal: i32,
+        event: SequencedEvent,
+    ) -> Result<()> {
         self.send_recovered_or_committed_proposed(ordinal, event, true)
     }
 
-    pub(crate) fn send_recovered_proposed(&self, ordinal: i32, event: SequencedEvent) -> Result<()> {
+    pub(crate) fn send_recovered_proposed(
+        &self,
+        ordinal: i32,
+        event: SequencedEvent,
+    ) -> Result<()> {
         self.send_recovered_or_committed_proposed(ordinal, event, false)
     }
 
@@ -178,5 +186,3 @@ pub(crate) fn reserve_event_ordinal(next: &AtomicI32) -> Result<i32> {
     })
     .map_err(|_| AgentError::Store("turn event ordinal exhausted".into()))
 }
-
-

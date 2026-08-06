@@ -34,13 +34,13 @@ mod image_hydration_tests;
 
 pub use events::ClaimedAgentEvent;
 pub use registry::ToolRegistry;
+#[cfg(test)]
+pub(crate) use transcript::rebuild_transcript_for_test;
 pub use types::{
     AgentConfig, AgentTurnOutcome, ForegroundAgentWaitRequest, SandboxAgentSpawnRequest,
     TurnWebSearch, UtilityModel, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_STEPS,
     DEFAULT_MAX_TOOL_RESULT_BYTES,
 };
-#[cfg(test)]
-pub(crate) use transcript::rebuild_transcript_for_test;
 
 use std::sync::Arc;
 
@@ -287,4 +287,3 @@ pub(crate) enum AcceptedServerCall {
     IdentityConflict,
     LeaseLost,
 }
-

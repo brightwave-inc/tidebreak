@@ -9,9 +9,7 @@ use futures::future::{self, Either};
 use futures::StreamExt;
 use futures_timer::Delay;
 
-use crate::approval::{
-    ApprovalGate, RefuseGate, StandingGrants,
-};
+use crate::approval::{ApprovalGate, RefuseGate, StandingGrants};
 use crate::cancel::CancelToken;
 use crate::citation::{parse_assistant_citations, AssistantCitationInput};
 use crate::context;
@@ -19,8 +17,7 @@ use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, ChatId, MessageId, TurnId};
 use crate::model::{
-    Chat, Message, PermissionMode, Role, ToolCallRecord,
-    ToolCallResolution, TurnRunStatus,
+    Chat, Message, PermissionMode, Role, ToolCallRecord, ToolCallResolution, TurnRunStatus,
 };
 use crate::preview::ToolResultPreview;
 use crate::provider::{
@@ -35,22 +32,16 @@ use crate::storage::{
 };
 use crate::tool::{ToolErrorCategory, ToolOutput};
 
-use super::events::{
-    AgentProgress, AssistantStreamEventFilter, ClaimedAgentEvent, EventSink,
-};
+use super::events::{AgentProgress, AssistantStreamEventFilter, ClaimedAgentEvent, EventSink};
 use super::registry::ToolRegistry;
-use super::transcript::{
-    parse_args, tool_result_blocks,
-};
+use super::transcript::{parse_args, tool_result_blocks};
 use super::types::{
-    AgentConfig, AgentTurnOutcome, SandboxAgentSpawnRequest,
-    TurnWebSearch, WRAP_UP_INSTRUCTION,
+    AgentConfig, AgentTurnOutcome, SandboxAgentSpawnRequest, TurnWebSearch, WRAP_UP_INSTRUCTION,
 };
 use super::{
-    AcceptedServerCall, Agent, AssistantCandidate,
-    CallIsolation, ClientArgumentResolution, PendingCall, SandboxSpawnGate,
-    StreamAttempt, StreamEnd, TurnExecution, MAX_PARALLEL_READ_ONLY_CALLS,
-    REPEATED_CALL_LIMIT,
+    AcceptedServerCall, Agent, AssistantCandidate, CallIsolation, ClientArgumentResolution,
+    PendingCall, SandboxSpawnGate, StreamAttempt, StreamEnd, TurnExecution,
+    MAX_PARALLEL_READ_ONLY_CALLS, REPEATED_CALL_LIMIT,
 };
 
 impl Agent {
@@ -1504,7 +1495,10 @@ impl Agent {
         }
     }
 
-    pub(crate) async fn accept_server_call_retry(&self, call: &ToolCallRecord) -> Result<AcceptedServerCall> {
+    pub(crate) async fn accept_server_call_retry(
+        &self,
+        call: &ToolCallRecord,
+    ) -> Result<AcceptedServerCall> {
         let Some(lease_token) = self.durable_steer_lease else {
             return Ok(match self.store.accept_tool_call(call).await? {
                 AcceptToolCallOutcome::Accepted(_) => AcceptedServerCall::Accepted,
