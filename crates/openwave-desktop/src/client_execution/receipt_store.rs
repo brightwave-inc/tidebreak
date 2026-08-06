@@ -12,9 +12,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use chrono::{DateTime, Utc};
 use openwave_core::{
-    validate_deliverable_name, CallId, ChatId, HostRootId, OutputId, OutputRevisionId,
-    OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION,
-    MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_DELIVERABLE_BYTES,
+    validate_portable_filename, CallId, ChatId, HostRootId, OutputId, OutputRevisionId,
+    OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION, MAX_BINARY_DELIVERABLE_BYTES,
+    MAX_CONNECTED_FOLDER_PATH_BYTES,
 };
 use openwave_host_broker::GrantSubject;
 use openwave_host_broker::OperationId;
@@ -601,8 +601,10 @@ impl OutputExportReceipt {
             || self.chat_id.as_uuid().is_nil()
             || self.output_id.as_uuid().is_nil()
             || self.revision_id.as_uuid().is_nil()
-            || validate_deliverable_name(&self.filename).is_err()
-            || self.byte_len > MAX_DELIVERABLE_BYTES as u64
+            // Binary outputs carry an arbitrary extension and the larger size
+            // ceiling; the export write path bounds writes by the same constant.
+            || validate_portable_filename(&self.filename).is_err()
+            || self.byte_len > MAX_BINARY_DELIVERABLE_BYTES as u64
             || self
                 .destination
                 .as_ref()
@@ -689,7 +691,7 @@ impl OutputWritebackReceipt {
                     || part.chars().any(char::is_control)
             })
             || self.byte_len == 0
-            || self.byte_len > MAX_DELIVERABLE_BYTES as u64
+            || self.byte_len > MAX_BINARY_DELIVERABLE_BYTES as u64
             || matches!(self.mode, OutputWriteMode::Create) && self.approval_id.is_some()
             || matches!(self.mode, OutputWriteMode::Replace)
                 && self.approval_id.is_none_or(|id| id.is_nil())
@@ -1425,6 +1427,7 @@ fn invalid_data(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openwave_core::MAX_DELIVERABLE_BYTES;
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -1643,6 +1646,33 @@ mod tests {
         conflicting.phase = OutputExportPhase::DestinationSelected;
         conflicting.terminal = Some(OutputExportTerminal::Completed);
         assert!(store.save_output_export(&conflicting).is_err());
+    }
+
+    #[test]
+    fn output_export_receipts_accept_binary_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination_root = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let mut receipt = OutputExportReceipt::new(
+            Uuid::new_v4(),
+            ChatId::new(),
+            OutputId::new(),
+            OutputRevisionId::new(),
+            "deck.pptx".to_owned(),
+            MAX_DELIVERABLE_BYTES as u64 + 1,
+            [9; 32],
+        );
+        receipt.phase = OutputExportPhase::DestinationSelected;
+        receipt.destination = Some(destination_root.path().join("deck.pptx"));
+        store.save_output_export(&receipt).unwrap();
+        assert_eq!(
+            store.load_output_export(receipt.operation_id).unwrap(),
+            Some(receipt.clone())
+        );
+
+        let mut oversized = receipt;
+        oversized.byte_len = MAX_BINARY_DELIVERABLE_BYTES as u64 + 1;
+        assert!(store.save_output_export(&oversized).is_err());
     }
 
     #[test]
