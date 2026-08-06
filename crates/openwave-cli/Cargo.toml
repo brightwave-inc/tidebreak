@@ -24,7 +24,15 @@ openwave-mcp = { path = "../openwave-mcp" }
 openwave-server = { path = "../openwave-server" }
 crossterm = { version = "=0.28.1", features = ["event-stream"] }
 futures = { workspace = true }
+# CommonMark parser for committed assistant text; no default features (the
+# binary and HTML renderer are unneeded).
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 ratatui = "=0.29.0"
+# Syntax highlighting for fenced code blocks. `default-syntaxes` brings the
+# compressed grammar dump; `regex-fancy` is the pure-Rust regex engine — the
+# default `onig` drags in a C build. No themes: the palette comes from
+# `tui::theme`.
+syntect = { version = "=5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -9,6 +9,7 @@
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
+use super::markdown;
 use super::theme;
 
 /// A finished block ready to commit to real terminal scrollback.
@@ -91,7 +92,9 @@ impl Commit {
                     Line::from(vec![marker, Span::styled(line, theme::bold())])
                 })
                 .collect(),
-            Commit::AssistantText(text) => wrap(&text, width).into_iter().map(Line::from).collect(),
+            // Assistant text is markdown-rendered only here, at commit time —
+            // the streaming live region stays plain until the block is final.
+            Commit::AssistantText(text) => markdown::lines(&text, width),
             // Completed tool noise recedes behind the assistant text: the whole
             // line is muted except the status mark.
             Commit::ToolDone { name, failed } => {

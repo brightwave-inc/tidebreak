@@ -28,6 +28,29 @@ pub const SUCCESS: Color = Color::Green;
 /// `--destructive`), same reasoning as [`SUCCESS`].
 pub const DESTRUCTIVE: Color = Color::Red;
 
+/// Inline code spans in assistant markdown. A soft teal — distinct from both
+/// prose and the accent, and light enough to sit next to [`MUTED`] on a dark
+/// terminal.
+pub const INLINE_CODE: Color = Color::Rgb(86, 182, 194);
+
+/// Code-block token classes for syntax highlighting. Foreground-only by
+/// design: background fills read wrong against arbitrary terminal themes.
+/// Hues follow the One Dark family (the desktop dark theme's spiritual
+/// cousin), held near the muted foreground's lightness so the ramp stays
+/// cohesive with [`ACCENT`] and [`MUTED`]. Keywords reuse the brand accent;
+/// comments reuse the muted foreground.
+pub const CODE_KEYWORD: Color = ACCENT;
+/// String literals: soft green.
+pub const CODE_STRING: Color = Color::Rgb(152, 195, 121);
+/// Numbers and language constants: soft orange.
+pub const CODE_NUMBER: Color = Color::Rgb(209, 154, 102);
+/// Function names: soft blue.
+pub const CODE_FUNCTION: Color = Color::Rgb(97, 175, 239);
+/// Type and class names: soft violet (kept apart from [`INLINE_CODE`]).
+pub const CODE_TYPE: Color = Color::Rgb(178, 148, 214);
+/// Comments (and the unknown-language fallback): the muted foreground.
+pub const CODE_COMMENT: Color = MUTED;
+
 /// Accent text.
 pub fn accent() -> Style {
     Style::default().fg(ACCENT)
@@ -56,4 +79,9 @@ pub fn success() -> Style {
 /// Semantic error (error lines, the ✗ status mark).
 pub fn destructive() -> Style {
     Style::default().fg(DESTRUCTIVE)
+}
+
+/// Inline code within assistant prose.
+pub fn inline_code() -> Style {
+    Style::default().fg(INLINE_CODE)
 }
