@@ -8,6 +8,7 @@
 mod app;
 mod client;
 mod render;
+mod theme;
 mod wire;
 
 use client::Client;
@@ -26,6 +27,7 @@ pub async fn run(chat: Option<ChatId>) -> Result<()> {
     let serve = tokio::spawn(server.serve());
 
     let client = Client::new(addr, &token)?;
+    let resumed = chat.is_some();
     let chat = match chat {
         Some(chat) => {
             client.require_chat(chat).await?;
@@ -33,7 +35,7 @@ pub async fn run(chat: Option<ChatId>) -> Result<()> {
         }
         None => client.create_chat().await?,
     };
-    let result = app::run(client, chat).await;
+    let result = app::run(client, chat, resumed).await;
     serve.abort();
     result
 }

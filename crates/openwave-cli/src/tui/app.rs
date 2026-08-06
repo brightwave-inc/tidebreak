@@ -18,7 +18,7 @@ use futures::StreamExt;
 use openwave_core::{AgentError, CallId, ChatId, Result, TurnId};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -28,11 +28,12 @@ use tui_textarea::{Input, TextArea};
 
 use super::client::{Client, EventSocket};
 use super::render::{self, Commit};
+use super::theme;
 use super::wire::{ChatFrame, ClientEvent, SequencedFrame, ToolCallStatus};
 
 /// Fixed height of the repainting region: transient stack, composer, footer.
 /// Clamped to the terminal at startup.
-const LIVE_HEIGHT: u16 = 16;
+const LIVE_HEIGHT: u16 = 10;
 /// Composer rows beyond this scroll inside the textarea.
 const MAX_COMPOSER_ROWS: u16 = 4;
 const TICK: Duration = Duration::from_millis(100);
@@ -67,6 +68,9 @@ struct ActiveTool {
 struct App {
     client: Client,
     chat: ChatId,
+    /// First group of the chat's UUID, for the header and the footer's right
+    /// edge.
+    short_id: String,
     actions: mpsc::UnboundedSender<ActionOutcome>,
     composer: TextArea<'static>,
     /// Assistant text of the in-flight turn, appended by `TextDelta`.
@@ -91,6 +95,7 @@ impl App {
     fn new(client: Client, chat: ChatId, actions: mpsc::UnboundedSender<ActionOutcome>) -> Self {
         Self {
             client,
+            short_id: chat.to_string().chars().take(8).collect(),
             chat,
             actions,
             composer: new_composer(Vec::new()),
@@ -392,7 +397,8 @@ impl App {
         }
     }
 
-    /// The live region's transient stack, bottom-anchored to `max` lines.
+    /// The live region's transient stack, bottom-anchored within `max` lines:
+    /// blank padding goes on top, so content sits directly above the composer.
     fn transient_lines(&self, width: usize, max: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if !self.thinking.is_empty() {
@@ -416,32 +422,45 @@ impl App {
         if lines.len() > max {
             lines.drain(..lines.len() - max);
         }
-        lines
+        let pad = max.saturating_sub(lines.len());
+        let mut anchored = vec![Line::default(); pad];
+        anchored.extend(lines);
+        anchored
     }
 
+    /// The footer's left side: state segment in the accent, key hints muted,
+    /// separated by a dim "·".
     fn footer_line(&self) -> Line<'static> {
+        let sep = || Span::styled(" · ", theme::muted());
         if let Some((message, _)) = &self.flash {
-            return Line::from(Span::styled(
-                message.clone(),
-                Style::default().fg(Color::Yellow),
-            ));
+            return Line::from(Span::styled(message.clone(), theme::accent()));
         }
-        let hint = Style::default().fg(Color::DarkGray);
         if self.approval.is_some() {
-            Line::from(Span::styled("y approve · n reject · ctrl+c cancel", hint))
+            Line::from(vec![
+                Span::styled("awaiting approval", theme::accent_bold()),
+                sep(),
+                Span::styled("y approve", theme::muted()),
+                sep(),
+                Span::styled("n reject", theme::muted()),
+                sep(),
+                Span::styled("ctrl+c cancel", theme::muted()),
+            ])
         } else if self.running_turn.is_some() {
             Line::from(vec![
-                Span::styled(
-                    format!("{} ", self.spinner()),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled("working… · ctrl+c cancel", hint),
+                Span::styled(format!("{} working…", self.spinner()), theme::accent()),
+                sep(),
+                Span::styled("ctrl+c cancel", theme::muted()),
             ])
         } else {
-            Line::from(Span::styled(
-                "enter send · alt+enter newline · ctrl+c quit",
-                hint,
-            ))
+            Line::from(vec![
+                Span::styled("ready", theme::muted()),
+                sep(),
+                Span::styled("enter send", theme::muted()),
+                sep(),
+                Span::styled("alt+enter newline", theme::muted()),
+                sep(),
+                Span::styled("ctrl+c quit", theme::muted()),
+            ])
         }
     }
 }
@@ -456,7 +475,7 @@ fn new_composer(lines: Vec<String>) -> TextArea<'static> {
     composer.set_cursor_line_style(Style::default());
     composer.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
     composer.set_placeholder_text("type a message");
-    composer.set_placeholder_style(Style::default().fg(Color::DarkGray));
+    composer.set_placeholder_style(theme::muted());
     composer
 }
 
@@ -539,12 +558,15 @@ async fn next_frame(
 
 /// Run the chat until the user quits. Terminal state is restored on every
 /// exit path, panic included.
-pub async fn run(client: Client, chat: ChatId) -> Result<()> {
+pub async fn run(client: Client, chat: ChatId, resumed: bool) -> Result<()> {
     install_panic_hook();
     let mut guard = TerminalGuard::new()?;
 
     let (actions, mut outcomes) = mpsc::unbounded_channel();
     let mut app = App::new(client, chat, actions);
+    // The banner is the first thing committed to scrollback.
+    let header = render::header_lines(resumed, &app.short_id);
+    app.commit(Commit::Lines(header));
     let mut socket = match app.client.open_events(chat, 0).await {
         Ok(socket) => Some(socket),
         Err(error) => {
@@ -667,8 +689,30 @@ fn draw(
             ])
             .split(frame.area());
             frame.render_widget(Paragraph::new(transient), rows[0]);
-            frame.render_widget(&app.composer, rows[1]);
-            frame.render_widget(Paragraph::new(app.footer_line()), rows[2]);
+            // The composer gutter matches the scrollback marker for sent user
+            // messages: accent ❯ on the first row, a muted │ on wrapped rows.
+            let composer_cols =
+                Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).split(rows[1]);
+            let gutter: Vec<Line<'static>> = (0..composer_rows)
+                .map(|row| {
+                    if row == 0 {
+                        Line::from(Span::styled("❯", theme::accent_bold()))
+                    } else {
+                        Line::from(Span::styled("│", theme::muted()))
+                    }
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(gutter), composer_cols[0]);
+            frame.render_widget(&app.composer, composer_cols[1]);
+            let mut footer = app.footer_line();
+            // The short chat id rides the right edge when there's room.
+            let short_id = format!("chat {}", app.short_id);
+            let pad = width.saturating_sub(footer.width() + short_id.len());
+            if pad >= 2 {
+                footer.spans.push(Span::raw(" ".repeat(pad)));
+                footer.spans.push(Span::styled(short_id, theme::muted()));
+            }
+            frame.render_widget(Paragraph::new(footer), rows[2]);
         })
         .map_err(terminal_error)?;
     Ok(())
