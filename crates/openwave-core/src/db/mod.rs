@@ -1357,7 +1357,7 @@ impl Store for DbStore {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content, &[], &[], &[]).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, &[], &[], &[], false).await
     }
 
     async fn accept_turn_with_attachments(
@@ -1379,6 +1379,32 @@ impl Store for DbStore {
             images,
             documents,
             invoked_skills,
+            false,
+        )
+        .await
+    }
+
+    async fn accept_turn_with_message_context(
+        &self,
+        id: TurnId,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+        images: &[ImageRef],
+        documents: &[DocumentId],
+        invoked_skills: &[String],
+        voice_input_used: bool,
+    ) -> Result<AcceptTurnOutcome> {
+        ops::turn::accept_turn(
+            self,
+            id,
+            chat_id,
+            model,
+            content,
+            images,
+            documents,
+            invoked_skills,
+            voice_input_used,
         )
         .await
     }
@@ -1419,7 +1445,28 @@ impl Store for DbStore {
         content: &str,
         interrupt: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
-        ops::turn::accept_turn_steer(self, id, turn_id, chat_id, content, interrupt).await
+        ops::turn::accept_turn_steer(self, id, turn_id, chat_id, content, interrupt, false).await
+    }
+
+    async fn accept_turn_steer_with_message_context(
+        &self,
+        id: TurnSteerId,
+        turn_id: TurnId,
+        chat_id: ChatId,
+        content: &str,
+        interrupt: bool,
+        voice_input_used: bool,
+    ) -> Result<AcceptTurnSteerOutcome> {
+        ops::turn::accept_turn_steer(
+            self,
+            id,
+            turn_id,
+            chat_id,
+            content,
+            interrupt,
+            voice_input_used,
+        )
+        .await
     }
 
     async fn list_pending_turn_steers(

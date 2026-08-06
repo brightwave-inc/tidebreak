@@ -108,6 +108,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         role: Role::Assistant,
         reasoning: MessageReasoning::default(),
         content: "standalone".into(),
+        llm_content: None,
         created_at: nanosecond_created_at,
     };
     store
@@ -154,6 +155,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         role: Role::Assistant,
         reasoning: MessageReasoning::default(),
         content: format!(":cit[answer]{{doc={} lines=1-1}}", document_id.0),
+        llm_content: None,
         created_at: completed_at,
     };
     let citation = AssistantCitationInput {
@@ -864,6 +866,7 @@ async fn postgres_parent_completion_and_child_admission_form_one_terminal_bounda
         role: Role::Assistant,
         reasoning: MessageReasoning::default(),
         content: "race-safe terminal answer".into(),
+        llm_content: None,
         created_at: utc_now_at_postgres_precision().max(turn.updated_at),
     };
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -2372,6 +2375,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         role: Role::Assistant,
         reasoning: MessageReasoning::default(),
         content: "postgres completion".into(),
+        llm_content: None,
         created_at: delayed_retry_at + Duration::seconds(1),
     };
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -2679,6 +2683,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         role: Role::Assistant,
         reasoning: MessageReasoning::default(),
         content: "event turn complete".into(),
+        llm_content: None,
         created_at: event_claimed_at + Duration::seconds(1),
     };
     store
@@ -2825,6 +2830,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         role: Role::Assistant,
         reasoning: MessageReasoning::default(),
         content: "postgres candidate".into(),
+        llm_content: None,
         created_at: Utc::now(),
     };
     let applied = store
@@ -2892,6 +2898,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                     role: Role::Assistant,
                     reasoning: MessageReasoning::default(),
                     content: "stale steer completion".into(),
+                    llm_content: None,
                     created_at: steer_completed_at,
                 },
             )
@@ -2930,6 +2937,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 role: Role::Assistant,
                 reasoning: MessageReasoning::default(),
                 content: "fresh steer completion".into(),
+                llm_content: None,
                 created_at: fresh_completed_at,
             },
         )
@@ -3028,6 +3036,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 role: Role::Assistant,
                 reasoning: MessageReasoning::default(),
                 content: "shared postgres identity".into(),
+                llm_content: None,
                 created_at: Utc::now(),
             })
             .await

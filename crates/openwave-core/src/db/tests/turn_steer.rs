@@ -12,6 +12,7 @@ fn pending_turn_steer(
         turn_id: Set(turn.id.0),
         chat_id: Set(turn.chat_id.0),
         content: Set(content.into()),
+        voice_input_used: Set(false),
         interrupt: Set(false),
         status: Set(TurnSteerStatus::Pending.as_str().into()),
         applied_lease_token: Set(None),
@@ -76,6 +77,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
         role: Set("user".into()),
         reasoning: Default::default(),
         content: Set("change course".into()),
+        llm_content: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
     }
@@ -122,6 +124,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
         role: Set("user".into()),
         reasoning: Default::default(),
         content: Set("mismatched identity".into()),
+        llm_content: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
     }
@@ -183,11 +186,19 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     let steer_id = crate::id::TurnSteerId::new();
     let pending = accepted_steer(
         store
-            .accept_turn_steer(steer_id, turn.id, chat.id, "change course", false)
+            .accept_turn_steer_with_message_context(
+                steer_id,
+                turn.id,
+                chat.id,
+                "change course",
+                false,
+                true,
+            )
             .await
             .unwrap(),
     );
     assert_eq!(pending.status, TurnSteerStatus::Pending);
+    assert!(pending.voice_input_used);
     assert_eq!(pending.message_id, None);
 
     let claim_at = Utc::now();
@@ -236,6 +247,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             "candidate before steer :cit[candidate]{{doc={} lines=1-1}}",
             document.id
         ),
+        llm_content: None,
         created_at: Utc::now(),
     };
     let apply_at = Utc::now();
@@ -304,6 +316,10 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         ]
     );
     assert_eq!(messages[2].created_at, applied.resolved_at.unwrap());
+    assert!(messages[2]
+        .llm_content
+        .as_deref()
+        .is_some_and(|content| content.contains("The user dictated this message")));
 
     let second_id = crate::id::TurnSteerId::new();
     accepted_steer(
@@ -320,6 +336,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "final answer".into(),
+        llm_content: None,
         created_at: completed_at,
     };
     assert!(matches!(
@@ -400,6 +417,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "generated from revision one".into(),
+        llm_content: None,
         created_at: stale_after_apply_at,
     };
     assert!(matches!(
@@ -423,6 +441,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: format!("fresh final :cit[answer]{{doc={} lines=1-1}}", document.id),
+        llm_content: None,
         created_at: fresh_completed_at,
     };
     assert!(matches!(
@@ -576,6 +595,13 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
     ));
     assert!(matches!(
         store
+            .accept_turn_steer_with_message_context(id, turn.id, chat.id, "exact", false, true,)
+            .await
+            .unwrap(),
+        AcceptTurnSteerOutcome::IdentityConflict
+    ));
+    assert!(matches!(
+        store
             .accept_turn_steer(id, TurnId::new(), ChatId::new(), "exact", false,)
             .await
             .unwrap(),
@@ -591,6 +617,7 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
             role: Role::User,
             reasoning: Default::default(),
             content: "already used".into(),
+            llm_content: None,
             created_at: Utc::now(),
         })
         .await
@@ -767,6 +794,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
         role: Role::Assistant,
         reasoning: Default::default(),
         content: "stale completion".into(),
+        llm_content: None,
         created_at: stale_output_at,
     };
 
@@ -823,6 +851,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "fresh completion".into(),
+                llm_content: None,
                 created_at: completed_at,
             },
         )
@@ -969,6 +998,7 @@ async fn concurrent_message_and_steer_reserve_one_shared_identity() {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "shared identity".into(),
+                llm_content: None,
                 created_at: Utc::now(),
             })
             .await
@@ -1286,6 +1316,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
         role: Set("assistant".into()),
         reasoning: Default::default(),
         content: Set("occupy identity".into()),
+        llm_content: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(Utc::now()),
     }

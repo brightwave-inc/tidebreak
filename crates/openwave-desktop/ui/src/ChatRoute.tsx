@@ -176,11 +176,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     if (!chat || !hydrated) return;
     const pending = firstMessageActions.take(chatId);
     if (pending) {
+      if (pending.voiceInputUsed) voice.markInputUsed();
       void sendMessage(
         pending.text,
         pending.images,
         pending.files,
         pending.skills,
+        pending.voiceInputUsed,
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -367,6 +369,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     imageItems: readonly ImageAttachment[] = images.attachments,
     fileItems: readonly ImportedDocument[] = files,
     skillNames: readonly string[] = invokedSkills(),
+    voiceInputUsed = voice.inputUsed,
   ) {
     await postTurn({
       content,
@@ -379,6 +382,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         mediaType: file.mediaType,
       })),
       invokedSkills: skillNames,
+      voiceInputUsed,
       fromComposer: true,
     });
   }
@@ -409,10 +413,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       transcriptImages: [...turn.images],
       documentIds: turn.files.map((file) => file.documentId),
       transcriptFiles: [...turn.files],
-      // A retry resends what the transcript holds, and the transcript does not
-      // yet carry the skills a turn was invoked with — so a retried turn is the
-      // ordinary send, with the composer's own pills left out of it.
-      invokedSkills: [],
+      invokedSkills: turn.invokedSkills,
+      voiceInputUsed: turn.voiceInputUsed,
       fromComposer: false,
     });
   }
@@ -429,6 +431,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     documentIds,
     transcriptFiles,
     invokedSkills: skillNames,
+    voiceInputUsed,
     fromComposer,
   }: {
     content: string;
@@ -437,6 +440,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     documentIds: readonly string[];
     transcriptFiles: readonly TranscriptFileAttachment[];
     invokedSkills: readonly string[];
+    voiceInputUsed: boolean;
     fromComposer: boolean;
   }) {
     if (!chat || !content || busy || deletingChatId !== null) return;
@@ -456,6 +460,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           text: content,
           images: [...transcriptImages],
           files: [...transcriptFiles],
+          voiceInputUsed,
+          invokedSkills: [...skillNames],
           createdAt: new Date().toISOString(),
         },
       ],
@@ -469,6 +475,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         attachments,
         documentIds,
         skillNames,
+        voiceInputUsed,
       );
       // Only once the turn is durably accepted, and only for what the composer
       // actually contributed. A refused send — an image the selected model
@@ -480,6 +487,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         images.clear();
         setComposerFiles(() => []);
         composerDraftActions.setSkills(chatId, []);
+        voice.resetInputUsed();
       }
     } catch (err) {
       // Nothing was accepted, so the message has to go back to where it can be
@@ -668,6 +676,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onStart: () => void voice.start(),
             onStop: voice.stop,
           }}
+          voiceInputUsed={voice.inputUsed}
+          onVoiceInputAccepted={voice.resetInputUsed}
           nativeDropTarget={
             <DocumentDropTarget
               chatId={chatId}
@@ -728,8 +738,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             disabled: deletingChatId !== null,
             onChange: onNetworkPolicyChange,
           }}
-          onDraftChange={setComposerDraft}
-          onSelectPrompt={setComposerDraft}
+          onDraftChange={(next) => {
+            setComposerDraft(next);
+            if (!next.trim()) voice.resetInputUsed();
+          }}
+          onSelectPrompt={(prompt) => {
+            setComposerDraft(prompt);
+            voice.resetInputUsed();
+          }}
           onSend={onSend}
           onRetryTurn={retryTurn}
           onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}

@@ -572,6 +572,7 @@ describe("sending a message", () => {
       [],
       ["doc-1"],
       ["pptx"],
+      true,
     );
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -582,6 +583,7 @@ describe("sending a message", () => {
       attachments: [],
       file_attachments: ["doc-1"],
       invoked_skills: ["pptx"],
+      voice_input_used: true,
     });
   });
 });
@@ -598,6 +600,7 @@ describe("active turn steering", () => {
       "steer-1",
       "change course",
       true,
+      true,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -609,6 +612,7 @@ describe("active turn steering", () => {
       turn_id: "turn-1",
       content: "change course",
       interrupt: true,
+      voice_input_used: true,
     });
   });
 });

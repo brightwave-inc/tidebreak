@@ -67,6 +67,8 @@ export type ChatMessage =
       text: string;
       images?: TranscriptImageAttachment[];
       files?: TranscriptFileAttachment[];
+      invokedSkills?: readonly string[];
+      voiceInputUsed?: boolean;
       createdAt?: string;
     }
   | {
@@ -123,6 +125,8 @@ export type ChatMessage =
       role: "turn_failure";
       category: TurnFailureCategory;
       model?: { id: string; provider: ModelInfo["provider"] };
+      invokedSkills?: readonly string[];
+      voiceInputUsed?: boolean;
     }
   | {
       id: string;
@@ -139,6 +143,8 @@ export type RetryableTurn = {
   text: string;
   images: readonly TranscriptImageAttachment[];
   files: readonly TranscriptFileAttachment[];
+  invokedSkills: readonly string[];
+  voiceInputUsed: boolean;
 };
 
 /**
@@ -165,6 +171,9 @@ export function retryableTurn(
       text: message.text,
       images: message.images ?? [],
       files: message.files ?? [],
+      invokedSkills: failure.invokedSkills ?? message.invokedSkills ?? [],
+      voiceInputUsed:
+        failure.voiceInputUsed ?? message.voiceInputUsed ?? false,
     };
   }
   return null;

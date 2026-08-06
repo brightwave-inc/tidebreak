@@ -152,7 +152,6 @@ pub(crate) fn freeze_foreground_turn_surface(
         false,
         None,
         false,
-        &[],
         openwave_core::TurnWebSearch::Host,
     )
 }
@@ -169,7 +168,6 @@ fn freeze_foreground_turn_surface_with_folders(
     offline_package_cache: bool,
     office_rendering: Option<bool>,
     plan_mode: bool,
-    invoked_skills: &[String],
     web_search: openwave_core::TurnWebSearch,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
@@ -193,7 +191,6 @@ fn freeze_foreground_turn_surface_with_folders(
         offline_package_cache,
         office_rendering,
         plan_mode,
-        invoked_skills,
     ));
     ForegroundTurnSurface {
         tools,
@@ -685,7 +682,6 @@ impl TurnWorker {
                 chat.permission_mode,
                 Some(openwave_core::PermissionMode::Plan)
             ),
-            &turn.invoked_skills,
             web_search,
         );
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {

@@ -261,6 +261,7 @@ pub mod message {
         pub seq: i64,
         pub role: String,
         pub content: String,
+        pub llm_content: Option<String>,
         pub reasoning: Option<Json>,
         pub turn_lease_token: Option<Uuid>,
         pub created_at: DateTimeUtc,
@@ -922,6 +923,7 @@ pub mod turn_run {
         pub model: String,
         #[sea_orm(column_type = "JsonBinary")]
         pub invoked_skills: Json,
+        pub voice_input_used: bool,
         pub status: String,
         pub attempt_count: i32,
         pub max_attempts: i32,
@@ -1127,6 +1129,7 @@ pub mod turn_steer {
         pub turn_id: Uuid,
         pub chat_id: Uuid,
         pub content: String,
+        pub voice_input_used: bool,
         pub interrupt: bool,
         pub status: String,
         pub applied_lease_token: Option<Uuid>,

@@ -33,13 +33,25 @@ function runTurn(turnId = "turn-1") {
     .update((session) => ({ ...session, busy: true, activeTurnId: turnId }));
 }
 
-function mount(client: ApiClient, draft = "change course", chatId = "chat-1") {
+function mount(
+  client: ApiClient,
+  draft = "change course",
+  chatId = "chat-1",
+  voiceInputUsed = false,
+) {
   const draftRef = { current: draft };
   const onDraftAccepted = vi.fn(() => {
     draftRef.current = "";
   });
   const view = renderHook(
-    ({ id }) => useTurnControls(client, id, draftRef, onDraftAccepted),
+    ({ id }) =>
+      useTurnControls(
+        client,
+        id,
+        draftRef,
+        onDraftAccepted,
+        voiceInputUsed,
+      ),
     { initialProps: { id: chatId } },
   );
   return { ...view, draftRef, onDraftAccepted };
@@ -98,10 +110,28 @@ describe("useTurnControls", () => {
       expect.any(String),
       "go left",
       true,
+      false,
     );
     expect(onDraftAccepted).toHaveBeenCalledTimes(1);
     expect(draftRef.current).toBe("");
     expect(result.current.steerPendingTurnId).toBeNull();
+  });
+
+  it("marks dictated guidance as voice input", async () => {
+    const client = stubClient();
+    const { result } = mount(client, "change course", "chat-1", true);
+    act(() => runTurn());
+
+    await act(async () => result.current.steer());
+
+    expect(client.steer).toHaveBeenCalledWith(
+      "chat-1",
+      "turn-1",
+      expect.any(String),
+      "change course",
+      true,
+      true,
+    );
   });
 
   it("keeps a draft the reader has since changed", async () => {

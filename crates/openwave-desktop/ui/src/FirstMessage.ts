@@ -8,6 +8,8 @@ export type PendingFirstMessage = {
   files: ImportedDocument[];
   /** Skills picked on home, which only the chat route can actually post. */
   skills: string[];
+  /** Whether voice transcription contributed to this message's text. */
+  voiceInputUsed: boolean;
 };
 
 /**

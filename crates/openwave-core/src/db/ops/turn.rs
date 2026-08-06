@@ -8,7 +8,7 @@ use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, ChatId, DocumentId, MessageId, TurnId};
 use crate::image::ImageRef;
-use crate::model::{AgentRunStatus, TurnRun, TurnRunStatus};
+use crate::model::{user_message_llm_content, AgentRunStatus, TurnRun, TurnRunStatus};
 use crate::provider::Usage;
 use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
 
@@ -114,6 +114,7 @@ pub(in crate::db) async fn accept_turn(
     images: &[ImageRef],
     documents: &[DocumentId],
     invoked_skills: &[String],
+    voice_input_used: bool,
 ) -> Result<AcceptTurnOutcome> {
     validate_turn_input(id, model, content, invoked_skills)?;
     message_attachment_ops::validate(images)?;
@@ -142,6 +143,7 @@ pub(in crate::db) async fn accept_turn(
             images,
             documents,
             invoked_skills,
+            voice_input_used,
         )
         .await?;
         transaction.commit().await.map_err(store_err)?;
@@ -183,6 +185,7 @@ pub(in crate::db) async fn accept_turn(
         seq: Set(next_message_seq_on(&transaction, chat_id).await?),
         role: Set("user".into()),
         content: Set(content.into()),
+        llm_content: Set(None),
         reasoning: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
@@ -203,7 +206,7 @@ pub(in crate::db) async fn accept_turn(
         transaction.rollback().await.map_err(store_err)?;
         return Err(error);
     }
-    if let Err(error) = message_document_attachment_ops::insert_on(
+    let document_context = match message_document_attachment_ops::insert_on(
         &transaction,
         chat_id,
         input_message_id,
@@ -212,8 +215,28 @@ pub(in crate::db) async fn accept_turn(
     )
     .await
     {
-        transaction.rollback().await.map_err(store_err)?;
-        return Err(error);
+        Ok(context) => context,
+        Err(error) => {
+            transaction.rollback().await.map_err(store_err)?;
+            return Err(error);
+        }
+    };
+    let llm_content = user_message_llm_content(
+        content,
+        images,
+        &document_context,
+        invoked_skills,
+        voice_input_used,
+    );
+    if llm_content.is_some() {
+        entities::message::ActiveModel {
+            id: Set(input_message_id.0),
+            llm_content: Set(llm_content),
+            ..Default::default()
+        }
+        .update(&transaction)
+        .await
+        .map_err(store_err)?;
     }
 
     let run = entities::turn_run::ActiveModel {
@@ -225,6 +248,7 @@ pub(in crate::db) async fn accept_turn(
         output_message_id: Set(None),
         model: Set(model.into()),
         invoked_skills: Set(serde_json::json!(invoked_skills)),
+        voice_input_used: Set(voice_input_used),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
         max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
@@ -265,6 +289,7 @@ pub(in crate::db) async fn accept_turn(
                     images,
                     documents,
                     invoked_skills,
+                    voice_input_used,
                 )
                 .await;
             }
@@ -1028,6 +1053,7 @@ async fn exact_accepted_turn_on<C>(
     images: &[ImageRef],
     documents: &[DocumentId],
     invoked_skills: &[String],
+    voice_input_used: bool,
 ) -> Result<AcceptTurnOutcome>
 where
     C: ConnectionTrait,
@@ -1067,7 +1093,8 @@ where
         && message.content == content
         && accepted_images == images
         && accepted_documents == documents
-        && invoked_skills_from_model(&existing)? == invoked_skills;
+        && invoked_skills_from_model(&existing)? == invoked_skills
+        && existing.voice_input_used == voice_input_used;
     Ok(if exact {
         AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
     } else {
@@ -1086,6 +1113,7 @@ pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Re
         output_message_id: model.output_message_id.map(MessageId),
         model: model.model,
         invoked_skills,
+        voice_input_used: model.voice_input_used,
         status: turn_run_status_from_db(&model.status)?,
         attempt_count: model.attempt_count,
         max_attempts: model.max_attempts,

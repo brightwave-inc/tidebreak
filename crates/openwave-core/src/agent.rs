@@ -44,9 +44,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::image::{ImageAttachments, ImageData, ImageRef};
 use crate::model::{
-    exec_attachment_file_name, Chat, Message, MessageAttachment, MessageDocumentAttachment,
-    PermissionMode, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
-    TurnRunStatus, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    Chat, Message, MessageAttachment, PermissionMode, Role, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnRunStatus,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
@@ -103,8 +102,6 @@ enum StreamEnd {
 /// (#1182). Never stored and never rendered — the durable message and the
 /// transcript keep exactly what the user watched stream.
 const USER_INTERRUPTION_NOTE: &str = "\n\n[The user stopped this response here]";
-const MAX_ANNOUNCED_FILES: usize = 8;
-const MAX_ANNOUNCED_IMAGES: usize = 8;
 
 /// A name-keyed registry of the tools available to the agent.
 ///
@@ -1185,6 +1182,7 @@ impl AssistantCandidate {
             turn_id,
             role: Role::Assistant,
             content: self.content.clone(),
+            llm_content: None,
             reasoning: self.reasoning.clone(),
             created_at: Utc::now(),
         }
@@ -4173,6 +4171,7 @@ impl Agent {
                 turn_id,
                 role,
                 content: content.to_string(),
+                llm_content: None,
                 reasoning: MessageReasoning::default(),
                 created_at: Utc::now(),
             })
@@ -4275,21 +4274,16 @@ impl Agent {
             let interrupted: HashSet<MessageId> = interrupted.into_iter().collect();
             for message in &mut messages {
                 if interrupted.contains(&message.id) {
-                    message.content.push_str(USER_INTERRUPTION_NOTE);
+                    message.append_model_context(USER_INTERRUPTION_NOTE);
                 }
             }
         }
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
-        let document_attachments = self
-            .store
-            .list_message_document_attachments(chat_id)
-            .await?;
         let (messages, checkpoint_boundary, source_boundaries) = rebuild_transcript_with_boundary(
             &messages,
             &tool_calls,
             &attachments,
-            &document_attachments,
             self.config.max_tool_result_bytes,
             self.config.image_input,
             checkpoint_source,
@@ -4610,11 +4604,9 @@ impl Agent {
 /// message. Legacy `Role::Tool` rows are ignored.
 ///
 /// The block transcript is never stored, only reconstructed here, so this is
-/// also the single place history regains the attachments a message was
-/// submitted with: images become [`ContentBlock::Image`] blocks in their
-/// recorded order, while a compact appended section names every available
-/// read or exec route. A message with no attachments rebuilds exactly as
-/// before.
+/// also the single place history regains image blocks in their recorded order.
+/// Attachment routes and other host-derived context already live in the
+/// message's durable model projection.
 #[cfg(test)]
 fn rebuild_transcript(
     messages: &[Message],
@@ -4626,7 +4618,6 @@ fn rebuild_transcript(
         messages,
         tool_calls,
         attachments,
-        &[],
         max_result_bytes,
         false,
         None,
@@ -4645,7 +4636,6 @@ fn rebuild_transcript_with_boundary(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     attachments: &[MessageAttachment],
-    document_attachments: &[MessageDocumentAttachment],
     max_result_bytes: usize,
     image_input: bool,
     checkpoint_source: Option<MessageId>,
@@ -4659,7 +4649,6 @@ fn rebuild_transcript_with_boundary(
         .filter(|message| message.role != Role::Tool)
         .collect();
     let images = group_attachments(attachments);
-    let documents = group_document_attachments(document_attachments);
     let batches = batch_tool_calls(tool_calls);
     let mut batch_i = 0;
     let mut out: Vec<ChatMessage> = Vec::new();
@@ -4681,10 +4670,10 @@ fn rebuild_transcript_with_boundary(
 
         if message.role == Role::Assistant {
             let next_ts = messages.get(i + 1).map(|m| m.created_at);
-            let text = if message.content.is_empty() {
+            let text = if message.content_for_model().is_empty() {
                 None
             } else {
-                Some(message.content.as_str())
+                Some(message.content_for_model())
             };
             // Same model step: tools upserted right after the assistant text.
             if batch_i < batches.len()
@@ -4714,16 +4703,15 @@ fn rebuild_transcript_with_boundary(
                 out.push(ChatMessage {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Text {
-                        text: message.content.clone(),
+                        text: message.content_for_model().to_owned(),
                     }],
                     reasoning: message.reasoning.clone(),
                 });
             }
         } else {
-            out.push(user_message_with_attachments(
+            out.push(user_message_for_model(
                 message,
                 images.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
-                documents.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
             ));
             // Tool-only steps between this message and the next non-assistant
             // (e.g. user → tools → user steer). If the next message is
@@ -4808,134 +4796,27 @@ fn group_attachments(
         .collect()
 }
 
-fn group_document_attachments(
-    attachments: &[MessageDocumentAttachment],
-) -> std::collections::HashMap<crate::id::MessageId, Vec<MessageDocumentAttachment>> {
-    let mut grouped: std::collections::HashMap<
-        crate::id::MessageId,
-        Vec<MessageDocumentAttachment>,
-    > = std::collections::HashMap::new();
-    for attachment in attachments {
-        grouped
-            .entry(attachment.message_id)
-            .or_default()
-            .push(attachment.clone());
-    }
-    for attachments in grouped.values_mut() {
-        attachments.sort_by_key(|attachment| attachment.ordinal);
-    }
-    grouped
-}
-
-/// Rebuild one user-authored message, carrying its attachments with its text.
+/// Rebuild one user-authored message, carrying image blocks beside its durable
+/// model-facing text.
 ///
 /// Images lead the block list: both supported providers document better results
 /// when an image precedes the text that refers to it, and the user's prompt is
 /// almost always a question *about* the attachment.
-fn user_message_with_attachments(
-    message: &Message,
-    images: &[ImageRef],
-    documents: &[MessageDocumentAttachment],
-) -> ChatMessage {
-    if images.is_empty() && documents.is_empty() {
-        return ChatMessage::text(message.role, message.content.clone());
+fn user_message_for_model(message: &Message, images: &[ImageRef]) -> ChatMessage {
+    if images.is_empty() {
+        return ChatMessage::text(message.role, message.content_for_model());
     }
     let mut content: Vec<ContentBlock> = images
         .iter()
         .map(|image| ContentBlock::Image { image: *image })
         .collect();
-    let context = attachment_context(images, documents);
-    let text = if message.content.is_empty() {
-        context
-    } else {
-        format!("{}\n\n{context}", message.content)
-    };
-    content.push(ContentBlock::Text { text });
+    content.push(ContentBlock::Text {
+        text: message.content_for_model().to_owned(),
+    });
     ChatMessage {
         role: message.role,
         content,
         reasoning: MessageReasoning::default(),
-    }
-}
-
-fn attachment_context(images: &[ImageRef], documents: &[MessageDocumentAttachment]) -> String {
-    let mut lines = vec!["<attachments>".to_owned()];
-    for (index, image) in images.iter().take(MAX_ANNOUNCED_IMAGES).enumerate() {
-        lines.push(format!(
-            "image_{}: id={}; media_type={}; byte_size={}; this is image content block {}",
-            index + 1,
-            image.blob_id,
-            image.media_type.as_str(),
-            image.byte_len,
-            index + 1
-        ));
-    }
-    for document in documents.iter().take(MAX_ANNOUNCED_FILES) {
-        let metadata = serde_json::json!({
-            "document_id": document.document_id,
-            "title": document.title.as_deref().unwrap_or("Attachment"),
-            "media_type": document.media_type,
-            "byte_size": document.source_blob.as_ref().map(|blob| blob.byte_len),
-        });
-        lines.push(format!(
-            "file: {}",
-            serde_json::to_string(&metadata).expect("attachment metadata is serializable")
-        ));
-        lines.push(format!("  route: {}", attachment_route(document)));
-    }
-    let omitted = images.len().saturating_sub(MAX_ANNOUNCED_IMAGES)
-        + documents.len().saturating_sub(MAX_ANNOUNCED_FILES);
-    if omitted > 0 {
-        lines.push(format!("{omitted} more attachment(s) omitted."));
-    }
-    lines.push("</attachments>".to_owned());
-    lines.join("\n")
-}
-
-fn attachment_route(document: &MessageDocumentAttachment) -> String {
-    if document.readable {
-        return format!(
-            "readable via read_source(document_id=\"{}\")",
-            document.document_id
-        );
-    }
-    let Some(source_blob) = document.source_blob.as_ref() else {
-        return "raw bytes unavailable because no source blob is retained".to_owned();
-    };
-    if source_blob.byte_len > MAX_EXEC_WORKSPACE_FILE_BYTES as u64 {
-        return format!(
-            "raw bytes not materialized because the file exceeds the \
-             {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
-        );
-    }
-    let path = format!(
-        "documents/{}",
-        exec_attachment_file_name(document.title.as_deref(), document.document_id)
-    );
-    let hint = attachment_script_hint(&document.media_type).map_or_else(String::new, |script| {
-        format!("; helper: python3 .openwave/exec-scripts/{script} {path}")
-    });
-    format!("raw bytes at {path} in the exec workspace{hint}")
-}
-
-fn attachment_script_hint(media_type: &str) -> Option<&'static str> {
-    let media_type = media_type
-        .split(';')
-        .next()
-        .unwrap_or(media_type)
-        .trim()
-        .to_ascii_lowercase();
-    match media_type.as_str() {
-        "application/pdf" => Some("render_pdf.py"),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        | "application/msword"
-        | "application/vnd.ms-powerpoint"
-        | "application/vnd.oasis.opendocument.text"
-        | "application/vnd.oasis.opendocument.presentation" => Some("render_office.py"),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        | "application/vnd.ms-excel" => Some("analyze_xlsx.py"),
-        _ => None,
     }
 }
 
@@ -5049,7 +4930,7 @@ fn push_tool_batch(
 ) {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     if let Some(text) = assistant
-        .map(|message| message.content.as_str())
+        .map(Message::content_for_model)
         .filter(|text| !text.is_empty())
     {
         blocks.push(ContentBlock::Text {
@@ -10952,6 +10833,7 @@ mod tests {
                     "OLD PREFIX: choose the durable SQLite path. {}",
                     "historical detail ".repeat(1_200)
                 ),
+                llm_content: None,
                 created_at: Utc::now(),
             },
             Message {
@@ -10961,6 +10843,7 @@ mod tests {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "OLD ASSISTANT: SQLite is confirmed; source:decision-doc.".into(),
+                llm_content: None,
                 created_at: Utc::now(),
             },
             Message {
@@ -10970,6 +10853,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "RECENT USER: keep this exchange raw.".into(),
+                llm_content: None,
                 created_at: Utc::now(),
             },
             Message {
@@ -10979,6 +10863,7 @@ mod tests {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "RECENT ASSISTANT: this is the newest completed exchange.".into(),
+                llm_content: None,
                 created_at: Utc::now(),
             },
         ];
@@ -11341,6 +11226,7 @@ mod tests {
             role: Role::User,
             reasoning: Default::default(),
             content: "old decision ".repeat(1_000),
+            llm_content: None,
             created_at: Utc::now(),
         };
         store.append_message(&historical).await.unwrap();
@@ -12769,7 +12655,7 @@ mod tests {
         let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
         let with_images = MessageId::new();
         let text_only = MessageId::new();
-        let messages = vec![
+        let mut messages = vec![
             Message {
                 id: with_images,
                 chat_id: chat,
@@ -12777,6 +12663,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "compare these".into(),
+                llm_content: None,
                 created_at: t0,
             },
             Message {
@@ -12786,6 +12673,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "and this one?".into(),
+                llm_content: None,
                 created_at: t1,
             },
         ];
@@ -12798,6 +12686,13 @@ mod tests {
         };
         let first = image(1, ImageMediaType::Png);
         let second = image(2, ImageMediaType::Jpeg);
+        messages[0].llm_content = crate::model::user_message_llm_content(
+            "compare these",
+            &[first, second],
+            &[],
+            &[],
+            false,
+        );
         // Deliberately out of row order: the ordinal decides, not arrival.
         let attachments = vec![
             MessageAttachment {
@@ -12827,10 +12722,10 @@ mod tests {
                 ContentBlock::Image { image: second },
                 ContentBlock::Text {
                     text: format!(
-                        "compare these\n\n<attachments>\n\
+                        "# Important context\n\n<attachments>\n\
                          image_1: id={}; media_type=image/png; byte_size=4096; this is image content block 1\n\
                          image_2: id={}; media_type=image/jpeg; byte_size=4096; this is image content block 2\n\
-                         </attachments>",
+                         </attachments>\n\n# User message\n\ncompare these",
                         first.blob_id, second.blob_id
                     )
                 },
@@ -12856,18 +12751,19 @@ mod tests {
         let chat = ChatId::new();
         let message_id = MessageId::new();
         let created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
-        let message = Message {
+        let mut message = Message {
             id: message_id,
             chat_id: chat,
             turn_id: turn,
             role: Role::User,
             reasoning: Default::default(),
             content: "summarize this file".into(),
+            llm_content: None,
             created_at,
         };
         let text_id = crate::id::DocumentId::new();
         let text_blob = crate::model::DocumentSourceBlob::from_bytes(b"decoded notes");
-        let text = MessageDocumentAttachment {
+        let text = crate::model::MessageDocumentAttachment {
             message_id,
             chat_id: chat,
             ordinal: 0,
@@ -12880,7 +12776,7 @@ mod tests {
         };
         let pdf_id = crate::id::DocumentId::new();
         let pdf_blob = crate::model::DocumentSourceBlob::from_bytes(b"%PDF opaque");
-        let pdf = MessageDocumentAttachment {
+        let pdf = crate::model::MessageDocumentAttachment {
             message_id,
             chat_id: chat,
             ordinal: 1,
@@ -12893,7 +12789,7 @@ mod tests {
         };
         let mut documents = vec![text, pdf];
         let oversized_id = crate::id::DocumentId::new();
-        documents.push(MessageDocumentAttachment {
+        documents.push(crate::model::MessageDocumentAttachment {
             message_id,
             chat_id: chat,
             ordinal: 2,
@@ -12902,13 +12798,13 @@ mod tests {
             media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
             source_blob: Some(crate::model::DocumentSourceBlob::from_digest(
                 [9; 32],
-                MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1,
+                crate::model::MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1,
             )),
             readable: false,
             created_at,
         });
         for ordinal in 3..=8 {
-            documents.push(MessageDocumentAttachment {
+            documents.push(crate::model::MessageDocumentAttachment {
                 message_id,
                 chat_id: chat,
                 ordinal,
@@ -12923,11 +12819,12 @@ mod tests {
             });
         }
 
+        message.llm_content =
+            crate::model::user_message_llm_content(&message.content, &[], &documents, &[], false);
         let rebuilt = rebuild_transcript_with_boundary(
             &[message],
             &[],
             &[],
-            &documents,
             DEFAULT_MAX_TOOL_RESULT_BYTES,
             false,
             None,
@@ -12936,7 +12833,7 @@ mod tests {
         let ContentBlock::Text { text } = &rebuilt[0].content[0] else {
             panic!("file attachment should annotate the user text");
         };
-        assert!(text.starts_with("summarize this file\n\n<attachments>"));
+        assert!(text.starts_with("# Important context\n\n<attachments>"));
         assert!(text.contains(&text_id.to_string()));
         assert!(text.contains("\"title\":\"notes.txt\""));
         assert!(text.contains(&format!(
@@ -12956,10 +12853,11 @@ mod tests {
         assert!(text.contains(&oversized_id.to_string()));
         assert!(text.contains(&format!(
             "route: raw bytes not materialized because the file exceeds the \
-             {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
+             {}-byte exec workspace limit",
+            crate::model::MAX_EXEC_WORKSPACE_FILE_BYTES
         )));
         assert!(text.contains("1 more attachment(s) omitted."));
-        assert!(text.ends_with("</attachments>"));
+        assert!(text.ends_with("</attachments>\n\n# User message\n\nsummarize this file"));
     }
 
     #[test]
@@ -12977,6 +12875,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "read it".into(),
+                llm_content: None,
                 created_at: t0,
             },
             Message {
@@ -12986,6 +12885,7 @@ mod tests {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "looking…".into(),
+                llm_content: None,
                 created_at: t1,
             },
         ];
@@ -13174,6 +13074,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "go".into(),
+                llm_content: None,
                 created_at: t0,
             },
             Message {
@@ -13183,6 +13084,7 @@ mod tests {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "done".into(),
+                llm_content: None,
                 created_at: t2,
             },
         ];
@@ -13231,6 +13133,7 @@ mod tests {
                 role: Role::User,
                 reasoning: Default::default(),
                 content: "hi".into(),
+                llm_content: None,
                 created_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
             },
             Message {
@@ -13240,6 +13143,7 @@ mod tests {
                 role: Role::Tool,
                 reasoning: Default::default(),
                 content: "legacy".into(),
+                llm_content: None,
                 created_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
             },
             Message {
@@ -13249,6 +13153,7 @@ mod tests {
                 role: Role::Assistant,
                 reasoning: Default::default(),
                 content: "bye".into(),
+                llm_content: None,
                 created_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
             },
         ];

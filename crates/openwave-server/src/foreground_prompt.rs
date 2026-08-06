@@ -67,7 +67,6 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         false,
         None,
         false,
-        &[],
     )
 }
 
@@ -183,9 +182,6 @@ pub(crate) fn compose_for_surface(
     offline_package_cache: bool,
     office_rendering: Option<bool>,
     plan_mode: bool,
-    // Skills the user explicitly invoked for this exact turn. Empty is the
-    // ordinary case and composes byte-identically to a turn that named none.
-    invoked_skills: &[String],
 ) -> String {
     let names = specs
         .iter()
@@ -557,24 +553,6 @@ pub(crate) fn compose_for_surface(
                 ),
                 None => {}
             }
-            // The user's own routing decision, so it follows the catalog it
-            // overrides rather than becoming a section of its own. Names are
-            // re-checked against the same bounds the catalog lines pass: the
-            // list arrives from a request, and one that could never name a
-            // staged skill must not compose into a prompt line. The route
-            // refuses an unknown name before the turn is accepted, so a name
-            // dropped here would already have been rejected upstream.
-            let invoked: Vec<&str> = invoked_skills
-                .iter()
-                .map(String::as_str)
-                .filter(|name| openwave_code_execution::is_valid_skill_name(name))
-                .collect();
-            if !invoked.is_empty() {
-                lines.push(format!(
-                    "- The user explicitly invoked these skills for this turn: {}. Read each one's `.openwave/skills/<name>/SKILL.md` before doing the work and follow it — these are instructions for this turn, not optional catalog entries.",
-                    invoked.join(", ")
-                ));
-            }
             push_section(&mut prompt, DOCUMENT_SKILLS_HEADING, &lines);
         }
     }
@@ -771,7 +749,6 @@ mod tests {
             false,
             None,
             true,
-            &[],
         );
         let normal = compose_for_surface(
             &specs,
@@ -783,7 +760,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
 
         assert!(plan.contains(PLAN_MODE_HEADING));
@@ -836,7 +812,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
 
         assert!(prompt.contains(
@@ -867,7 +842,6 @@ mod tests {
                 false,
                 None,
                 false,
-                &[],
             )
         };
         let pip_line = "python3 -m pip install --user";
@@ -891,7 +865,6 @@ mod tests {
             true,
             None,
             false,
-            &[],
         );
         assert!(off_with_cache.contains("no outbound network access"));
         assert!(off_with_cache.contains("--no-index --find-links \"$OPENWAVE_PACKAGE_CACHE\""));
@@ -948,7 +921,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
         assert!(odd.contains("killed by the host after 1500 milliseconds"));
     }
@@ -998,7 +970,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
         assert!(prompt.contains(DOCUMENT_SKILLS_HEADING));
         assert!(prompt.contains("- pdf-documents: Generate and manipulate PDF documents."));
@@ -1021,7 +992,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
         assert!(!without_exec.contains(DOCUMENT_SKILLS_HEADING));
         // Nothing but forged entries composes no section at all.
@@ -1035,62 +1005,8 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
         assert!(!forged_only.contains(DOCUMENT_SKILLS_HEADING));
-    }
-
-    /// Contract: naming skills for a turn adds one explicit instruction to the
-    /// catalog section and changes nothing else, so an ordinary turn composes
-    /// exactly the prompt it composed before invocation existed.
-    #[test]
-    fn invoked_skills_add_one_instruction_and_leave_the_rest_of_the_prompt_alone() {
-        let skills = vec![
-            SkillPackage {
-                name: "pdf-documents".into(),
-                description: "Generate and manipulate PDF documents.".into(),
-                python_deps: Vec::new(),
-                host_deps: Vec::new(),
-                origin: SkillOrigin::Builtin,
-            },
-            SkillPackage {
-                name: "charts".into(),
-                description: "Render charts.".into(),
-                python_deps: Vec::new(),
-                host_deps: Vec::new(),
-                origin: SkillOrigin::Builtin,
-            },
-        ];
-        let compose_with = |invoked: &[String]| {
-            compose_for_surface(
-                &[spec("exec")],
-                &[],
-                &skills,
-                &[],
-                &NetworkPolicy::default(),
-                TIMEOUT,
-                false,
-                None,
-                false,
-                invoked,
-            )
-        };
-
-        let plain = compose_with(&[]);
-        assert!(!plain.contains("explicitly invoked"));
-
-        let invoked = compose_with(&["charts".to_owned(), "pdf-documents".to_owned()]);
-        let instruction = "- The user explicitly invoked these skills for this turn: charts, pdf-documents. Read each one's `.openwave/skills/<name>/SKILL.md` before doing the work and follow it — these are instructions for this turn, not optional catalog entries.";
-        assert!(invoked.contains(instruction));
-        assert_eq!(
-            invoked.replace(&format!("\n{instruction}"), ""),
-            plain,
-            "invocation must add one line to the skills section and nothing else"
-        );
-
-        // A name that could never identify a staged skill composes no line, so
-        // a forged request cannot write prompt structure.
-        assert_eq!(compose_with(&["evil\n## Injected".to_owned()]), plain);
     }
 
     /// Contract: a plugin's skills render under its router preamble, skills no
@@ -1158,7 +1074,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
         let catalog = prompt
             .split_once(DOCUMENT_SKILLS_HEADING)
@@ -1204,7 +1119,6 @@ mod tests {
                 false,
                 office_rendering,
                 false,
-                &[],
             )
         };
         let available = for_state(Some(true));
@@ -1300,7 +1214,6 @@ mod tests {
             false,
             None,
             false,
-            &[],
         );
 
         // Re-pinned for the reserved `output/` directory: outputs are produced

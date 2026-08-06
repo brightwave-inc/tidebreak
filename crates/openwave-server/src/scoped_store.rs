@@ -208,9 +208,9 @@ impl ScopedStore {
         self.store.get_turn_run(id).await
     }
 
-    /// [`Store::accept_turn_with_attachments`].
+    /// [`Store::accept_turn_with_message_context`].
     #[allow(clippy::too_many_arguments)]
-    pub async fn accept_turn_with_attachments(
+    pub async fn accept_turn_with_message_context(
         &self,
         id: TurnId,
         chat_id: ChatId,
@@ -219,9 +219,10 @@ impl ScopedStore {
         images: &[ImageRef],
         documents: &[DocumentId],
         invoked_skills: &[String],
+        voice_input_used: bool,
     ) -> Result<AcceptTurnOutcome> {
         self.store
-            .accept_turn_with_attachments(
+            .accept_turn_with_message_context(
                 id,
                 chat_id,
                 model,
@@ -229,21 +230,30 @@ impl ScopedStore {
                 images,
                 documents,
                 invoked_skills,
+                voice_input_used,
             )
             .await
     }
 
-    /// [`Store::accept_turn_steer`].
-    pub async fn accept_turn_steer(
+    /// [`Store::accept_turn_steer_with_message_context`].
+    pub async fn accept_turn_steer_with_message_context(
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
         chat_id: ChatId,
         content: &str,
         interrupt: bool,
+        voice_input_used: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
         self.store
-            .accept_turn_steer(id, turn_id, chat_id, content, interrupt)
+            .accept_turn_steer_with_message_context(
+                id,
+                turn_id,
+                chat_id,
+                content,
+                interrupt,
+                voice_input_used,
+            )
             .await
     }
 

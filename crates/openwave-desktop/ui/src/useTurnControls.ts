@@ -36,12 +36,14 @@ export type TurnControls = {
  *   rather than at render, so a keystroke that has not painted yet still counts.
  * @param onDraftAccepted called when accepted guidance was the draft still in
  *   the composer, so the composer can clear it.
+ * @param voiceInputUsed whether voice transcription contributed to this draft.
  */
 export function useTurnControls(
   client: ApiClient | null,
   chatId: string | null,
   draftRef: RefObject<string>,
   onDraftAccepted: () => void,
+  voiceInputUsed = false,
 ): TurnControls {
   const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
     null,
@@ -188,6 +190,7 @@ export function useTurnControls(
       { chatId, turnId },
       draftRef.current,
       () => crypto.randomUUID(),
+      voiceInputUsed,
     );
     if (!request) return;
 
@@ -202,6 +205,7 @@ export function useTurnControls(
         request.steerId,
         request.content,
         true,
+        request.voiceInputUsed,
       );
       if (!canApplySteerResponse(request)) return;
 

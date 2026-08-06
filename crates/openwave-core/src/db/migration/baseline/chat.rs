@@ -495,6 +495,7 @@ pub(super) fn message_table() -> TableCreateStatement {
         .col(ColumnDef::new(Message::Seq).big_integer().not_null())
         .col(ColumnDef::new(Message::Role).text().not_null())
         .col(ColumnDef::new(Message::Content).text().not_null())
+        .col(ColumnDef::new(Message::LlmContent).text())
         .col(ColumnDef::new(Message::Reasoning).json_binary())
         .col(
             ColumnDef::new(Message::CreatedAt)

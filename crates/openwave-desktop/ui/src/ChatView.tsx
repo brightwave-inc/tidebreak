@@ -62,6 +62,10 @@ export type ChatViewProps = {
   files: ComposerFiles;
   folders?: ComposerFolders;
   voice?: ComposerVoice;
+  /** Whether voice transcription contributed to the current draft. */
+  voiceInputUsed: boolean;
+  /** Retire voice origin only after the current draft is durably accepted. */
+  onVoiceInputAccepted: () => void;
   nativeDropTarget?: ReactNode;
   attachError: string | null;
   onDraftChange: (value: string) => void;
@@ -97,6 +101,8 @@ export function ChatView({
   files,
   folders,
   voice,
+  voiceInputUsed,
+  onVoiceInputAccepted,
   nativeDropTarget,
   attachError,
   onDraftChange,
@@ -119,8 +125,15 @@ export function ChatView({
   const userQuestions = useUserQuestions(client, chat.id);
   const planApprovals = usePlanApprovals(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
-  const turnControls = useTurnControls(client, chat.id, draftRef, () =>
-    onDraftChange(""),
+  const turnControls = useTurnControls(
+    client,
+    chat.id,
+    draftRef,
+    () => {
+      onDraftChange("");
+      onVoiceInputAccepted();
+    },
+    voiceInputUsed,
   );
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);

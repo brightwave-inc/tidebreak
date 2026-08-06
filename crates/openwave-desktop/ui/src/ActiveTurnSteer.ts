@@ -22,6 +22,7 @@ export type ActiveTurnSteerRequest = ActiveTurnTarget & {
   content: string;
   draftSnapshot: string;
   steerId: string;
+  voiceInputUsed: boolean;
 };
 
 export function canBeginActiveTurnSteer(input: {
@@ -53,6 +54,7 @@ export class ActiveTurnSteerFence {
     target: ActiveTurnTarget,
     draft: string,
     createId: () => string,
+    voiceInputUsed = false,
   ): ActiveTurnSteerRequest | null {
     const content = draft.trim();
     if (
@@ -67,13 +69,15 @@ export class ActiveTurnSteerFence {
     const request =
       this.retryable &&
       sameTarget(this.retryable, target) &&
-      this.retryable.content === content
+      this.retryable.content === content &&
+      this.retryable.voiceInputUsed === voiceInputUsed
         ? { ...this.retryable, draftSnapshot: draft }
         : {
             ...target,
             content,
             draftSnapshot: draft,
             steerId: createId(),
+            voiceInputUsed,
           };
     this.retryable = null;
     this.pending = request;

@@ -327,6 +327,7 @@ describe("app shell", () => {
         [],
         [],
         [],
+        false,
       ),
     );
     expect(
