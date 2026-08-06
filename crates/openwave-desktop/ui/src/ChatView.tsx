@@ -423,10 +423,10 @@ export function ChatView({
           slash={{
             options: composerPlugins.slashOptions,
             invoked: invokedSkills,
-            onInvoke: (name) =>
+            onInvoke: (names) =>
               useComposerDrafts
                 .getState()
-                .setSkills(chat.id, [...invokedSkills, name]),
+                .setSkills(chat.id, [...invokedSkills, ...names]),
             onRemove: (name) =>
               useComposerDrafts
                 .getState()

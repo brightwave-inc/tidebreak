@@ -4,24 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ComposerToolsMenu } from "./ComposerToolsMenu";
-import type { PluginInfo } from "./api";
 
 afterEach(cleanup);
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
-
-function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
-  return {
-    name: "documents",
-    display_name: "Documents",
-    description: "Writes Word, Excel, and PowerPoint files.",
-    category: "documents",
-    capabilities: [],
-    enabled: false,
-    skills: [],
-    ...overrides,
-  };
-}
 
 function open() {
   return userEvent.setup().click(screen.getByRole("button", { name: "Tools" }));
@@ -99,13 +85,13 @@ it("renders nothing when the surface offers none of its actions", () => {
   expect(container).toBeEmptyDOMElement();
 });
 
-it("offers the installed plugins under the turn's setup actions", async () => {
-  const onSelect = vi.fn();
+it("offers the plugin library as one row under the turn's setup actions", async () => {
+  const onOpen = vi.fn();
   render(
     <ComposerToolsMenu
       disabled={false}
       attachFiles={{ attaching: false, onAttach: vi.fn() }}
-      plugins={{ items: [plugin()], onSelect }}
+      plugins={{ onOpen }}
     />,
   );
 
@@ -113,19 +99,18 @@ it("offers the installed plugins under the turn's setup actions", async () => {
   const rows = screen.getAllByRole("menuitem");
   expect(rows.map((row) => row.textContent)).toEqual([
     "Attach files",
-    "DocumentsWrites Word, Excel, and PowerPoint files.",
+    "Plugins",
   ]);
 
   await userEvent.setup().click(rows[1]);
-  expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ name: "documents" }));
+  await waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
 });
 
-it("keeps the plugins section off a catalog that is empty or unread", async () => {
+it("keeps the plugins row off a surface with no library to reach", async () => {
   render(
     <ComposerToolsMenu
       disabled={false}
       attachFiles={{ attaching: false, onAttach: vi.fn() }}
-      plugins={{ items: [], onSelect: vi.fn() }}
     />,
   );
 

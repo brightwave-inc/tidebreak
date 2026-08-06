@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { FolderPlus, LoaderCircle, Paperclip, Plus } from "lucide-react";
+import { FolderPlus, LoaderCircle, Package, Paperclip, Plus } from "lucide-react";
 
-import type { NetworkPolicy, PluginInfo, ReasoningEffort } from "./api";
+import type { NetworkPolicy, ReasoningEffort } from "./api";
 import { ReasoningEffortSubMenu } from "./ModelMenu";
 import {
   NetworkPolicyDialog,
@@ -12,14 +12,11 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { categoryIcon } from "@/plugins/pluginVocabulary";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 
 export type ComposerNetwork = {
   value: NetworkPolicy;
@@ -35,15 +32,14 @@ export type ComposerReasoning = {
 };
 
 /**
- * The installed bundles, offered as something to reach for on this message.
+ * The way into the plugin library from the menu.
  *
- * Presentational: the menu lists what it is given and reports the pick. Turning
- * the bundle on and saying so in the draft belong to whoever owns the catalog
- * and the draft.
+ * Presentational: the menu reports that the row was chosen. What the library
+ * holds, and what picking one of its rows does, belongs to the composer that
+ * owns the draft and the message's invocations.
  */
-export type ComposerPlugins = {
-  items: readonly PluginInfo[];
-  onSelect: (plugin: PluginInfo) => void;
+export type ComposerPluginsEntry = {
+  onOpen: () => void;
 };
 
 export type ComposerToolsMenuProps = {
@@ -52,7 +48,7 @@ export type ComposerToolsMenuProps = {
   attachFolder?: { working: boolean; onAttach: () => void };
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
-  plugins?: ComposerPlugins;
+  plugins?: ComposerPluginsEntry;
 };
 
 /**
@@ -64,8 +60,9 @@ export type ComposerToolsMenuProps = {
  * occasionally and then forget about, so they collapse into one menu and leave
  * the bar to the model, the permission mode, and sending.
  *
- * Installed plugins sit at the bottom for the same reason: picking one is
- * preparation for this message, not a place to manage the library — that stays
+ * The library sits at the bottom as a single row rather than a bundle per line:
+ * it is the same list `/` reaches, and duplicating it here left two pickers
+ * that looked alike and behaved differently. Managing the library still lives
  * on the Plugins page.
  */
 export function ComposerToolsMenu({
@@ -83,10 +80,9 @@ export function ComposerToolsMenu({
 
   const hasAttachments = Boolean(attachFiles || attachFolder);
   const hasSettings = Boolean(network || reasoning);
-  // A catalog that is empty or never loaded simply has no section. The menu is
-  // not the place to report that the plugin library could not be read.
-  const pluginItems = plugins?.items ?? [];
-  const hasPlugins = pluginItems.length > 0;
+  // A catalog that is empty or never loaded simply has no row. The menu is not
+  // the place to report that the plugin library could not be read.
+  const hasPlugins = Boolean(plugins);
   if (!hasAttachments && !hasSettings && !hasPlugins) return null;
 
   const NetworkIcon = network ? networkPolicyIcon(network.value) : null;
@@ -107,13 +103,7 @@ export function ComposerToolsMenu({
             </Button>
           </DropdownMenuTrigger>
         </WithTooltip>
-        <DropdownMenuContent
-          align="start"
-          side="top"
-          // Plugin rows carry a description under the name, so the menu widens
-          // to give one a readable line rather than truncating it to nothing.
-          className={cn(hasPlugins ? "w-72" : "w-60")}
-        >
+        <DropdownMenuContent align="start" side="top" className="w-60">
           {attachFiles && (
             <DropdownMenuItem
               disabled={disabled || attachFiles.attaching}
@@ -172,33 +162,17 @@ export function ComposerToolsMenu({
           {hasPlugins && plugins && (
             <>
               {(hasAttachments || hasSettings) && <DropdownMenuSeparator />}
-              <p className="text-muted-foreground px-2 py-1.5 text-xs font-medium">
-                Plugins
-              </p>
-              <DropdownMenuGroup aria-label="Plugins">
-                {pluginItems.map((plugin) => {
-                  const Icon = categoryIcon(plugin.category);
-                  return (
-                    <DropdownMenuItem
-                      key={plugin.name}
-                      className="items-start"
-                      disabled={disabled}
-                      onSelect={() => plugins.onSelect(plugin)}
-                    >
-                      <Icon
-                        className="text-muted-foreground mt-0.5 size-4 shrink-0"
-                        aria-hidden="true"
-                      />
-                      <span className="flex min-w-0 flex-col">
-                        <span className="truncate">{plugin.display_name}</span>
-                        <span className="text-muted-foreground truncate text-xs">
-                          {plugin.description}
-                        </span>
-                      </span>
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuGroup>
+              <DropdownMenuItem
+                disabled={disabled}
+                onSelect={() => {
+                  // Opened once the menu has gone: the panel takes focus for
+                  // its search field, which the closing menu would take back.
+                  window.requestAnimationFrame(plugins.onOpen);
+                }}
+              >
+                <Package className="size-4 text-muted-foreground" aria-hidden="true" />
+                <span>Plugins</span>
+              </DropdownMenuItem>
             </>
           )}
         </DropdownMenuContent>

@@ -140,7 +140,7 @@ it("invokes a picked skill and shows it as a chip the reader can drop", async ()
   await user.keyboard("make slides /pptx");
   await user.click(screen.getByRole("option", { name: /Pptx/ }));
 
-  expect(onInvoke).toHaveBeenCalledWith("pptx");
+  expect(onInvoke).toHaveBeenCalledWith(["pptx"]);
   // The token comes out of the prose; the invocation travels beside it.
   expect(onDraftChange).toHaveBeenLastCalledWith("make slides ");
 
