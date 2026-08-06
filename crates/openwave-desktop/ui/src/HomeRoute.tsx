@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
@@ -27,6 +27,7 @@ import { ModelMenu } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
+import { pluginsApisFromClient } from "./plugins/pluginsApis";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import { RouteFrame } from "./RouteFrame";
 import { AppSidebar } from "./sidebar/AppSidebar";
@@ -52,6 +53,7 @@ export function HomeRoute() {
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const draft = useComposerDraft(HOME_DRAFT_KEY);
   const composerPlugins = useComposerPlugins(client);
+  const promptLibrary = useMemo(() => pluginsApisFromClient(client), [client]);
   const setDraft = (text: string) =>
     composerDraftActions.setDraft(HOME_DRAFT_KEY, text);
   const voice = useVoiceComposer(
@@ -277,10 +279,13 @@ export function HomeRoute() {
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
           {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
-              fills the composer rather than sending, the way it does in a chat. */}
+              fills the composer rather than sending, the way it does in a chat.
+              Home's starters come from the installed prompt library when it has
+              any; otherwise the built-in openers stand. */}
           <WelcomeState
             onSelectPrompt={setDraft}
             executionConfigClient={client}
+            promptLibrary={promptLibrary}
           />
         </div>
 

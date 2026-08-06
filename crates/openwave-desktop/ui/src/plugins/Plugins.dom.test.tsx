@@ -43,6 +43,7 @@ const CATALOG: PluginCatalog = {
       enabled: true,
     },
   ],
+  prompts: [],
 };
 
 function catalogWith(
@@ -66,6 +67,7 @@ function apisWith(overrides: Partial<PluginsApis> = {}): PluginsApis {
     instructions: vi
       .fn()
       .mockImplementation(async (name: string) => ({ name, instructions: SKILL_BODY })),
+    promptBody: vi.fn(),
     ...overrides,
   };
 }

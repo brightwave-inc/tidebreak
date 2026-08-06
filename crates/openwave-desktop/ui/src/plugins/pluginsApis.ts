@@ -2,6 +2,7 @@ import type {
   ApiClient,
   PluginCatalog,
   PluginEnableUpdate,
+  PromptBody,
   SkillInstructions,
 } from "@/api";
 
@@ -16,6 +17,8 @@ export type PluginsApis = {
   setEnabled(update: PluginEnableUpdate): Promise<PluginCatalog>;
   /** One skill's instruction body, fetched when its detail opens. */
   instructions(name: string): Promise<SkillInstructions>;
+  /** One prompt's insertable text, fetched when the user picks it. */
+  promptBody(name: string): Promise<PromptBody>;
 };
 
 export function pluginsApisFromClient(client: ApiClient): PluginsApis {
@@ -23,5 +26,6 @@ export function pluginsApisFromClient(client: ApiClient): PluginsApis {
     list: () => client.listPlugins(),
     setEnabled: (update) => client.setPluginsEnabled(update),
     instructions: (name) => client.getSkillInstructions(name),
+    promptBody: (name) => client.getPromptBody(name),
   };
 }
