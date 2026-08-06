@@ -103,7 +103,67 @@ impl MessageReasoning {
     /// A block minted by another provider — or by another model on the same
     /// provider — is foreign input, so a mismatch yields nothing rather than
     /// failing: switching models mid-conversation is ordinary, and sending no
-    /// reasoning is always a valid request shape.
+    /// reasoning is always a valid request shape. This is the flatten-on-switch
+    /// rule for thinking blocks; see `docs/model-providers.md`.
+    pub fn replayable_for(&self, provider: Option<&ProviderId>, model: &str) -> &[Value] {
+        match &self.origin {
+            Some(origin) if origin.provider.as_ref() == provider && origin.model == model => {
+                &self.blocks
+            }
+            _ => &[],
+        }
+    }
+}
+
+/// Provider-native content blocks for a tool the provider already ran.
+///
+/// Anthropic's server-side web search is the motivating case: result bodies
+/// live only in opaque `encrypted_content` that must be replayed verbatim to
+/// the same route. The cleartext [`ContentBlock::ProviderExecutedToolCall`]
+/// output stays the host/UI shape; this side channel carries what that
+/// provider alone needs on a later request.
+///
+/// Origin-gated exactly like [`MessageReasoning`]: a foreign provider or
+/// model gets nothing and adapters fall back to cleartext `output` (the
+/// flatten-on-switch rule in `docs/model-providers.md`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolReplay {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<ReasoningOrigin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blocks: Vec<Value>,
+}
+
+impl ProviderToolReplay {
+    /// Native blocks captured from a live stream on `origin`'s route.
+    ///
+    /// An empty block list still records the origin when the call was
+    /// provider-executed but has nothing opaque to replay (OpenAI citations
+    /// are already in the cleartext output). Callers that have neither an
+    /// origin nor blocks should leave the field absent instead.
+    pub fn captured(origin: ReasoningOrigin, blocks: Vec<Value>) -> Self {
+        Self {
+            origin: Some(origin),
+            blocks,
+        }
+    }
+
+    /// Whether there is anything to attribute or replay.
+    pub fn is_empty(&self) -> bool {
+        self.origin.is_none() && self.blocks.is_empty()
+    }
+
+    /// The route that minted the blocks, if any were captured.
+    pub fn origin(&self) -> Option<&ReasoningOrigin> {
+        self.origin.as_ref()
+    }
+
+    /// The blocks, whatever route they came from.
+    pub fn blocks(&self) -> &[Value] {
+        &self.blocks
+    }
+
+    /// The blocks, but only when they are valid input for this exact route.
     pub fn replayable_for(&self, provider: Option<&ProviderId>, model: &str) -> &[Value] {
         match &self.origin {
             Some(origin) if origin.provider.as_ref() == provider && origin.model == model => {
@@ -172,15 +232,21 @@ pub enum ContentBlock {
         /// Whether the provider's tool failed.
         #[serde(default)]
         is_error: bool,
+        /// Provider-native blocks for same-route replay, when the adapter
+        /// captured any. Absent for host-shaped history and for providers
+        /// whose cleartext `output` is already enough.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay: Option<ProviderToolReplay>,
     },
 }
 
-/// Render a provider-executed tool call as one line of assistant prose.
+/// Render a provider-executed tool call as assistant prose a foreign adapter
+/// can carry.
 ///
-/// Adapters whose wire format has no place for a call the *other* provider ran
-/// send this instead, so replayed history keeps the fact that a search
-/// happened and what it found rather than dropping it silently. Compact by
-/// design: it rides in the model's context on every later request.
+/// Used when the wire format has no place for a call this (or another)
+/// provider ran server-side, or when native replay is not valid for the
+/// current route. Includes titles and URLs from the cleartext result so a
+/// later step is not left with only a count.
 #[must_use]
 pub fn provider_executed_tool_call_text(
     name: &str,
@@ -191,24 +257,59 @@ pub fn provider_executed_tool_call_text(
     /// Cap on the rendered subject, so an unbounded input cannot grow the
     /// prompt one line at a time.
     const MAX_SUBJECT_CHARS: usize = 200;
+    /// How many result rows ride in the prose; the rest are tallied.
+    const MAX_LISTED_RESULTS: usize = 8;
+    /// Cap on each listed title.
+    const MAX_TITLE_CHARS: usize = 120;
 
     let subject = match input.get("query").and_then(Value::as_str) {
         Some(query) => query.to_owned(),
         None => input.to_string(),
     };
     let subject: String = subject.chars().take(MAX_SUBJECT_CHARS).collect();
-    let outcome = if is_error {
-        match output.get("error_code").and_then(Value::as_str) {
+    if is_error {
+        let outcome = match output.get("error_code").and_then(Value::as_str) {
             Some(code) => format!("failed ({code})"),
             None => "failed".to_owned(),
-        }
-    } else {
-        match output.get("results").and_then(Value::as_array) {
-            Some(results) => format!("{} results", results.len()),
-            None => "done".to_owned(),
-        }
+        };
+        return format!("[{name}: {subject} -> {outcome}]");
+    }
+    let Some(results) = output.get("results").and_then(Value::as_array) else {
+        return format!("[{name}: {subject} -> done]");
     };
-    format!("[{name}: {subject} -> {outcome}]")
+    if results.is_empty() {
+        return format!("[{name}: {subject} -> 0 results]");
+    }
+    let mut lines = Vec::with_capacity(1 + MAX_LISTED_RESULTS.min(results.len()));
+    lines.push(format!("[{name}: {subject} -> {} results]", results.len()));
+    for result in results.iter().take(MAX_LISTED_RESULTS) {
+        let title = result
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(MAX_TITLE_CHARS)
+            .collect::<String>();
+        let url = result
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if title.is_empty() && url.is_empty() {
+            continue;
+        }
+        if title.is_empty() {
+            lines.push(format!("- {url}"));
+        } else if url.is_empty() {
+            lines.push(format!("- {title}"));
+        } else {
+            lines.push(format!("- {title} — {url}"));
+        }
+    }
+    let omitted = results.len().saturating_sub(MAX_LISTED_RESULTS);
+    if omitted > 0 {
+        lines.push(format!("- …and {omitted} more"));
+    }
+    lines.join("\n")
 }
 
 /// A single message in the conversation sent to a provider.
@@ -598,6 +699,8 @@ pub enum ProviderEvent {
         output: Value,
         /// Whether the provider's tool failed.
         is_error: bool,
+        /// Provider-native blocks for same-route replay, when captured.
+        replay: Option<ProviderToolReplay>,
     },
     /// Final token usage for the completion.
     Usage(Usage),
@@ -661,10 +764,16 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_executed_call_renders_as_one_bounded_line() {
+    fn a_provider_executed_call_renders_titles_and_stays_bounded() {
         // Adapters with no wire form for another provider's server-side call
         // send this instead, and it rides in context on every later request.
-        let results = serde_json::json!({"provider": "anthropic", "results": [{}, {}]});
+        let results = serde_json::json!({
+            "provider": "anthropic",
+            "results": [
+                {"title": "A", "url": "https://example.com/a"},
+                {"title": "B", "url": "https://example.com/b"},
+            ]
+        });
         assert_eq!(
             provider_executed_tool_call_text(
                 "web_search",
@@ -672,7 +781,7 @@ mod tests {
                 &results,
                 false
             ),
-            "[web_search: rust 2027 -> 2 results]"
+            "[web_search: rust 2027 -> 2 results]\n- A — https://example.com/a\n- B — https://example.com/b"
         );
         assert_eq!(
             provider_executed_tool_call_text(
@@ -690,7 +799,30 @@ mod tests {
             &results,
             false,
         );
-        assert!(long.chars().count() < 300, "{}", long.chars().count());
+        assert!(long.chars().count() < 400, "{}", long.chars().count());
+    }
+
+    #[test]
+    fn provider_tool_replay_is_gated_on_origin() {
+        let replay = ProviderToolReplay::captured(
+            ReasoningOrigin {
+                provider: Some(ProviderId::new("anthropic")),
+                model: "claude-opus-5".into(),
+            },
+            vec![serde_json::json!({"type": "server_tool_use"})],
+        );
+        assert_eq!(
+            replay
+                .replayable_for(Some(&ProviderId::new("anthropic")), "claude-opus-5")
+                .len(),
+            1
+        );
+        assert!(replay
+            .replayable_for(Some(&ProviderId::new("openai")), "claude-opus-5")
+            .is_empty());
+        assert!(replay
+            .replayable_for(Some(&ProviderId::new("anthropic")), "claude-sonnet-5")
+            .is_empty());
     }
 
     #[test]

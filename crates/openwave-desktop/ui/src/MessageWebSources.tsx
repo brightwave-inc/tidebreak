@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { ToolResultPreview } from "./api";
+import { DomainFavicon } from "./DomainFavicon";
 import { openExternal } from "./host";
 
 /** One page a turn's web searches surfaced, as the row shows it. */
@@ -53,10 +54,11 @@ export function MessageWebSources({
           type="button"
           title={source.label}
           aria-label={source.label}
-          className="max-w-56 truncate rounded-full border bg-card px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-card px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           onClick={() => void openSource(source.url)}
         >
-          {source.domain}
+          <DomainFavicon url={source.url} className="size-3" />
+          <span className="truncate">{source.domain}</span>
         </button>
       ))}
       {hidden > 0 && (

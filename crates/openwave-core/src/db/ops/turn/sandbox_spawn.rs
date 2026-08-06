@@ -292,6 +292,7 @@ where
             status: Set(ToolCallStatus::Completed.as_str().into()),
             result: Set(Some(request.result.clone())),
             result_preview: Set(None),
+            provider_replay: Set(None),
             error_code: Set(None),
             error_detail: Set(None),
             approval_status: Set(None),

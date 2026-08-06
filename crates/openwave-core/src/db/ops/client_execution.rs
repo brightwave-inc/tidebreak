@@ -60,6 +60,7 @@ pub(in crate::db) async fn accept_tool_call(
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
         result_preview: Set(None),
+        provider_replay: Set(serialize_provider_replay(call.provider_replay.as_ref())?),
         error_code: Set(None),
         error_detail: Set(None),
         approval_status: Set(None),
@@ -144,6 +145,7 @@ pub(in crate::db) async fn accept_claimed_tool_call(
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
         result_preview: Set(None),
+        provider_replay: Set(serialize_provider_replay(call.provider_replay.as_ref())?),
         error_code: Set(None),
         error_detail: Set(None),
         approval_status: Set(None),
@@ -975,6 +977,13 @@ pub(in crate::db) fn tool_call_from_model(
             .map_err(|error| {
                 AgentError::Store(format!("invalid stored tool result preview: {error}"))
             })?,
+        provider_replay: model
+            .provider_replay
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                AgentError::Store(format!("invalid stored provider tool replay: {error}"))
+            })?,
         error_code: model.error_code,
         error_detail: model.error_detail,
         client_executor_id: model.client_executor_id,
@@ -992,6 +1001,15 @@ fn client_claim_from_model(model: entities::tool_call::Model) -> Result<ClientTo
         call: tool_call_from_model(model)?,
         lease_token,
     })
+}
+
+fn serialize_provider_replay(
+    replay: Option<&crate::provider::ProviderToolReplay>,
+) -> Result<Option<serde_json::Value>> {
+    replay
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| AgentError::Store(format!("invalid provider tool replay: {error}")))
 }
 
 fn execution_from_db(value: &str) -> Result<ToolCallExecution> {

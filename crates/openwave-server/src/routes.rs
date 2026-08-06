@@ -2928,6 +2928,7 @@ mod activity_tests {
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: Some("private-error-code".into()),
             error_detail: Some("private error detail".into()),
             client_executor_id: Some(uuid::Uuid::new_v4()),

@@ -17,6 +17,7 @@ import type {
   ResultFailure,
 } from "./api";
 import { DocumentIcon } from "./components/document-table/DocumentIcon";
+import { DomainFavicon } from "./DomainFavicon";
 
 type ToolEntriesListProps = {
   name: string;
@@ -166,6 +167,11 @@ function EntryIcon({ entry }: { entry: ResultEntry }) {
         aria-hidden="true"
       />
     );
+  }
+  // A link with an address gets its site mark; without one the kind glyph
+  // stands in — same as every other row that has nowhere to fetch from.
+  if (entry.kind === "link" && entry.url !== null) {
+    return <DomainFavicon url={entry.url} />;
   }
   const Icon = ENTRY_ICONS[entry.kind];
   return (

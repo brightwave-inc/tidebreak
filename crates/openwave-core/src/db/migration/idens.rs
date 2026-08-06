@@ -631,6 +631,7 @@ pub(crate) enum ToolCall {
     Status,
     Result,
     ResultPreview,
+    ProviderReplay,
     ErrorCode,
     ErrorDetail,
     ApprovalStatus,

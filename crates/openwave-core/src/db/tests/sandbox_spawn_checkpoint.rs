@@ -166,6 +166,7 @@ async fn park_spawn_on_approval(
             status: ToolCallStatus::Pending,
             result: None,
             result_preview: None,
+            provider_replay: None,
             error_code: None,
             error_detail: None,
             client_executor_id: None,
@@ -966,6 +967,8 @@ async fn orchestration_calls_are_not_generic_work_and_rebuild_once_in_spawn_orde
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,
@@ -1086,6 +1089,8 @@ async fn tool_history_order_is_independent_of_provider_clock_skew() {
         status: ToolCallStatus::Pending,
         result: None,
         result_preview: None,
+
+        provider_replay: None,
         error_code: None,
         error_detail: None,
         client_executor_id: None,

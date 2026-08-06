@@ -521,6 +521,8 @@ mod tests {
                     status: ToolCallStatus::Pending,
                     result: None,
                     result_preview: None,
+
+                    provider_replay: None,
                     error_code: None,
                     error_detail: None,
                     client_executor_id: None,

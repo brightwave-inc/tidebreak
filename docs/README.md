@@ -6,6 +6,8 @@ Project documentation, versioned alongside the code.
   they fit together.
 - [How OpenWave works](how-openwave-works.md) — a plain-language maintainer tour
   of the product, runtime, state machines, document model, and unfinished edges.
+- [Model providers and cross-provider replay](model-providers.md) — provider
+  tiers, mid-conversation switching, and the flatten-on-switch rule.
 - [Host access and connected folders](host-access.md) — how projects and
   conversations receive user-approved access to folders on the host machine.
 - [Agent runs and sandboxed background work](agent-runs.md) — the shared
