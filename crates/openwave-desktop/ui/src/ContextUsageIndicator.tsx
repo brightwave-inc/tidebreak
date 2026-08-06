@@ -71,32 +71,34 @@ export function ContextUsageIndicator({
         )}
         // The visible pill is a magnitude; the accessible name is the sentence
         // a screen reader needs, since "34%" alone says nothing about of what.
+        // A graphic with a text alternative rather than a live region: this
+        // updates on every turn, and it is reference material, not an
+        // announcement worth interrupting for.
+        role="img"
         aria-label={`Context: ${percent}% of ${formatTokenCount(contextWindow)} tokens used`}
-        role="status"
       >
-        <ContextUsageRing percent={percent} level={level} />
+        <ContextUsageRing percent={percent} />
         {percent}%
       </span>
     </WithTooltip>
   );
 }
 
-/** A small filled ring, drawn as a conic sweep over a muted track. */
-function ContextUsageRing({
-  percent,
-  level,
-}: {
-  percent: number;
-  level: ReturnType<typeof contextUsageLevel>;
-}) {
+/**
+ * A small filled ring, drawn as a conic sweep over a muted track.
+ *
+ * Takes its colour from the pill via `currentColor`, so the threshold styling
+ * lives in exactly one place.
+ */
+function ContextUsageRing({ percent }: { percent: number }) {
+  const filled = `${percent * 3.6}deg`;
   return (
     <span
       aria-hidden="true"
       className="size-3 shrink-0 rounded-full"
       style={{
-        background: `conic-gradient(currentColor 0deg ${percent * 3.6}deg, color-mix(in oklch, currentColor 20%, transparent) ${percent * 3.6}deg 360deg)`,
+        background: `conic-gradient(currentColor 0deg ${filled}, color-mix(in oklch, currentColor 20%, transparent) ${filled} 360deg)`,
       }}
-      data-level={level}
     />
   );
 }
