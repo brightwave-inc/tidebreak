@@ -4235,6 +4235,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tui-textarea",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

@@ -107,6 +107,42 @@ pub fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// Clip a line to a display width, dropping spans (or parts of spans) that
+/// would run past it. Scrollback and panels render into fixed buffers that
+/// panic on an over-wide line, so everything that reaches one is clipped here.
+pub fn clip_line(line: Line<'static>, width: usize) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in line.spans {
+        if used >= width {
+            break;
+        }
+        let text = span.content.as_ref();
+        let remaining = width - used;
+        if text.width() <= remaining {
+            used += text.width();
+            out.push(span);
+        } else {
+            let mut taken = String::new();
+            let mut w = 0usize;
+            for ch in text.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w + cw > remaining {
+                    break;
+                }
+                w += cw;
+                taken.push(ch);
+            }
+            if !taken.is_empty() {
+                out.push(Span::styled(taken, span.style));
+            }
+            used = width;
+        }
+    }
+    Line::from(out)
+}
+
 /// The timestamp format used across the transcript: local wall time.
 pub fn timestamp(at: chrono::DateTime<chrono::Utc>) -> String {
     at.with_timezone(&chrono::Local).format("%H:%M").to_string()
@@ -325,25 +361,18 @@ pub fn header_lines(resumed: bool, short_id: &str) -> Vec<Line<'static>> {
 
 /// The dim reasoning tail shown while the model thinks: at most the last two
 /// wrapped lines, so a long stream doesn't crowd the live region.
-pub fn thinking_lines(thinking: &str, width: usize) -> Vec<Line<'static>> {
-    let mut lines = wrap(thinking, width.saturating_sub(2));
-    if lines.len() > 2 {
-        lines.drain(..lines.len() - 2);
-    }
-    lines
-        .into_iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                format!("  {line}"),
-                theme::muted().add_modifier(Modifier::ITALIC),
-            ))
-        })
-        .collect()
+/// Streaming assistant text, rendered as live markdown so code fences and
+/// emphasis form as the text arrives, exactly as the settled block will.
+pub fn streaming_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    super::markdown::lines(text, width)
 }
 
-/// Streaming assistant text, wrapped plain.
-pub fn streaming_lines(text: &str, width: usize) -> Vec<Line<'static>> {
-    wrap(text, width).into_iter().map(Line::from).collect()
+/// The spinner frames, shared across the header, running tools, and live
+/// agent lines so they stay in phase.
+pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+pub fn spinner_at(tick: usize) -> char {
+    SPINNER[tick % SPINNER.len()]
 }
 
 /// The running tool's line: spinner in the accent, name plain.
