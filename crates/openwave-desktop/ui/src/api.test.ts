@@ -362,6 +362,34 @@ describe("pending approval recovery", () => {
     });
   });
 
+  // A pending write_file approval offers path_prefix rungs. Rejecting the
+  // variant made every chat with one pending unloadable (#1712), because one
+  // invalid rung fails the whole hydration response.
+  it("accepts the path_prefix rungs a write_file approval offers", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "write_file",
+        approval: "workspace_may_modify_files",
+        class: "workspace",
+        preview: { tool: "write_file", path: "data/parser.js" },
+        grant_rungs: [
+          { path_prefix: { segments: 2 } },
+          { path_prefix: { segments: 1 } },
+        ],
+      })?.grantRungs,
+    ).toEqual([
+      { path_prefix: { segments: 2 } },
+      { path_prefix: { segments: 1 } },
+    ]);
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        grant_rungs: [{ path_prefix: { segments: 0 } }],
+      }),
+    ).toBeNull();
+  });
+
   it("drops a preview it cannot fully validate rather than half-rendering it", () => {
     const exec = {
       ...safe,
