@@ -48,7 +48,6 @@ const TICK: Duration = Duration::from_millis(100);
 /// One delayed reconnect after an unexpected socket close; further closes give
 /// up rather than hammering the server.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Outcomes of HTTP actions spawned off the UI loop, plus the one reconnect.
 enum ActionOutcome {
@@ -187,6 +186,9 @@ struct App {
     /// In-flight reconnect task identity, so the loop doesn't open a second
     /// socket while one is already connecting.
     reconnecting: Option<()>,
+    /// The cursor in the slash-command autocomplete list, when the composer
+    /// is a `/` prefix.
+    slash_selected: usize,
 }
 
 impl App {
@@ -222,6 +224,7 @@ impl App {
             catalog: None,
             hydrated: false,
             reconnecting: None,
+            slash_selected: 0,
         }
     }
 
@@ -250,7 +253,7 @@ impl App {
     }
 
     fn spinner(&self) -> char {
-        SPINNER[self.spinner % SPINNER.len()]
+        render::spinner_at(self.spinner)
     }
 
     fn on_frame(&mut self, frame: SequencedFrame) {
@@ -602,11 +605,63 @@ impl App {
             {
                 self.composer.insert_newline();
             }
+            // Slash autocomplete: when the composer is a `/` prefix, Tab and
+            // the arrows walk the matching command list and Enter completes.
+            KeyCode::Enter if self.slash_matches().len() == 1 => {
+                self.complete_slash();
+                self.try_send();
+            }
+            KeyCode::Tab if !self.slash_matches().is_empty() => {
+                let len = self.slash_matches().len();
+                self.slash_selected = (self.slash_selected + 1) % len;
+            }
+            KeyCode::BackTab if !self.slash_matches().is_empty() => {
+                let len = self.slash_matches().len();
+                self.slash_selected = (self.slash_selected + len - 1) % len;
+            }
+            KeyCode::Down if !self.slash_matches().is_empty() => {
+                let len = self.slash_matches().len();
+                self.slash_selected = (self.slash_selected + 1) % len;
+            }
+            KeyCode::Up if !self.slash_matches().is_empty() => {
+                let len = self.slash_matches().len();
+                self.slash_selected = (self.slash_selected + len - 1) % len;
+            }
             KeyCode::Enter => self.try_send(),
             _ => {
                 super::composer::edit_key(&mut self.composer, key);
+                self.slash_selected = 0;
             }
         }
+    }
+
+    /// The composer text as a slash-command prefix: matches when the input is
+    /// a single line starting with `/` and no space yet (still naming the
+    /// command). Returns the matching canonical command names.
+    fn slash_matches(&self) -> Vec<&'static str> {
+        let line = self.composer.lines().first().cloned().unwrap_or_default();
+        if self.composer.lines().len() > 1 || !line.starts_with('/') || line.contains(' ') {
+            return Vec::new();
+        }
+        let prefix = line.trim_start_matches('/').to_lowercase();
+        super::overlays::SLASH_COMMANDS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| name.starts_with(prefix.as_str()))
+            .collect()
+    }
+
+    /// Fill the composer with the selected slash command plus a trailing
+    /// space, ready for args or Enter.
+    fn complete_slash(&mut self) {
+        let matches = self.slash_matches();
+        let Some(name) = matches.get(self.slash_selected).or(matches.first()) else {
+            return;
+        };
+        self.composer = super::composer::new(vec![format!("/{name} ")]);
+        // Cursor to the end.
+        self.composer.move_cursor(tui_textarea::CursorMove::End);
+        self.slash_selected = 0;
     }
 
     fn overlay_key(&mut self, key: KeyEvent) {
@@ -766,9 +821,94 @@ impl App {
         }
     }
 
+    /// The slash-command table, Claude Code style: `/name args` in the
+    /// composer. Each entry is the canonical name plus a one-line blurb the
+    /// help overlay and the autocomplete list share.
+    /// Run a slash command. Returns true when the input was a command (so the
+    /// composer resets and nothing is sent to the model). The command table
+    /// lives in `overlays::SLASH_COMMANDS`, shared with the help overlay.
+    fn run_slash_command(&mut self, input: &str) -> bool {
+        let trimmed = input.trim();
+        let Some(body) = trimmed.strip_prefix('/') else {
+            return false;
+        };
+        let mut parts = body.splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or("").to_lowercase();
+        let arg = parts.next().map(str::trim).unwrap_or("");
+        // The composer is consumed either way; unknown commands just flash.
+        self.composer = super::composer::new(Vec::new());
+        match name.as_str() {
+            "model" | "models" => self.open_models(),
+            "effort" => {
+                if arg.is_empty() {
+                    // No argument: open the model overlay's effort picker.
+                    self.open_models();
+                    if let Some(Overlay::Models(overlay)) = &mut self.overlay {
+                        overlay.picking_effort = true;
+                    }
+                } else {
+                    self.set_effort(Some(arg.to_owned()));
+                }
+            }
+            "mode" | "permission" | "permissions" => {
+                if arg.is_empty() {
+                    self.open_mode();
+                } else {
+                    self.set_mode(arg.to_owned());
+                }
+            }
+            "chats" | "chat" | "threads" | "switch" => self.open_chats(),
+            "new" => self.new_chat(),
+            "rename" | "title" => {
+                if arg.is_empty() {
+                    self.flash("/rename <title>");
+                } else {
+                    let chat = self.chat;
+                    self.rename_chat(chat, arg.to_owned());
+                }
+            }
+            "move" | "project" => self.open_move(),
+            "agents" | "agent" | "runs" => self.open_agents(),
+            "questions" | "question" | "ask" => {
+                let chat = self.chat;
+                self.refresh_questions_for(chat);
+            }
+            "help" | "?" => self.overlay = Some(Overlay::Help(HelpOverlay::new())),
+            "quit" | "exit" | "q" => self.should_quit = true,
+            _ => {
+                self.flash(format!("unknown command /{name} — try /help"));
+            }
+        }
+        true
+    }
+
+    /// Fetch this chat's parked questions and open the answer overlay.
+    fn refresh_questions_for(&mut self, chat: ChatId) {
+        let (client, actions) = (self.client.clone(), self.actions.clone());
+        tokio::spawn(async move {
+            match client.list_pending_questions(chat).await {
+                Ok(mut pending) => {
+                    if let Some(block) = pending.drain(..).next() {
+                        let _ = actions.send(ActionOutcome::QuestionsReady(block));
+                    } else {
+                        let _ =
+                            actions.send(ActionOutcome::GenericOk("no pending questions".into()));
+                    }
+                }
+                Err(error) => {
+                    let _ = actions.send(ActionOutcome::ChatOpFailed(error.to_string()));
+                }
+            }
+        });
+    }
+
     fn try_send(&mut self) {
         let content = self.composer.lines().join("\n");
         if content.trim().is_empty() {
+            return;
+        }
+        // Slash commands are handled locally, never sent to the model.
+        if content.trim_start().starts_with('/') && self.run_slash_command(&content) {
             return;
         }
         // A running turn steers rather than rejects: the desktop's composer
@@ -1301,7 +1441,7 @@ impl App {
 
     /// The live region's transient stack, bottom-anchored within `max` lines:
     /// blank padding goes on top, so content sits directly above the composer.
-    fn transient_lines(&self, width: usize, max: usize) -> Vec<Line<'static>> {
+    fn transient_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if let Some(plan) = &self.plan {
             lines.extend(render::plan_card(
@@ -1315,8 +1455,14 @@ impl App {
             || self.active_tool.is_some()
             || self.approval.is_some()
         {
-            if !self.thinking.is_empty() {
-                lines.extend(render::thinking_lines(&self.thinking, width));
+            // While the model works, show a spinner rather than the raw
+            // reasoning stream — the reasoning still folds into the transcript
+            // at turn end, so nothing is lost, but the live view stays calm.
+            if self.streaming.is_empty() && self.active_tool.is_none() && self.approval.is_none() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", self.spinner()), theme::accent()),
+                    Span::styled("working…", theme::muted()),
+                ]));
             }
             if !self.streaming.is_empty() {
                 lines.extend(render::streaming_lines(&self.streaming, width));
@@ -1361,13 +1507,9 @@ impl App {
                 self.spinner(),
             ));
         }
-        if lines.len() > max {
-            lines.drain(..lines.len() - max);
-        }
-        let pad = max.saturating_sub(lines.len());
-        let mut anchored = vec![Line::default(); pad];
-        anchored.extend(lines);
-        anchored
+        // The region is sized to the content (see `draw`), so nothing is
+        // drained or padded here — a growing stream grows the terminal.
+        lines
     }
 
     /// The footer's left side: state segment in the accent, key hints muted,
@@ -1414,6 +1556,8 @@ impl App {
             spans.push(sep());
             spans.push(Span::styled("enter send", theme::muted()));
         }
+        spans.push(sep());
+        spans.push(Span::styled("/ commands", theme::muted()));
         spans.push(sep());
         spans.push(Span::styled("ctrl+o chats", theme::muted()));
         spans.push(sep());
@@ -1692,6 +1836,9 @@ fn flush_commits(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stdout>
         .commits
         .drain(..)
         .flat_map(|commit| commit.lines(width))
+        // Defensive: never let a line wider than the viewport reach
+        // `insert_before`, whose fixed buffer panics on an over-wide line.
+        .map(|line| render::clip_line(line, width))
         .collect();
     let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     terminal
@@ -1706,10 +1853,19 @@ fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     live_height: u16,
 ) -> Result<()> {
-    let width = terminal.size().map_err(terminal_error)?.width as usize;
+    let area = terminal.size().map_err(terminal_error)?;
+    let width = area.width as usize;
     let composer_rows = (app.composer.lines().len() as u16).clamp(1, MAX_COMPOSER_ROWS);
-    let transient_rows = live_height.saturating_sub(composer_rows + 1);
-    let transient = app.transient_lines(width, transient_rows as usize);
+    // The transient region grows with its content (so streaming text expands
+    // the terminal rather than scrolling inside a capped block), bounded by
+    // the viewport minus the composer and footer. `live_height` is the floor
+    // the loop keeps stable between turns.
+    let max_transient = area
+        .height
+        .saturating_sub(composer_rows + 1)
+        .max(live_height.saturating_sub(composer_rows + 1));
+    let transient = app.transient_lines(width);
+    let transient_rows = (transient.len() as u16).clamp(1, max_transient);
     terminal
         .draw(|frame| {
             let rows = Layout::vertical([
@@ -1745,6 +1901,42 @@ fn draw(
                 footer.spans.extend(right);
             }
             frame.render_widget(Paragraph::new(footer), rows[2]);
+            // The slash-command autocomplete floats just above the composer.
+            let slash = app.slash_matches();
+            if !slash.is_empty() {
+                let selected = app.slash_selected.min(slash.len() - 1);
+                let items: Vec<Line<'static>> = slash
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let blurb = super::overlays::SLASH_COMMANDS
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, b)| *b)
+                            .unwrap_or("");
+                        let marker = if i == selected { "▸ " } else { "  " };
+                        let style = if i == selected {
+                            theme::selected()
+                        } else {
+                            Style::default()
+                        };
+                        Line::from(vec![
+                            Span::styled(marker, style),
+                            Span::styled(format!("/{name:<10}"), style),
+                            Span::styled(blurb, style),
+                        ])
+                    })
+                    .collect();
+                let height = items.len() as u16;
+                // Sit on top of the composer's top edge, growing upward.
+                let y = rows[1].y.saturating_sub(height);
+                let area = Rect::new(rows[1].x, y, rows[1].width.min(56), height);
+                frame.render_widget(Clear, area);
+                frame.render_widget(
+                    Paragraph::new(items).style(Style::default().bg(theme::PANEL_BG)),
+                    area,
+                );
+            }
             // An overlay floats on top of the live region.
             if let Some(overlay) = &mut app.overlay {
                 render_overlay(overlay, frame);

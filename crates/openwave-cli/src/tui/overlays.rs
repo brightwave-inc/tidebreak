@@ -18,6 +18,26 @@ use super::render;
 use super::theme;
 use crate::api::wire::{AgentRunSnapshot, ChatSummary, ModelInfo, PendingQuestions};
 
+/// The slash-command table, Claude Code style: `/name args` in the composer.
+/// Each entry is the canonical name plus a one-line blurb the help overlay and
+/// the autocomplete list share.
+pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("model", "pick the model (opens the selector)"),
+    (
+        "effort",
+        "set reasoning effort: none|low|medium|high|xhigh|max",
+    ),
+    ("mode", "permission mode: plan|ask|auto|allow"),
+    ("chats", "open the chat switcher"),
+    ("new", "start a new chat"),
+    ("rename", "rename this chat: /rename <title>"),
+    ("move", "move this chat to a project"),
+    ("agents", "list background agents"),
+    ("questions", "answer the model's parked questions"),
+    ("help", "shortcut and command reference"),
+    ("quit", "leave"),
+];
+
 /// What an overlay decided. `Stay` keeps it open; `Dismiss` closes it; the
 /// rest close it and hand the app an action.
 pub enum OverlayOutcome {
@@ -49,6 +69,33 @@ fn row(selected: bool, spans: Vec<Span<'static>>) -> Line<'static> {
             .map(|span| span.patch_style(style))
             .collect::<Vec<_>>(),
     )
+}
+
+/// A selectable bar row: the selected row is padded to the panel's full width
+/// so its highlight reads as a solid bar, the way a menu cursor should.
+fn bar(selected: bool, width: usize, spans: Vec<Span<'static>>) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let mut spans = spans;
+    if selected {
+        let used: usize = spans.iter().map(|span| span.content.width()).sum();
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), theme::selected()));
+        }
+    }
+    row(selected, spans)
+}
+
+/// Move a selection cursor. Arrows and Tab step down, Shift-Tab steps up,
+/// wrapping at the ends — the menu convention.
+fn nav_step(selected: usize, len: usize, down: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if down {
+        (selected + 1) % len
+    } else {
+        (selected + len - 1) % len
+    }
 }
 
 fn title_or_untitled(title: Option<&str>) -> String {
@@ -115,15 +162,15 @@ impl ChatsOverlay {
         }
         match key.code {
             KeyCode::Esc => OverlayOutcome::Dismiss,
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                 if !self.chats.is_empty() {
-                    self.selected = (self.selected + 1) % self.chats.len();
+                    self.selected = nav_step(self.selected, self.chats.len(), true);
                 }
                 OverlayOutcome::Stay
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if !self.chats.is_empty() {
-                    self.selected = (self.selected + self.chats.len() - 1) % self.chats.len();
+                    self.selected = nav_step(self.selected, self.chats.len(), false);
                 }
                 OverlayOutcome::Stay
             }
@@ -209,11 +256,11 @@ impl ChatsOverlay {
                     },
                 ),
             ];
-            out.push(row(selected, spans));
+            out.push(bar(selected, width, spans));
         }
         out.push(Line::default());
         out.push(Line::from(Span::styled(
-            "enter open · n new · r rename · d delete · esc close",
+            "↑↓/tab move · enter open · n new · r rename · d delete · esc close",
             theme::muted(),
         )));
         out
@@ -279,16 +326,16 @@ impl AgentsOverlay {
                     OverlayOutcome::Dismiss
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                 if !self.runs.is_empty() {
-                    self.selected = (self.selected + 1) % self.runs.len();
+                    self.selected = nav_step(self.selected, self.runs.len(), true);
                     self.detail = None;
                 }
                 OverlayOutcome::Stay
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if !self.runs.is_empty() {
-                    self.selected = (self.selected + self.runs.len() - 1) % self.runs.len();
+                    self.selected = nav_step(self.selected, self.runs.len(), false);
                     self.detail = None;
                 }
                 OverlayOutcome::Stay
@@ -372,7 +419,7 @@ impl AgentsOverlay {
             } else {
                 spans.push(Span::styled(format!("  {}", run.status), theme::muted()));
             }
-            out.push(row(selected, spans));
+            out.push(bar(selected, width, spans));
         }
         // The expanded run's detail: activity timeline plus a result slice.
         if let Some((open, items)) = &self.detail {
@@ -433,7 +480,7 @@ pub struct ModelOverlay {
     current: Option<String>,
     effort: Option<String>,
     /// Whether the effort list is showing instead of the model list.
-    picking_effort: bool,
+    pub(crate) picking_effort: bool,
     /// The cursor within the effort list.
     effort_selected: usize,
 }
@@ -487,16 +534,15 @@ impl ModelOverlay {
                     self.picking_effort = false;
                     return OverlayOutcome::Stay;
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     if !efforts.is_empty() {
-                        self.effort_selected = (self.effort_selected + 1) % efforts.len();
+                        self.effort_selected = nav_step(self.effort_selected, efforts.len(), true);
                     }
                     return OverlayOutcome::Stay;
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                     if !efforts.is_empty() {
-                        self.effort_selected =
-                            (self.effort_selected + efforts.len() - 1) % efforts.len();
+                        self.effort_selected = nav_step(self.effort_selected, efforts.len(), false);
                     }
                     return OverlayOutcome::Stay;
                 }
@@ -509,15 +555,15 @@ impl ModelOverlay {
         }
         match key.code {
             KeyCode::Esc => OverlayOutcome::Dismiss,
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                 if !self.models.is_empty() {
-                    self.selected = (self.selected + 1) % self.models.len();
+                    self.selected = nav_step(self.selected, self.models.len(), true);
                 }
                 OverlayOutcome::Stay
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if !self.models.is_empty() {
-                    self.selected = (self.selected + self.models.len() - 1) % self.models.len();
+                    self.selected = nav_step(self.selected, self.models.len(), false);
                 }
                 OverlayOutcome::Stay
             }
@@ -548,8 +594,9 @@ impl ModelOverlay {
             for (i, effort) in self.efforts().iter().enumerate() {
                 let selected = i == self.effort_selected;
                 let current = self.effort.as_deref() == Some(effort.as_str());
-                out.push(row(
+                out.push(bar(
                     selected,
+                    width,
                     vec![
                         Span::styled(
                             if selected { "▸ " } else { "  " },
@@ -617,11 +664,11 @@ impl ModelOverlay {
             if !model.available {
                 spans.push(Span::styled("  unavailable", theme::muted()));
             }
-            out.push(row(selected, spans));
+            out.push(bar(selected, width, spans));
         }
         out.push(Line::default());
         out.push(Line::from(Span::styled(
-            "enter select · d default · e effort… · esc close",
+            "↑↓/tab move · enter select · d default · e effort… · esc close",
             theme::muted(),
         )));
         out
@@ -655,12 +702,12 @@ impl ModeOverlay {
     pub fn key(&mut self, key: KeyEvent) -> OverlayOutcome {
         match key.code {
             KeyCode::Esc => OverlayOutcome::Dismiss,
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1) % MODES.len();
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.selected = nav_step(self.selected, MODES.len(), true);
                 OverlayOutcome::Stay
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = (self.selected + MODES.len() - 1) % MODES.len();
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                self.selected = nav_step(self.selected, MODES.len(), false);
                 OverlayOutcome::Stay
             }
             KeyCode::Enter => OverlayOutcome::SetMode(MODES[self.selected].0.to_owned()),
@@ -673,8 +720,9 @@ impl ModeOverlay {
         let mut out = Vec::new();
         for (i, (_, label, blurb)) in MODES.iter().enumerate() {
             let selected = i == self.selected;
-            out.push(row(
+            out.push(bar(
                 selected,
+                width,
                 vec![
                     Span::styled(
                         if selected { "▸ " } else { "  " },
@@ -701,7 +749,7 @@ impl ModeOverlay {
         }
         out.push(Line::default());
         out.push(Line::from(Span::styled(
-            "enter set · esc close",
+            "↑↓/tab move · enter set · esc close",
             theme::muted(),
         )));
         out
@@ -730,12 +778,12 @@ impl MoveOverlay {
         let len = self.projects.len() + 1;
         match key.code {
             KeyCode::Esc => OverlayOutcome::Dismiss,
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1) % len;
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.selected = nav_step(self.selected, len, true);
                 OverlayOutcome::Stay
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = (self.selected + len - 1) % len;
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                self.selected = nav_step(self.selected, len, false);
                 OverlayOutcome::Stay
             }
             KeyCode::Enter => {
@@ -752,8 +800,9 @@ impl MoveOverlay {
     pub fn lines(&self, width: usize) -> Vec<Line<'static>> {
         let width = width.max(20);
         let mut out = Vec::new();
-        out.push(row(
+        out.push(bar(
             self.selected == 0,
+            width,
             vec![
                 Span::styled(
                     if self.selected == 0 { "▸ " } else { "  " },
@@ -768,8 +817,9 @@ impl MoveOverlay {
         ));
         for (i, project) in self.projects.iter().enumerate() {
             let selected = self.selected == i + 1;
-            out.push(row(
+            out.push(bar(
                 selected,
+                width,
                 vec![
                     Span::styled(
                         if selected { "▸ " } else { "  " },
@@ -791,7 +841,7 @@ impl MoveOverlay {
         }
         out.push(Line::default());
         out.push(Line::from(Span::styled(
-            "enter move · esc close",
+            "↑↓/tab move · enter move · esc close",
             theme::muted(),
         )));
         out
@@ -894,15 +944,15 @@ impl QuestionsOverlay {
         let multi = question.question_type == "multi";
         match key.code {
             KeyCode::Esc => OverlayOutcome::Dismiss,
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                 if option_count > 0 {
-                    self.cursor = (self.cursor + 1) % option_count;
+                    self.cursor = nav_step(self.cursor, option_count, true);
                 }
                 OverlayOutcome::Stay
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if option_count > 0 {
-                    self.cursor = (self.cursor + option_count - 1) % option_count;
+                    self.cursor = nav_step(self.cursor, option_count, false);
                 }
                 OverlayOutcome::Stay
             }
@@ -1052,6 +1102,19 @@ impl HelpOverlay {
     }
 
     pub fn lines(&self, _width: usize) -> Vec<Line<'static>> {
+        let mut out: Vec<Line<'static>> = Vec::new();
+        out.push(Line::from(Span::styled(
+            "slash commands",
+            theme::accent_bold(),
+        )));
+        for (name, blurb) in SLASH_COMMANDS {
+            out.push(Line::from(vec![
+                Span::styled(format!("/{name:<10}"), theme::accent()),
+                Span::styled(blurb.to_string(), theme::muted()),
+            ]));
+        }
+        out.push(Line::default());
+        out.push(Line::from(Span::styled("keys", theme::accent_bold())));
         let rows: &[(&str, &str)] = &[
             ("enter", "send · steer while a turn runs"),
             ("alt+enter", "newline"),
@@ -1065,13 +1128,12 @@ impl HelpOverlay {
             ("y / n / a", "approve once · reject · always…"),
             ("esc", "close a panel"),
         ];
-        rows.iter()
-            .map(|(key, what)| {
-                Line::from(vec![
-                    Span::styled(format!("{key:<10}"), theme::accent()),
-                    Span::styled(what.to_string(), theme::muted()),
-                ])
-            })
-            .collect()
+        out.extend(rows.iter().map(|(key, what)| {
+            Line::from(vec![
+                Span::styled(format!("{key:<10}"), theme::accent()),
+                Span::styled(what.to_string(), theme::muted()),
+            ])
+        }));
+        out
     }
 }
