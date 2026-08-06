@@ -492,6 +492,10 @@ pub struct ResolvedModelPolicy {
     pub input_modalities: Vec<InputModality>,
     /// Whether the provider request uses a reasoning-model shape.
     pub supports_reasoning: bool,
+    /// Whether a turn on this model may run the provider's own server-side web
+    /// search instead of the host's. Asserts that the routing adapter emits the
+    /// vendor tool, so it is never inherited by a pass-through route.
+    pub supports_vendor_web_search: bool,
     /// The reasoning-effort levels this model accepts, ascending. Empty when
     /// the model takes no effort control.
     pub reasoning_efforts: Vec<ReasoningEffort>,
@@ -510,6 +514,7 @@ impl ResolvedModelPolicy {
             max_output_tokens: spec.max_output_tokens,
             input_modalities: spec.input_modalities.to_vec(),
             supports_reasoning: spec.supports_reasoning,
+            supports_vendor_web_search: spec.supports_vendor_web_search,
             reasoning_efforts: spec.reasoning_efforts.to_vec(),
         }
     }
@@ -568,6 +573,11 @@ impl ResolvedModelPolicy {
             // Unknown endpoints get deliberately conservative request shaping.
             // Capability editing can be added later without changing the key.
             supports_reasoning: false,
+            // A pass-through endpoint cannot promise a provider-executed
+            // search, whatever upstream model it is serving — the request
+            // shape that would enable one is the vendor's own, and this route
+            // does not speak it. Deliberately not inherited by `gateway_for`.
+            supports_vendor_web_search: false,
             reasoning_efforts: Vec::new(),
         }
     }

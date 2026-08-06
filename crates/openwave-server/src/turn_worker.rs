@@ -153,6 +153,7 @@ pub(crate) fn freeze_foreground_turn_surface(
         None,
         false,
         &[],
+        openwave_core::TurnWebSearch::Host,
     )
 }
 
@@ -169,10 +170,21 @@ fn freeze_foreground_turn_surface_with_folders(
     office_rendering: Option<bool>,
     plan_mode: bool,
     invoked_skills: &[String],
+    web_search: openwave_core::TurnWebSearch,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
+    // The prompt describes the capabilities the turn actually has. A vendor
+    // turn still has `web_search` — the provider runs it, but the model names
+    // and uses it the same way — so only the turn that has no search at all
+    // drops the section, and a turn that keeps it keeps the guidance that has
+    // always come with it.
+    let mut specs = tools.specs_for_surface(true, plan_mode);
+    if web_search == openwave_core::TurnWebSearch::Off {
+        specs.retain(|spec| spec.name != openwave_core::WEB_SEARCH_TOOL);
+    }
+    agent_config.web_search = web_search;
     agent_config.system_prompt = Some(crate::foreground_prompt::compose_for_surface(
-        &tools.specs_for_surface(true, plan_mode),
+        &specs,
         exec_folders,
         skills,
         plugins,
@@ -629,29 +641,6 @@ impl TurnWorker {
             Some(provider) => provider.current_timeout_ms().await,
             None => crate::code_execution::DEFAULT_TIMEOUT_MS,
         };
-        let surface = freeze_foreground_turn_surface_with_folders(
-            tools,
-            &self.agent_config,
-            &exec_folders,
-            &skills,
-            &plugins,
-            &chat.network_policy,
-            exec_timeout_ms,
-            offline_package_cache,
-            office_rendering,
-            matches!(
-                chat.permission_mode,
-                Some(openwave_core::PermissionMode::Plan)
-            ),
-            &turn.invoked_skills,
-        );
-        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
-            eprintln!(
-                "openwave: turn {} operating_prompt={}",
-                turn.id,
-                crate::foreground_prompt::identity(prompt)
-            );
-        }
         let model_policy = if self.resolver.enforces_model_registry() {
             crate::providers::resolve_model_policy(&*self.store, &turn.model, true).await?
         } else {
@@ -668,6 +657,43 @@ impl TurnWorker {
                     "the turn's model is no longer registered for its provider",
                 )
                 .await;
+        }
+        // Resolved per turn, alongside the model: which search this turn gets
+        // depends on both host policy and the model that is about to run, and
+        // both can change between turns of one chat. A model the registry does
+        // not own claims no vendor search. It is resolved before the surface is
+        // frozen because the surface's prompt has to describe it.
+        let web_search = crate::web_search::resolve_turn_web_search(
+            &*self.store,
+            &*self.secrets,
+            model_policy
+                .as_ref()
+                .is_some_and(|policy| policy.supports_vendor_web_search),
+        )
+        .await?;
+        let surface = freeze_foreground_turn_surface_with_folders(
+            tools,
+            &self.agent_config,
+            &exec_folders,
+            &skills,
+            &plugins,
+            &chat.network_policy,
+            exec_timeout_ms,
+            offline_package_cache,
+            office_rendering,
+            matches!(
+                chat.permission_mode,
+                Some(openwave_core::PermissionMode::Plan)
+            ),
+            &turn.invoked_skills,
+            web_search,
+        );
+        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
+            eprintln!(
+                "openwave: turn {} operating_prompt={}",
+                turn.id,
+                crate::foreground_prompt::identity(prompt)
+            );
         }
         // Resolved per turn, not at boot, so enabling a provider takes effect on
         // the next turn. `None` is not a failure: background maintenance is

@@ -56,6 +56,7 @@ describe("WebSearchPanel", () => {
       has_credential: false,
       available: false,
       timeout_ms: 20_000,
+      mode: "automatic",
     });
 
     render(<WebSearchPanel client={client} />);
@@ -96,6 +97,7 @@ describe("WebSearchPanel", () => {
         has_credential: true,
         available: true,
         timeout_ms: 20_000,
+        mode: "automatic",
       },
       [
         { provider: "exa", has_credential: true },
@@ -124,6 +126,7 @@ describe("WebSearchPanel", () => {
       has_credential: false,
       available: false,
       timeout_ms: 20_000,
+      mode: "automatic",
     });
 
     render(<WebSearchPanel client={client} />);
@@ -150,6 +153,7 @@ describe("WebSearchPanel", () => {
       has_credential: true,
       available: true,
       timeout_ms: 20_000,
+      mode: "automatic",
     });
 
     render(<WebSearchPanel client={client} />);

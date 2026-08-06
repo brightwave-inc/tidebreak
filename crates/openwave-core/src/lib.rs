@@ -75,7 +75,7 @@ pub mod user_questions;
 
 pub use agent::{
     Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, ForegroundAgentWaitRequest,
-    SandboxAgentSpawnRequest, ToolRegistry, UtilityModel,
+    SandboxAgentSpawnRequest, ToolRegistry, TurnWebSearch, UtilityModel,
 };
 pub use agent_tools::{
     sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_read_delegated_file_tool_spec,
