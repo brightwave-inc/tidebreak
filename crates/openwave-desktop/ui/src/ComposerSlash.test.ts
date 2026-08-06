@@ -16,7 +16,9 @@ const CATALOG: PluginCatalog = {
       display_name: "Documents",
       description: "Writes Word, Excel, and PowerPoint files.",
       category: "documents",
+      origin: "builtin",
       capabilities: [],
+      compatibility: { status: "unchecked", issues: [] },
       enabled: true,
       skills: [
         { name: "docx", description: "Documents.", origin: "builtin", enabled: true },
@@ -28,7 +30,9 @@ const CATALOG: PluginCatalog = {
       display_name: "Charts",
       description: "Plots data.",
       category: "visualization",
+      origin: "builtin",
       capabilities: [],
+      compatibility: { status: "unchecked", issues: [] },
       enabled: false,
       skills: [
         { name: "charts", description: "Plots.", origin: "builtin", enabled: true },
