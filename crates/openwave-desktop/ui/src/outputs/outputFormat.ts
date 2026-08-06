@@ -9,6 +9,8 @@ export function outputTypeLabel(mediaType: string): string {
       return "CSV";
     case "application/json":
       return "JSON";
+    case "application/vnd.openwave.chart+json":
+      return "Chart";
     case "text/html":
       return "HTML";
     case "text/plain":

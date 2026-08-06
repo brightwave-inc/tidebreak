@@ -61,7 +61,8 @@ export type TextDeliverableMediaType =
   | "text/plain"
   | "text/csv"
   | "application/json"
-  | "text/html";
+  | "text/html"
+  | "application/vnd.openwave.chart+json";
 
 const MAX_DELIVERABLES = 100;
 const MAX_FILENAME_CHARACTERS = 120;
@@ -80,6 +81,7 @@ export function isTextDeliverableMediaType(
     "text/csv",
     "application/json",
     "text/html",
+    "application/vnd.openwave.chart+json",
   ].includes(value);
 }
 
