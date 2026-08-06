@@ -113,7 +113,7 @@ async fn read_until_turns_end(
             let event: RendererSequencedEvent = serde_json::from_str(text.as_str()).unwrap();
             if matches!(
                 event.event,
-                RendererAgentEvent::TurnCompleted | RendererAgentEvent::TurnFailed { .. }
+                RendererAgentEvent::TurnCompleted { .. } | RendererAgentEvent::TurnFailed { .. }
             ) {
                 completed += 1;
             }
@@ -177,6 +177,13 @@ where
 
 fn assert_renderer_event_frames_are_redacted(events: &[serde_json::Value]) {
     let serialized = serde_json::to_string(events).unwrap();
+    // `usage` is deliberately absent from this list: the terminal events carry
+    // the turn's four token counts so the desktop can show context usage.
+    // `stop_reason`, which sits beside it in the journal, still does not cross.
+    //
+    // Internal *keys* are written with their quotes and colon rather than bare.
+    // A bare `output` also matches the `output_tokens` count that now crosses
+    // legitimately, and a check that cannot distinguish the two is not a check.
     for forbidden in [
         "provider-secret-id",
         "provider-secret-call-id",
@@ -184,16 +191,15 @@ fn assert_renderer_event_frames_are_redacted(events: &[serde_json::Value]) {
         "/Users/private",
         "file.txt",
         "hunter2",
-        "fragment",
-        "output",
-        "content",
-        "data",
-        "summary",
-        "usage",
-        "stop_reason",
-        "diagnostic",
-        "lease",
-        "checkpoint",
+        "\"fragment\":",
+        "\"output\":",
+        "\"content\":",
+        "\"data\":",
+        "\"summary\":",
+        "\"stop_reason\":",
+        "\"diagnostic\":",
+        "\"lease\":",
+        "\"checkpoint\":",
     ] {
         assert!(
             !serialized.contains(forbidden),
@@ -355,7 +361,7 @@ async fn ws_replays_a_finished_turn_from_the_journal() {
         .any(|e| matches!(&e.event, RendererAgentEvent::TextDelta { text } if text == "hi")));
     assert!(matches!(
         events.last().unwrap().event,
-        RendererAgentEvent::TurnCompleted
+        RendererAgentEvent::TurnCompleted { .. }
     ));
     // Sequence numbers are strictly increasing.
     assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
@@ -407,7 +413,7 @@ async fn ws_replays_one_turn_then_streams_the_next_live() {
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e.event, RendererAgentEvent::TurnCompleted))
+            .filter(|e| matches!(e.event, RendererAgentEvent::TurnCompleted { .. }))
             .count(),
         2,
         "both turns completed over one connection"
@@ -478,7 +484,7 @@ async fn ws_subprotocol_auth_succeeds() {
                 continue;
             };
             let event: RendererSequencedEvent = serde_json::from_str(text.as_str()).unwrap();
-            if matches!(event.event, RendererAgentEvent::TurnCompleted) {
+            if matches!(event.event, RendererAgentEvent::TurnCompleted { .. }) {
                 saw_completed = true;
                 break;
             }

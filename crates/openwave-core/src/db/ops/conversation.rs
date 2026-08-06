@@ -825,6 +825,7 @@ where
             _ => continue,
         };
         let invoked_skills = super::turn::invoked_skills_from_model(&turn)?;
+        let usage = super::turn::usage_from_turn_model(&turn)?;
         index_of.insert(turn.id, snapshots.len());
         snapshots.push(ChatTerminalTurnSnapshot {
             turn_id: TurnId(turn.id),
@@ -836,6 +837,7 @@ where
             failure_kind: turn.last_error_code,
             model: turn.model,
             invoked_skills,
+            usage,
             finished_at,
         });
     }
