@@ -1930,7 +1930,22 @@ media_type: string | null,
  * [`Output`]: ResultEntryKind::Output
  * [`App`]: ResultEntryKind::App
  */
-target_id: string | null, };
+target_id: string | null, 
+/**
+ * The public page this row opens, when it names one.
+ *
+ * The one projected field a click leaves the application with, so it is
+ * admitted at construction rather than at the click: only `http` and
+ * `https` survive [`Self::with_web_url`], and a row whose address is
+ * anything else keeps its title and its domain and simply does not open.
+ * It rides alongside the domain in `detail` rather than replacing it —
+ * a column of rows is still told apart by host, not by query string.
+ *
+ * Carried because attribution for a search a chat did not run itself is
+ * only meaningful if the reader can reach the page. `default` because
+ * retained projections predate the field.
+ */
+url?: string, };
 
 /**
  * What one row of a listed result is, which is what picks its icon.

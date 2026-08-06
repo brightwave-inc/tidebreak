@@ -1132,15 +1132,16 @@ fn provider_executed_entries(output: &Value) -> Vec<crate::ResultEntry> {
         .unwrap_or_default()
         .iter()
         .map(|result| {
+            let url = result
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let entry = crate::ResultEntry::new(
                 crate::ResultEntryKind::Link,
                 result.get("title").and_then(Value::as_str).unwrap_or(""),
-            );
-            match result
-                .get("url")
-                .and_then(Value::as_str)
-                .and_then(result_host)
-            {
+            )
+            .with_web_url(url);
+            match result_host(url) {
                 Some(host) => entry.with_detail(host),
                 None => entry,
             }
