@@ -1,7 +1,7 @@
 ---
 name: charts
 display-name: Charts
-description: Charts and plots rendered to PNG or SVG, inspected before delivery.
+description: Interactive native charts, or plots rendered to PNG or SVG, validated before delivery.
 category: visualization
 skills: ["charts"]
 ---
