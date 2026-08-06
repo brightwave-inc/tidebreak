@@ -73,6 +73,7 @@ import {
   type StickyChatDefaults as WireStickyChatDefaults,
   type WebSearchConfigInfo as WireWebSearchConfigInfo,
   type WebSearchCredentialReadiness as WireWebSearchCredentialReadiness,
+  type WebSearchMode as WireWebSearchMode,
   type WebSearchProviderKind as WireWebSearchProviderKind,
   type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
   type PendingOutputWritebackRequest as WirePendingOutputWritebackRequest,
@@ -253,6 +254,9 @@ export type Project = WireProject;
 
 /** The fixed, host-owned search providers supported by this build. */
 export type WebSearchProviderKind = WireWebSearchProviderKind;
+
+/** Which search a chat gets: the model provider's, this host's, or none. */
+export type WebSearchMode = WireWebSearchMode;
 
 /** Non-secret web-search policy and readiness for its selected provider. */
 export type WebSearchConfigInfo = WireWebSearchConfigInfo;
@@ -1007,6 +1011,7 @@ export class ApiClient {
   }
 
   putWebSearchConfig(body: {
+    mode?: WebSearchMode;
     provider?: WebSearchProviderKind | null;
     timeout_ms?: number;
     // Explicit null clears the configured instance URL; omitting the field
