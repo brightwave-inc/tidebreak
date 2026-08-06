@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Bot, Check, Clock, Square, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { useApp } from "./AppContext";
 import {
@@ -7,8 +8,13 @@ import {
   summarizeAgentActivity,
   useAgentRunActivity,
 } from "./AgentActivityTimeline";
+import {
+  copyAgentRunDebug,
+  fetchAgentRunProgress,
+} from "./AgentRunDebugReport";
 import { agentRunStatusDetail, RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
-import type { AgentRun } from "./api";
+import type { AgentRun, ApiClient } from "./api";
+import { ClipboardCopyButton, copyPlainText } from "./ClipboardCopyButton";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { SubmittedOutputPills } from "./SubmittedOutputPills";
 import { useAgentRuns } from "./useAgentRuns";
@@ -101,6 +107,7 @@ export function BackgroundAgentPanel({
         <BackgroundAgentDetail
           run={run}
           activity={activity}
+          chatId={chatId}
           onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
         />
       ) : agentRuns.error ? (
@@ -132,12 +139,15 @@ export function BackgroundAgentPanel({
 function BackgroundAgentDetail({
   run,
   activity,
+  chatId,
   onOpenOutput,
 }: {
   run: AgentRun;
   activity: ReturnType<typeof useAgentRunActivity>;
+  chatId: string;
   onOpenOutput?: (outputId: string) => void;
 }) {
+  const { client } = useApp();
   const live = RUNNING_AGENT_STATUSES.has(run.status);
   const now = useNowWhile(live);
   const elapsed = elapsedLabel(run, now);
@@ -168,7 +178,8 @@ function BackgroundAgentDetail({
               )}
             </p>
           </div>
-          <div className="mt-0.5 shrink-0">
+          <div className="mt-0.5 flex shrink-0 items-center gap-1.5">
+            <CopyAgentRunDebugButton client={client} chatId={chatId} run={run} />
             <AgentRunStatusBadge status={run.status} />
           </div>
         </div>
@@ -205,6 +216,46 @@ function BackgroundAgentDetail({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The "Copy debug info" affordance for one run, mirroring the chat header's.
+ * The report is assembled at click time from the run snapshot plus the two
+ * run-scoped endpoints, so a live run's copy is as fresh as the click.
+ */
+export function CopyAgentRunDebugButton({
+  client,
+  chatId,
+  run,
+  className = "inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden",
+}: {
+  client: ApiClient;
+  chatId: string;
+  run: AgentRun;
+  className?: string;
+}) {
+  return (
+    <ClipboardCopyButton
+      copy={() =>
+        copyAgentRunDebug(run, {
+          fetchActivity: () => client.listAgentRunActivity(chatId, run.id),
+          fetchProgress: () =>
+            fetchAgentRunProgress((afterSequence) =>
+              client.listAgentRunProgress(chatId, run.id, afterSequence),
+            ),
+          writeClipboard: (text) => copyPlainText(text),
+          notify: ({ message, description }) =>
+            description
+              ? toast.success(message, { description })
+              : toast.error(message),
+        })
+      }
+      label="Copy debug info"
+      copiedAnnouncement="Debug info copied to clipboard."
+      failedAnnouncement="Debug info could not be copied."
+      className={className}
+    />
   );
 }
 
