@@ -73,8 +73,16 @@ pub(crate) struct PresentationPdfRequest {
 /// Outcome of a conversion request. A missing converter is a state the
 /// renderer designs for, not a failure: on macOS it triggers the managed
 /// download (unless one already failed this run), elsewhere the install hint.
+///
+/// `rename_all` alone renames the variants and leaves their fields in
+/// snake_case, so `rename_all_fields` is what actually makes the payload the
+/// renderer reads (`pdfBase64`, `installFailure`); the test below pins both.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "status")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "status"
+)]
 pub(crate) enum PresentationPdfResult {
     Converted {
         pdf_base64: String,
@@ -744,6 +752,50 @@ mod tests {
 
         assert!(uri.starts_with("file:///"), "{uri}");
         assert!(uri.contains("OpenWave%20Preview/profile%20%231"), "{uri}");
+    }
+
+    /// The IPC wire contract for the preview. The renderer reads these keys
+    /// by name, and an enum-level `rename_all` renames only the variants —
+    /// leaving `pdf_base64` on the wire, which the renderer read as
+    /// `undefined` and handed to `atob`, failing every presentation preview.
+    #[test]
+    fn conversion_result_serializes_camel_case_variants_and_fields() {
+        let converted = serde_json::to_value(PresentationPdfResult::Converted {
+            pdf_base64: "JVBERi0=".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            converted,
+            serde_json::json!({ "status": "converted", "pdfBase64": "JVBERi0=" })
+        );
+
+        let missing = serde_json::to_value(PresentationPdfResult::ConverterMissing {
+            installable: true,
+            install_failure: Some("Download cancelled".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(
+            missing,
+            serde_json::json!({
+                "status": "converterMissing",
+                "installable": true,
+                "installFailure": "Download cancelled",
+            })
+        );
+
+        let failed = serde_json::to_value(PresentationPdfResult::Failed {
+            message: "LibreOffice failed".to_owned(),
+            details: "Exit status: exit status: 1".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            failed,
+            serde_json::json!({
+                "status": "failed",
+                "message": "LibreOffice failed",
+                "details": "Exit status: exit status: 1",
+            })
+        );
     }
 
     #[test]
