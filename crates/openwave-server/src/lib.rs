@@ -336,6 +336,7 @@ pub fn app(state: AppState) -> Router {
             "/plugins/skills/{name}/instructions",
             get(routes::get_skill_instructions),
         )
+        .route("/plugins/prompts/{name}/body", get(routes::get_prompt_body))
         .route(
             "/connected-apps/rest/{id}",
             axum::routing::put(routes::put_rest_connected_app)
@@ -923,8 +924,10 @@ async fn bind_inner(
         .with_blob_write_locks(exec_blob_writes)
         .with_document_scripts(config.exec_scripts_dir.clone())
         .with_skills(config.exec_skills_dir.clone())
+        .with_prompts(config.exec_prompts_dir.clone())
         .with_plugins(config.exec_plugins_dir.clone())
         .with_user_skills(Some(config.user_skills_dir()))
+        .with_user_prompts(Some(config.user_prompts_dir()))
         .with_folder_grant_resolver(folder_grant_resolver)
         .with_office_converter(office_converter)
         .with_host_tool_broker(host_tool_broker),

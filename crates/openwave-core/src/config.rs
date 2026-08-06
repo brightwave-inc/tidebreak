@@ -69,6 +69,12 @@ pub struct Config {
     /// alone in the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_plugins_dir: Option<PathBuf>,
+    /// Trusted source directory for built-in reusable prompt packages. Prompts
+    /// are user-side text, never staged and never advertised to the model, so
+    /// an embedding that leaves this absent simply has no curated prompts —
+    /// user-authored ones still load from the data directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_prompts_dir: Option<PathBuf>,
     /// Whether newly spawned background agent runs may execute inside a local
     /// container when the configured runtime is available. Disabled by default,
     /// so existing installations keep the in-process scheduler path.
@@ -108,6 +114,14 @@ impl Config {
         self.data_dir.join("plugins")
     }
 
+    /// The per-install directory user-authored prompt packages are read from
+    /// (`{data_dir}/prompts/<name>/PROMPT.md`), derived the same way as
+    /// [`Config::user_skills_dir`].
+    #[must_use]
+    pub fn user_prompts_dir(&self) -> PathBuf {
+        self.data_dir.join("prompts")
+    }
+
     /// A desktop-profile config rooted at `data_dir`.
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -118,6 +132,7 @@ impl Config {
             exec_scripts_dir: None,
             exec_skills_dir: None,
             exec_plugins_dir: None,
+            exec_prompts_dir: None,
             container_execution_enabled: false,
             container_image: None,
             auth_tokens_file: None,
@@ -188,6 +203,7 @@ impl Config {
             exec_scripts_dir: None,
             exec_skills_dir: None,
             exec_plugins_dir: None,
+            exec_prompts_dir: None,
             container_execution_enabled,
             container_image,
             auth_tokens_file,
