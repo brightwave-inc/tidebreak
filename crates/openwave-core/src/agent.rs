@@ -615,6 +615,30 @@ pub struct AgentConfig {
     /// Model for background maintenance calls this turn may make. `None` means
     /// the host has none, and that work is skipped.
     pub utility_model: Option<UtilityModel>,
+    /// How this turn reaches the web.
+    pub web_search: TurnWebSearch,
+}
+
+/// Which web search, if any, a turn is allowed to use.
+///
+/// One decision rather than two flags, because the two effects are inseparable:
+/// the vendor's tool and the host's carry the same name, so whichever one the
+/// turn gets, the other must not be advertised.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TurnWebSearch {
+    /// The registry decides, as it always has: a registered `web_search` tool
+    /// is advertised and executed on this host. The default, and what every
+    /// turn did before the vendor route existed.
+    #[default]
+    Host,
+    /// The provider searches on its own infrastructure under this budget. The
+    /// host tool is withheld — the searches are already done by the time the
+    /// step's blocks arrive, and nothing dispatches them.
+    Vendor(crate::provider::VendorWebSearch),
+    /// No web search at all this turn: no vendor budget, and the host tool is
+    /// not advertised, so the model is not offered a capability the host has
+    /// turned off.
+    Off,
 }
 
 /// Default context window: 200k tokens (Claude Opus/Sonnet).
@@ -656,6 +680,7 @@ impl Default for AgentConfig {
             context_window: DEFAULT_CONTEXT_WINDOW,
             tool_scratch: None,
             utility_model: None,
+            web_search: TurnWebSearch::Host,
         }
     }
 }
@@ -1091,6 +1116,54 @@ fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
     serde_json::from_str(&call.args)
         .ok()
         .and_then(|args| ToolActionPreview::build(&call.name, &args))
+}
+
+/// Project the rows of a provider-executed search result into activity entries.
+///
+/// The adapter normalizes its vendor output to the shape the host tool of the
+/// same name produces, so the card the reader sees is built from the same
+/// fields whichever route ran the search. Anything that does not carry that
+/// shape simply contributes no rows.
+fn provider_executed_entries(output: &Value) -> Vec<crate::ResultEntry> {
+    output
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|result| {
+            let entry = crate::ResultEntry::new(
+                crate::ResultEntryKind::Link,
+                result.get("title").and_then(Value::as_str).unwrap_or(""),
+            );
+            match result
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(result_host)
+            {
+                Some(host) => entry.with_detail(host),
+                None => entry,
+            }
+        })
+        .collect()
+}
+
+/// The bare host of a result URL, for the secondary line of its row.
+///
+/// Deliberately a display projection rather than a parse: nothing routes on the
+/// answer, and a URL this cannot read simply shows no host.
+fn result_host(url: &str) -> Option<String> {
+    let host = url
+        .split_once("://")?
+        .1
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .trim_start_matches("www.");
+    (!host.is_empty()).then(|| host.to_owned())
 }
 
 struct AssistantCandidate {
@@ -1546,14 +1619,32 @@ impl Agent {
                         tools: if wrap_up {
                             Vec::new()
                         } else {
-                            self.tools.specs_for_surface(
+                            let mut specs = self.tools.specs_for_surface(
                                 self.agent_orchestration_active(),
                                 matches!(chat.permission_mode, Some(PermissionMode::Plan)),
-                            )
+                            );
+                            // The host tool and the provider's own search are
+                            // one capability with one name. Advertising both
+                            // would offer the model two `web_search` tools —
+                            // a request most providers reject outright — so
+                            // the registered one is withheld for exactly the
+                            // turns the host routed elsewhere or turned off.
+                            if self.config.web_search != TurnWebSearch::Host {
+                                specs.retain(|spec| spec.name != crate::WEB_SEARCH_TOOL);
+                            }
+                            specs
                         },
                         max_tokens: self.config.max_tokens,
                         temperature: self.config.temperature,
                         reasoning_effort: self.config.reasoning_effort,
+                        // The wrap-up call is the turn writing its answer from
+                        // what it already has. Leaving the vendor budget on it
+                        // would let the provider start fresh research inside
+                        // the step whose whole purpose is to stop.
+                        vendor_web_search: match self.config.web_search {
+                            TurnWebSearch::Vendor(vendor) if !wrap_up => Some(vendor),
+                            _ => None,
+                        },
                         images,
                         ..Default::default()
                     };
@@ -1782,7 +1873,7 @@ impl Agent {
             // it, and a stale segment must neither commit nor replay an effect a
             // later attempt now owns. Terminal completion is left to the worker's
             // own lease compare-and-swap, so only fence the tool-bearing path.
-            if !calls.is_empty() {
+            if !calls.is_empty() || !provider_executed.is_empty() {
                 self.ensure_durable_lease_current(turn_id).await?;
             }
 
@@ -1800,6 +1891,14 @@ impl Agent {
             // Searches the provider ran on its own infrastructure during this
             // step. They sit between the prose and the calls the loop is about
             // to make, which is where they happened. Nothing dispatches them.
+            //
+            // They are persisted here, before the step's own calls are
+            // admitted, so the journal and a rebuilt transcript both keep them
+            // in the order they occurred.
+            for block in &provider_executed {
+                self.record_provider_executed_call(chat.id, turn_id, block, events)
+                    .await?;
+            }
             blocks.extend(provider_executed);
             for call in &calls {
                 // The transcript block stays the coerced value: it goes back
@@ -2337,6 +2436,97 @@ impl Agent {
         self.tools
             .get(&call.name)
             .is_some_and(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
+    }
+
+    /// Persist one call the provider already ran, and announce it.
+    ///
+    /// The work is finished before OpenWave sees it, so the row is written and
+    /// resolved back to back rather than admitted pending. Everything after
+    /// that is deliberately identical to a host tool call of the same name: the
+    /// journal carries the same started/completed pair, the activity card is
+    /// built by the same projection, and a later turn rebuilds it as an
+    /// ordinary `ToolUse`/`ToolResult` pair, because it is an ordinary row.
+    ///
+    /// A row that cannot be written is not a reason to fail the turn — the
+    /// search already happened and the model already has its results — so the
+    /// step continues without it.
+    async fn record_provider_executed_call(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        block: &ContentBlock,
+        events: &EventSink<'_>,
+    ) -> Result<()> {
+        let ContentBlock::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            is_error,
+        } = block
+        else {
+            return Ok(());
+        };
+        let call_id = CallId::new();
+        let result = output.to_string();
+        let tool_output = if *is_error {
+            ToolOutput::error(result.clone())
+        } else {
+            ToolOutput::text(result.clone()).with_entries(provider_executed_entries(output))
+        };
+        let preview = ToolResultPreview::build(name, &tool_output);
+        let record = ToolCallRecord {
+            id: call_id,
+            chat_id,
+            turn_id,
+            // No client loop ever answers this call, so the id only has to be
+            // unique and stable for the row it identifies.
+            provider_id: format!("provider_executed_{call_id}"),
+            name: name.clone(),
+            arguments: input.clone(),
+            raw_arguments: None,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        events.send(AgentEvent::ToolCallStarted {
+            call_id,
+            name: name.clone(),
+        });
+        if !matches!(
+            self.accept_server_call_retry(&record).await?,
+            AcceptedServerCall::Accepted
+        ) {
+            return Ok(());
+        }
+        let resolution = if *is_error {
+            ToolCallResolution::Failed {
+                result,
+                error_code: output
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .unwrap_or(ToolErrorCategory::ToolFailed.as_str())
+                    .to_owned(),
+                error_detail: None,
+            }
+        } else {
+            ToolCallResolution::Completed { result }
+        };
+        self.resolve_server_call_retry(chat_id, turn_id, call_id, &resolution, preview.as_ref())
+            .await?;
+        events.send(AgentEvent::ToolCallCompleted {
+            call_id,
+            output: tool_output,
+            action: ToolActionPreview::build(name, input),
+            result: preview,
+        });
+        Ok(())
     }
 
     /// Admit one server-executed call to the durable record before it runs, so
@@ -5052,6 +5242,7 @@ mod tests {
     use crate::id::{ChatId, ProjectId};
     use crate::model::Project;
     use crate::provider::ProviderId;
+    use crate::provider::VendorWebSearch;
     use crate::tools::{ListDir, ReadFile, WriteFile};
 
     fn tool_scratch(path: &std::path::Path) -> ToolScratch {
@@ -6588,6 +6779,178 @@ mod tests {
         let content = found.expect("the resumed transcript replays the result");
         assert!(content.len() < oversized.len());
         assert!(content.contains("[truncated:"));
+    }
+
+    /// The host's own `web_search`. Registered so the turn has one to withhold,
+    /// and never expected to run.
+    struct HostWebSearch;
+
+    #[async_trait]
+    impl Tool for HostWebSearch {
+        fn spec(&self) -> ToolSpec {
+            crate::web_search_tool_spec()
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Sensitive
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            panic!("a search the provider already ran must never be dispatched")
+        }
+    }
+
+    /// What one request advertised, and the vendor budget it carried.
+    type SearchSurfaces = Arc<Mutex<Vec<(Vec<String>, Option<VendorWebSearch>)>>>;
+
+    /// Answers with a search it already ran, recording what each request
+    /// advertised and asked for.
+    struct VendorSearchProvider {
+        seen: SearchSurfaces,
+    }
+
+    #[async_trait]
+    impl ModelProvider for VendorSearchProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fake")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.seen.lock().unwrap().push((
+                req.tools.iter().map(|tool| tool.name.clone()).collect(),
+                req.vendor_web_search,
+            ));
+            Ok(stream::iter(vec![
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: crate::WEB_SEARCH_TOOL.into(),
+                    input: serde_json::json!({ "query": "openwave release notes" }),
+                    output: serde_json::json!({
+                        "provider": "anthropic",
+                        "results": [{
+                            "url": "https://www.example.com/notes",
+                            "title": "Release notes",
+                            "snippet": "what shipped",
+                        }],
+                    }),
+                    is_error: false,
+                },
+                ProviderEvent::TextDelta {
+                    text: "here is what I found".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    /// A vendor turn end to end: the model is offered one web search rather
+    /// than two, the search the provider ran is kept like any other tool call,
+    /// and a later turn replays it as an ordinary pair.
+    #[tokio::test]
+    async fn a_provider_executed_search_replaces_the_host_tool_and_is_kept_like_one() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let budget = VendorWebSearch { max_uses: 3 };
+        let agent = Agent::new(
+            Arc::new(VendorSearchProvider { seen: seen.clone() }),
+            Arc::new(
+                ToolRegistry::new()
+                    .with(Box::new(HostWebSearch))
+                    .with(Box::new(ReadFile)),
+            ),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                web_search: TurnWebSearch::Vendor(budget),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "what shipped?", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        // One capability, one name: the request carries the vendor budget and
+        // withholds the host tool, while the rest of the surface is untouched.
+        let requests = seen.lock().unwrap().clone();
+        let (advertised, vendor) = requests.first().expect("the turn made a model call");
+        assert_eq!(*vendor, Some(budget));
+        assert!(
+            !advertised.contains(&crate::WEB_SEARCH_TOOL.to_owned())
+                && advertised.contains(&"read_file".to_owned()),
+            "advertised the wrong surface: {advertised:?}"
+        );
+
+        // The reader sees the search happen and finish, exactly as they would
+        // a host search.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallStarted { name, .. } if name == crate::WEB_SEARCH_TOOL
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallCompleted { .. })));
+
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        let [call] = &calls[..] else {
+            panic!("the provider's search was not recorded: {calls:?}");
+        };
+        assert_eq!(call.name, crate::WEB_SEARCH_TOOL);
+        assert_eq!(call.status, ToolCallStatus::Completed);
+        assert_eq!(call.arguments["query"], "openwave release notes");
+        assert!(call
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("https://www.example.com/notes")));
+
+        // The record is the whole replay mechanism: a later turn rebuilds it
+        // as a tool pair with no knowledge of who ran it.
+        let messages = store.list_messages(chat.id).await.unwrap();
+        let rebuilt = rebuild_transcript(&messages, &calls, &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
+        let blocks: Vec<&ContentBlock> = rebuilt
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .collect();
+        let use_id = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { id, name, .. } if name == crate::WEB_SEARCH_TOOL => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .expect("the rebuilt transcript replays the search as a tool call");
+        assert!(
+            blocks.iter().any(|block| matches!(
+                block,
+                ContentBlock::ToolResult { tool_use_id, content, .. }
+                    if *tool_use_id == use_id && content.contains("Release notes")
+            )),
+            "the replayed call kept no result: {rebuilt:?}"
+        );
     }
 
     #[test]

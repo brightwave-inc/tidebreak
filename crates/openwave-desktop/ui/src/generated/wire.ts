@@ -2321,7 +2321,13 @@ export type VerificationTier = "verified" | "unverified";
  * selection, credential presence, and the configured instance URL — key
  * material never crosses the secret boundary.
  */
-export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, timeout_ms: number, 
+export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, 
+/**
+ * Which search a turn gets. Orthogonal to the fields below, which report
+ * only the host provider's readiness: a vendor turn is unaffected by all
+ * of them.
+ */
+mode: WebSearchMode, timeout_ms: number, 
 /**
  * Whether a key is stored for the selected provider. Always false for a
  * credential-free provider, which has no key slot at all — read
@@ -2345,6 +2351,18 @@ searxng_base_url?: string, };
  * deliberately carries no secret material.
  */
 export type WebSearchCredentialReadiness = { provider: WebSearchProviderKind, has_credential: boolean, };
+
+/**
+ * Which search a turn should use, as the operator chose it.
+ *
+ * The choice is about *who runs the search*, not about which engine: a vendor
+ * search runs inside the model provider's own infrastructure and never touches
+ * this host's providers, credentials, or egress policy. `Automatic` is the
+ * default and the value every configuration written before this existed reads
+ * back as, so an installation that had web search working keeps exactly the
+ * search it had.
+ */
+export type WebSearchMode = "automatic" | "vendor" | "host" | "off";
 
 /**
  * A configured web-search backend. The stable string also selects its secret

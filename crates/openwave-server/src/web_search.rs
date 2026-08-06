@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openwave_core::{
     ApprovalClass, ChatId, DocumentId, DocumentUpsert, NetworkPolicy, Result, SecretProvider,
-    Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    Store, Tool, ToolCtx, ToolOutput, ToolSpec, TurnWebSearch, VendorWebSearch,
 };
 use openwave_web_search::{
     BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, NativeExtractor,
@@ -91,12 +91,44 @@ const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 3] = [
     WebSearchProviderKind::Brave,
 ];
 
+/// Which search a turn should use, as the operator chose it.
+///
+/// The choice is about *who runs the search*, not about which engine: a vendor
+/// search runs inside the model provider's own infrastructure and never touches
+/// this host's providers, credentials, or egress policy. `Automatic` is the
+/// default and the value every configuration written before this existed reads
+/// back as, so an installation that had web search working keeps exactly the
+/// search it had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchMode {
+    /// Prefer a configured, usable host provider; fall back to the model's own
+    /// search when the model has one and the host has nothing to run.
+    #[default]
+    Automatic,
+    /// The model's own search, or none. Deliberately no host fallback: an
+    /// operator who chose the vendor route did so to keep queries off this
+    /// host's providers, and quietly reinstating one would defeat the choice.
+    Vendor,
+    /// The host's configured provider only, exactly as before this setting
+    /// existed.
+    Host,
+    /// No web search at all. The tool is not advertised, so the model is not
+    /// offered a capability the operator turned off.
+    Off,
+}
+
 /// Non-secret host configuration. `provider: None` is the safe default: no
 /// credential lookup and no possible outbound request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebSearchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<WebSearchProviderKind>,
+    /// Which search a turn gets. Independent of `provider`: the host provider
+    /// stays configured while the vendor route is selected, so switching back
+    /// does not ask for the key again.
+    #[serde(default)]
+    pub mode: WebSearchMode,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     /// Base URL of the operator's self-hosted SearXNG instance.
@@ -115,6 +147,7 @@ impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
             provider: None,
+            mode: WebSearchMode::Automatic,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             searxng_base_url: None,
         }
@@ -164,6 +197,10 @@ pub struct WebSearchConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub provider: Option<WebSearchProviderKind>,
+    /// Which search a turn gets. Orthogonal to the fields below, which report
+    /// only the host provider's readiness: a vendor turn is unaffected by all
+    /// of them.
+    pub mode: WebSearchMode,
     pub timeout_ms: u64,
     /// Whether a key is stored for the selected provider. Always false for a
     /// credential-free provider, which has no key slot at all — read
@@ -200,6 +237,9 @@ pub struct WebSearchCredentialsInfo {
 pub struct WebSearchConfigUpdate {
     #[serde(default, deserialize_with = "double_option")]
     pub provider: Option<Option<WebSearchProviderKind>>,
+    /// An omitted mode leaves the current choice unchanged.
+    #[serde(default)]
+    pub mode: Option<WebSearchMode>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     /// An omitted value leaves the instance URL unchanged; an explicit `null`
@@ -244,27 +284,81 @@ pub async fn config_info(
     secrets: &dyn SecretProvider,
 ) -> Result<WebSearchConfigInfo> {
     let config = read_config(store).await?;
-    let has_credential = match config.provider {
-        Some(provider) => matches!(
-            WebSearchCredentials::resolve(secrets, provider).await,
-            Ok(WebSearchCredentialState::Present(_))
-        ),
-        None => false,
-    };
-    let available = match config.provider {
-        // Nothing to authenticate with; the instance URL is what it needs.
-        Some(WebSearchProviderKind::Searxng) => config.searxng_base_url().is_some(),
-        Some(_) => has_credential,
-        None => false,
-    };
+    let has_credential = host_has_credential(&config, secrets).await;
+    let available = host_is_available(&config, has_credential);
     Ok(WebSearchConfigInfo {
         provider: config.provider,
+        mode: config.mode,
         timeout_ms: config.timeout_ms,
         has_credential,
         available,
         searxng_base_url: config
             .searxng_base_url()
             .map(|base| base.as_str().to_owned()),
+    })
+}
+
+/// Whether a key is stored for the selected provider, without returning it.
+async fn host_has_credential(config: &WebSearchConfig, secrets: &dyn SecretProvider) -> bool {
+    match config.provider {
+        Some(provider) => matches!(
+            WebSearchCredentials::resolve(secrets, provider).await,
+            Ok(WebSearchCredentialState::Present(_))
+        ),
+        None => false,
+    }
+}
+
+/// Whether the selected host provider has everything it needs to be invoked.
+fn host_is_available(config: &WebSearchConfig, has_credential: bool) -> bool {
+    match config.provider {
+        // Nothing to authenticate with; the instance URL is what it needs.
+        Some(WebSearchProviderKind::Searxng) => config.searxng_base_url().is_some(),
+        Some(_) => has_credential,
+        None => false,
+    }
+}
+
+/// Decide which search one turn gets, from host policy and the model's own
+/// capabilities.
+///
+/// `supports_vendor` is the resolved model row's claim that the routing adapter
+/// emits a provider-executed search for it — not that the vendor documents one
+/// — so a model reached over a pass-through route resolves as if it had none.
+///
+/// Nothing here consults the chat's permission mode. A vendor search is
+/// provider-internal: it makes no egress from this host, reaches no new party
+/// with the conversation's data, and is already finished by the time OpenWave
+/// sees it, so there is no decision an approval card could still gate.
+pub async fn resolve_turn_web_search(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    supports_vendor: bool,
+) -> Result<TurnWebSearch> {
+    let config = read_config(store).await?;
+    let vendor = || {
+        TurnWebSearch::Vendor(VendorWebSearch {
+            max_uses: VendorWebSearch::DEFAULT_MAX_USES,
+        })
+    };
+    Ok(match config.mode {
+        WebSearchMode::Off => TurnWebSearch::Off,
+        // The host tool as registered: available or not, the model is offered
+        // it and an unconfigured host answers the call with the same
+        // configuration error it always has.
+        WebSearchMode::Host => TurnWebSearch::Host,
+        WebSearchMode::Vendor if supports_vendor => vendor(),
+        WebSearchMode::Vendor => TurnWebSearch::Off,
+        WebSearchMode::Automatic => {
+            let has_credential = host_has_credential(&config, secrets).await;
+            if host_is_available(&config, has_credential) {
+                TurnWebSearch::Host
+            } else if supports_vendor {
+                vendor()
+            } else {
+                TurnWebSearch::Host
+            }
+        }
     })
 }
 
@@ -359,6 +453,9 @@ pub async fn update_config(
     let mut config = read_config(store).await?;
     if let Some(provider) = update.provider {
         config.provider = provider;
+    }
+    if let Some(mode) = update.mode {
+        config.mode = mode;
     }
     if let Some(timeout_ms) = update.timeout_ms {
         config.timeout_ms = timeout_ms;
@@ -766,6 +863,7 @@ mod tests {
             &secrets,
             WebSearchConfigUpdate {
                 provider: Some(Some(WebSearchProviderKind::Exa)),
+                mode: None,
                 timeout_ms: Some(MIN_TIMEOUT_MS),
                 searxng_base_url: None,
             },
@@ -791,6 +889,7 @@ mod tests {
         let secrets = TestSecrets::default();
         let select = |base: Option<Option<String>>| WebSearchConfigUpdate {
             provider: Some(Some(WebSearchProviderKind::Searxng)),
+            mode: None,
             timeout_ms: None,
             searxng_base_url: base,
         };
@@ -864,6 +963,78 @@ mod tests {
         assert!(!info.has_credential);
         assert!(!info.available);
         assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+    }
+
+    /// The whole point of the mode: which search a turn gets, decided from
+    /// host policy and the model in front of it.
+    #[tokio::test]
+    async fn turn_resolution_prefers_a_usable_host_and_falls_back_to_the_vendor() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        let resolve = |supports_vendor| resolve_turn_web_search(&store, &secrets, supports_vendor);
+        let vendor = TurnWebSearch::Vendor(VendorWebSearch {
+            max_uses: VendorWebSearch::DEFAULT_MAX_USES,
+        });
+
+        // Nothing configured. A capable model searches on its provider; one
+        // with no vendor search — a gateway-served row, say — is left exactly
+        // where it was, holding a host tool that will report it needs setting
+        // up when it is called.
+        assert_eq!(resolve(true).await.unwrap(), vendor);
+        assert_eq!(resolve(false).await.unwrap(), TurnWebSearch::Host);
+
+        // A selected provider is not yet a usable one: without its key there
+        // is still nothing on this host to run the search.
+        let select_exa = |mode| WebSearchConfigUpdate {
+            provider: Some(Some(WebSearchProviderKind::Exa)),
+            mode: Some(mode),
+            timeout_ms: None,
+            searxng_base_url: None,
+        };
+        update_config(&store, &secrets, select_exa(WebSearchMode::Automatic))
+            .await
+            .unwrap();
+        assert_eq!(resolve(true).await.unwrap(), vendor);
+
+        // With the key in place the host provider wins: the operator chose it,
+        // and automatic means prefer what is actually configured here.
+        write_credential(&secrets, WebSearchProviderKind::Exa, "key")
+            .await
+            .unwrap();
+        assert_eq!(resolve(true).await.unwrap(), TurnWebSearch::Host);
+
+        // The explicit modes override the preference in both directions, and
+        // the vendor choice never silently falls back to the host provider it
+        // was chosen instead of.
+        update_config(&store, &secrets, select_exa(WebSearchMode::Vendor))
+            .await
+            .unwrap();
+        assert_eq!(resolve(true).await.unwrap(), vendor);
+        assert_eq!(resolve(false).await.unwrap(), TurnWebSearch::Off);
+
+        update_config(&store, &secrets, select_exa(WebSearchMode::Off))
+            .await
+            .unwrap();
+        assert_eq!(resolve(true).await.unwrap(), TurnWebSearch::Off);
+    }
+
+    /// A configuration written before the mode existed keeps the behavior it
+    /// had, rather than reading back as whichever variant sorts first.
+    #[tokio::test]
+    async fn a_stored_configuration_without_a_mode_reads_back_as_automatic() {
+        let (store, _dir) = test_store().await;
+        store
+            .set_setting(
+                WEB_SEARCH_SETTING,
+                &serde_json::json!({ "provider": "tavily", "timeout_ms": DEFAULT_TIMEOUT_MS }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_config(&store).await.unwrap().mode,
+            WebSearchMode::Automatic
+        );
     }
 
     /// Persisted policy may be hand-edited or left by an interrupted build.
