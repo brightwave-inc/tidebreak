@@ -32,8 +32,8 @@ pub struct MetadataFrame {
     pub metadata: String,
 }
 
-/// The events the TUI renders. Only fields the TUI uses are declared; serde
-/// drops the rest, so a server-side field addition never breaks decoding.
+/// The events the CLI renders. Only fields a CLI surface uses are declared;
+/// serde drops the rest, so a server-side field addition never breaks decoding.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {

@@ -277,3 +277,39 @@ fn mcp_accepts_a_non_utf8_workspace_path() {
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
 }
+
+/// Print mode's contract at the process boundary: stdout is the output and
+/// nothing else, and a turn that cannot run exits non-zero instead of hanging
+/// on a prompt no one is there to answer. With no credential configured the
+/// engine boots and refuses the message, which is the shortest path through
+/// that boundary.
+#[test]
+fn print_mode_fails_with_clean_stdout_when_no_model_provider_is_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("-p")
+        .arg("hello")
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave -p");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("provider") && stderr.contains("credential"),
+        "stderr: {stderr}"
+    );
+}

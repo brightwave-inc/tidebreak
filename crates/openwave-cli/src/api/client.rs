@@ -114,16 +114,18 @@ impl Client {
     }
 
     /// Decide a parked tool call (`204`). Slice 1 sends no standing grant.
+    /// `reason` is recorded with a rejection and ignored on approval.
     pub async fn decide_approval(
         &self,
         chat: ChatId,
         call_id: CallId,
         approve: bool,
+        reason: &str,
     ) -> Result<()> {
         let body = if approve {
             serde_json::json!({ "decision": "approve" })
         } else {
-            serde_json::json!({ "decision": "reject", "reason": "declined from terminal" })
+            serde_json::json!({ "decision": "reject", "reason": reason })
         };
         let response = self
             .http

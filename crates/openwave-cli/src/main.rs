@@ -19,6 +19,11 @@
 //! `openwave tui [--chat <id>]` runs an interactive terminal chat: it boots the
 //! same in-process server as `serve` and drives it over the loopback HTTP+WS
 //! API, starting a fresh chat or resuming an existing one.
+//!
+//! `openwave -p "<prompt>"` runs one turn without a terminal: same engine, no
+//! interaction. stdout carries the assistant's text (or, with
+//! `--output-format json`, the turn's event stream as NDJSON), and the exit
+//! status says whether the turn completed.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -27,31 +32,43 @@ use std::sync::Arc;
 
 use openwave_core::{AgentError, ChatId, Config, ListDir, ReadFile, Result, ToolCtx, ToolRegistry};
 
+mod api;
+mod print;
 mod tui;
 
+use print::OutputFormat;
+
 const USAGE: &str = "usage: openwave serve\n       openwave mcp <workspace>\n       openwave \
-                     rehome-secrets\n       openwave tui [--chat <id>]";
+                     rehome-secrets\n       openwave tui [--chat <id>]\n       openwave -p \
+                     <prompt> [--chat <id>] [--output-format text|json]";
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
-        // Print the error's `Display` (e.g. "configuration error: …"), not the
-        // `Debug` form the stdlib `Termination` impl would show, and exit non-zero.
-        eprintln!("openwave: {error}");
-        std::process::exit(1);
+    match run().await {
+        Ok(0) => {}
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            // Print the error's `Display` (e.g. "configuration error: …"), not
+            // the `Debug` form the stdlib `Termination` impl would show.
+            eprintln!("openwave: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
-async fn run() -> Result<()> {
+/// Dispatch one command, returning the process exit status. Only print mode
+/// reports anything but `0`, since only it distinguishes a failure of the
+/// command from a failure of the work the command drove.
+async fn run() -> Result<i32> {
     let mut args = std::env::args_os().skip(1);
     match args.next().as_deref() {
         // Default to `serve` so a bare `openwave` runs the daemon.
-        None => serve().await,
+        None => serve().await.map(|()| 0),
         Some(command) if command == OsStr::new("serve") => {
             if args.next().is_some() {
                 usage_error("serve does not accept arguments");
             }
-            serve().await
+            serve().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("mcp") => {
             let Some(workspace) = args.next() else {
@@ -60,13 +77,13 @@ async fn run() -> Result<()> {
             if args.next().is_some() {
                 usage_error("mcp accepts exactly one workspace path");
             }
-            serve_mcp(workspace.into()).await
+            serve_mcp(workspace.into()).await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("rehome-secrets") => {
             if args.next().is_some() {
                 usage_error("rehome-secrets does not accept arguments");
             }
-            rehome_secrets().await
+            rehome_secrets().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("tui") => {
             let chat = match args.next() {
@@ -85,7 +102,39 @@ async fn run() -> Result<()> {
             if args.next().is_some() {
                 usage_error("tui accepts only an optional --chat <id>");
             }
-            tui::run(chat).await
+            tui::run(chat).await.map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("-p") || command == OsStr::new("--print") => {
+            let Some(prompt) = args.next() else {
+                usage_error("-p requires a prompt");
+            };
+            let Some(prompt) = prompt.to_str().map(str::to_owned) else {
+                usage_error("-p expects a UTF-8 prompt");
+            };
+            let mut chat = None;
+            let mut format = OutputFormat::Text;
+            while let Some(flag) = args.next() {
+                if flag == OsStr::new("--chat") {
+                    let Some(id) = args.next() else {
+                        usage_error("--chat requires a chat id");
+                    };
+                    match ChatId::from_str(&id.to_string_lossy()) {
+                        Ok(id) => chat = Some(id),
+                        Err(_) => usage_error("--chat expects a chat UUID"),
+                    }
+                } else if flag == OsStr::new("--output-format") {
+                    let Some(value) = args.next() else {
+                        usage_error("--output-format requires text or json");
+                    };
+                    match OutputFormat::parse(&value.to_string_lossy()) {
+                        Some(value) => format = value,
+                        None => usage_error("--output-format expects text or json"),
+                    }
+                } else {
+                    usage_error(&format!("unknown print-mode argument {flag:?}"));
+                }
+            }
+            print::run(prompt, chat, format).await
         }
         Some(other) => {
             usage_error(&format!("unknown command {other:?}"));

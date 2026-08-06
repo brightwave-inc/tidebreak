@@ -6,13 +6,11 @@
 //! consumes. Logging is file-only: the TUI owns the terminal.
 
 mod app;
-mod client;
 mod markdown;
 mod render;
 mod theme;
-mod wire;
 
-use client::Client;
+use crate::api::client::Client;
 use openwave_core::{ChatId, Result};
 
 /// Boot the server, open (or resume) the chat, and run the interactive loop.
