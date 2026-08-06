@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use openwave_core::{AgentError, ChatId, Config, ListDir, ReadFile, Result, ToolCtx, ToolRegistry};
 
+mod api;
 mod tui;
 
 const USAGE: &str = "usage: openwave serve\n       openwave mcp <workspace>\n       openwave \

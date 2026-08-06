@@ -26,10 +26,10 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tui_textarea::{Input, TextArea};
 
-use super::client::{Client, EventSocket};
 use super::render::{self, Commit};
 use super::theme;
-use super::wire::{ChatFrame, ClientEvent, SequencedFrame, ToolCallStatus};
+use crate::api::client::{Client, EventSocket};
+use crate::api::wire::{ChatFrame, ClientEvent, SequencedFrame, ToolCallStatus};
 
 /// Fixed height of the repainting region: transient stack, composer, footer.
 /// Clamped to the terminal at startup.
