@@ -89,6 +89,23 @@ pub fn init_logging(data_dir: &Path) {
     }
 }
 
+/// Install the file-only subscriber used by `openwave tui`.
+///
+/// The TUI owns the terminal, so unlike [`init_logging`] there is no stderr
+/// mirror — and an unusable log file degrades to no subscriber at all rather
+/// than stderr, which would corrupt the display.
+pub fn init_logging_file_only(data_dir: &Path) {
+    if let Ok(writer) = open_log_writer(data_dir) {
+        let subscriber = tracing_subscriber::registry().with(env_filter()).with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_ansi(false)
+                .with_writer(writer),
+        );
+        let _ = subscriber.try_init();
+    }
+}
+
 /// The active filter: `OPENWAVE_LOG` when set and valid, the default policy
 /// otherwise.
 fn env_filter() -> EnvFilter {
