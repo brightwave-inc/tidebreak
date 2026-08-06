@@ -627,6 +627,8 @@ pub mod sandbox_spawn_checkpoint {
         #[sea_orm(column_type = "JsonBinary")]
         pub arguments: Json,
         pub result: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub remaining_requests: Json,
         pub steer_revision: i64,
         pub event_ordinal: i32,
         pub model_steps: i32,

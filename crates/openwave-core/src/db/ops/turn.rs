@@ -46,7 +46,7 @@ pub(in crate::db) use resolution::{
     record_turn_run_failure_and_append_event, recover_exact_completed_turn_event,
     request_turn_cancellation, request_turn_cancellation_and_append_event,
 };
-pub(in crate::db) use sandbox_spawn::checkpoint_sandbox_spawn;
+pub(in crate::db) use sandbox_spawn::{checkpoint_sandbox_spawn, resumed_sandbox_spawn_batch};
 pub(in crate::db) use steer::{accept_turn_steer, apply_turn_steer, list_pending_turn_steers};
 
 pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {

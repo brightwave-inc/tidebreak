@@ -32,6 +32,46 @@ use super::super::{
 };
 use super::{canonical_db_timestamp, turn_run_from_model};
 
+/// The still-ungated tail of the spawn batch the previous claim segment parked
+/// on, if this claim is the one resuming that park.
+///
+/// The batch belongs to exactly one claim: the segment that parked wrote it,
+/// and the segment that resumes is the next claim of the same attempt. Any
+/// later claim — a lost lease, a retried attempt — matches nothing and starts
+/// clean, which is the fail-safe direction: a spawn nobody carried forward is
+/// simply not created.
+pub(in crate::db) async fn resumed_sandbox_spawn_batch(
+    store: &DbStore,
+    turn_id: crate::TurnId,
+    attempt_count: i32,
+    claim_count: i32,
+) -> Result<Vec<crate::agent::SandboxAgentSpawnRequest>> {
+    let Some(previous_claim) = claim_count.checked_sub(1).filter(|count| *count >= 1) else {
+        return Ok(Vec::new());
+    };
+    let Some(model) = entities::sandbox_spawn_checkpoint::Entity::find()
+        .filter(entities::sandbox_spawn_checkpoint::Column::OriginTurnId.eq(turn_id.0))
+        .filter(entities::sandbox_spawn_checkpoint::Column::AttemptCount.eq(attempt_count))
+        .filter(entities::sandbox_spawn_checkpoint::Column::ClaimCount.eq(previous_claim))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(Vec::new());
+    };
+    let remaining: Vec<crate::agent::SandboxAgentSpawnRequest> =
+        serde_json::from_value(model.remaining_requests)?;
+    if remaining
+        .iter()
+        .any(|request| !request.is_well_formed() || request.approval_gated)
+    {
+        return Err(AgentError::Store(
+            "carried sandbox spawn batch is malformed".into(),
+        ));
+    }
+    Ok(remaining)
+}
+
 pub(in crate::db) async fn checkpoint_sandbox_spawn(
     store: &DbStore,
     request: &SandboxSpawnCheckpointRequest,
@@ -306,6 +346,7 @@ where
         history_order: Set(history_order),
         arguments: Set(request.arguments.clone()),
         result: Set(request.result.clone()),
+        remaining_requests: Set(serde_json::to_value(&request.remaining_requests)?),
         steer_revision: Set(request.expected_steer_revision),
         event_ordinal: Set(request.event_ordinal),
         model_steps: Set(request.progress.model_steps),
@@ -567,12 +608,15 @@ fn validate_request(request: &SandboxSpawnCheckpointRequest) -> Result<()> {
         && !request.provider_id.contains('\0');
     let result_valid =
         !request.result.contains('\0') && request.result.len() <= ToolCallRecord::MAX_RESULT_BYTES;
+    // A zero-step checkpoint is the resumed half of a batch: the claim that
+    // picked the parked turn back up gated the next sibling and admitted it
+    // without ever calling the model, so it has no step to charge.
     if request.origin_turn_id.0.is_nil()
         || request.lease_token.is_nil()
         || request.call_id.0.is_nil()
         || request.expected_steer_revision < 0
         || !(2..i32::MAX).contains(&request.event_ordinal)
-        || request.progress.model_steps <= 0
+        || request.progress.model_steps < 0
         || request.max_active_background_agents == 0
         || request.max_active_background_agents > AgentRun::MAX_CONCURRENCY_LIMIT
         || !labels_valid
@@ -584,8 +628,33 @@ fn validate_request(request: &SandboxSpawnCheckpointRequest) -> Result<()> {
             "invalid non-blocking sandbox spawn checkpoint".into(),
         ));
     }
+    if !remaining_requests_are_valid(request) {
+        return Err(AgentError::Store(
+            "invalid carried sandbox spawn batch".into(),
+        ));
+    }
     canonical_arguments(request)?;
     Ok(())
+}
+
+/// Whether the still-ungated tail carried with this checkpoint is one this
+/// turn may replay.
+///
+/// Each entry has to be a spawn the gate can still ask about: well formed,
+/// not already gated, and a call the batch names exactly once — a duplicate
+/// or the admitted call itself would gate a decision that has already been
+/// made, and a pre-gated entry would claim a durable pending row nobody wrote.
+fn remaining_requests_are_valid(request: &SandboxSpawnCheckpointRequest) -> bool {
+    let mut seen = std::collections::HashSet::with_capacity(request.remaining_requests.len());
+    request.remaining_requests.iter().all(|remaining| {
+        remaining.is_well_formed()
+            && !remaining.approval_gated
+            && remaining.call_id != request.call_id
+            && seen.insert(remaining.call_id)
+            && !remaining.provider_id.contains('\0')
+            && serde_json::to_vec(&remaining.arguments)
+                .is_ok_and(|value| value.len() <= ToolCallRecord::MAX_ARGUMENT_BYTES)
+    })
 }
 
 fn canonical_arguments(request: &SandboxSpawnCheckpointRequest) -> Result<SpawnSandboxAgentArgs> {
@@ -658,6 +727,7 @@ fn checkpoint_matches(
         && checkpoint.steer_revision == request.expected_steer_revision
         && checkpoint.event_ordinal == request.event_ordinal
         && checkpoint.progress == request.progress
+        && checkpoint.remaining_requests == request.remaining_requests
 }
 
 fn checkpoint_from_model(
@@ -680,6 +750,7 @@ fn checkpoint_from_model(
         history_order: model.history_order,
         arguments: model.arguments,
         result: model.result,
+        remaining_requests: serde_json::from_value(model.remaining_requests)?,
         steer_revision: model.steer_revision,
         event_ordinal: model.event_ordinal,
         progress: TurnCheckpointProgress {

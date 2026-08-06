@@ -459,6 +459,11 @@ pub(super) fn sandbox_spawn_checkpoint_table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(SandboxSpawnCheckpoint::RemainingRequests)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(SandboxSpawnCheckpoint::SteerRevision)
                 .big_integer()
                 .not_null(),
@@ -564,7 +569,10 @@ pub(super) fn sandbox_spawn_checkpoint_table() -> TableCreateStatement {
         )
         .check(Expr::col(SandboxSpawnCheckpoint::SteerRevision).gte(0))
         .check(Expr::col(SandboxSpawnCheckpoint::EventOrdinal).between(2, i32::MAX - 1))
-        .check(Expr::col(SandboxSpawnCheckpoint::ModelSteps).gt(0))
+        // Zero is admissible: a spawn taken from a batch that was carried
+        // across an earlier approval park is checkpointed by the claim that
+        // resumed the turn, which reached the gate without calling the model.
+        .check(Expr::col(SandboxSpawnCheckpoint::ModelSteps).gte(0))
         .check(Expr::col(SandboxSpawnCheckpoint::HistoryOrder).gt(0))
         .check(Expr::col(SandboxSpawnCheckpoint::InputTokens).between(0, i64::from(u32::MAX)))
         .check(Expr::col(SandboxSpawnCheckpoint::OutputTokens).between(0, i64::from(u32::MAX)))
@@ -587,13 +595,26 @@ pub(super) fn sandbox_spawn_checkpoint_table() -> TableCreateStatement {
 }
 
 pub(super) fn sandbox_spawn_checkpoint_indexes() -> Vec<IndexCreateStatement> {
-    vec![Index::create()
-        .name("idx_sandbox_spawn_checkpoint_event")
-        .table(SandboxSpawnCheckpoint::Table)
-        .col(SandboxSpawnCheckpoint::ChatId)
-        .col(SandboxSpawnCheckpoint::EventSeq)
-        .unique()
-        .to_owned()]
+    vec![
+        Index::create()
+            .name("idx_sandbox_spawn_checkpoint_event")
+            .table(SandboxSpawnCheckpoint::Table)
+            .col(SandboxSpawnCheckpoint::ChatId)
+            .col(SandboxSpawnCheckpoint::EventSeq)
+            .unique()
+            .to_owned(),
+        // One claim segment can park on at most one spawn checkpoint — it
+        // ends there — which is what lets the resuming claim find the batch
+        // its predecessor left behind by claim identity alone.
+        Index::create()
+            .name("idx_sandbox_spawn_checkpoint_claim_segment")
+            .table(SandboxSpawnCheckpoint::Table)
+            .col(SandboxSpawnCheckpoint::OriginTurnId)
+            .col(SandboxSpawnCheckpoint::AttemptCount)
+            .col(SandboxSpawnCheckpoint::ClaimCount)
+            .unique()
+            .to_owned(),
+    ]
 }
 
 /// One file an exec turn changed in a user folder, with the blob holding its

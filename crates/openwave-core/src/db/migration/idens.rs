@@ -233,6 +233,7 @@ pub(crate) enum SandboxSpawnCheckpoint {
     HistoryOrder,
     Arguments,
     Result,
+    RemainingRequests,
     SteerRevision,
     EventOrdinal,
     ModelSteps,

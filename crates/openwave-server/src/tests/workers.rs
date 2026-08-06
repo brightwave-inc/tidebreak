@@ -367,6 +367,141 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
         .any(|message| message.content.contains("premature parent answer")));
 }
 
+/// A batch of gated delegations keeps its tail across the approval park.
+///
+/// One model step can name several delegations, and a card for one of them is
+/// not consent for the rest, so the turn parks after each approval. The tail
+/// used to be dropped at that park: the resumed attempt asked the model again,
+/// which cost a round trip per approval, re-issued the same delegations under
+/// fresh call ids, and left the originals hanging in the transcript forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gated_spawn_batch_is_carried_across_the_approval_park() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let provider = Arc::new(GatedSpawnBatchProvider::default());
+    let mut tools = ToolRegistry::new();
+    tools.register_foreground_agent_orchestration();
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 4,
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    // Left in `Ask`: every spawn in the batch has to cross the gate on its own.
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "delegate both questions").await,
+        StatusCode::ACCEPTED
+    );
+
+    async fn approval_call_ids(store: &Arc<dyn Store>, chat: ChatId) -> Vec<CallId> {
+        store
+            .list_events(chat, 0)
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|event| match &event.event {
+                AgentEvent::ApprovalRequired { call_id, .. } => Some(*call_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn wait_for_approvals(store: &Arc<dyn Store>, chat: ChatId, count: usize) -> Vec<CallId> {
+        for _ in 0..500 {
+            let ids = approval_call_ids(store, chat).await;
+            if ids.len() >= count {
+                return ids;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("turn should park on {count} approval cards");
+    }
+
+    async fn approve(router: &axum::Router, bearer: &str, chat: ChatId, call_id: CallId) {
+        let decide = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{chat}/approvals/{call_id}"))
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "approve"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decide.status(), StatusCode::NO_CONTENT);
+    }
+
+    let first = wait_for_approvals(&store, chat.id, 1).await[0];
+    approve(&router, &bearer, chat.id, first).await;
+
+    let both = wait_for_approvals(&store, chat.id, 2).await;
+    assert_eq!(both[0], first);
+    assert_ne!(
+        both[1], first,
+        "each spawn is decided under its own call id"
+    );
+    // The whole point: the second card came from the batch the checkpoint
+    // carried, not from a second look at the model.
+    assert_eq!(
+        provider.foreground_calls.load(Ordering::SeqCst),
+        1,
+        "the carried batch must reach the gate without another model call"
+    );
+    approve(&router, &bearer, chat.id, both[1]).await;
+
+    for _ in 0..500 {
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        let spawns = calls
+            .iter()
+            .filter(|call| call.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL)
+            .collect::<Vec<_>>();
+        if spawns.len() == 2
+            && spawns
+                .iter()
+                .all(|call| call.status == openwave_core::ToolCallStatus::Completed)
+        {
+            // Both delegations were answered under the call ids the model
+            // streamed, so nothing is left dangling in the transcript.
+            assert_eq!(
+                spawns
+                    .iter()
+                    .map(|call| call.id)
+                    .collect::<std::collections::HashSet<_>>(),
+                both.iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("both spawns in the batch should complete under their original call ids");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_drains_a_turn_queued_before_startup() {
     let dir = tempfile::tempdir().unwrap();
