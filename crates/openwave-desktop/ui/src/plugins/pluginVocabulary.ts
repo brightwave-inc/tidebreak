@@ -8,9 +8,9 @@ import type { PluginCapability, PluginCategory } from "@/api";
  *
  * The vocabulary is closed server-side, so this table is total: a capability
  * the host can derive always has words here rather than falling back to the
- * wire slug. `live-control` and `mcp` are not derived by anything today; they
- * are named anyway because the surface renders whatever comes back, and the
- * day a bundle earns one it should read like the others.
+ * wire slug. `live-control` is not derived by anything today; it is named
+ * anyway because the surface renders whatever comes back, and the day a bundle
+ * earns one it should read like the others.
  */
 const CAPABILITY_LABELS: Record<PluginCapability, string> = {
   "write-files": "Writes files",

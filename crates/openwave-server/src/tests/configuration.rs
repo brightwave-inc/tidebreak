@@ -2900,6 +2900,9 @@ async fn stamps_and_surfaces_static_plugin_compatibility() {
         // content, not a package manifest: this archive must still install
         // through the internal path.
         ("deploy-skill/scripts/plugin.json", b"{\"tool\": \"config\"}"),
+        // Bundled MCP configuration is a standard-format component; a bare
+        // skill package shipping one is told it will not be read.
+        ("deploy-skill/mcp.json", b"{\"mcpServers\": {}}"),
     ]);
     let (router, bearer) = plugin_install_app(
         Arc::new(store),
@@ -2924,6 +2927,13 @@ async fn stamps_and_surfaces_static_plugin_compatibility() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let installed: serde_json::Value = json_body(response).await;
     assert_eq!(installed["compatibility"]["status"], "limited");
+    assert_eq!(
+        installed["skipped"][0],
+        serde_json::json!({
+            "path": "mcp.json",
+            "reason": "bundled MCP configuration is only read from Agent Plugins packages"
+        })
+    );
     assert_eq!(
         installed["compatibility"]["issues"],
         serde_json::json!([
@@ -2957,6 +2967,9 @@ async fn stamps_and_surfaces_static_plugin_compatibility() {
 
 /// The only manifest schema the standard-format importer accepts.
 const AGENT_PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+
+/// The matching schema for a package's bundled MCP server configuration.
+const AGENT_PLUGIN_MCP_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
 
 /// Contract: a package published in the Agent Plugins format
 /// (<https://agent-plugins.org>) is recognized by its root `plugin.json`, its
@@ -3181,6 +3194,156 @@ async fn standard_manifests_report_ignored_fields_and_carry_our_extension() {
         .find(|plugin| plugin["name"] == "reporting")
         .unwrap();
     assert_eq!(plugin["category"], "data");
+}
+
+/// Contract: an `mcp.json` bundled with a standard package is validated,
+/// regenerated from what passed, and retained beside the installed manifest,
+/// which is what earns the plugin its `mcp` badge. A single bad entry is
+/// dropped and reported without touching the rest — the per-entry grading
+/// <https://agent-plugins.org/specification> §7.2.2 requires.
+#[tokio::test]
+async fn retains_validated_mcp_servers_and_derives_the_badge() {
+    let (dir, store) = temp_db_store("plugin-mcp.db").await;
+    let manifest = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_SCHEMA}\", \"name\": \"reporting\", \
+          \"description\": \"Reporting skills.\"}}"
+    );
+    let mcp = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_MCP_SCHEMA}\", \"mcpServers\": {{\
+           \"local\": {{\"type\": \"stdio\", \"command\": \"./bin/serve\", \
+             \"args\": [\"--root\", \"${{PLUGIN_ROOT}}\"]}}, \
+           \"remote\": {{\"type\": \"streamable-http\", \
+             \"url\": \"https://mcp.example.com/v1\"}}, \
+           \"bogus\": {{\"type\": \"stdio\", \"command\": \"serve\", \"retries\": 3}}}}}}"
+    );
+    let archive = plugin_archive(&[
+        ("pkg/plugin.json", manifest.as_bytes()),
+        ("pkg/mcp.json", mcp.as_bytes()),
+        (
+            "pkg/skills/weekly-report/SKILL.md",
+            b"---\nname: weekly-report\ndescription: Draft the weekly report.\n---\nBody.\n",
+        ),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/reporting-1.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/reporting-1.0.0.zip",
+                "revision": "1.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        installed["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mcp.json#bogus"]
+    );
+
+    // Only the entries that validated are written back.
+    let retained: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("plugins/reporting/mcp.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retained["$schema"], AGENT_PLUGIN_MCP_SCHEMA);
+    assert_eq!(
+        retained["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["local", "remote"]
+    );
+
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "reporting")
+        .unwrap();
+    assert!(plugin["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("mcp")));
+}
+
+/// Contract: a top-level problem in `mcp.json` disables that plugin's MCP
+/// configuration and nothing else — the skills still install, no server
+/// configuration is retained, and the badge is not earned.
+#[tokio::test]
+async fn an_invalid_mcp_file_disables_mcp_without_sinking_the_plugin() {
+    let (dir, store) = temp_db_store("plugin-mcp-invalid.db").await;
+    let manifest = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_SCHEMA}\", \"name\": \"reporting\", \
+          \"description\": \"Reporting skills.\"}}"
+    );
+    let archive = plugin_archive(&[
+        ("pkg/plugin.json", manifest.as_bytes()),
+        (
+            "pkg/mcp.json",
+            b"{\"$schema\": \"https://agent-plugins.org/schemas/9.9.9/mcp.schema.json\", \
+              \"mcpServers\": {\"remote\": {\"type\": \"streamable-http\", \
+              \"url\": \"https://mcp.example.com/v1\"}}}",
+        ),
+        (
+            "pkg/skills/weekly-report/SKILL.md",
+            b"---\nname: weekly-report\ndescription: Draft the weekly report.\n---\nBody.\n",
+        ),
+    ]);
+    let (router, bearer) = plugin_install_app(
+        Arc::new(store),
+        dir.path(),
+        FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/reporting-1.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        },
+    );
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/reporting-1.0.0.zip",
+                "revision": "1.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = json_body(response).await;
+    assert_eq!(installed["skipped"][0]["path"], "mcp.json");
+    assert!(!dir.path().join("plugins/reporting/mcp.json").exists());
+    assert!(dir.path().join("skills/weekly-report/SKILL.md").is_file());
+
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "reporting")
+        .unwrap();
+    assert!(!plugin["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("mcp")));
 }
 
 /// Contract: the catalog reports host-derived badges and enable state,

@@ -36,12 +36,13 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use openwave_code_execution::{
-    assess_plugin_compatibility, is_valid_plugin_name, parse_agent_plugin_manifest,
-    parse_plugin_manifest, parse_skill_manifest, LoadedSkill, PluginCategory, PluginCompatibility,
-    PluginInstallStamp, PluginOrigin, PluginPackage, PluginSourceFormat, SkillOrigin, SkillScript,
-    AGENT_PLUGIN_MANIFEST_FILE, AGENT_PLUGIN_SKILLS_DIR, AGENT_PLUGIN_SPEC_VERSION,
-    PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA, PLUGIN_MANIFEST_FILE,
-    SKILL_MANIFEST_FILE, SKILL_SCRIPTS_DIR,
+    assess_plugin_compatibility, canonical_mcp_config, is_valid_plugin_name,
+    parse_agent_plugin_manifest, parse_plugin_manifest, parse_plugin_mcp_config,
+    parse_skill_manifest, LoadedSkill, PluginCategory, PluginCompatibility, PluginInstallStamp,
+    PluginMcpConfig, PluginOrigin, PluginPackage, PluginSourceFormat, SkillOrigin, SkillScript,
+    AGENT_PLUGIN_MANIFEST_FILE, AGENT_PLUGIN_MCP_FILE, AGENT_PLUGIN_SKILLS_DIR,
+    AGENT_PLUGIN_SPEC_VERSION, PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA,
+    PLUGIN_MANIFEST_FILE, SKILL_MANIFEST_FILE, SKILL_SCRIPTS_DIR,
 };
 use openwave_web_search::{admit_fetch_address, admit_fetch_url};
 use serde::{Deserialize, Serialize};
@@ -362,6 +363,11 @@ fn fetch_transport_error(error: reqwest::Error) -> PluginInstallError {
 pub(crate) struct PreparedPlugin {
     pub package: PluginPackage,
     pub manifest: String,
+    /// The canonical `mcp.json` to retain beside the manifest, regenerated
+    /// from the entries that validated. `None` when the package ships no
+    /// configuration, when its configuration was rejected whole, or when
+    /// nothing in it survived validation.
+    pub mcp_config: Option<String>,
     pub skills: Vec<LoadedSkill>,
     pub stamp: PluginInstallStamp,
     pub skipped: Vec<SkippedPluginMember>,
@@ -570,6 +576,7 @@ fn retain_archive_file(path: &[String]) -> bool {
     path.last()
         .is_some_and(|name| name == PLUGIN_MANIFEST_FILE || name == SKILL_MANIFEST_FILE)
         || is_package_root_file(path, AGENT_PLUGIN_MANIFEST_FILE)
+        || is_package_root_file(path, AGENT_PLUGIN_MCP_FILE)
         || path.iter().any(|component| component == SKILL_SCRIPTS_DIR)
 }
 
@@ -676,6 +683,7 @@ fn prepare_tree(
         let root = manifest_path[..manifest_path.len() - 1].to_vec();
         let mut selected = Vec::new();
         let mut skipped = skipped_foreign_members(&tree, &root);
+        skipped_bundled_mcp_config(&tree, &root, &mut skipped);
         for prompt in &package.prompts {
             push_skipped(
                 &mut skipped,
@@ -736,6 +744,7 @@ fn prepare_tree(
         return Ok(PreparedPlugin {
             stamp: install_stamp(source, PluginSourceFormat::PluginManifest, compatibility),
             manifest,
+            mcp_config: None,
             skills: selected
                 .into_iter()
                 .map(|skill| skill.loaded.clone())
@@ -753,7 +762,14 @@ fn prepare_tree(
         }));
     }
     let skill = skills.pop().expect("one skill was checked above");
-    let mut skipped = skipped_single_skill_members(&tree, &skill.root);
+    // The specific disclosure goes in first: a bare package's generic
+    // "outside SKILL.md and one-level scripts/" reason would otherwise be the
+    // one a response shows for a file the importer has a better answer about.
+    let mut skipped = Vec::new();
+    skipped_bundled_mcp_config(&tree, &skill.root, &mut skipped);
+    for member in skipped_single_skill_members(&tree, &skill.root) {
+        push_skipped(&mut skipped, member.path, &member.reason);
+    }
     let compatibility = assess_plugin_compatibility(&[(&skill.loaded.package, skill.has_scripts)]);
     let display_name = display_name(&skill.loaded.package.name);
     let mut package = PluginPackage {
@@ -764,6 +780,7 @@ fn prepare_tree(
         skills: vec![skill.loaded.package.name.clone()],
         prompts: Vec::new(),
         router_preamble: None,
+        mcp_servers: 0,
         origin: PluginOrigin::User,
         compatibility: compatibility.clone(),
     };
@@ -777,6 +794,7 @@ fn prepare_tree(
     Ok(PreparedPlugin {
         stamp: install_stamp(source, PluginSourceFormat::PluginManifest, compatibility),
         manifest,
+        mcp_config: None,
         skills: vec![skill.loaded],
         package,
         skipped,
@@ -821,17 +839,6 @@ fn prepare_standard_tree(
     }
 
     let mut skipped = skipped_foreign_members(tree, &root);
-    // The standard's other component type. Its bytes are not installed by this
-    // importer yet, and a package that ships one should be told so rather than
-    // left to wonder why nothing connected.
-    let mcp_config = prefixed_path(&root, &["mcp.json"]);
-    if tree.paths.contains(&mcp_config) {
-        push_skipped(
-            &mut skipped,
-            mcp_config.join("/"),
-            "component type is outside the instruction-only importer",
-        );
-    }
     for ignored in &parsed.ignored {
         push_skipped(
             &mut skipped,
@@ -839,6 +846,7 @@ fn prepare_standard_tree(
             &ignored.reason,
         );
     }
+    let mcp_config = prepare_mcp_config(tree, &root, &mut skipped)?;
 
     let skills_root = prefixed_path(&root, &[AGENT_PLUGIN_SKILLS_DIR]);
     let mut selected: Vec<ParsedSkill> = Vec::new();
@@ -884,6 +892,7 @@ fn prepare_standard_tree(
         // `PLUGIN.md` path there is nothing here to prune and disclose.
         prompts: Vec::new(),
         router_preamble: parsed.manifest.router_preamble,
+        mcp_servers: mcp_config.as_ref().map_or(0, |config| config.servers.len()),
         origin: PluginOrigin::User,
         compatibility: compatibility.clone(),
         name,
@@ -892,9 +901,11 @@ fn prepare_standard_tree(
     // The generated manifest goes through the internal parser before any byte
     // is copied, exactly as the `PLUGIN.md` path does: nothing reaches disk in
     // a shape the ordinary loader would later reject.
+    let mcp_servers = package.mcp_servers;
     package = parse_plugin_manifest(&manifest, PluginOrigin::User)
         .map_err(|error| PluginInstallError::InvalidPlugin(error.to_string()))?;
     package.compatibility = compatibility.clone();
+    package.mcp_servers = mcp_servers;
     skipped.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(PreparedPlugin {
         stamp: install_stamp(
@@ -905,10 +916,56 @@ fn prepare_standard_tree(
             compatibility,
         ),
         manifest,
+        mcp_config: mcp_config
+            .filter(|config| !config.servers.is_empty())
+            .as_ref()
+            .map(canonical_mcp_config),
         skills: selected.into_iter().map(|skill| skill.loaded).collect(),
         package,
         skipped,
     })
+}
+
+/// Validate the package's bundled MCP server configuration, if it ships one.
+///
+/// The specification grades MCP failures narrowly: a top-level problem —
+/// unreadable JSON, a schema identifier this client does not implement, a
+/// shape that is not `$schema` plus `mcpServers` — disables MCP for this
+/// plugin and nothing else, while a single bad entry drops only that entry.
+/// Both are reported through the ordinary skip disclosure, so an install
+/// response says what will not connect and why.
+fn prepare_mcp_config(
+    tree: &ArchiveTree,
+    root: &[String],
+    skipped: &mut Vec<SkippedPluginMember>,
+) -> Result<Option<PluginMcpConfig>, PluginInstallError> {
+    let path = prefixed_path(root, &[AGENT_PLUGIN_MCP_FILE]);
+    let Some(bytes) = tree.files.get(&path) else {
+        return Ok(None);
+    };
+    let source = std::str::from_utf8(bytes).map_err(|_| {
+        PluginInstallError::InvalidPlugin(format!("{} is not UTF-8", path.join("/")))
+    })?;
+    match parse_plugin_mcp_config(source) {
+        Ok(parsed) => {
+            for server in &parsed.skipped {
+                push_skipped(
+                    skipped,
+                    format!("{AGENT_PLUGIN_MCP_FILE}#{}", server.name),
+                    &server.reason,
+                );
+            }
+            Ok(Some(parsed.config))
+        }
+        Err(error) => {
+            push_skipped(
+                skipped,
+                AGENT_PLUGIN_MCP_FILE.to_owned(),
+                &error.to_string(),
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// The immediate child directory names under `skills_root`, in name order.
@@ -1108,6 +1165,27 @@ fn skipped_foreign_members(tree: &ArchiveTree, root: &[String]) -> Vec<SkippedPl
     skipped
 }
 
+/// Report an `mcp.json` an archive ships in a format that does not define one.
+///
+/// Bundled MCP configuration is a component of the Agent Plugins standard
+/// format, read from that specification's fixed location. A `PLUGIN.md` bundle
+/// or a bare skill package carrying the same file is describing something this
+/// importer will not act on, so it is disclosed rather than dropped in silence.
+fn skipped_bundled_mcp_config(
+    tree: &ArchiveTree,
+    root: &[String],
+    skipped: &mut Vec<SkippedPluginMember>,
+) {
+    let path = prefixed_path(root, &[AGENT_PLUGIN_MCP_FILE]);
+    if tree.paths.contains(&path) {
+        push_skipped(
+            skipped,
+            path.join("/"),
+            "bundled MCP configuration is only read from Agent Plugins packages",
+        );
+    }
+}
+
 fn skipped_single_skill_members(tree: &ArchiveTree, root: &[String]) -> Vec<SkippedPluginMember> {
     let mut skipped = Vec::new();
     let scripts = prefixed_path(root, &[SKILL_SCRIPTS_DIR]);
@@ -1207,6 +1285,9 @@ pub(crate) fn install_prepared(
                 ))
             })?,
         )?;
+        if let Some(config) = &prepared.mcp_config {
+            std::fs::write(plugin_stage.join(AGENT_PLUGIN_MCP_FILE), config.as_bytes())?;
+        }
         for (skill, stage) in prepared.skills.iter().zip(&skill_stages) {
             std::fs::create_dir(stage)?;
             std::fs::write(stage.join(SKILL_MANIFEST_FILE), skill.manifest.as_bytes())?;

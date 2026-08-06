@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "process", "rt", "sync", "time"] }
 tracing = "=0.1.44"
 trash = { workspace = true }
+url = "=2.5.8"
 uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

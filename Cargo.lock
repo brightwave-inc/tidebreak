@@ -4262,6 +4262,7 @@ dependencies = [
  "tracing",
  "trash",
  "ts-rs",
+ "url",
  "uuid",
 ]
 
