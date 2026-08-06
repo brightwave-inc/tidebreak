@@ -2060,18 +2060,27 @@ pub async fn list_chat_messages(
             Some(snapshot)
         })
         .collect();
-    let mut file_changes_by_turn =
-        match list_file_change_summaries(&*state.store, &*state.blobs, id).await {
-            Ok(summaries) => summaries,
-            Err(error) => {
-                tracing::warn!(
-                    chat = %id,
-                    %error,
-                    "could not load connected-folder change summaries"
-                );
-                std::collections::HashMap::new()
-            }
-        };
+    let mut file_changes_by_turn = match list_file_change_summaries(
+        &*state.store,
+        &*state.blobs,
+        id,
+        Some(&crate::turn_worker::private_chat_scratch_path(
+            &state.config.data_dir.join("scratch"),
+            id,
+        )),
+    )
+    .await
+    {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            tracing::warn!(
+                chat = %id,
+                %error,
+                "could not load connected-folder change summaries"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
