@@ -17,13 +17,15 @@ import type { AppsApis } from "./appsApis";
  * A `consent_required` refusal mid-session (revoked, or a server reconfigured
  * while the app was open) is reported upward so the host can re-present the
  * consent sheet; the frame itself just sees a rejected call.
+ *
+ * Unlike the inline MCP App card, this frame fills whatever space the panel
+ * gives it — the bridge's app-reported height is ignored and tall content
+ * scrolls inside the sandbox.
  */
 type FrameState =
   | { kind: "loading" }
   | { kind: "unavailable" }
   | { kind: "ready"; url: string };
-
-const DEFAULT_FRAME_HEIGHT = 384;
 
 export function AppFrame({
   appId,
@@ -39,7 +41,6 @@ export function AppFrame({
 }) {
   const { resolved: resolvedTheme } = useTheme();
   const [state, setState] = useState<FrameState>({ kind: "loading" });
-  const [frameHeight, setFrameHeight] = useState(DEFAULT_FRAME_HEIGHT);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const bridgeRef = useRef<McpAppBridge | null>(null);
 
@@ -54,10 +55,14 @@ export function AppFrame({
     const bridge = createMcpAppBridge({
       frame: () => frameRef.current?.contentWindow ?? null,
       theme: () => themeRef.current,
-      onHeight: setFrameHeight,
       invokeOperation: async (operationId, parameters, body) => {
         try {
-          return await apis.invokeOperation(appId, operationId, parameters, body);
+          return await apis.invokeOperation(
+            appId,
+            operationId,
+            parameters,
+            body,
+          );
         } catch (error) {
           if (
             error instanceof AppInvokeRefusalError &&
@@ -118,14 +123,14 @@ export function AppFrame({
   }, [apis, appId]);
 
   return (
-    <div className="bg-background mx-4 overflow-hidden rounded-lg border">
+    <div className="bg-background mx-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border">
       {state.kind === "loading" && (
         <p className="text-muted-foreground p-3 text-xs">Opening app…</p>
       )}
       {state.kind === "unavailable" && (
         <p className="text-muted-foreground p-3 text-xs">
-          This app could not be opened. Its stored revision may be missing —
-          try again, or delete the app.
+          This app could not be opened. Its stored revision may be missing — try
+          again, or delete the app.
         </p>
       )}
       {state.kind === "ready" && (
@@ -135,8 +140,7 @@ export function AppFrame({
           src={state.url}
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
-          className="w-full border-0"
-          style={{ height: frameHeight }}
+          className="w-full flex-1 border-0"
         />
       )}
     </div>
