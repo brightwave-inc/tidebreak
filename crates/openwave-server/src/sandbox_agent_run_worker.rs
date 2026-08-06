@@ -26,9 +26,10 @@ use openwave_core::{
     AgentError, AgentRun, AgentRunStatus, AgentRunSubmittedOutput, CallId, ChatMessage,
     ChatRequest, ContentBlock, FailAgentRunOutcome, MessageReasoning, ModelProvider,
     ParkSandboxToolCallOutcome, ProviderEvent, RequestFolderAccessArgs, Result,
-    ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall, SandboxToolCallRequest,
-    SandboxToolCallStatus, SecretProvider, StopReason, Store, SubmitAgentRunResultOutcome,
-    ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    ResumeTurnForAgentRunWaitSetOutcome, Role, SandboxToolCall, SandboxToolCallParkEntry,
+    SandboxToolCallRequest, SandboxToolCallStatus, SecretProvider, StopReason, Store,
+    SubmitAgentRunResultOutcome, ToolCallRecord, ToolCallResolution, TurnWebSearch,
+    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -590,35 +591,9 @@ impl SandboxAgentRunWorker {
         let depth = previous_calls.len();
         let outcome = match completion {
             SandboxCompletion::Final(text) => self.submit_result(&run, lease_token, text).await,
-            SandboxCompletion::WebSearch {
-                provider_id,
-                arguments,
-            } => {
-                self.park_sandbox_tool_call(
-                    run,
-                    lease_token,
-                    provider_id,
-                    openwave_core::SANDBOX_WEB_SEARCH_TOOL,
-                    arguments,
-                    &narration,
-                    "sandbox web-search checkpoint identity conflict",
-                )
-                .await
-            }
-            SandboxCompletion::Exec {
-                provider_id,
-                arguments,
-            } => {
-                self.park_sandbox_tool_call(
-                    run,
-                    lease_token,
-                    provider_id,
-                    SANDBOX_EXEC_TOOL,
-                    arguments,
-                    &narration,
-                    "sandbox exec checkpoint identity conflict",
-                )
-                .await
+            SandboxCompletion::ToolCall(intent) => {
+                self.park_sandbox_tool_call(run, lease_token, intent, &narration)
+                    .await
             }
             SandboxCompletion::Done { outputs, summary } => {
                 self.submit_submission(&run, lease_token, &outputs, &summary)
@@ -627,21 +602,6 @@ impl SandboxAgentRunWorker {
             SandboxCompletion::FolderAccessProposal { request } => {
                 self.submit_folder_access_proposal(run.id, lease_token, request)
                     .await
-            }
-            SandboxCompletion::DelegatedFileRead {
-                provider_id,
-                arguments,
-            } => {
-                self.park_sandbox_tool_call(
-                    run,
-                    lease_token,
-                    provider_id,
-                    openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL,
-                    arguments,
-                    &narration,
-                    "sandbox delegated-file checkpoint identity conflict",
-                )
-                .await
             }
         };
         // Published after the step's own durable transition has committed, for
@@ -902,31 +862,48 @@ impl SandboxAgentRunWorker {
     /// Park one tool call as a durable checkpoint and release the run's lease.
     ///
     /// Every sandbox tool that needs an executor parks the same way — only the
-    /// tool name and the conflict message differ — so they share this body
-    /// rather than each carrying its own copy of the crash-recovery reasoning
-    /// below.
-    #[allow(clippy::too_many_arguments)]
+    /// tool name differs — so they share this body rather than each carrying
+    /// its own copy of the crash-recovery reasoning below. A call the host
+    /// refused parks the same way with its answer already attached, so the
+    /// next step of the run reads it as an ordinary error result.
     async fn park_sandbox_tool_call(
         &self,
         run: AgentRun,
         lease_token: uuid::Uuid,
-        provider_id: String,
-        name: &str,
-        arguments: serde_json::Value,
+        intent: SandboxToolCallIntent,
         narration: &str,
-        conflict_message: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
-        let call = SandboxToolCallRequest {
-            id: CallId::new(),
-            agent_run_id: run.id,
-            chat_id: run.chat_id,
+        let SandboxToolCallIntent {
             provider_id,
-            name: name.into(),
+            name,
             arguments,
+            disposition,
+        } = intent;
+        let entry = SandboxToolCallParkEntry {
+            call: SandboxToolCallRequest {
+                id: CallId::new(),
+                agent_run_id: run.id,
+                chat_id: run.chat_id,
+                provider_id,
+                name,
+                arguments,
+            },
+            resolution: match disposition {
+                SandboxToolCallDisposition::Execute => None,
+                SandboxToolCallDisposition::Rejected {
+                    error_code,
+                    message,
+                } => Some(ToolCallResolution::Failed {
+                    result: rejection_result(&message),
+                    error_code: error_code.to_owned(),
+                    error_detail: None,
+                }),
+            },
         };
+        let call = &entry.call;
         let outcome = match self
             .store
-            .park_agent_run_for_sandbox_tool_call(run.id, lease_token, &call)
+            .park_agent_run_for_sandbox_tool_call(run.id, lease_token, &entry)
             .await
         {
             Ok(outcome) => outcome,
@@ -960,12 +937,18 @@ impl SandboxAgentRunWorker {
                 self.publish_progress(run.id, call.id, narration).await;
                 // This shared wake is only a latency hint; the dedicated
                 // executor's durable candidate scan remains the recovery path.
+                // A call the host already answered has no executor and simply
+                // ignores it.
                 self.wake.notify_one();
                 Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id))
             }
             ParkSandboxToolCallOutcome::IdentityConflict => {
-                self.record_failure(&run, lease_token, AgentError::msg(conflict_message))
-                    .await
+                self.record_failure(
+                    &run,
+                    lease_token,
+                    AgentError::msg("sandbox tool checkpoint identity conflict"),
+                )
+                .await
             }
             ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
                 self.record_failure(
@@ -1117,13 +1100,11 @@ async fn sandbox_request(
     }
     let mut messages = vec![ChatMessage::text(Role::User, task)];
     for call in calls {
-        if !matches!(
-            call.name.as_str(),
-            openwave_core::SANDBOX_WEB_SEARCH_TOOL
-                | openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
-                | SANDBOX_EXEC_TOOL
-        ) || !call.status.is_terminal()
-        {
+        // The row's name is the model's own emitted name — dispatch data, not
+        // a replay contract. A call the host refused replays exactly like one
+        // an executor ran: what matters is that it is finished and has an
+        // answer to hand back.
+        if !call.status.is_terminal() {
             return Err(AgentError::msg("sandbox checkpoint cannot be resumed"));
         }
         let receipt = store
@@ -1265,48 +1246,140 @@ enum SandboxCompletion {
         outputs: Vec<String>,
         summary: String,
     },
-    /// One command to run in this run's own private workspace.
-    Exec {
-        provider_id: String,
-        arguments: serde_json::Value,
-    },
-    WebSearch {
-        provider_id: String,
-        arguments: serde_json::Value,
-    },
+    /// One tool call the model made, to dispatch or to answer in place.
+    ToolCall(SandboxToolCallIntent),
     FolderAccessProposal {
         request: RequestFolderAccessArgs,
     },
-    DelegatedFileRead {
-        provider_id: String,
-        arguments: serde_json::Value,
+}
+
+/// One tool call the model emitted, classified for the host.
+#[derive(Debug, Clone)]
+struct SandboxToolCallIntent {
+    provider_id: String,
+    name: String,
+    /// The model's arguments as it sent them, `Null` when its JSON never
+    /// parsed. A rejected call parks these verbatim so the replayed transcript
+    /// shows the model exactly what it asked for.
+    arguments: serde_json::Value,
+    disposition: SandboxToolCallDisposition,
+}
+
+#[derive(Debug, Clone)]
+enum SandboxToolCallDisposition {
+    /// Dispatch to the tool's executor lane.
+    Execute,
+    /// The host answers this call itself with an error result carrying this
+    /// text, so the model can correct itself on the next step.
+    Rejected {
+        error_code: &'static str,
+        message: String,
     },
+}
+
+/// The model-facing text of a refusal, shaped to what a durable receipt
+/// accepts: never empty, never carrying a NUL the model's own tool name might
+/// have contributed, and never longer than the receipt's result budget.
+fn rejection_result(message: &str) -> String {
+    let mut result: String = message.chars().filter(|byte| *byte != '\0').collect();
+    if result.len() > openwave_core::SandboxToolCall::MAX_RESULT_BYTES {
+        let mut cut = openwave_core::SandboxToolCall::MAX_RESULT_BYTES;
+        while cut > 0 && !result.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        result.truncate(cut);
+    }
+    if result.trim().is_empty() {
+        return "The call could not be dispatched.".to_owned();
+    }
+    result
+}
+
+/// Decide whether a tool call the model emitted can be dispatched.
+///
+/// A call the host cannot dispatch is not an infrastructure failure: the model
+/// asked for something that does not exist or sent arguments that do not fit,
+/// and the corrective answer belongs in the transcript. Only a call with no
+/// provider id is unanswerable — there is no id to attach a result to.
+fn classify_sandbox_tool_call(
+    provider_id: String,
+    name: String,
+    raw_arguments: &str,
+    advertised: &[String],
+) -> Result<SandboxToolCallIntent> {
+    if provider_id.is_empty() {
+        return Err(AgentError::msg(
+            "sandbox agent requested a tool without a call id",
+        ));
+    }
+    // Parsed once, up front: whatever the model sent is what the checkpoint
+    // records, so the replayed transcript shows it exactly what it asked for.
+    let parsed = serde_json::from_str::<serde_json::Value>(raw_arguments).ok();
+    let arguments = parsed.clone().unwrap_or(serde_json::Value::Null);
+    if !advertised.contains(&name) {
+        let available = advertised.join(", ");
+        let message =
+            format!("{name} is not available to a background task. Available tools: {available}.");
+        return Ok(SandboxToolCallIntent {
+            provider_id,
+            name,
+            arguments,
+            disposition: SandboxToolCallDisposition::Rejected {
+                error_code: "unavailable_tool",
+                message,
+            },
+        });
+    }
+    let invalid = |arguments: serde_json::Value| SandboxToolCallIntent {
+        provider_id: provider_id.clone(),
+        name: name.clone(),
+        arguments,
+        disposition: SandboxToolCallDisposition::Rejected {
+            error_code: "invalid_arguments",
+            message: format!(
+                "Arguments for {name} were not valid: re-send the call with arguments matching \
+                 this tool's input schema."
+            ),
+        },
+    };
+    if parsed.is_none() {
+        return Ok(invalid(serde_json::Value::Null));
+    }
+    let valid = match name.as_str() {
+        SANDBOX_EXEC_TOOL => validate_sandbox_exec_arguments(&arguments),
+        openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => {
+            validate_sandbox_read_delegated_file_arguments(&arguments)
+        }
+        openwave_core::SANDBOX_DONE_TOOL => {
+            openwave_core::validate_sandbox_done_arguments(&arguments)
+                && serde_json::from_value::<openwave_core::SandboxDoneArgs>(arguments.clone())
+                    .is_ok()
+        }
+        openwave_core::REQUEST_FOLDER_ACCESS_TOOL => {
+            serde_json::from_value::<RequestFolderAccessArgs>(arguments.clone())
+                .is_ok_and(|request| request.is_well_formed())
+        }
+        // The web-search lane validates its own arguments when it claims the
+        // call; parsing is all this step can check.
+        _ => true,
+    };
+    if !valid {
+        return Ok(invalid(arguments));
+    }
+    Ok(SandboxToolCallIntent {
+        provider_id,
+        name,
+        arguments,
+        disposition: SandboxToolCallDisposition::Execute,
+    })
 }
 
 async fn complete_sandbox_task(
     provider: Arc<dyn ModelProvider>,
     request: ChatRequest,
 ) -> Result<SandboxStep> {
-    let web_search_advertised = request
-        .tools
-        .iter()
-        .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL);
-    let exec_advertised = request
-        .tools
-        .iter()
-        .any(|tool| tool.name == SANDBOX_EXEC_TOOL);
-    let done_advertised = request
-        .tools
-        .iter()
-        .any(|tool| tool.name == openwave_core::SANDBOX_DONE_TOOL);
-    let folder_proposal_advertised = request
-        .tools
-        .iter()
-        .any(|tool| tool.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL);
-    let delegated_file_advertised = request
-        .tools
-        .iter()
-        .any(|tool| tool.name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL);
+    let advertised_tools: Vec<String> =
+        request.tools.iter().map(|tool| tool.name.clone()).collect();
     let mut stream = provider.stream(request).await?;
     let mut text = String::new();
     let mut calls = std::collections::BTreeMap::<u32, (String, String, String)>::new();
@@ -1362,109 +1435,53 @@ async fn complete_sandbox_task(
                         ));
                     }
                     let (_, (provider_id, name, arguments)) = calls.into_iter().next().unwrap();
-                    if provider_id.is_empty() {
-                        return Err(AgentError::msg(
-                            "sandbox agent requested an unavailable tool",
-                        ));
-                    }
-                    if name == openwave_core::SANDBOX_WEB_SEARCH_TOOL && web_search_advertised {
-                        let arguments = serde_json::from_str(&arguments).map_err(|_| {
-                            AgentError::msg("sandbox agent emitted invalid web-search arguments")
-                        })?;
-                        return Ok(SandboxStep {
-                            narration: text,
-                            completion: SandboxCompletion::WebSearch {
-                                provider_id,
-                                arguments,
-                            },
-                            provider_executed,
-                        });
-                    }
-                    if name == SANDBOX_EXEC_TOOL && exec_advertised {
-                        let arguments = serde_json::from_str(&arguments).map_err(|_| {
-                            AgentError::msg("sandbox agent emitted invalid exec arguments")
-                        })?;
-                        if !validate_sandbox_exec_arguments(&arguments) {
-                            return Err(AgentError::msg(
-                                "sandbox agent emitted invalid exec arguments",
-                            ));
-                        }
-                        return Ok(SandboxStep {
-                            narration: text,
-                            completion: SandboxCompletion::Exec {
-                                provider_id,
-                                arguments,
-                            },
-                            provider_executed,
-                        });
-                    }
-                    if name == openwave_core::SANDBOX_DONE_TOOL && done_advertised {
-                        let arguments = serde_json::from_str::<serde_json::Value>(&arguments)
-                            .map_err(|_| {
-                                AgentError::msg("sandbox agent emitted invalid done arguments")
-                            })?;
-                        if !openwave_core::validate_sandbox_done_arguments(&arguments) {
-                            return Err(AgentError::msg(
-                                "sandbox agent emitted invalid done arguments",
-                            ));
-                        }
-                        let arguments =
-                            serde_json::from_value::<openwave_core::SandboxDoneArgs>(arguments)
+                    let intent = classify_sandbox_tool_call(
+                        provider_id,
+                        name,
+                        &arguments,
+                        &advertised_tools,
+                    )?;
+                    // These two end the run in place rather than parking work,
+                    // so they are consumed here and their narration is dropped
+                    // — the result they carry already speaks for the run.
+                    if matches!(intent.disposition, SandboxToolCallDisposition::Execute) {
+                        if intent.name == openwave_core::SANDBOX_DONE_TOOL {
+                            let arguments =
+                                serde_json::from_value::<openwave_core::SandboxDoneArgs>(
+                                    intent.arguments,
+                                )
                                 .map_err(|_| {
                                     AgentError::msg("sandbox agent emitted invalid done arguments")
                                 })?;
-                        return Ok(SandboxStep {
-                            narration: String::new(),
-                            completion: SandboxCompletion::Done {
-                                outputs: arguments.outputs,
-                                summary: arguments.summary,
-                            },
-                            provider_executed,
-                        });
-                    }
-                    if name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL
-                        && folder_proposal_advertised
-                    {
-                        let request = serde_json::from_str::<RequestFolderAccessArgs>(&arguments)
-                            .map_err(|_| {
-                            AgentError::msg("sandbox agent emitted invalid folder-access proposal")
-                        })?;
-                        if !request.is_well_formed() {
-                            return Err(AgentError::msg(
-                                "sandbox agent emitted invalid folder-access proposal",
-                            ));
+                            return Ok(SandboxStep {
+                                narration: String::new(),
+                                completion: SandboxCompletion::Done {
+                                    outputs: arguments.outputs,
+                                    summary: arguments.summary,
+                                },
+                                provider_executed,
+                            });
                         }
-                        return Ok(SandboxStep {
-                            narration: String::new(),
-                            completion: SandboxCompletion::FolderAccessProposal { request },
-                            provider_executed,
-                        });
-                    }
-                    if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
-                        && delegated_file_advertised
-                    {
-                        let arguments = serde_json::from_str(&arguments).map_err(|_| {
-                            AgentError::msg(
-                                "sandbox agent emitted invalid delegated-file arguments",
-                            )
-                        })?;
-                        if !validate_sandbox_read_delegated_file_arguments(&arguments) {
-                            return Err(AgentError::msg(
-                                "sandbox agent emitted invalid delegated-file arguments",
-                            ));
+                        if intent.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL {
+                            let request =
+                                serde_json::from_value::<RequestFolderAccessArgs>(intent.arguments)
+                                    .map_err(|_| {
+                                        AgentError::msg(
+                                            "sandbox agent emitted invalid folder-access proposal",
+                                        )
+                                    })?;
+                            return Ok(SandboxStep {
+                                narration: String::new(),
+                                completion: SandboxCompletion::FolderAccessProposal { request },
+                                provider_executed,
+                            });
                         }
-                        return Ok(SandboxStep {
-                            narration: text,
-                            completion: SandboxCompletion::DelegatedFileRead {
-                                provider_id,
-                                arguments,
-                            },
-                            provider_executed,
-                        });
                     }
-                    return Err(AgentError::msg(
-                        "sandbox agent requested an unadvertised tool",
-                    ));
+                    return Ok(SandboxStep {
+                        narration: text,
+                        completion: SandboxCompletion::ToolCall(intent),
+                        provider_executed,
+                    });
                 }
                 if !calls.is_empty() {
                     return Err(AgentError::msg(
@@ -1628,6 +1645,54 @@ mod tests {
                 vec![
                     ProviderEvent::TextDelta {
                         text: "search-informed answer".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// A model that reaches for a tool the run was never offered, then answers
+    /// once it has been told what it may use.
+    #[derive(Default)]
+    struct UnavailableToolThenFinalProvider {
+        requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for UnavailableToolThenFinalProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("sandbox-unavailable-tool")
+        }
+
+        async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let call_number = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            let events = if call_number == 1 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "read_1".into(),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path":"notes.md"}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "answer without that file".into(),
                     },
                     ProviderEvent::Stop {
                         reason: StopReason::EndTurn,
@@ -2230,6 +2295,87 @@ mod tests {
         );
     }
 
+    /// The failure this whole path exists to prevent: a background run that
+    /// reaches for a tool it was never offered used to fail its attempt, and
+    /// because every retry replays the same context it failed the same way
+    /// until the budget ran out. The call is answered instead, and the run
+    /// carries on from the same attempt.
+    #[tokio::test]
+    async fn an_unavailable_tool_call_is_answered_and_the_run_keeps_its_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        let provider = Arc::new(UnavailableToolThenFinalProvider::default());
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            test_secrets(),
+            Arc::new(FixedResolver(provider.clone())),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            AgentConfig {
+                model: "sandbox-model".into(),
+                max_steps: 3,
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        let spawn = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+        admit_sandbox(&store, chat.id, spawn, "Summarize the notes.").await;
+
+        let call_id = match worker.run_once().await.unwrap() {
+            SandboxAgentRunWorkerOutcome::ToolCheckpointed(call_id) => call_id,
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        };
+        let parked = store.get_agent_run(id).await.unwrap().unwrap();
+        // Not `waiting`: no executor lane will ever resolve this call, so the
+        // run has to be immediately claimable again or it would hang forever.
+        assert_eq!(parked.status, AgentRunStatus::RetryWait);
+        assert_eq!(
+            parked.last_error_code.as_deref(),
+            Some("tool_checkpoint_resolved")
+        );
+        assert_eq!(parked.attempt_count, 1);
+        let receipt = store
+            .get_sandbox_tool_call_receipt(call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status, SandboxToolCallStatus::Failed);
+        assert!(receipt.result.contains("Available tools:"), "{receipt:?}");
+        // The call is answered, so no executor lane may pick it up.
+        assert!(store
+            .list_sandbox_tool_call_candidates(10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(id)
+        );
+        let after = store.get_agent_run(id).await.unwrap().unwrap();
+        assert_eq!(after.attempt_count, 1);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            matches!(&requests[1].messages[1].content[0], ContentBlock::ToolUse { id, name, input } if id == "read_1" && name == "read_file" && input == &serde_json::json!({"path":"notes.md"}))
+        );
+        assert!(
+            matches!(&requests[1].messages[2].content[0], ContentBlock::ToolResult { tool_use_id, content, is_error } if tool_use_id == "read_1" && content.contains("Available tools:") && *is_error)
+        );
+    }
+
     /// A run whose task needs more than one lookup: the checkpoint chain has to
     /// survive a second park and replay both receipts in order, because the
     /// worker rebuilds the whole transcript from the database on every claim.
@@ -2313,7 +2459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_ambiguous_or_unavailable_sandbox_tool_events_without_checkpointing() {
+    async fn refuses_malformed_sandbox_tool_events_without_checkpointing() {
         let request = ChatRequest {
             provider: None,
             model: "m".into(),
@@ -2347,20 +2493,6 @@ mod tests {
                 ProviderEvent::ToolCallStarted {
                     index: 0,
                     id: "one".into(),
-                    name: "read_file".into(),
-                },
-                ProviderEvent::ToolCallArgsDelta {
-                    index: 0,
-                    fragment: "{}".into(),
-                },
-                ProviderEvent::Stop {
-                    reason: StopReason::ToolUse,
-                },
-            ],
-            vec![
-                ProviderEvent::ToolCallStarted {
-                    index: 0,
-                    id: "one".into(),
                     name: "web_search".into(),
                 },
                 ProviderEvent::Stop {
@@ -2381,6 +2513,16 @@ mod tests {
                     reason: StopReason::ToolUse,
                 },
             ],
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: String::new(),
+                    name: "web_search".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ],
         ] {
             assert!(
                 complete_sandbox_task(Arc::new(EventProvider(events)), request.clone())
@@ -2388,6 +2530,60 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    /// A tool the run was never offered is the model's mistake, not the
+    /// host's: it is answered in the transcript so the next step can correct
+    /// itself, rather than spending the run's attempt budget.
+    #[tokio::test]
+    async fn unadvertised_sandbox_tool_call_is_answered_rather_than_refused() {
+        let request = ChatRequest {
+            provider: None,
+            model: "m".into(),
+            reasoning_model: false,
+            system: None,
+            messages: vec![],
+            tools: vec![sandbox_exec_tool_spec(), sandbox_done_tool_spec()],
+            max_tokens: None,
+            temperature: None,
+            reasoning_effort: None,
+            images: openwave_core::ImageAttachments::new(),
+            ..Default::default()
+        };
+        let completion = complete_sandbox_task(
+            Arc::new(EventProvider(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "one".into(),
+                    name: "read_file".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ])),
+            request,
+        )
+        .await
+        .unwrap()
+        .completion;
+        let SandboxCompletion::ToolCall(intent) = completion else {
+            panic!("an unadvertised tool must still produce a tool call");
+        };
+        assert_eq!(intent.name, "read_file");
+        let SandboxToolCallDisposition::Rejected {
+            error_code,
+            message,
+        } = intent.disposition
+        else {
+            panic!("an unadvertised tool must not be dispatched");
+        };
+        assert_eq!(error_code, "unavailable_tool");
+        assert!(message.contains("Available tools:"), "{message}");
+        assert!(message.contains(SANDBOX_EXEC_TOOL), "{message}");
     }
 
     #[tokio::test]
@@ -2462,11 +2658,13 @@ mod tests {
                 .park_sandbox_tool_call(
                     run,
                     lease,
-                    "search_1".into(),
-                    openwave_core::SANDBOX_WEB_SEARCH_TOOL,
-                    serde_json::json!({"query":"OpenWave"}),
+                    SandboxToolCallIntent {
+                        provider_id: "search_1".into(),
+                        name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+                        arguments: serde_json::json!({"query":"OpenWave"}),
+                        disposition: SandboxToolCallDisposition::Execute,
+                    },
                     "",
-                    "sandbox web-search checkpoint identity conflict",
                 )
                 .await
                 .unwrap(),
@@ -3251,7 +3449,23 @@ mod tests {
                 reason: StopReason::ToolUse,
             },
         ]));
-        assert!(complete_sandbox_task(provider, request).await.is_err());
+        // Calling a withdrawn tool is answered rather than failed: the step
+        // budget is spent, so the run needs the correction in its transcript,
+        // not a burned attempt.
+        let completion = complete_sandbox_task(provider, request)
+            .await
+            .unwrap()
+            .completion;
+        let SandboxCompletion::ToolCall(intent) = completion else {
+            panic!("a withdrawn tool must still produce a tool call");
+        };
+        assert!(matches!(
+            intent.disposition,
+            SandboxToolCallDisposition::Rejected {
+                error_code: "unavailable_tool",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -3304,13 +3518,18 @@ mod tests {
         ]));
         assert!(matches!(
             complete_sandbox_task(provider, request).await.unwrap().completion,
-            SandboxCompletion::DelegatedFileRead { arguments, .. }
-                if arguments == serde_json::json!({})
+            SandboxCompletion::ToolCall(SandboxToolCallIntent {
+                ref name,
+                ref arguments,
+                disposition: SandboxToolCallDisposition::Execute,
+                ..
+            }) if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+                && *arguments == serde_json::json!({})
         ));
     }
 
     #[tokio::test]
-    async fn delegated_file_read_rejects_nonempty_arguments() {
+    async fn delegated_file_read_answers_nonempty_arguments_without_parking_work() {
         let request = ChatRequest {
             provider: None,
             model: "m".into(),
@@ -3338,7 +3557,25 @@ mod tests {
                 reason: StopReason::ToolUse,
             },
         ]));
-        assert!(complete_sandbox_task(provider, request).await.is_err());
+        let completion = complete_sandbox_task(provider, request)
+            .await
+            .unwrap()
+            .completion;
+        let SandboxCompletion::ToolCall(intent) = completion else {
+            panic!("invalid delegated-file arguments must stay a tool call");
+        };
+        assert_eq!(intent.arguments, serde_json::json!({"path":"secret"}));
+        assert!(
+            matches!(
+                intent.disposition,
+                SandboxToolCallDisposition::Rejected {
+                    error_code: "invalid_arguments",
+                    ..
+                }
+            ),
+            "{:?}",
+            intent.disposition
+        );
     }
 
     #[tokio::test]

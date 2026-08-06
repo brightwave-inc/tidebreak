@@ -1830,6 +1830,17 @@ impl SandboxToolCallRequest {
     }
 }
 
+/// One entry in a sandbox checkpoint park.
+///
+/// `resolution: Some(_)` inserts the row already terminal together with its
+/// receipt in the same transaction: the host answered the call itself and no
+/// executor lane will ever see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SandboxToolCallParkEntry {
+    pub call: SandboxToolCallRequest,
+    pub resolution: Option<ToolCallResolution>,
+}
+
 /// Durable lifecycle of sandbox-owned tool work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

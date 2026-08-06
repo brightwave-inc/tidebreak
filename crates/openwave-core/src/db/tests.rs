@@ -71,6 +71,14 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
     (dir, store)
 }
 
+/// A checkpoint the host expects an executor lane to run.
+fn dispatchable(call: &crate::model::SandboxToolCallRequest) -> SandboxToolCallParkEntry {
+    SandboxToolCallParkEntry {
+        call: call.clone(),
+        resolution: None,
+    }
+}
+
 #[tokio::test]
 async fn bundled_sqlite_supports_fts5() {
     let (_dir, store) = temp_store().await;

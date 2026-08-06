@@ -162,7 +162,11 @@ async fn delegated_read_requires_exact_admission_and_empty_arguments() {
     let request = read_request(&run, CallId::new());
     assert_eq!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                worker_lease,
+                &super::dispatchable(&request)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::DelegatedResourceUnavailable
@@ -182,7 +186,7 @@ async fn delegated_read_requires_exact_admission_and_empty_arguments() {
     };
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &web)
+            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&web))
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
@@ -204,7 +208,11 @@ async fn delegated_read_requires_exact_admission_and_empty_arguments() {
         let mut malformed = read_request(&run, CallId::new());
         malformed.arguments = arguments;
         assert!(second_store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &malformed)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                worker_lease,
+                &super::dispatchable(&malformed)
+            )
             .await
             .is_err());
     }
@@ -227,7 +235,7 @@ async fn delegated_read_requires_exact_admission_and_empty_arguments() {
             .park_agent_run_for_sandbox_tool_call(
                 corrupt_run.id,
                 corrupt_lease,
-                &read_request(&corrupt_run, CallId::new()),
+                &super::dispatchable(&read_request(&corrupt_run, CallId::new())),
             )
             .await
             .unwrap(),
@@ -242,14 +250,22 @@ async fn delegated_read_checkpoint_and_claim_are_exact_and_lane_isolated() {
     let request = read_request(&run, CallId::new());
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                worker_lease,
+                &super::dispatchable(&request)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Parked { .. }
     ));
     assert!(matches!(
         store
-            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+            .park_agent_run_for_sandbox_tool_call(
+                run.id,
+                worker_lease,
+                &super::dispatchable(&request)
+            )
             .await
             .unwrap(),
         ParkSandboxToolCallOutcome::Existing { .. }
@@ -337,7 +353,11 @@ async fn delegated_read_checkpoint_and_claim_are_exact_and_lane_isolated() {
     assert!(
         matches!(
             store
-                .park_agent_run_for_sandbox_tool_call(run.id, next_worker_lease, &second)
+                .park_agent_run_for_sandbox_tool_call(
+                    run.id,
+                    next_worker_lease,
+                    &super::dispatchable(&second)
+                )
                 .await
                 .unwrap(),
             ParkSandboxToolCallOutcome::Parked { .. }
@@ -361,7 +381,7 @@ async fn detach_before_claim_terminalizes_without_exposing_authority() {
     let (chat, run, worker_lease, resource) = delegated_sandbox(&store).await;
     let request = read_request(&run, CallId::new());
     store
-        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&request))
         .await
         .unwrap();
     detach_root(&store, &chat, resource.root_id).await;
@@ -404,7 +424,7 @@ async fn concurrent_detach_and_claim_require_a_final_revocation_heartbeat() {
     let (chat, run, worker_lease, resource) = delegated_sandbox(&store).await;
     let request = read_request(&run, CallId::new());
     store
-        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&request))
         .await
         .unwrap();
 
@@ -462,7 +482,7 @@ async fn detach_after_claim_rejects_content_at_the_atomic_resolution_fence() {
     let (chat, run, worker_lease, resource) = delegated_sandbox(&store).await;
     let request = read_request(&run, CallId::new());
     store
-        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&request))
         .await
         .unwrap();
     let lease = uuid::Uuid::new_v4();
@@ -514,7 +534,7 @@ async fn exact_terminal_retry_survives_a_later_attachment_revocation() {
     let (chat, run, worker_lease, resource) = delegated_sandbox(&store).await;
     let request = read_request(&run, CallId::new());
     store
-        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&request))
         .await
         .unwrap();
     let lease = uuid::Uuid::new_v4();
@@ -548,7 +568,7 @@ async fn wrong_and_expired_delegated_read_leases_cannot_heartbeat_or_resolve() {
     let (_chat, run, worker_lease, _resource) = delegated_sandbox(&store).await;
     let request = read_request(&run, CallId::new());
     store
-        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&request))
         .await
         .unwrap();
     let lease = uuid::Uuid::new_v4();
@@ -617,7 +637,7 @@ async fn cancelling_a_delegated_read_fences_native_execution_without_leaking_aut
     let (_chat, run, worker_lease, resource) = delegated_sandbox(&store).await;
     let request = read_request(&run, CallId::new());
     store
-        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &request)
+        .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &super::dispatchable(&request))
         .await
         .unwrap();
     let lease = uuid::Uuid::new_v4();
