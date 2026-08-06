@@ -236,10 +236,13 @@ jobs:
         run: |
           docker run --rm --entrypoint python3 \
             "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
-            -c 'import fpdf, pypdf, pptx, docx, openpyxl, matplotlib, pypdfium2'
+            -c 'import fpdf, pypdf, pptx, docx, openpyxl, matplotlib, pypdfium2, uno'
           docker run --rm --entrypoint soffice \
             "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
             --version
+          docker run --rm --entrypoint node \
+            "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
+            -e 'require("pptxgenjs")'
 
       # This workflow deliberately uses no third-party actions; the scanner is
       # the trivy release binary, pinned by version and sha256 checksum the

@@ -12,11 +12,13 @@
 #   - `slim`      — the agent binary on a minimal Debian base. The egress proxy
 #                   runs from this layer's contents; nothing else is needed.
 #   - `documents` — `slim` plus LibreOffice (headless DOCX/PPTX/XLSX rendering
-#                   for the document skills' visual QA loop), the bundled exec
-#                   helper scripts, and the document skills' pinned Python
-#                   dependencies preinstalled system-wide, so a sandbox produces
-#                   documents without any in-run package install. This is the
-#                   default build target and the ref the local backend runs.
+#                   for the document skills' visual QA loop, and the UNO bridge
+#                   for driving Calc from Python), Node.js with pptxgenjs for
+#                   JavaScript deck generation, the bundled exec helper scripts,
+#                   and the document skills' pinned Python dependencies
+#                   preinstalled system-wide, so a sandbox produces documents
+#                   without any in-run package install. This is the default
+#                   build target and the ref the local backend runs.
 #
 # Build context is the WORKSPACE ROOT, so the whole Cargo workspace and the
 # committed Cargo.lock are visible to a `--locked` build:
@@ -88,6 +90,17 @@ USER openwave:openwave
 
 ENTRYPOINT ["/usr/local/bin/openwave-sandbox-agent"]
 
+# ---- Node.js distribution --------------------------------------------------
+# The Node.js runtime the documents stage copies in. The official Node image
+# built on the same Debian release as the runtime base, so the binary links
+# against the glibc that is already there and no third-party apt repository or
+# per-architecture tarball URL enters the build. Digest-pinned like every other
+# base here: this is the multi-architecture node:20-bookworm-slim index as of
+# 2026-08-06 (Node 20.20.2), covering the amd64 and arm64 images the publish
+# workflow builds. Update the digest deliberately (`docker buildx imagetools
+# inspect node:20-bookworm-slim` prints the current one).
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS nodedist
+
 # ---- documents runtime (default) -------------------------------------------
 # The document helpers need Python plus native renderers, and the document
 # skills (skills/*/SKILL.md) each pin one Python library. Preinstalling those
@@ -108,22 +121,60 @@ USER root
 # version is pinned with the rest.
 COPY crates/openwave-sandbox-agent/documents-requirements.txt /tmp/documents-requirements.txt
 
+# The apt set is the native side of the same bargain: the three LibreOffice
+# document components the skills render and convert through, poppler for PDF
+# rasterization and figure extraction, and Python for the helper scripts.
+# `python3-uno` is LibreOffice's Python bridge — it binds to the *system*
+# python3, which is why the helpers run under `python3` rather than a virtual
+# environment, and it lets a script drive Calc (formulas, chart objects,
+# recalculation) instead of only writing files another tool reopens.
+# `default-jre-headless` is what LibreOffice's own conversion filters need for
+# the paths that route through Java; without it those conversions fail at run
+# time inside a network-free sandbox.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+       default-jre-headless \
+       libreoffice-calc \
        libreoffice-impress \
        libreoffice-writer \
        poppler-utils \
        python3 \
        python3-pip \
+       python3-uno \
     && python3 -m pip install --break-system-packages --no-cache-dir \
        --require-hashes -r /tmp/documents-requirements.txt \
     && rm -rf /var/lib/apt/lists/* /root/.cache /tmp/documents-requirements.txt \
     && mkdir -p /opt/openwave/exec-scripts
 
+# Node.js, for the JavaScript deck path: pptxgenjs builds a PPTX from script
+# without the layout gymnastics the Python route needs for the same slide. Only
+# the interpreter and the bundled npm are taken from the pinned distribution
+# image — the `npm`/`npx` entry points are the symlinks that image ships,
+# recreated here explicitly so what lands on PATH is visible in this file.
+COPY --from=nodedist /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodedist /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# The deck library, pinned exactly like the Python closure and installed
+# globally at build time so a run needs no `npm install` and no registry
+# egress. npm verifies each package against the registry's integrity hash on
+# install, which is the equivalent of pip's `--require-hashes` here.
+RUN npm install --global --no-audit --no-fund --loglevel=error pptxgenjs@4.0.1 \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
+
+# Global installs are not on Node's default resolution path for a script run
+# from the workspace, so point NODE_PATH at them: `require("pptxgenjs")`
+# resolves from any directory, with no per-workspace node_modules.
+ENV NODE_PATH=/usr/local/lib/node_modules
+
 COPY scripts/exec-documents/ /opt/openwave/exec-scripts/
 
 RUN python3 /opt/openwave/exec-scripts/render_pdf.py --help >/dev/null \
-    && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null
+    && python3 /opt/openwave/exec-scripts/analyze_xlsx.py --help >/dev/null \
+    && python3 -c "import uno" \
+    && node -e "require('pptxgenjs')"
 
 # The helper library path shown to the model-facing exec tool.
 ENV OPENWAVE_EXEC_SCRIPTS=/opt/openwave/exec-scripts

@@ -216,6 +216,12 @@ and Pillow. The sandbox image includes these tools. Local execution reports a
 concise command error when the host lacks Python or an underlying renderer; it
 does not download tooling or use an unconfined fallback.
 
+Beyond the helpers, the sandbox image carries the runtimes a document run may
+reach for directly: LibreOffice Writer, Calc, and Impress with the `uno` Python
+bridge for driving a running LibreOffice from a script, and Node.js with
+`pptxgenjs` installed globally, so `require("pptxgenjs")` resolves from any
+directory without a local `npm install`.
+
 ## Workspace lifecycle
 
 Beside `execute`, a provider may offer an optional durable-workspace
