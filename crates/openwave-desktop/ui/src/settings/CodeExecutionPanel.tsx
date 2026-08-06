@@ -249,9 +249,12 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
             Local execution confines writes to private chat scratch and routes
             any granted network access through a loopback broker. E2B and
             Daytona run commands in managed cloud sandboxes and reuse their
-            workspace while it is alive. Every provider retains the same
-            direct-command, bounded-output, idempotency, and execution-consent
-            contract.
+            workspace while it is alive. Docker runs them in a container on
+            this machine, so staged files never leave it, with the same
+            document tooling the cloud sandboxes have — but it does not yet
+            enforce a conversation's network setting. Every provider retains
+            the same direct-command, bounded-output, idempotency, and
+            execution-consent contract.
           </p>
         </>
       )}
@@ -420,6 +423,14 @@ const EGRESS_STATUS_PRESENTATION: Record<
     badge: "warning",
     label: "Unconfirmed",
     lead: "A policy is sent at creation, but enforcement is not yet confirmed against the live API. These stay reachable regardless of policy:",
+  },
+  // Not a weaker boundary — no boundary. The conversation's network choice
+  // reaches nothing on this backend, which is worth the strongest tone the
+  // list has rather than the same amber as a partially enforced one.
+  not_enforced: {
+    badge: "critical",
+    label: "Not enforced",
+    lead: "This backend applies no network restriction, so a conversation's network setting does not reach it:",
   },
 };
 

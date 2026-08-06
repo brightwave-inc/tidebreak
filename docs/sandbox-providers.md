@@ -18,7 +18,14 @@ connects them.
 | Tier | Today | What isolates the work |
 | --- | --- | --- |
 | Background agent run | `openwave-server` sandbox agent-run worker | Capability restriction: no history, fixed tool budget, bounded I/O. |
-| Execution provider | `openwave-code-execution` | OS or VM enforcement: Seatbelt on supported hosts, a vendor sandbox remotely. |
+| Execution provider | `openwave-code-execution` | OS, container, or VM enforcement: Seatbelt on supported hosts, a container on the host's own runtime, a vendor sandbox remotely. |
+
+Both tiers can end up running a container, which is exactly why the rule below
+matters: `openwave-server`'s `sandbox_docker` provisions containers that speak
+the sandbox-agent wire protocol for the *run* tier, while
+`openwave-code-execution`'s Docker backend runs one bounded `docker exec` per
+call for the *provider* tier. They share only the published image; neither
+depends on the other.
 
 These are orthogonal. Background agent work currently runs inside the OpenWave
 server process; an execution provider performs one bounded process invocation

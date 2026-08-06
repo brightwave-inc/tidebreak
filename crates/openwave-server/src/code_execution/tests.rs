@@ -1005,6 +1005,16 @@ fn egress_enforcement_never_oversells_a_provider_past_its_model() {
         EgressEnforcementStatus::Boundary,
         "the tier caveat must keep Daytona off the unconditional boundary status"
     );
+
+    // The container backend sends no policy anywhere, so it must not borrow a
+    // status that implies one was sent and merely went unconfirmed. This is
+    // the assertion that catches the tempting future edit — passing the
+    // configured egress into the container adapter and calling the row
+    // enforced — without the container actually enforcing anything.
+    let docker = row(CodeExecutionProviderKind::Docker);
+    assert_eq!(docker.status, EgressEnforcementStatus::NotEnforced);
+    assert_eq!(docker.gaps, [DOCKER_OPEN_EGRESS_GAP]);
+    assert!(docker.requirement.is_none());
 }
 
 #[test]

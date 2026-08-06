@@ -1209,6 +1209,16 @@ impl ConfiguredCodeExecutionProvider {
                     self.preparation_sink(),
                 )?)
             }
+            CodeExecutionProviderKind::Docker => {
+                // No credential and no egress policy: the container runs on
+                // the host's own runtime with ordinary network access, which
+                // the settings surface discloses rather than implying the
+                // conversation's policy reaches it.
+                Box::new(configured_docker(
+                    Duration::from_millis(config.timeout_ms),
+                    self.remote_sessions.clone(),
+                )?)
+            }
             _ => {
                 return Err(CodeExecutionError::Unavailable(
                     "selected provider is not supported by this build".into(),
