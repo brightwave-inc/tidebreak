@@ -469,6 +469,22 @@ pub(crate) fn compose_for_surface(
                     .to_owned(),
             );
         }
+        // The baseline set is the one Python inventory that holds on every
+        // backend: the managed sandbox image preinstalls it, and the local
+        // backend can install it from the network or from the verified cache.
+        // With neither install route open, the line is omitted rather than
+        // promising the local backend something it may not have.
+        if package_installs_reachable || offline_package_cache {
+            let baseline = openwave_code_execution::baseline_python_deps().join(", ");
+            let install = if package_installs_reachable {
+                "install it with the pip command above"
+            } else {
+                "install it from the read-only cache with the offline pip command above"
+            };
+            lines.push(format!(
+                "- These libraries are available on every execution backend: {baseline}. Managed sandboxes preinstall them; if an import fails, {install} at exactly these versions."
+            ));
+        }
         if exec_folders.is_empty() {
             lines.push(
                 "- This turn has no host folders granted to local exec; connected-folder tools remain the only folder interface."
@@ -870,6 +886,17 @@ mod tests {
         assert!(off_with_cache.contains("--no-index --find-links \"$OPENWAVE_PACKAGE_CACHE\""));
         assert!(!off_with_cache.contains("package installs are unavailable"));
 
+        // The baseline set is advertised wherever some install route exists,
+        // and stays silent when neither the network nor the cache can supply
+        // it. It always renders the exact pins the backends carry.
+        let baseline = openwave_code_execution::baseline_python_deps();
+        assert!(baseline.contains(&"numpy==2.4.6"));
+        for pin in baseline {
+            assert!(off_with_cache.contains(pin));
+            assert!(!off.contains(pin));
+        }
+        assert!(off_with_cache.contains("available on every execution backend"));
+
         let packages = compose_with(&NetworkPolicy::PackageManagers);
         assert!(packages.contains("package-manager registries only"));
         assert!(packages.contains(pip_line));
@@ -1218,11 +1245,10 @@ mod tests {
             false,
         );
 
-        // Re-pinned for the reserved `output/` directory: outputs are produced
-        // by `exec`, never by `write_file`.
+        // Re-pinned for the baseline Python set the exec section now names.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:0a38ffd0ca7c82c4b4079090dfb5bc03d13b3b39da9807332a6ddfb2c6bac853"
+            "foreground-v2:sha256:a57fc22c83ba09f64615efc52392ca958573a675e4b1ca1512e91178c0f578ea"
         );
     }
 }

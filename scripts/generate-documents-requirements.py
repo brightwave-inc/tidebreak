@@ -6,8 +6,9 @@ Run from the repository root:
     python3 scripts/generate-documents-requirements.py
 
 Reads the top-level pins from the document skills' SKILL.md `deps` manifests
-(plus pypdfium2 for the bundled render helpers), resolves their transitive
-closure for the image's platform (linux cp311) with pip, and records every
+and from crates/openwave-code-execution/baseline_python_deps.txt (the baseline
+set every execution backend guarantees), resolves their transitive closure for
+the image's platform (linux cp311) with pip, and records every
 file hash PyPI publishes for each resolved version. It also resolves the skill
 pins for the local sandbox's fixed runtime (macOS arm64 cp39), so an incompatible
 pin fails regeneration instead of making every local cache-population pass
@@ -26,8 +27,9 @@ import sys
 import tempfile
 import urllib.request
 
-# Pinned for the bundled exec helpers (render_pdf.py), not by any SKILL.md.
-HELPER_PINS = ["pypdfium2==4.30.0"]
+# The baseline packages guaranteed on every execution backend, declared once
+# for the image, the local offline package cache, and the operating prompt.
+BASELINE = pathlib.Path("crates/openwave-code-execution/baseline_python_deps.txt")
 
 OUTPUT = pathlib.Path("crates/openwave-sandbox-agent/documents-requirements.txt")
 LOCAL_SANDBOX_PLATFORM = "macosx_11_0_arm64"
@@ -40,15 +42,26 @@ HEADER = """\
 # publish moment trusts these recorded digests rather than whatever PyPI
 # serves that day; a substituted artifact fails the build.
 #
-# The top-level pins mirror the document skills' SKILL.md `deps` manifests
-# plus pypdfium2 for the bundled render helpers (the sandbox-image-pins test
-# enforces the lockstep); the rest is their pinned transitive closure. Each
-# entry lists every file hash PyPI publishes for that version, so one file
-# covers amd64, arm64, and pure wheels alike.
+# The top-level pins mirror the document skills' SKILL.md `deps` manifests plus
+# the baseline set in crates/openwave-code-execution/baseline_python_deps.txt
+# (the sandbox-image-pins test enforces both locksteps); the rest is their
+# pinned transitive closure. Each entry lists every file hash PyPI publishes
+# for that version, so one file covers amd64, arm64, and pure wheels alike.
 #
-# Regenerate after bumping a skill pin:
+# Regenerate after bumping a skill pin or a baseline pin:
 #   python3 scripts/generate-documents-requirements.py
 """
+
+
+def baseline_pins():
+    pins = [
+        line.strip()
+        for line in BASELINE.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    if not pins:
+        sys.exit(f"{BASELINE} declares no pins")
+    return pins
 
 
 def skill_pins():
@@ -119,8 +132,9 @@ def hash_lines(resolved):
 
 def main():
     skill_dependencies = skill_pins()
-    pins = skill_dependencies + HELPER_PINS
-    if len(pins) < len(HELPER_PINS) + 5:
+    baseline = baseline_pins()
+    pins = skill_dependencies + baseline
+    if len(pins) < len(baseline) + 5:
         sys.exit(f"expected at least five SKILL.md pins, found: {pins}")
     validate_local_sandbox(skill_dependencies)
     resolved = resolve_closure(pins)

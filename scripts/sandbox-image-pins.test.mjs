@@ -3,11 +3,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 // The documents sandbox image preinstalls the document skills' pinned Python
-// dependencies. That lockstep is by convention in three places — the SKILL.md
-// manifests, the hash-checked requirements closure, and the Dockerfile that
-// installs it — and silently drifts when a skill bumps a pin. These tests make
-// the drift loud at PR time instead of leaving a stale image to be discovered
-// by a background run.
+// dependencies and the baseline set every execution backend guarantees. That
+// lockstep is by convention across the SKILL.md manifests,
+// baseline_python_deps.txt, the hash-checked requirements closure, and the
+// Dockerfile that installs it — and silently drifts when a pin is bumped in
+// one place. These tests make the drift loud at PR time instead of leaving a
+// stale image to be discovered by a background run.
 
 const dockerfile = readFileSync(
   new URL("../crates/openwave-sandbox-agent/Dockerfile", import.meta.url),
@@ -21,6 +22,13 @@ const requirements = readFileSync(
   "utf8",
 );
 const skillsDirectory = new URL("../skills/", import.meta.url);
+const baselineDeps = readFileSync(
+  new URL(
+    "../crates/openwave-code-execution/baseline_python_deps.txt",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 function skillPins() {
   const pins = new Map();
@@ -81,9 +89,34 @@ test("every document-skill pin is preinstalled at the same version", () => {
         "regenerate with scripts/generate-documents-requirements.py",
     );
   }
+});
 
-  // The bundled render helpers' own dependency rides the same closure.
-  assert.ok(preinstalled.has("pypdfium2"));
+test("the baseline python set is preinstalled at the same versions", () => {
+  const preinstalled = requirementPins();
+  const declared = baselineDeps
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+
+  // The Rust side reads the same file and drops anything that is not an exact
+  // pin, so an unpinned entry would silently shrink the guaranteed set.
+  assert.ok(declared.length >= 3, "the baseline set must not be emptied");
+  for (const pin of declared) {
+    const [packageName, version] = pin.split("==");
+    assert.ok(
+      packageName && version && !version.includes(" "),
+      `baseline_python_deps.txt entry is not an exact pin: ${pin}`,
+    );
+    assert.equal(
+      preinstalled.get(packageName.toLowerCase()),
+      version,
+      `documents-requirements.txt does not carry the baseline ${pin}; ` +
+        "regenerate with scripts/generate-documents-requirements.py",
+    );
+  }
+
+  // The bundled render helpers' own dependency is part of the baseline set.
+  assert.ok(declared.some((pin) => pin.startsWith("pypdfium2==")));
 });
 
 test("the documents closure is hash-checked and installed that way", () => {

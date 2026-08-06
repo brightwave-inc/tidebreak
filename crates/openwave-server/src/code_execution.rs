@@ -1614,21 +1614,32 @@ impl ConfiguredCodeExecutionProvider {
         }
     }
 
-    /// Best-effort host-side acquisition of the built-in skills' pinned
-    /// dependencies, spawned once per process when a networked local exec
-    /// shows the cache could be used. Failure clears the latch so a later
-    /// exec retries; conversations keep their network install path either way.
-    /// User-authored skills are deliberately excluded: the pass runs once,
-    /// user pins change under it, and their installs use the ordinary
-    /// networked path like any other package.
+    /// Best-effort host-side acquisition of the baseline set and the built-in
+    /// skills' pinned dependencies, spawned once per process when a networked
+    /// local exec shows the cache could be used. Failure clears the latch so a
+    /// later exec retries; conversations keep their network install path
+    /// either way. User-authored skills are deliberately excluded: the pass
+    /// runs once, user pins change under it, and their installs use the
+    /// ordinary networked path like any other package.
     fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
         use std::sync::atomic::Ordering;
-        let pin_sets = self
-            .skills
+        let mut pin_sets = Vec::new();
+        // The baseline set is preinstalled in the managed sandbox image; on
+        // this backend the cache is what makes it available offline, so it is
+        // acquired here regardless of which skills are loaded.
+        let baseline = openwave_code_execution::baseline_python_deps()
             .iter()
-            .map(|skill| skill.package.python_deps.clone())
-            .filter(|pins| !pins.is_empty())
+            .map(|pin| (*pin).to_owned())
             .collect::<Vec<_>>();
+        if !baseline.is_empty() {
+            pin_sets.push(baseline);
+        }
+        pin_sets.extend(
+            self.skills
+                .iter()
+                .map(|skill| skill.package.python_deps.clone())
+                .filter(|pins| !pins.is_empty()),
+        );
         if pin_sets.is_empty() {
             return;
         }
@@ -1638,9 +1649,9 @@ impl ConfiguredCodeExecutionProvider {
         let latch = self.package_cache_population.clone();
         tokio::spawn(async move {
             let mut failed = false;
-            // Per-skill acquisition: each skill's pins resolve as one
-            // consistent closure, and one unresolvable skill cannot sink the
-            // others' artifacts.
+            // Per-set acquisition: each set's pins resolve as one consistent
+            // closure, and one unresolvable set cannot sink the others'
+            // artifacts.
             for pins in pin_sets {
                 match cache
                     .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
