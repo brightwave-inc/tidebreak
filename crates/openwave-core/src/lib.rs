@@ -138,9 +138,10 @@ pub use client_tools::{
     READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 pub use compaction::{
-    CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
-    DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
-    DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+    CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBaseline,
+    CompactionTokenBounds, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
+    DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES, DEFAULT_COMPACTION_TARGET_FRACTION,
+    DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

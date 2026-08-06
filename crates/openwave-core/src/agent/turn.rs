@@ -342,7 +342,7 @@ impl Agent {
             .await?;
         let mut checkpoint_boundary = loaded.checkpoint_boundary;
         let source_boundaries = loaded.source_boundaries;
-        let unabridged_tokens = loaded.unabridged_tokens;
+        let token_baseline = loaded.token_baseline;
         let user_texts = loaded.user_texts;
         let mut transcript = loaded.messages;
         if let Some(instruction) = self.continuation_instruction.as_ref() {
@@ -416,7 +416,7 @@ impl Agent {
                             transcript: &transcript,
                             source_boundaries: &source_boundaries,
                             user_texts: &user_texts,
-                            unabridged_tokens,
+                            token_baseline,
                             current: checkpoint.as_ref(),
                             attempted_boundary: &mut checkpoint_attempt_boundary,
                             events,

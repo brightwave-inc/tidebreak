@@ -86,6 +86,32 @@ pub struct CompactionTokenBounds {
     pub target: usize,
 }
 
+/// What the compaction trigger counts, measured once per transcript load.
+///
+/// Two numbers rather than one because both would otherwise lie. Tool results
+/// are byte-capped for the provider body, so counting the live transcript
+/// alone under-counts history and compaction fires late; counting only the
+/// uncapped rebuild freezes at load, so a turn that crosses the threshold on
+/// its own tool output never compacts. The trigger is therefore the uncapped
+/// history plus whatever this turn has appended to the transcript since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionTokenBaseline {
+    /// Loaded durable history, rebuilt without tool-result caps.
+    pub unabridged_history_tokens: usize,
+    /// The same history as the live provider transcript started out.
+    pub loaded_transcript_tokens: usize,
+}
+
+impl CompactionTokenBaseline {
+    /// Trigger tokens for the transcript as it stands now.
+    #[must_use]
+    pub fn trigger_tokens(&self, transcript: &[ChatMessage]) -> usize {
+        let live = context::estimate_transcript_tokens(transcript);
+        self.unabridged_history_tokens
+            .saturating_add(live.saturating_sub(self.loaded_transcript_tokens))
+    }
+}
+
 /// One durable row's inclusive end in the rebuilt provider transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionSourceBoundary {
@@ -276,6 +302,26 @@ mod tests {
             .map(|(i, id)| boundary(*id, Role::User, i + 1))
             .collect();
         assert!(select_compaction_boundary(&transcript, &sources, 10, 2, None).is_none());
+    }
+
+    #[test]
+    fn trigger_tokens_count_history_uncapped_and_in_turn_growth() {
+        let loaded = vec![ChatMessage::text(Role::User, "abridged history")];
+        let baseline = CompactionTokenBaseline {
+            // As if the durable tool results were far larger uncapped.
+            unabridged_history_tokens: 10_000,
+            loaded_transcript_tokens: context::estimate_transcript_tokens(&loaded),
+        };
+        assert_eq!(baseline.trigger_tokens(&loaded), 10_000);
+
+        let mut grown = loaded.clone();
+        grown.push(ChatMessage::text(
+            Role::Assistant,
+            "tool output ".repeat(500),
+        ));
+        let growth = context::estimate_transcript_tokens(&grown[1..]);
+        assert!(growth > 0);
+        assert_eq!(baseline.trigger_tokens(&grown), 10_000 + growth);
     }
 
     #[test]

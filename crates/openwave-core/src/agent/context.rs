@@ -6,6 +6,7 @@ use futures::StreamExt;
 
 use crate::compaction::{
     self, select_compaction_boundary, CompactionSelection, CompactionSourceBoundary,
+    CompactionTokenBaseline,
 };
 use crate::context;
 use crate::error::{AgentError, Result};
@@ -31,7 +32,7 @@ pub(crate) struct CreateContextCheckpoint<'a> {
     pub transcript: &'a [ChatMessage],
     pub source_boundaries: &'a [TranscriptSourceBoundary],
     pub user_texts: &'a [(MessageId, String)],
-    pub unabridged_tokens: usize,
+    pub token_baseline: CompactionTokenBaseline,
     pub current: Option<&'a ContextCheckpoint>,
     pub attempted_boundary: &'a mut Option<usize>,
     pub events: &'a super::events::EventSink<'a>,
@@ -87,7 +88,7 @@ impl Agent {
             self.config.image_input,
             checkpoint_source,
         );
-        let unabridged_tokens = context::estimate_transcript_tokens(&unabridged);
+        let unabridged_history_tokens = context::estimate_transcript_tokens(&unabridged);
         let user_texts: Vec<(MessageId, String)> = messages
             .iter()
             .filter(|message| message.role == Role::User)
@@ -102,11 +103,15 @@ impl Agent {
                 self.config.image_input,
                 checkpoint_source,
             );
+        let token_baseline = CompactionTokenBaseline {
+            unabridged_history_tokens,
+            loaded_transcript_tokens: context::estimate_transcript_tokens(&provider_messages),
+        };
         Ok(LoadedTranscript {
             messages: provider_messages,
             checkpoint_boundary,
             source_boundaries,
-            unabridged_tokens,
+            token_baseline,
             user_texts,
         })
     }
@@ -134,7 +139,7 @@ impl Agent {
             transcript,
             source_boundaries,
             user_texts,
-            unabridged_tokens,
+            token_baseline,
             current,
             attempted_boundary,
             events,
@@ -147,7 +152,7 @@ impl Agent {
             .config
             .compaction
             .resolve_token_bounds(self.config.context_window);
-        if unabridged_tokens <= bounds.threshold {
+        if token_baseline.trigger_tokens(transcript) <= bounds.threshold {
             return Ok(None);
         }
 
@@ -214,7 +219,10 @@ impl Agent {
             summary_budget.saturating_sub(context::estimate_transcript_tokens(&summary_messages)),
             context::content_floor_for_level(0),
         );
-        if prefix_messages.is_empty() && summary_messages.is_empty() {
+        // The prefix is what this checkpoint claims to summarize. If the folded
+        // prior checkpoint left no budget for any of it, saving the answer
+        // would advance the boundary past history nothing read.
+        if prefix_messages.is_empty() {
             return Ok(None);
         }
         context::evict_all_images(&mut prefix_messages);
