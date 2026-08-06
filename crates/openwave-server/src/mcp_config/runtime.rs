@@ -18,25 +18,25 @@ use crate::mcp_curated::{curation_for, McpCuration};
 use super::types::*;
 use super::validation::{connection_diagnostic, validate_servers};
 
-struct ManagedServer {
+pub(super) struct ManagedServer {
     client: Option<McpClient>,
     health: McpHealth,
     diagnostic: Option<String>,
     reconnect_backoff: Duration,
-    epoch: u64,
-    reconnect_lock: Arc<Mutex<()>>,
+    pub(super) epoch: u64,
+    pub(super) reconnect_lock: Arc<Mutex<()>>,
     /// Prefetched MCP Apps view documents, keyed by declared `ui://` URI.
     ui_views: HashMap<String, UiViewDocument>,
 }
 
-struct RuntimeState {
-    definitions: Vec<McpServerDefinition>,
+pub(super) struct RuntimeState {
+    pub(super) definitions: Vec<McpServerDefinition>,
     /// The connected-app record id behind each configured server name. App
     /// manifests and grants bind these ids; the id survives edits to the
     /// definition and dies with the record, so a name-keyed lookup here is
     /// only ever a projection detail, never the consent key.
     ids: BTreeMap<String, ConnectedAppId>,
-    servers: HashMap<String, ManagedServer>,
+    pub(super) servers: HashMap<String, ManagedServer>,
 }
 
 /// Owns the current MCP connection set and atomically published tool registry.
@@ -47,7 +47,7 @@ struct RuntimeState {
 pub(crate) struct McpRuntime {
     base_tools: ToolRegistry,
     tools: RwLock<Arc<ToolRegistry>>,
-    state: Mutex<RuntimeState>,
+    pub(super) state: Mutex<RuntimeState>,
     mutation: Mutex<()>,
     store: Arc<dyn Store>,
     /// Holds each server's literal environment values, keyed by record id.
@@ -102,7 +102,7 @@ impl McpRuntime {
     /// unreadable entry resolves empty: the child then starts without those
     /// names and fails with the server's own diagnostic, which beats taking
     /// an unrelated settings save down.
-    async fn stored_env(&self, id: ConnectedAppId) -> BTreeMap<String, String> {
+    pub(super) async fn stored_env(&self, id: ConnectedAppId) -> BTreeMap<String, String> {
         match self.secrets.get_secret(&env_secret_key(id)).await {
             Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
             Ok(None) => BTreeMap::new(),
@@ -653,7 +653,7 @@ impl McpRuntime {
     }
 
     #[cfg(test)]
-    async fn replace_with_commit_pause(
+    pub(super) async fn replace_with_commit_pause(
         &self,
         config: McpServersConfig,
         entered: Arc<tokio::sync::Notify>,
@@ -839,7 +839,7 @@ impl McpRuntime {
             .await
     }
 
-    async fn replace_permissive(
+    pub(super) async fn replace_permissive(
         &self,
         definitions: Vec<McpServerDefinition>,
         ids: BTreeMap<String, ConnectedAppId>,
@@ -1238,7 +1238,7 @@ impl McpRuntime {
         }
     }
 
-    async fn mark_degraded(&self, name: &str, epoch: u64, backoff: Duration) {
+    pub(super) async fn mark_degraded(&self, name: &str, epoch: u64, backoff: Duration) {
         let mut state = self.state.lock().await;
         if let Some(server) = state
             .servers

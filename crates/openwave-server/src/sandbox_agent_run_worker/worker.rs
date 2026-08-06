@@ -173,7 +173,7 @@ impl SandboxAgentRunWorker {
             .await
     }
 
-    async fn resume_parent_wait_set_with_token(
+    pub(super) async fn resume_parent_wait_set_with_token(
         &self,
         wait_id: CallId,
         resume_token: uuid::Uuid,
@@ -261,7 +261,7 @@ impl SandboxAgentRunWorker {
         Ok(outcome)
     }
 
-    async fn process(
+    pub(super) async fn process(
         &self,
         run: AgentRun,
         lease_token: uuid::Uuid,
@@ -713,7 +713,7 @@ impl SandboxAgentRunWorker {
     /// The step is trimmed to what the run's remaining tool budget can hold
     /// before anything is written: rows are the durable cost, and a batch the
     /// store would refuse is worse than one honest refusal the model can read.
-    async fn park_sandbox_tool_calls(
+    pub(super) async fn park_sandbox_tool_calls(
         &self,
         run: AgentRun,
         lease_token: uuid::Uuid,

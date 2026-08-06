@@ -33,12 +33,13 @@ use crate::state::BlobWriteGuard;
 
 use super::*;
 
-use chrono::Utc;
+use super::provider::exec_folder_grant_for_turn;
+use super::staging::{materialize_chat_attachments, prepare_execution_directories};
+
 use openwave_core::{
     AgentError, ChatRootAttachment, DbStore, DocumentId, DocumentSourceBlob, DocumentSourceUpsert,
-    FsBlobStore, PermissionMode, RootAttachmentOrigin, TurnId,
+    FsBlobStore, PermissionMode, RootAttachmentOrigin,
 };
-use std::sync::Mutex;
 use uuid::Uuid;
 
 struct NoSecrets;

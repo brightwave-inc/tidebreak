@@ -31,7 +31,7 @@ use super::staging::{
 };
 
 pub struct ConfiguredCodeExecutionProvider {
-    store: Arc<dyn Store>,
+    pub(super) store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     blobs: Option<Arc<dyn BlobStore>>,
     scratch_root: PathBuf,
@@ -856,7 +856,7 @@ impl ConfiguredCodeExecutionProvider {
     /// A folder that cannot be staged is downgraded to read-only for this turn:
     /// silently restoring direct writes would remove the overlay precisely for
     /// the largest or most unusual folders.
-    async fn open_write_overlay(
+    pub(super) async fn open_write_overlay(
         &self,
         chat: ChatId,
         turn: TurnId,
@@ -1033,7 +1033,7 @@ impl ConfiguredCodeExecutionProvider {
             .map(|staged| staged.overlay.inspector())
     }
 
-    async fn resolve_chat_folder_grants(
+    pub(super) async fn resolve_chat_folder_grants(
         &self,
         chat: &Chat,
     ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, CodeExecutionError> {
@@ -1444,7 +1444,7 @@ impl ConfiguredCodeExecutionProvider {
     }
 }
 
-fn exec_folder_grant_for_turn(
+pub(super) fn exec_folder_grant_for_turn(
     grant: ResolvedExecFolderGrant,
     staged: &HashMap<PathBuf, PathBuf>,
 ) -> std::result::Result<ExecFolderGrant, CodeExecutionError> {

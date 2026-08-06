@@ -256,7 +256,7 @@ impl McpServerDefinition {
     /// Build the child command. `env` is the definition's literal environment
     /// as resolved from the secret store — passed in rather than read off the
     /// definition, because the definition never holds values.
-    fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
+    pub(super) fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
         let Some(program) = &self.command else {
             return Err(AgentError::config(
                 "MCP server definition has no command to spawn",
@@ -288,7 +288,7 @@ impl McpServerDefinition {
         Ok(command)
     }
 
-    async fn connect(
+    pub(super) async fn connect(
         &self,
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
