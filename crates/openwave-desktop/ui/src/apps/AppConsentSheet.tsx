@@ -24,6 +24,9 @@ import { Button } from "@/components/ui/button";
  * A manifest that binds both a folder and API operations gets the explicit
  * combined-consent warning (docs/folder-bindings.md): the app can read files
  * and send data out, and the sheet says so before the user agrees.
+ *
+ * The sheet never renders for a manifest with no bindings: the server reports
+ * such an app as granted vacuously — there is nothing to consent to.
  */
 export function AppConsentSheet({
   state,
@@ -55,11 +58,7 @@ export function AppConsentSheet({
         <ShieldAlert className="text-warning size-4 shrink-0" aria-hidden="true" />
         <h2 className="text-sm font-medium">This app needs your permission</h2>
       </div>
-      {state.bindings.length === 0 ? (
-        <p className="text-muted-foreground text-sm">
-          This app requests no tool access.
-        </p>
-      ) : (
+      {state.bindings.length > 0 && (
         <ul className="flex flex-col gap-2" aria-label="Requested access">
           {state.bindings.map((binding) => (
             <li

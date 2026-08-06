@@ -92,6 +92,42 @@ async fn unknown_apps_and_unconfigured_bindings_refuse_on_the_grant_surface() {
     assert_eq!(refused.status(), StatusCode::CONFLICT);
 }
 
+/// A manifest that binds nothing is granted vacuously — no consent sheet, no
+/// stored grant needed. There is nothing to consent to: every invoke would
+/// fail the pin check before the consent gate, so prompting would only gate
+/// the frame on an empty "yes".
+#[tokio::test]
+async fn a_manifest_with_no_bindings_reads_granted_without_consent() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Calculator".into(),
+                    bindings: vec![],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let state = grant_request(&router, &bearer, "GET", app_id).await;
+    assert_eq!(state.status(), StatusCode::OK);
+    let state: serde_json::Value = serde_json::from_str(&body_string(state).await).unwrap();
+    assert_eq!(state["granted"], json!(true));
+    assert_eq!(state["bindings"], json!([]));
+}
+
 /// The projection contract: consent grants, and neither the base URL, the
 /// document hash, nor the credential reference behind the record ever reaches
 /// the renderer — the sheet gets the record's display name and the pinned
