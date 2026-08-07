@@ -464,6 +464,7 @@ function OpenAiCredentialSection({
   onClear: () => void;
 }) {
   const signedInWithChatgpt = info.auth_mode === "chatgpt" && info.has_credential;
+  const [pendingUrl, setPendingUrl] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const pollDeadlineRef = useRef<number | null>(null);
 
@@ -480,33 +481,44 @@ function OpenAiCredentialSection({
 
   useEffect(() => stopPolling, [stopPolling]);
 
-  const startPolling = useCallback(() => {
-    stopPolling();
-    pollRef.current = window.setInterval(() => {
-      void client
-        .getOpenaiChatgptStatus()
-        .then((status) => {
-          if (status.error) {
-            stopPolling();
-            setError(status.error);
-            toast.error("ChatGPT sign-in failed");
-            return;
-          }
-          if (status.signed_in) {
-            stopPolling();
-            onChanged();
-            toast.success("Signed in with ChatGPT");
-          }
-        })
-        .catch(() => {
-          /* transient; keep polling until the deadline below */
-        });
-    }, CHATGPT_SIGN_IN_POLL_MS);
-    pollDeadlineRef.current = window.setTimeout(
-      stopPolling,
-      CHATGPT_SIGN_IN_TIMEOUT_MS,
-    );
-  }, [client, onChanged, setError, stopPolling]);
+  const startPolling = useCallback(
+    (authorizationUrl: string | null) => {
+      stopPolling();
+      setPendingUrl(authorizationUrl);
+      const settle = (signedIn: boolean, failure?: string) => {
+        stopPolling();
+        setPendingUrl(null);
+        if (signedIn) {
+          onChanged();
+          toast.success("Signed in with ChatGPT");
+          return;
+        }
+        setError(failure ?? "ChatGPT sign-in did not complete. Try again.");
+        toast.error("ChatGPT sign-in failed");
+      };
+      pollRef.current = window.setInterval(() => {
+        void client
+          .getOpenaiChatgptStatus()
+          .then((status) => {
+            if (status.error) settle(false, status.error);
+            else if (status.signed_in) settle(true);
+          })
+          .catch(() => {
+            /* transient; keep polling until the deadline below */
+          });
+      }, CHATGPT_SIGN_IN_POLL_MS);
+      pollDeadlineRef.current = window.setTimeout(() => {
+        stopPolling();
+        // The server's own window has closed by now, so read the outcome it
+        // recorded instead of leaving the row waiting on nothing.
+        void client
+          .getOpenaiChatgptStatus()
+          .then((status) => settle(status.signed_in, status.error))
+          .catch(() => settle(false));
+      }, CHATGPT_SIGN_IN_TIMEOUT_MS);
+    },
+    [client, onChanged, setError, stopPolling],
+  );
 
   // The sign-in runs on the server, so one started before this panel mounted —
   // or left behind when the user navigated away — is still waiting on the
@@ -524,7 +536,9 @@ function OpenAiCredentialSection({
           setError(status.error);
           return;
         }
-        if (status.pending_authorization_url) startPolling();
+        if (status.pending_authorization_url) {
+          startPolling(status.pending_authorization_url);
+        }
       })
       .catch(() => {
         /* the row still works without a resumed sign-in */
@@ -541,7 +555,7 @@ function OpenAiCredentialSection({
       const { authorization_url } = await client.openaiChatgptSignIn();
       await openSignInPage(authorization_url);
       toast.message("Finish signing in with ChatGPT in your browser");
-      startPolling();
+      startPolling(authorization_url);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -592,6 +606,25 @@ function OpenAiCredentialSection({
           Sign in with ChatGPT
         </Button>
       </div>
+      {pendingUrl && (
+        <p className="text-xs text-muted-foreground">
+          Waiting for the browser to finish signing in.{" "}
+          <a
+            href={pendingUrl}
+            className="underline"
+            onClick={(event) => {
+              // No target="_blank": the shell plugin's injected click handler
+              // opens such links itself without honoring preventDefault, which
+              // doubles the tab. Route through the native opener and keep the
+              // href for hover/copy.
+              event.preventDefault();
+              void openSignInPage(pendingUrl);
+            }}
+          >
+            Open the sign-in page again
+          </a>
+        </p>
+      )}
       <Input
         type="password"
         placeholder="Or paste an API key"

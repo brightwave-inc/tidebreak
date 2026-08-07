@@ -233,9 +233,12 @@ pub async fn put_provider(
             Some(providers::ProviderCredential::ApiKey { .. })
         )
     {
-        // The write below clears the ChatGPT vault, but a sign-in still in
-        // flight would repopulate it and replace the key the user just chose.
-        state.chatgpt.cancel_pending().await;
+        // Switching to a key retires the subscription session. Sign out
+        // rather than letting the write clear the vault on its own: that
+        // cancels a sign-in still in flight (it would otherwise land after
+        // the write and replace the key) and revokes the refresh token
+        // instead of dropping it locally while it stays live at OpenAI.
+        state.chatgpt.sign_out().await?;
     }
     let info = providers::update_provider(
         &*state.store,
