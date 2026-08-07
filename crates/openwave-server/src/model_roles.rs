@@ -55,6 +55,7 @@ const UTILITY_DEFAULTS: &[&str] = &[
     "openai::gpt-5.4-nano",
     "gemini::gemini-3.5-flash-lite",
     "vertex::gemini-3.5-flash-lite",
+    "bedrock::anthropic.claude-sonnet-5",
     "fireworks::accounts/fireworks/models/deepseek-v4-flash",
     "together::deepseek-ai/DeepSeek-V4-Flash-0731",
 ];

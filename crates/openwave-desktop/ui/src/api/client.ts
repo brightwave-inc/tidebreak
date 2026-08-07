@@ -192,9 +192,16 @@ export class ApiClient {
       enabled?: boolean;
       base_url?: string | null;
       vertex_location?: string | null;
+      aws_region?: string | null;
       credential?:
         | { type: "api_key"; key: string }
-        | { type: "service_account"; json: string };
+        | { type: "service_account"; json: string }
+        | {
+            type: "aws_credentials";
+            access_key_id: string;
+            secret_access_key: string;
+            session_token?: string;
+          };
       models?: CustomModelConfig[];
     },
   ): Promise<ProviderInfo> {

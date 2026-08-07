@@ -1920,7 +1920,7 @@ auth_mode?: ProviderAuthMode,
 /**
  * Explicit configured model entries for this endpoint.
  */
-models: Array<CustomModelConfig>, };
+models: Array<CustomModelConfig>, aws_region?: string, };
 
 /**
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without

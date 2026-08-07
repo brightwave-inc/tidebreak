@@ -29,6 +29,8 @@ use crate::OpenAiProvider;
 use crate::VertexProvider;
 #[cfg(feature = "xai")]
 use crate::XaiProvider;
+#[cfg(feature = "bedrock")]
+use crate::{BedrockAuth, BedrockProvider};
 
 /// Native request protocol used by one curated Vertex model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,6 +80,39 @@ pub struct VertexRoute {
     location: String,
     credential_fingerprint: [u8; 32],
     model_families: Vec<(String, VertexModelFamily)>,
+}
+
+/// Bedrock-specific endpoint and SigV4 metadata.
+///
+/// The region is non-secret. AWS credentials stay redacted through their own
+/// `Debug` implementation and are hashed, never copied, into router cache
+/// fingerprints.
+#[derive(Clone)]
+pub struct BedrockRoute {
+    region: String,
+    credentials: Option<crate::AwsCredentials>,
+}
+
+impl BedrockRoute {
+    pub fn new(region: impl Into<String>, credentials: Option<crate::AwsCredentials>) -> Self {
+        Self {
+            region: region.into(),
+            credentials,
+        }
+    }
+
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+}
+
+impl std::fmt::Debug for BedrockRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BedrockRoute")
+            .field("region", &self.region)
+            .field("credentials", &self.credentials)
+            .finish()
+    }
 }
 
 impl VertexRoute {
@@ -216,6 +251,9 @@ pub struct Route {
     /// Vertex resource/auth metadata. Present for the first-class Vertex route
     /// and for a legacy Gemini route backed by a Google service account.
     pub vertex: Option<VertexRoute>,
+    /// Bedrock region and optional SigV4 credentials. An absent credential
+    /// means `api_key` supplies a Bedrock API key.
+    pub bedrock: Option<BedrockRoute>,
     /// ChatGPT account id for OpenAI routes authenticated via ChatGPT OAuth.
     /// Baked into the adapter (only the bearer rotates).
     pub chatgpt_account_id: Option<String>,
@@ -230,6 +268,7 @@ impl std::fmt::Debug for Route {
             .field("curated_models", &self.curated_models)
             .field("token_source", &self.token_source.is_some())
             .field("vertex", &self.vertex)
+            .field("bedrock", &self.bedrock)
             .field("chatgpt_account_id", &self.chatgpt_account_id)
             .finish()
     }
@@ -373,7 +412,14 @@ impl ModelProvider for Router {
 }
 
 fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
-    if route.api_key.is_empty() && route.token_source.is_none() {
+    if route.api_key.is_empty()
+        && route.token_source.is_none()
+        && route
+            .bedrock
+            .as_ref()
+            .and_then(|bedrock| bedrock.credentials.as_ref())
+            .is_none()
+    {
         return None;
     }
     match route.kind {
@@ -509,6 +555,20 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         RouteKind::Vertex => None,
         #[cfg(not(feature = "gemini"))]
         RouteKind::Gemini => None,
+        #[cfg(feature = "bedrock")]
+        RouteKind::Bedrock => {
+            let bedrock = route.bedrock.as_ref()?;
+            let auth = match &bedrock.credentials {
+                Some(credentials) => BedrockAuth::AwsCredentials(credentials.clone()),
+                None if !route.api_key.is_empty() => BedrockAuth::ApiKey(route.api_key.clone()),
+                None => return None,
+            };
+            Some(Arc::new(
+                BedrockProvider::new(bedrock.region.clone(), auth).ok()?,
+            ))
+        }
+        #[cfg(not(feature = "bedrock"))]
+        RouteKind::Bedrock => None,
         #[cfg(not(feature = "openai"))]
         RouteKind::Openai => None,
         #[cfg(not(feature = "xai"))]
@@ -525,7 +585,7 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}",
                 r.kind.as_str(),
                 // A rotating token must not thrash the cached router; the
                 // fingerprint tracks *whether* a live source exists, and the
@@ -556,6 +616,21 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                         .join(",");
                     format!("{}:{credential}:{families}", vertex.location)
                 }),
+                r.bedrock.as_ref().map_or_else(String::new, |bedrock| {
+                    let credential =
+                        bedrock
+                            .credentials
+                            .as_ref()
+                            .map_or_else(String::new, |credentials| {
+                                format!(
+                                    "{:x}:{:x}:{:x}",
+                                    fnv1a64(credentials.access_key_id()),
+                                    fnv1a64(credentials.secret_access_key()),
+                                    credentials.session_token().map_or(0, fnv1a64),
+                                )
+                            });
+                    format!("{}:{credential}", bedrock.region)
+                }),
                 r.chatgpt_account_id.as_deref().unwrap_or("")
             )
         })
@@ -578,11 +653,9 @@ fn fnv1a64(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "xai")]
-    use openwave_core::provider::{ContentBlock, MessageReasoning, ReasoningOrigin};
-    use openwave_core::ImageAttachments;
-    #[cfg(feature = "xai")]
-    use openwave_core::{ChatMessage, Role};
+    use futures::StreamExt as _;
+    use openwave_core::provider::{ChatMessage, ContentBlock, MessageReasoning, ReasoningOrigin};
+    use openwave_core::{ImageAttachments, Role};
     #[cfg(feature = "xai")]
     use serde_json::json;
 
@@ -594,6 +667,7 @@ mod tests {
             curated_models: models.iter().map(|m| (*m).to_string()).collect(),
             token_source: None,
             vertex: None,
+            bedrock: None,
             chatgpt_account_id: None,
         }
     }
@@ -997,5 +1071,78 @@ mod tests {
         let body = rx.await.unwrap();
         assert_eq!(body["input"][0], reasoning);
         assert!(body.get("provider").is_none());
+    }
+
+    #[tokio::test]
+    async fn router_preserves_the_route_hint_needed_for_native_reasoning_replay() {
+        use axum::body::Body;
+        use axum::extract::{Request, State};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use tokio::sync::oneshot;
+
+        async fn capture(
+            State(tx): State<Arc<std::sync::Mutex<Option<oneshot::Sender<serde_json::Value>>>>>,
+            request: Request,
+        ) -> impl IntoResponse {
+            let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            }
+            (
+                [("content-type", "text/event-stream")],
+                Body::from(
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                ),
+            )
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let app = axum::Router::new()
+            .fallback(post(capture))
+            .with_state(Arc::new(std::sync::Mutex::new(Some(tx))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let model = "claude-sonnet-5";
+        let router = Router::build(vec![route(
+            RouteKind::Anthropic,
+            "key",
+            &[model],
+            Some(&format!("http://{address}")),
+        )]);
+        let mut stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("anthropic")),
+                model: model.into(),
+                reasoning_model: true,
+                messages: vec![ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "answer".into(),
+                    }],
+                    reasoning: MessageReasoning::captured(
+                        ReasoningOrigin {
+                            provider: Some(ProviderId::new("anthropic")),
+                            model: model.into(),
+                        },
+                        vec![serde_json::json!({
+                            "type": "thinking",
+                            "thinking": "plan",
+                            "signature": "signed",
+                        })],
+                    ),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let body = rx.await.unwrap();
+        assert_eq!(body["messages"][0]["content"][0]["type"], "thinking");
     }
 }

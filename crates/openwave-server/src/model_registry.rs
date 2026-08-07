@@ -350,6 +350,35 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
+    // Bedrock model ids are provider-owned route ids rather than Anthropic API
+    // ids. These rows use the native Claude Messages body over Bedrock Mantle;
+    // the adapter carries images, tools, adaptive reasoning, and signed
+    // reasoning replay, but deliberately does not advertise Anthropic's
+    // provider-executed web search through this route.
+    ModelSpec {
+        id: "anthropic.claude-fable-5",
+        display_name: "Claude Fable 5",
+        provider: ProviderKind::Bedrock,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "anthropic.claude-sonnet-5",
+        display_name: "Claude Sonnet 5",
+        provider: ProviderKind::Bedrock,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
     ModelSpec {
         id: "gpt-5.6-sol",
         display_name: "GPT-5.6 Sol",

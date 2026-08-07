@@ -119,6 +119,18 @@ impl AnthropicProvider {
         self
     }
 
+    /// Authenticate the exact serialized request through a shared transport.
+    #[must_use]
+    pub(crate) fn with_request_auth(
+        mut self,
+        auth: std::sync::Arc<dyn crate::http::RequestAuthenticator>,
+        provider_label: &'static str,
+    ) -> Self {
+        self.request_auth = Some(auth);
+        self.provider_label = provider_label;
+        self
+    }
+
     /// Fetch the credential from `source` at each request instead of using a
     /// static key. For gateways whose tokens rotate under the adapter.
     #[must_use]
@@ -171,9 +183,10 @@ impl ModelProvider for AnthropicProvider {
             Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
             _ => None,
         };
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
+        let api_key = match (&self.request_auth, &self.token_source) {
+            (Some(_), _) => String::new(),
+            (None, Some(source)) => source.bearer_token_for(req.conversation).await?,
+            (None, None) => self.api_key.clone(),
         };
 
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
@@ -199,6 +212,7 @@ impl ModelProvider for AnthropicProvider {
         let stream = async_stream::stream! {
             let mut response = response;
             let mut state = StreamState {
+                provider_label: provider.provider_label,
                 output_tool,
                 raw_blocks: continuations_allowed.then(RawAssistantBlocks::default),
                 replay_origin: Some(replay_origin),
@@ -337,7 +351,7 @@ impl AnthropicProvider {
             );
         }
         let response = request
-            .json(body)
+            .body(body)
             .send()
             .await
             // reqwest's display includes the URL, and a gateway URL can carry
@@ -810,6 +824,12 @@ fn web_search_tool_type(model: &str) -> &'static str {
 /// anything longer than two digits does not count as one.
 fn claude_generation(model: &str) -> Option<(u32, u32)> {
     let starts_with_digit = |token: &&str| token.starts_with(|c: char| c.is_ascii_digit());
+    let leaf = model.rsplit('/').next().unwrap_or(model);
+    let model = ["us.", "eu.", "apac.", "jp.", "au.", "global."]
+        .iter()
+        .find_map(|prefix| leaf.strip_prefix(prefix))
+        .unwrap_or(leaf);
+    let model = model.strip_prefix("anthropic.").unwrap_or(model);
     let mut tokens = model
         .strip_prefix("claude-")?
         .split('-')
@@ -951,6 +971,7 @@ fn anthropic_role(role: Role) -> &'static str {
 /// Prompt-cache-aware token counts accumulated across a stream.
 #[derive(Default)]
 struct StreamState {
+    provider_label: &'static str,
     input_tokens: u32,
     cache_read_input_tokens: u32,
     cache_creation_input_tokens: u32,
@@ -1119,7 +1140,10 @@ fn end_of_stream(state: &StreamState) -> Option<ProviderEvent> {
         return None;
     }
     Some(ProviderEvent::Failed {
-        error: ProviderErrorInfo::provider("anthropic stream ended mid-tool-call"),
+        error: ProviderErrorInfo::provider(format!(
+            "{} stream ended mid-tool-call",
+            stream_provider_label(state)
+        )),
     })
 }
 
@@ -1410,6 +1434,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             events
         }
         _ => Vec::new(),
+    }
+}
+
+fn stream_provider_label(state: &StreamState) -> &'static str {
+    if state.provider_label.is_empty() {
+        "anthropic"
+    } else {
+        state.provider_label
     }
 }
 

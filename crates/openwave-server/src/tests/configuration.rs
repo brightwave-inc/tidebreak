@@ -1541,6 +1541,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
             // must not let it redirect the credential.
             base_url: Some("https://attacker.invalid/v1".into()),
             vertex_location: None,
+            aws_region: None,
             models: vec![providers::CustomModelConfig {
                 id: "grok-account-model".into(),
                 context_window: 500_000,
@@ -1620,6 +1621,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2269,6 +2271,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2316,6 +2319,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             enabled: false,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2362,6 +2366,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
                 enabled: true,
                 base_url: None,
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2509,6 +2514,7 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
             enabled: true,
             base_url: None,
             vertex_location: Some("global".into()),
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2540,6 +2546,89 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
 }
 
 #[tokio::test]
+async fn bedrock_aws_credentials_build_an_explicit_non_fallback_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Bedrock,
+        &providers::ProviderCredential::AwsCredentials {
+            access_key_id: "AKIAEXAMPLE".into(),
+            secret_access_key: "bedrock-secret".into(),
+            session_token: Some("bedrock-session".into()),
+        },
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Bedrock,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            aws_region: Some("us-east-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "openai.gpt-oss-120b".into(),
+                display_name: Some("GPT OSS 120B".into()),
+                upstream_id: None,
+                context_window: 300_000,
+                max_output_tokens: 10_000,
+                input_modalities: vec![crate::model_registry::InputModality::Text],
+                supports_reasoning: false,
+                reasoning_efforts: Vec::new(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].kind, openwave_router::RouteKind::Bedrock);
+    assert!(routes[0].api_key.is_empty());
+    assert_eq!(routes[0].bedrock.as_ref().unwrap().region(), "us-east-1");
+    let debug = format!("{:?}", routes[0]);
+    assert!(!debug.contains("AKIAEXAMPLE"));
+    assert!(!debug.contains("bedrock-secret"));
+    assert!(!debug.contains("bedrock-session"));
+
+    let router = openwave_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("bedrock")),
+            "anthropic.claude-fable-5"
+        ),
+        Some(openwave_router::RouteKind::Bedrock)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("bedrock")),
+            "openai.gpt-oss-120b"
+        ),
+        Some(openwave_router::RouteKind::Bedrock)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("bedrock")),
+            "unknown-model"
+        ),
+        None
+    );
+}
+
+#[tokio::test]
 async fn openai_compatible_route_is_free_form_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -2565,6 +2654,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
             enabled: true,
             base_url: Some("http://127.0.0.1:1234/v1".into()),
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2743,6 +2833,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
                 enabled: true,
                 base_url,
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2836,6 +2927,7 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2896,6 +2988,7 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )

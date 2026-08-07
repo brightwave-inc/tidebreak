@@ -37,6 +37,24 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 
+use openwave_core::error::Result;
+
+/// Provider-specific authentication applied to an already-shaped HTTP request.
+///
+/// Most adapters own a fixed header scheme, but Bedrock Mantle exposes existing
+/// Messages and Responses wire contracts behind either a bearer key or AWS
+/// Signature Version 4. Keeping authentication at this boundary lets those
+/// adapters retain their mature request/stream normalization while signing the
+/// exact bytes they send.
+pub(crate) trait RequestAuthenticator: Send + Sync {
+    fn authenticate(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: &reqwest::Url,
+        body: &[u8],
+    ) -> Result<reqwest::RequestBuilder>;
+}
+
 /// Connect-phase budget. Loopback is instant and a reachable hosted provider
 /// completes TCP + TLS well inside this; anything slower is unreachable, not
 /// slow.

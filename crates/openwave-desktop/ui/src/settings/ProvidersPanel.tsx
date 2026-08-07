@@ -40,6 +40,8 @@ function newConfiguredModel(): CustomModelConfig {
   };
 }
 
+type CredentialType = "api_key" | "service_account" | "aws_credentials";
+
 export function ProvidersPanel({
   providers,
   client,
@@ -108,12 +110,18 @@ function ProviderRow({
     info.vertex_location ?? "global",
   );
   const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
+  const [awsRegion, setAwsRegion] = useState(info.aws_region ?? "us-east-1");
+  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
+  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
+  const [awsSessionToken, setAwsSessionToken] = useState("");
   const [models, setModels] = useState<CustomModelConfig[]>(info.models);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
   const hasConfigurableModels =
-    info.kind === "openai_compatible" || info.kind === "xai";
+    info.kind === "openai_compatible" ||
+    info.kind === "xai" ||
+    info.kind === "bedrock";
 
   async function save(enabled: boolean) {
     setSaving(true);
@@ -123,9 +131,16 @@ function ProviderRow({
         enabled: boolean;
         base_url?: string | null;
         vertex_location?: string | null;
+        aws_region?: string | null;
         credential?:
           | { type: "api_key"; key: string }
-          | { type: "service_account"; json: string };
+          | { type: "service_account"; json: string }
+          | {
+              type: "aws_credentials";
+              access_key_id: string;
+              secret_access_key: string;
+              session_token?: string;
+            };
         models?: CustomModelConfig[];
       } = { enabled };
       if (hasConfigurableModels) {
@@ -158,9 +173,29 @@ function ProviderRow({
           };
         }
       }
+      if (info.kind === "bedrock") {
+        body.aws_region = awsRegion.trim() || null;
+        if (
+          credentialType === "aws_credentials" &&
+          awsAccessKeyId.trim() &&
+          awsSecretAccessKey.trim()
+        ) {
+          body.credential = {
+            type: "aws_credentials",
+            access_key_id: awsAccessKeyId.trim(),
+            secret_access_key: awsSecretAccessKey.trim(),
+            ...(awsSessionToken.trim()
+              ? { session_token: awsSessionToken.trim() }
+              : {}),
+          };
+        }
+      }
       await client.putProvider(info.kind as ProviderKind, body);
       setKey("");
       setServiceAccountJson("");
+      setAwsAccessKeyId("");
+      setAwsSecretAccessKey("");
+      setAwsSessionToken("");
       onChanged();
       toast.success(`Saved ${providerLabel(info.kind)} settings`);
     } catch (err) {
@@ -242,6 +277,8 @@ function ProviderRow({
               <p className="text-xs text-muted-foreground">
                 {info.kind === "xai"
                   ? "Add each xAI model available to this API key, including its limits and supported capabilities."
+                  : info.kind === "bedrock"
+                  ? "Add exact Bedrock Mantle model IDs. Anthropic IDs use Claude Messages; other IDs use OpenAI Responses. Custom rows start with conservative text-only, non-reasoning capabilities."
                   : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
               </p>
             )}
