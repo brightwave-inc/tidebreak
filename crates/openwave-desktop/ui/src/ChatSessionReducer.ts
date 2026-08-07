@@ -27,6 +27,8 @@ import { PRESENTATION_MEDIA_TYPES } from "./document/officePdf";
 export type ChatSessionState = {
   /** Highest event seq applied; events at or below it are duplicates. */
   lastSeq: number;
+  /** Whether new stream presentation should animate rather than catch up. */
+  animateStreaming: boolean;
   messages: ChatMessage[];
   busy: boolean;
   activeTurnId: string | null;
@@ -99,6 +101,7 @@ export type ChatSessionDeps = {
 export function initialChatSessionState(): ChatSessionState {
   return {
     lastSeq: 0,
+    animateStreaming: true,
     messages: [],
     busy: false,
     activeTurnId: null,
@@ -119,7 +122,14 @@ export function reduceChatSessionEvent(
   deps: ChatSessionDeps,
 ): ChatSessionTransition {
   if (framed.seq <= state.lastSeq) return { state, effects: [] };
-  state = { ...state, lastSeq: framed.seq };
+  state = {
+    ...state,
+    lastSeq: framed.seq,
+    // Replayed journal frames rebuild the active turn after navigation or a
+    // reconnect. They are current state, not new activity, so only the first
+    // genuinely live frame re-enables the presentation typewriters.
+    animateStreaming: framed.replayed !== true,
+  };
   const event = framed.event;
   const effects: ChatSessionEffect[] = [];
 

@@ -232,6 +232,10 @@ async fn ws_live_and_replay_frames_use_the_renderer_safe_projection() {
     send_message_http(&client, addr, &token, chat.id).await;
     let live = read_raw_until_terminal(&mut live_socket).await;
     assert_renderer_event_frames_are_redacted(&live);
+    assert!(
+        live.iter().all(|event| event.get("replayed").is_none()),
+        "live frames retain their established wire shape"
+    );
 
     wait_for_turn(&store, chat.id).await;
     let mut replay_request = format!("ws://{addr}/chats/{}/events?after=0", chat.id)
@@ -243,6 +247,12 @@ async fn ws_live_and_replay_frames_use_the_renderer_safe_projection() {
     let (mut replay_socket, _) = connect_async(replay_request).await.unwrap();
     let replay = read_raw_until_terminal(&mut replay_socket).await;
     assert_renderer_event_frames_are_redacted(&replay);
+    assert!(
+        replay
+            .iter()
+            .all(|event| event.get("replayed") == Some(&serde_json::Value::Bool(true))),
+        "durable catch-up frames identify themselves to the renderer"
+    );
 
     let live_sequences = live
         .iter()

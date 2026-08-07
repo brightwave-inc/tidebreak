@@ -61,11 +61,12 @@ pub struct ChatCitationSnapshot {
 
 /// One terminal turn and the visible stream it produced.
 ///
-/// Completed turns point at their committed assistant message, which remains
-/// authoritative for final prose. Failed and cancelled turns have no message,
-/// so their partial prose and reasoning are rebuilt from the journal. Refusal
-/// and failure details stay outcome metadata on the same turn rather than
-/// becoming more transcript side tables.
+/// Completed turns point at their committed assistant output, which remains
+/// authoritative for final prose. A cancelled turn can instead point at its
+/// committed partial output or the last intermediate assistant step it left
+/// visible. Only a genuinely message-less failed or cancelled turn rebuilds
+/// partial prose from the journal. Refusal and failure details stay outcome
+/// metadata on the same turn rather than becoming more transcript side tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTerminalTurnSnapshot {
     pub turn_id: TurnId,

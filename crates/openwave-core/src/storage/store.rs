@@ -1121,17 +1121,17 @@ pub trait Store: Send + Sync {
     /// approval. Returns empty for any claim that is not the immediate
     /// successor of a spawn park.
     ///
-    /// The default is empty rather than unimplemented: a store that never
-    /// admits sandbox children can never have parked on a spawn checkpoint
-    /// either, and this read runs on every claim.
+    /// Every store states this capability explicitly. A store whose
+    /// [`checkpoint_sandbox_spawn`](Store::checkpoint_sandbox_spawn) remains
+    /// unavailable returns an empty batch; a store that can checkpoint spawns
+    /// must recover the carried tail or return an error rather than silently
+    /// dropping it.
     async fn resumed_sandbox_spawn_batch(
         &self,
-        _turn_id: TurnId,
-        _attempt_count: i32,
-        _claim_count: i32,
-    ) -> Result<Vec<crate::agent::SandboxAgentSpawnRequest>> {
-        Ok(Vec::new())
-    }
+        turn_id: TurnId,
+        attempt_count: i32,
+        claim_count: i32,
+    ) -> Result<Vec<crate::agent::SandboxAgentSpawnRequest>>;
 
     /// Fetch immutable origin ownership for an admitted sandbox child.
     async fn get_sandbox_agent_admission(

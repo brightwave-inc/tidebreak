@@ -1703,6 +1703,13 @@ impl TurnWorker {
                             }
                             Ok(Some(CheckpointSandboxSpawnOutcome::SteerPending(_)))
                             | Ok(Some(CheckpointSandboxSpawnOutcome::OutputSuperseded(_))) => {
+                                // The approval gate may already have committed
+                                // a decision for this exact call. Keep that
+                                // admitted head with its original siblings;
+                                // the next loop applies the steer, replays the
+                                // head without a second approval, and gates the
+                                // still-ungated tail normally.
+                                pending_sandbox_spawns.insert(0, request);
                                 break;
                             }
                             Ok(Some(CheckpointSandboxSpawnOutcome::AtCapacity)) => {

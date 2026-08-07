@@ -475,8 +475,9 @@ origin: RootAttachmentOrigin, };
 /**
  * One terminal turn's renderer-safe status and visible streamed content.
  *
- * A completed turn points at its authoritative assistant message. Failed and
- * cancelled turns have no message, but remain first-class transcript entries
+ * A completed turn points at its authoritative assistant output. A cancelled
+ * turn may point at the last assistant message it committed before stopping;
+ * message-less failed and cancelled turns remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
 export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, 
@@ -1909,7 +1910,7 @@ export type RendererModelIdentity = { id: string, provider: ProviderKind, };
  */
 export type RendererRefusal = { category: string | null, partial_output: boolean, };
 
-export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, };
+export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, replayed?: boolean, };
 
 /**
  * A tool name the renderer is allowed to present.

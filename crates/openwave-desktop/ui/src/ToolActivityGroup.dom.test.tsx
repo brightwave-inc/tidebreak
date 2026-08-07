@@ -48,6 +48,19 @@ describe("ToolActivityGroup rail animation", () => {
     );
   });
 
+  it("shows a replayed active phase immediately", () => {
+    render(
+      <ToolActivityGroup
+        groupIndex={0}
+        animate={false}
+        activities={[{ id: "write", name: "write_file", status: "running" }]}
+      />,
+    );
+
+    const label = screen.getByLabelText("Updating a file");
+    expect(label.textContent).toBe("Updating a file");
+  });
+
   it("renders expanded row titles at full length without animating them", () => {
     render(
       <ToolActivityGroup

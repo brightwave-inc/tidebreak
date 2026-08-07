@@ -140,7 +140,7 @@ async fn stream_events(
                         .ok()
                         .and_then(|turns| turns.into_iter().find(|turn| !turn.status.is_terminal()))
                         .map(|turn| turn.model);
-                    if send_event(&mut socket, &event, model.as_deref()).await.is_err() {
+                    if send_event(&mut socket, &event, model.as_deref(), false).await.is_err() {
                         break;
                     }
                 }
@@ -185,7 +185,7 @@ async fn replay_after(
             active_turn_id = Some(*turn_id);
         }
         let model = active_turn_id.and_then(|turn_id| turn_models.get(&turn_id));
-        send_event(socket, &event, model.map(String::as_str))
+        send_event(socket, &event, model.map(String::as_str), true)
             .await
             .map_err(|_| ())?;
     }
@@ -197,14 +197,15 @@ async fn send_event(
     socket: &mut WebSocket,
     event: &SequencedEvent,
     model: Option<&str>,
+    replayed: bool,
 ) -> Result<(), axum::Error> {
-    send_frame(
-        socket,
-        &RendererChatFrame::Event(Box::new(
-            RendererSequencedEvent::from(event).with_turn_model(model),
-        )),
-    )
-    .await
+    let projected = RendererSequencedEvent::from(event).with_turn_model(model);
+    let projected = if replayed {
+        projected.mark_replayed()
+    } else {
+        projected
+    };
+    send_frame(socket, &RendererChatFrame::Event(Box::new(projected))).await
 }
 
 /// Send one frame as JSON text. A frame that fails to serialize is skipped

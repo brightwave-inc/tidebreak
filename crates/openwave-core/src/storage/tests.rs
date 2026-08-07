@@ -1097,6 +1097,15 @@ impl Store for MemStore {
             .map(|(_, e)| e.clone())
             .collect())
     }
+
+    async fn resumed_sandbox_spawn_batch(
+        &self,
+        _turn_id: crate::TurnId,
+        _attempt_count: i32,
+        _claim_count: i32,
+    ) -> Result<Vec<crate::agent::SandboxAgentSpawnRequest>> {
+        Ok(Vec::new())
+    }
 }
 
 fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {

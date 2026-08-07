@@ -438,8 +438,9 @@ impl From<openwave_core::MessageDocumentAttachment> for TranscriptFileAttachment
 
 /// One terminal turn's renderer-safe status and visible streamed content.
 ///
-/// A completed turn points at its authoritative assistant message. Failed and
-/// cancelled turns have no message, but remain first-class transcript entries
+/// A completed turn points at its authoritative assistant output. A cancelled
+/// turn may point at the last assistant message it committed before stopping;
+/// message-less failed and cancelled turns remain first-class transcript entries
 /// carrying the partial prose and reasoning the reader already saw live.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct ChatTerminalTurnSnapshot {

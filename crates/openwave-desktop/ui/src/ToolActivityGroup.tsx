@@ -34,6 +34,8 @@ export type ToolActivity = {
 type ToolActivityGroupProps = {
   activities: ToolActivity[];
   groupIndex: number;
+  /** Whether this active phase arrived live rather than from socket replay. */
+  animate?: boolean;
   /** Cards for the calls that have something to show, rendered below. */
   children?: ReactNode;
 };
@@ -53,6 +55,7 @@ type ToolActivityGroupProps = {
 export function ToolActivityGroup({
   activities,
   groupIndex,
+  animate = true,
   children,
 }: ToolActivityGroupProps) {
   // Total by construction: an activity that throws while being read costs its
@@ -72,6 +75,7 @@ export function ToolActivityGroup({
         <ToolActivityRail
           activities={safeActivities}
           groupIndex={groupIndex}
+          animate={animate}
         />
       </ErrorBoundary>
     );
@@ -108,9 +112,11 @@ export function ToolActivityGroup({
 function ToolActivityRail({
   activities: safeActivities,
   groupIndex,
+  animate,
 }: {
   activities: (ToolActivity | null)[];
   groupIndex: number;
+  animate: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = `tool-activity-group-${groupIndex}`;
@@ -124,7 +130,10 @@ function ToolActivityRail({
   // The phase line types itself out once when the phase first goes live, then
   // updates instantly as calls settle and nudge the wording — re-typing on
   // every change reads as a stutter, and a settled phase should never animate.
-  const displayedSummary = useTypewriterOnce(summary.label, summary.inProgress);
+  const displayedSummary = useTypewriterOnce(
+    summary.label,
+    summary.inProgress && animate,
+  );
 
   return (
     <>

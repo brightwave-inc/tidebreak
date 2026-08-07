@@ -676,6 +676,7 @@ struct PauseTerminalStore {
     fail_after_assistant_commit: std::sync::atomic::AtomicBool,
     assistant_append_calls: AtomicUsize,
     fail_after_park_commit: std::sync::atomic::AtomicBool,
+    pause_before_spawn_checkpoint: std::sync::atomic::AtomicBool,
     fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     apply_steer_cancellation_committed: Arc<Notify>,
@@ -706,6 +707,7 @@ impl PauseTerminalStore {
             fail_after_assistant_commit: std::sync::atomic::AtomicBool::new(false),
             assistant_append_calls: AtomicUsize::new(0),
             fail_after_park_commit: std::sync::atomic::AtomicBool::new(false),
+            pause_before_spawn_checkpoint: std::sync::atomic::AtomicBool::new(false),
             fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             apply_steer_cancellation_committed: Arc::new(Notify::new()),
@@ -755,6 +757,11 @@ impl PauseTerminalStore {
 
     fn fail_after_next_park_commit(&self) {
         self.fail_after_park_commit.store(true, Ordering::SeqCst);
+    }
+
+    fn pause_before_next_spawn_checkpoint(&self) {
+        self.pause_before_spawn_checkpoint
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_after_next_apply_steer_commit(&self) {
@@ -1223,6 +1230,30 @@ impl Store for PauseTerminalStore {
         }
         Ok(outcome)
     }
+    async fn checkpoint_sandbox_spawn(
+        &self,
+        request: &openwave_core::SandboxSpawnCheckpointRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<openwave_core::CheckpointSandboxSpawnOutcome>> {
+        if self
+            .pause_before_spawn_checkpoint
+            .swap(false, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.checkpoint_sandbox_spawn(request, now).await
+    }
+    async fn resumed_sandbox_spawn_batch(
+        &self,
+        turn_id: TurnId,
+        attempt_count: i32,
+        claim_count: i32,
+    ) -> Result<Vec<openwave_core::SandboxAgentSpawnRequest>> {
+        self.inner
+            .resumed_sandbox_spawn_batch(turn_id, attempt_count, claim_count)
+            .await
+    }
     async fn record_turn_run_failure_and_append_event(
         &self,
         id: TurnId,
@@ -1413,6 +1444,60 @@ impl Store for PauseTerminalStore {
         self.inner
             .accept_claimed_tool_call(call, lease_token, now)
             .await
+    }
+    async fn request_tool_call_approval(
+        &self,
+        request: &openwave_core::ApprovalRequest,
+        requested_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::RequestToolApprovalOutcome> {
+        self.inner
+            .request_tool_call_approval(request, requested_at)
+            .await
+    }
+    async fn request_tool_call_approval_and_append_event(
+        &self,
+        request: &openwave_core::ApprovalRequest,
+        lease_token: uuid::Uuid,
+        event_ordinal: i32,
+        requested_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::JournaledToolApprovalOutcome> {
+        self.inner
+            .request_tool_call_approval_and_append_event(
+                request,
+                lease_token,
+                event_ordinal,
+                requested_at,
+            )
+            .await
+    }
+    async fn decide_tool_call_approval(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        decision: &openwave_core::ApprovalDecision,
+        decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::DecideToolApprovalOutcome> {
+        self.inner
+            .decide_tool_call_approval(chat_id, call_id, decision, decided_at)
+            .await
+    }
+    async fn decide_tool_call_approval_with_grant(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        decision: &openwave_core::ApprovalDecision,
+        grant: &openwave_core::StandingGrant,
+        decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::DecideToolApprovalOutcome> {
+        self.inner
+            .decide_tool_call_approval_with_grant(chat_id, call_id, decision, grant, decided_at)
+            .await
+    }
+    async fn get_tool_call_approval(
+        &self,
+        call_id: CallId,
+    ) -> Result<Option<openwave_core::ToolApproval>> {
+        self.inner.get_tool_call_approval(call_id).await
     }
     async fn claim_client_tool_call(
         &self,

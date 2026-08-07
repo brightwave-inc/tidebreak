@@ -87,6 +87,12 @@ impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
 pub(crate) struct RendererSequencedEvent {
     pub seq: i64,
     pub event: RendererAgentEvent,
+    // True only when this frame came from durable catch-up rather than the live
+    // fan-out. Omitted live to preserve the established frame shape; renderers
+    // use it to avoid replaying presentation animations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub replayed: Option<bool>,
 }
 
 /// A turn's token accounting, as the renderer needs it.
@@ -438,6 +444,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
         Self {
             seq: value.seq,
             event,
+            replayed: None,
         }
     }
 }
@@ -447,6 +454,11 @@ impl RendererSequencedEvent {
         if let RendererAgentEvent::TurnFailed { model, .. } = &mut self.event {
             *model = selection.and_then(model_identity);
         }
+        self
+    }
+
+    pub(crate) fn mark_replayed(mut self) -> Self {
+        self.replayed = Some(true);
         self
     }
 }
@@ -489,6 +501,7 @@ mod tests {
                         ..RendererTurnUsage::default()
                     },
                 },
+                replayed: None,
             }
         );
     }
@@ -1014,6 +1027,7 @@ mod tests {
                         message_id: first_id,
                         text: "first".into(),
                     },
+                    replayed: None,
                 },
                 RendererSequencedEvent {
                     seq: 42,
@@ -1021,6 +1035,7 @@ mod tests {
                         message_id: second_id,
                         text: "second".into(),
                     },
+                    replayed: None,
                 },
             ]
         );

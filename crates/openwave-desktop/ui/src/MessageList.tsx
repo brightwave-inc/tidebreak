@@ -219,6 +219,8 @@ type MessageListProps = {
   /** The connected client, so a background agent row can fetch debug info. */
   backgroundAgentClient?: ApiClient;
   busy: boolean;
+  /** False while the socket is rebuilding already-seen journal history. */
+  animateStreaming?: boolean;
   /**
    * Semantic compaction is running for the open turn. Prefer a visible
    * "Compacting conversation" status over the ordinary Working indicator.
@@ -295,6 +297,7 @@ export function MessageList({
   onOpenBackgroundAgent,
   onOpenOutput,
   busy,
+  animateStreaming = true,
   compacting = false,
   streamStalled = false,
   scrollRef,
@@ -335,6 +338,7 @@ export function MessageList({
   const { items: messageItems, lastTurnStart } = groupMessageItems(
     messages,
     busy,
+    animateStreaming,
     onApproval,
     approvalState,
     imageClient,
@@ -566,6 +570,7 @@ export function isTurnClosingAssistant(
 export function groupMessageItems(
   messages: ChatMessage[],
   busy: boolean,
+  animateStreaming: boolean,
   onApproval: (
     callId: string,
     decision: "approve" | "reject",
@@ -654,6 +659,7 @@ export function groupMessageItems(
           key={message.id}
           message={message}
           busy={message.id === streamingAssistantId}
+          animateStreaming={animateStreaming}
           sequenceEnd={message.role !== "assistant" || closesTurn}
           imageClient={imageClient}
           chatId={chatId}
@@ -788,7 +794,11 @@ export function groupMessageItems(
         key={`tool-activity-group-${groupIndex}`}
         fallback={<ToolActivityUnavailable />}
       >
-        <ToolActivityGroup activities={railActivities} groupIndex={groupIndex}>
+        <ToolActivityGroup
+          activities={railActivities}
+          groupIndex={groupIndex}
+          animate={animateStreaming}
+        >
           {children.length > 0 ? children : undefined}
         </ToolActivityGroup>
       </ErrorBoundary>,
@@ -1077,6 +1087,7 @@ const EMPTY_SOURCES: readonly AssistantSource[] = [];
 function MessageBubbleImpl({
   message,
   busy,
+  animateStreaming = true,
   sequenceEnd = true,
   imageClient,
   chatId,
@@ -1085,6 +1096,7 @@ function MessageBubbleImpl({
 }: {
   message: ChatMessage;
   busy: boolean;
+  animateStreaming?: boolean;
   /** Only the turn-closing assistant bubble carries the footer. */
   sequenceEnd?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
@@ -1143,7 +1155,10 @@ function MessageBubbleImpl({
             />
           )}
           {message.text && (
-            <AssistantMessageBody text={message.text} streaming={busy} />
+            <AssistantMessageBody
+              text={message.text}
+              streaming={busy && animateStreaming}
+            />
           )}
           <AssistantSources
             sources={message.sources}

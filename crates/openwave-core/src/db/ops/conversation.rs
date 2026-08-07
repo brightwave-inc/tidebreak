@@ -761,7 +761,7 @@ pub(in crate::db) async fn get_chat_transcript(
     let message_document_attachments =
         super::message_document_attachment::list_for_chat_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
-    let terminal_turns = list_terminal_turns_on(&transaction, chat_id).await?;
+    let terminal_turns = list_terminal_turns_on(&transaction, chat_id, &messages).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
@@ -781,11 +781,13 @@ pub(in crate::db) async fn get_chat_transcript(
 /// The journal holds every delta a chat has ever produced, tool arguments
 /// included, so this deliberately filters on the payload's variant tag in SQL
 /// rather than deserializing the chat's whole event history. Completed prose
-/// still comes from its committed message; only message-less terminal turns
-/// retain their streamed text here.
+/// still comes from its committed message. A cancellation after an intermediate
+/// step committed points at the last assistant message from that turn; only a
+/// genuinely message-less terminal turn retains its streamed text here.
 async fn list_terminal_turns_on<C>(
     conn: &C,
     chat_id: ChatId,
+    messages: &[Message],
 ) -> Result<Vec<ChatTerminalTurnSnapshot>>
 where
     C: ConnectionTrait,
@@ -806,6 +808,13 @@ where
         return Ok(Vec::new());
     }
 
+    let last_assistant_message_by_turn = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .fold(HashMap::new(), |mut by_turn, message| {
+            by_turn.insert(message.turn_id, message.id);
+            by_turn
+        });
     let mut snapshots = Vec::with_capacity(turns.len());
     let mut index_of = HashMap::with_capacity(turns.len());
     for turn in turns {
@@ -826,10 +835,19 @@ where
         };
         let invoked_skills = super::turn::invoked_skills_from_model(&turn)?;
         let usage = super::turn::usage_from_turn_model(&turn)?;
+        let message_id = turn.output_message_id.map(MessageId).or_else(|| {
+            matches!(&status, ChatTerminalTurnStatus::Cancelled)
+                .then(|| {
+                    last_assistant_message_by_turn
+                        .get(&TurnId(turn.id))
+                        .copied()
+                })
+                .flatten()
+        });
         index_of.insert(turn.id, snapshots.len());
         snapshots.push(ChatTerminalTurnSnapshot {
             turn_id: TurnId(turn.id),
-            message_id: turn.output_message_id.map(MessageId),
+            message_id,
             status,
             partial_content: String::new(),
             reasoning: String::new(),

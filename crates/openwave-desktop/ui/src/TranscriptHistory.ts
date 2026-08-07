@@ -152,9 +152,10 @@ export function hydrateTranscriptHistory(
       resultUnreadable: activity.result_unreadable,
       createdAt: activity.started_at,
     })),
-    // Failed and stopped turns leave no assistant message behind. Their one
-    // terminal entry keeps streamed content and status adjacent in transcript
-    // order, with a stable identity across hydrations.
+    // Terminal turns that left no assistant message behind keep their streamed
+    // content and status adjacent in transcript order, with a stable identity
+    // across hydrations. A cancellation after a committed step is associated
+    // with that message above instead.
     ...terminalTurns
       .filter((turn) => !turn.message_id)
       .map((turn) => ({
