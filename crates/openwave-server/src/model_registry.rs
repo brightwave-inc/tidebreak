@@ -215,6 +215,7 @@ impl ModelSpec {
             | ProviderKind::Openai
             | ProviderKind::Gemini
             | ProviderKind::Vertex
+            | ProviderKind::Bedrock
             | ProviderKind::Fireworks => true,
             ProviderKind::Together => matches!(
                 self.id,
@@ -1096,6 +1097,7 @@ mod tests {
             ProviderKind::Xai => true,
             ProviderKind::Gemini => true,
             ProviderKind::Vertex => true,
+            ProviderKind::Bedrock => true,
             ProviderKind::Fireworks => true,
             ProviderKind::Together => true,
             ProviderKind::OpenaiCompatible => false,

@@ -53,6 +53,8 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     vertex: Option<VertexEndpoint>,
+    request_auth: Option<std::sync::Arc<dyn crate::http::RequestAuthenticator>>,
+    provider_label: &'static str,
     /// Per-request credential supplier for gateways that mint short-lived
     /// tokens. Takes precedence over `api_key` when present.
     token_source: Option<std::sync::Arc<dyn crate::BearerTokenSource>>,
@@ -70,6 +72,8 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             vertex: None,
+            request_auth: None,
+            provider_label: "anthropic",
             token_source: None,
             conversation_attribution: false,
         }
@@ -106,6 +110,8 @@ impl AnthropicProvider {
                 project_id,
                 location,
             }),
+            request_auth: None,
+            provider_label: "vertex",
             token_source: Some(token_source),
             conversation_attribution: false,
         })
@@ -158,11 +164,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     fn id(&self) -> ProviderId {
-        ProviderId::new(if self.vertex.is_some() {
-            "vertex"
-        } else {
-            "anthropic"
-        })
+        ProviderId::new(self.provider_label)
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
@@ -323,6 +325,7 @@ impl AnthropicProvider {
         conversation: Option<openwave_core::id::ChatId>,
         model: &str,
     ) -> Result<reqwest::Response> {
+        let body = serde_json::to_vec(body)?;
         let mut request = if let Some(vertex) = &self.vertex {
             if !valid_anthropic_model_id(model) {
                 return Err(AgentError::config("invalid Vertex AI Claude model id"));
@@ -335,11 +338,18 @@ impl AnthropicProvider {
                 .bearer_auth(api_key)
                 .header("content-type", "application/json")
         } else {
-            self.client
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", api_key)
+            let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+            let url = reqwest::Url::parse(&url)
+                .map_err(|_| AgentError::config("invalid Messages API endpoint"))?;
+            let request = self
+                .client
+                .post(url.clone())
                 .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
+                .header("content-type", "application/json");
+            match &self.request_auth {
+                Some(auth) => auth.authenticate(request, &url, &body)?,
+                None => request.header("x-api-key", api_key),
+            }
         };
         // A conversation is declared only where one is configured to be read.
         // The id is a UUID, so it satisfies the gateway's bound on the value
@@ -357,9 +367,7 @@ impl AnthropicProvider {
             // reqwest's display includes the URL, and a gateway URL can carry
             // tenant-identifying parts; `AgentError` strings reach the client
             // via TurnFailed. Only the fact of a failed request surfaces.
-            .map_err(|_| {
-                AgentError::Provider(format!("{} request failed", self.provider_name()))
-            })?;
+            .map_err(|_| AgentError::Provider(format!("{} request failed", self.provider_label)))?;
 
         // Surface non-2xx without the raw body — it can echo key material, and
         // `AgentError` strings reach the client via TurnFailed. Status (+ a
@@ -370,14 +378,14 @@ impl AnthropicProvider {
             let body = read_bounded_error_body(response.bytes_stream()).await;
             return Err(match &self.vertex {
                 Some(vertex) => classify_provider_error_redacting(
-                    self.provider_name(),
+                    self.provider_label,
                     status.as_u16(),
                     &body,
                     retry_after,
                     &[vertex.project_id.as_str()],
                 ),
                 None => classify_provider_error(
-                    self.provider_name(),
+                    self.provider_label,
                     status.as_u16(),
                     &body,
                     retry_after,
@@ -388,11 +396,7 @@ impl AnthropicProvider {
     }
 
     fn provider_name(&self) -> &'static str {
-        if self.vertex.is_some() {
-            "vertex"
-        } else {
-            "anthropic"
-        }
+        self.provider_label
     }
 }
 
@@ -1168,7 +1172,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 Some(project_id) => {
                     classify_in_band_error_redacting("vertex", error, &[project_id])
                 }
-                None => classify_in_band_error("anthropic", error),
+                None => classify_in_band_error(stream_provider_label(state), error),
             };
             vec![ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&error),

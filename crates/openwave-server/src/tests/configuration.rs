@@ -1287,6 +1287,7 @@ async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_accou
             enabled: false,
             base_url: None,
             vertex_location: Some("us-east5".into()),
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -1300,6 +1301,101 @@ async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_accou
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bedrock_settings_keep_aws_secrets_out_of_api_and_publish_configured_models() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "aws_region": "us-east-1",
+                        "credential": {
+                            "type": "aws_credentials",
+                            "access_key_id": "AKIAEXAMPLE",
+                            "secret_access_key": "bedrock-secret",
+                            "session_token": "bedrock-session"
+                        },
+                        "models": [{
+                            "id": "openai.gpt-oss-120b",
+                            "display_name": "GPT OSS 120B",
+                            "context_window": 131072,
+                            "max_output_tokens": 32768
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(response).await;
+    assert_eq!(info["kind"], "bedrock");
+    assert_eq!(info["aws_region"], "us-east-1");
+    assert_eq!(info["auth_mode"], "aws_credentials");
+    assert_eq!(info["has_credential"], true);
+    assert!(info.get("credential").is_none());
+    assert!(!info.to_string().contains("AKIAEXAMPLE"));
+    assert!(!info.to_string().contains("bedrock-secret"));
+    assert!(!info.to_string().contains("bedrock-session"));
+
+    let models = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/models")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalog: serde_json::Value = json_body(models).await;
+    let rows = catalog["models"].as_array().unwrap();
+    let custom = rows
+        .iter()
+        .find(|model| model["key"] == "bedrock::openai.gpt-oss-120b")
+        .unwrap();
+    assert_eq!(custom["input_modalities"], serde_json::json!(["text"]));
+    assert_eq!(custom["verification"], "unverified");
+    assert_eq!(custom["available"], true);
+    let claude = rows
+        .iter()
+        .find(|model| model["key"] == "bedrock::anthropic.claude-fable-5")
+        .unwrap();
+    assert_eq!(
+        claude["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert_eq!(claude["supports_reasoning"], true);
+    assert_eq!(claude["verification"], "unverified");
+    assert_eq!(claude["available"], true);
+
+    let rejected = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"aws_region": "../us-east-1"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -2527,6 +2623,7 @@ async fn stored_regional_vertex_is_unavailable_and_claims_no_models_or_route() {
             enabled: true,
             base_url: None,
             vertex_location: Some("us-east5".into()),
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2854,6 +2951,7 @@ async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
                 enabled: true,
                 base_url: None,
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )

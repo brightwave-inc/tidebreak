@@ -228,6 +228,8 @@ pub enum RouteKind {
     Gemini,
     /// Google Vertex AI with native Gemini and Anthropic Claude protocols.
     Vertex,
+    /// Amazon Bedrock Mantle (Claude Messages or OpenAI Responses).
+    Bedrock,
     /// A model-gateway deployment's Anthropic-compatible surface, authenticated
     /// with short-lived resource-scoped tokens instead of a static key.
     ModelGateway,
@@ -251,6 +253,7 @@ impl RouteKind {
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
             RouteKind::Vertex => "vertex",
+            RouteKind::Bedrock => "bedrock",
             RouteKind::ModelGateway => "model_gateway",
             RouteKind::ModelGatewayOpenai => "model_gateway_openai",
         }
@@ -275,6 +278,7 @@ impl RouteKind {
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
             "vertex" => Some(Self::Vertex),
+            "bedrock" => Some(Self::Bedrock),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
@@ -382,6 +386,7 @@ impl Router {
             RouteKind::Xai,
             RouteKind::Gemini,
             RouteKind::Vertex,
+            RouteKind::Bedrock,
             RouteKind::Fireworks,
             RouteKind::Together,
             RouteKind::ModelGateway,

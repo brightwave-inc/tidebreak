@@ -49,6 +49,8 @@ export function providerLabel(provider: ProviderKind): string {
       return "Google Gemini";
     case "vertex":
       return "Google Vertex AI";
+    case "bedrock":
+      return "Amazon Bedrock";
     case "fireworks":
       return "Fireworks AI";
     case "together":

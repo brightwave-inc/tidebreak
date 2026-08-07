@@ -137,6 +137,7 @@ export function ProviderIcon({
       return <GeminiIcon {...rest} />;
     case "vertex":
       return <GeminiIcon {...rest} />;
+    case "bedrock":
     case "fireworks":
     case "together":
     case "openai_compatible":

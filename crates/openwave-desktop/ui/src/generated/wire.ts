@@ -1885,7 +1885,7 @@ export type PromptOrigin = "builtin" | "user";
 /**
  * How a provider's credential was established.
  */
-export type ProviderAuthMode = "api_key" | "chatgpt" | "service_account";
+export type ProviderAuthMode = "api_key" | "chatgpt" | "service_account" | "aws_credentials";
 
 /**
  * Public view of a provider — never includes the credential itself.
@@ -1926,7 +1926,7 @@ models: Array<CustomModelConfig>, aws_region?: string, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "fireworks" | "together" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "bedrock" | "fireworks" | "together" | "openai_compatible" | "model_gateway";
 
 /**
  * How hard a reasoning-capable model should think before answering.

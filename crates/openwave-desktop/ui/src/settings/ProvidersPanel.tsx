@@ -104,7 +104,13 @@ function ProviderRow({
     isFirstClassVertex ||
     (info.kind === "gemini" && info.auth_mode === "service_account");
   const [key, setKey] = useState("");
-  const credentialType = usesServiceAccount ? "service_account" : "api_key";
+  const [credentialType, setCredentialType] = useState<CredentialType>(
+    info.kind === "bedrock" && info.auth_mode === "aws_credentials"
+      ? "aws_credentials"
+      : usesServiceAccount
+        ? "service_account"
+        : "api_key",
+  );
   const [serviceAccountJson, setServiceAccountJson] = useState("");
   const [vertexLocation, setVertexLocation] = useState(
     info.vertex_location ?? "global",
@@ -499,10 +505,54 @@ function ProviderRow({
         />
       ) : (
         <>
+          {info.kind === "bedrock" && (
+            <>
+              <label className="grid gap-1 text-xs text-muted-foreground">
+                Credential type
+                <Select
+                  value={credentialType}
+                  disabled={saving}
+                  onValueChange={(value) =>
+                    setCredentialType(value as CredentialType)
+                  }
+                >
+                  <SelectTrigger
+                    aria-label="Amazon Bedrock credential type"
+                    className="h-9"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="api_key">Bedrock API key</SelectItem>
+                    <SelectItem value="aws_credentials">
+                      AWS access keys (SigV4)
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <Input
+                type="text"
+                aria-label="AWS region"
+                placeholder="AWS region"
+                value={awsRegion}
+                onChange={(event) => {
+                  setAwsRegion(event.target.value);
+                  setAwsRegionTouched(true);
+                }}
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                OpenWave derives the Bedrock Mantle endpoint from this region;
+                credentials cannot redirect requests to another host.
+              </p>
+            </>
+          )}
           {credentialType === "api_key" && (
             <Input
               type="password"
-              placeholder="API key"
+              placeholder={
+                info.kind === "bedrock" ? "Bedrock API key" : "API key"
+              }
               value={key}
               onChange={(e) => setKey(e.target.value)}
               autoComplete="off"
@@ -559,6 +609,37 @@ function ProviderRow({
               />
             </>
           )}
+          {info.kind === "bedrock" &&
+            credentialType === "aws_credentials" && (
+              <div className="grid gap-2">
+                <Input
+                  type="password"
+                  aria-label="AWS access key ID"
+                  placeholder="AWS access key ID"
+                  value={awsAccessKeyId}
+                  onChange={(event) => setAwsAccessKeyId(event.target.value)}
+                  autoComplete="off"
+                />
+                <Input
+                  type="password"
+                  aria-label="AWS secret access key"
+                  placeholder="AWS secret access key"
+                  value={awsSecretAccessKey}
+                  onChange={(event) =>
+                    setAwsSecretAccessKey(event.target.value)
+                  }
+                  autoComplete="off"
+                />
+                <Input
+                  type="password"
+                  aria-label="AWS session token"
+                  placeholder="AWS session token (optional)"
+                  value={awsSessionToken}
+                  onChange={(event) => setAwsSessionToken(event.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+            )}
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
@@ -572,11 +653,14 @@ function ProviderRow({
                   usesServiceAccount &&
                   credentialType === "service_account" &&
                   !serviceAccountJson.trim()) ||
-                (info.kind === "openai_compatible" &&
+                (!info.has_credential &&
+                  info.kind === "bedrock" &&
+                  credentialType === "aws_credentials" &&
+                  (!awsAccessKeyId.trim() || !awsSecretAccessKey.trim())) ||
+                (hasConfigurableModels &&
                   models.some((model) => !model.id.trim())) ||
-                (info.kind === "xai" &&
-                  (models.length === 0 ||
-                    models.some((model) => !model.id.trim())))
+                (info.kind === "xai" && models.length === 0) ||
+                (info.kind === "bedrock" && !awsRegion.trim())
               }
               onClick={() => void save(true)}
             >
@@ -611,6 +695,12 @@ function credentialStatusLabel(info: ProviderInfo): string {
   }
   if (info.auth_mode === "service_account") {
     return "Google service account set";
+  }
+  if (info.kind === "bedrock" && info.auth_mode === "aws_credentials") {
+    return "AWS access keys set";
+  }
+  if (info.kind === "bedrock" && info.auth_mode === "api_key") {
+    return "Bedrock API key set";
   }
   return "Credential set";
 }

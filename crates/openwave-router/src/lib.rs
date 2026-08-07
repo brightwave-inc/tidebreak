@@ -38,6 +38,9 @@ pub mod google_auth;
 #[cfg(all(feature = "anthropic", feature = "gemini"))]
 pub mod vertex;
 
+#[cfg(feature = "bedrock")]
+pub mod bedrock;
+
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicProvider;
 #[cfg(feature = "bedrock")]
@@ -52,7 +55,10 @@ pub use google_auth::{GoogleServiceAccount, GoogleServiceAccountTokenSource};
 pub use openai::OpenAiProvider;
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
-pub use router::{BearerTokenSource, Route, RouteKind, Router, VertexModelFamily, VertexRoute};
+pub use router::{
+    AwsCredentials, BearerTokenSource, BedrockRoute, Route, RouteKind, Router, VertexModelFamily,
+    VertexRoute,
+};
 #[cfg(all(feature = "anthropic", feature = "gemini"))]
 pub use vertex::VertexProvider;
 #[cfg(feature = "xai")]

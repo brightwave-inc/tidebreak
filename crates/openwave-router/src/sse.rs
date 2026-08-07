@@ -601,6 +601,54 @@ mod tests {
     }
 
     #[test]
+    fn bedrock_http_and_in_band_errors_redact_credential_material() {
+        let markers = [
+            "ABSKDISTINCTIVEBEDROCKKEY",
+            "access_key_id=AKIAEXAMPLE",
+            "secret_access_key=distinctive-secret",
+            "session_token=distinctive-session",
+            "x-amz-security-token: distinctive-token",
+            "AccessKeyId=AKIAEXAMPLE",
+            "SecretAccessKey=distinctive-compact-secret",
+            "secretAccessKey: distinctive-camel-secret",
+            "SessionToken=distinctive-compact-session",
+            "sessionToken: distinctive-camel-session",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ASIAIOSFODNN7EXAMPLE",
+            concat!(
+                "AWS4-HMAC-SHA256 Credential=EXAMPLEKEY/20260807/us-east-1/",
+                "bedrock-mantle/aws4_request, SignedHeaders=host;x-amz-date, ",
+                "Signature=distinctive-signature"
+            ),
+            concat!(
+                "X-Amz-Credential=EXAMPLEKEY%2F20260807%2Fus-east-1%2F",
+                "bedrock-mantle%2Faws4_request"
+            ),
+        ];
+
+        for marker in markers {
+            let body = serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": format!("provider echoed {marker}")
+                }
+            })
+            .to_string();
+            let http = safe_http_error("bedrock", 400, &body);
+            assert_eq!(http, "bedrock returned 400 (invalid_request_error)");
+            assert!(!http.contains(marker));
+
+            let frame = serde_json::json!({
+                "code": 400,
+                "message": format!("provider echoed {marker}")
+            });
+            let in_band = classify_in_band_error("bedrock", &frame).to_string();
+            assert!(!in_band.contains(marker));
+            assert!(!in_band.contains("provider echoed"));
+        }
+    }
+
+    #[test]
     fn known_vertex_project_is_removed_while_status_and_code_remain() {
         let project_id = "customer-project-123";
         let body = serde_json::json!({
