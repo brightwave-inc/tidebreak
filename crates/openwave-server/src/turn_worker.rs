@@ -2617,10 +2617,14 @@ fn private_chat_scratch(
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = DirBuilder::new();
             #[cfg(unix)]
-            builder.mode(0o700);
-            root_dir.create_dir_with(&chat_name, &builder)?;
+            {
+                let mut builder = DirBuilder::new();
+                builder.mode(0o700);
+                root_dir.create_dir_with(&chat_name, &builder)?;
+            }
+            #[cfg(not(unix))]
+            root_dir.create_dir(&chat_name)?;
         }
         Err(error) => return Err(error),
     }
