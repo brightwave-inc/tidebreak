@@ -412,7 +412,16 @@ pub trait Store: Send + Sync {
         owner: &OwnerId,
         chat: &Chat,
         settings: &[(String, Value)],
-    ) -> Result<Chat>;
+    ) -> Result<Chat> {
+        if settings.is_empty() {
+            return self
+                .create_chat_with_project_defaults_scoped(owner, chat)
+                .await;
+        }
+        Err(AgentError::Store(
+            "atomic chat creation with setting updates is not implemented by this Store".into(),
+        ))
+    }
 
     /// Fetch `owner`'s chat by id; `None` when it does not exist **or**
     /// belongs to someone else.

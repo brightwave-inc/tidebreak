@@ -458,49 +458,6 @@ impl Store for MemStore {
         chats.insert(chat.id, chat.clone());
         Ok(chat)
     }
-    async fn create_chat_with_project_defaults_and_settings_scoped(
-        &self,
-        _owner: &crate::model::OwnerId,
-        base: &Chat,
-        setting_updates: &[(String, Value)],
-    ) -> Result<Chat> {
-        if base.attachment_revision != 0 || !base.root_attachments.is_empty() {
-            return Err(AgentError::Store(
-                "chat project defaults must start from an empty revision-zero projection".into(),
-            ));
-        }
-        let mut settings = self.settings.lock().unwrap();
-        let projects = self.projects.lock().unwrap();
-        let mut chat = base.clone();
-        if let Some(project_id) = chat.project_id {
-            let project = projects
-                .get(&project_id)
-                .ok_or_else(|| AgentError::Store("chat project does not exist".into()))?;
-            chat.root_attachments = project
-                .root_attachments
-                .iter()
-                .copied()
-                .map(|root_id| ChatRootAttachment {
-                    root_id,
-                    origin: RootAttachmentOrigin::ProjectDefault,
-                })
-                .collect();
-            if !chat.root_attachments.is_empty() {
-                chat.attachment_revision = 1;
-            }
-        }
-        validate_chat_root_projection(&chat)
-            .map_err(|message| AgentError::Store(message.into()))?;
-        let mut chats = self.chats.lock().unwrap();
-        if chats.contains_key(&chat.id) {
-            return Err(AgentError::Store("chat already exists".into()));
-        }
-        chats.insert(chat.id, chat.clone());
-        for (key, value) in setting_updates {
-            settings.insert(key.clone(), value.clone());
-        }
-        Ok(chat)
-    }
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         Ok(self.chats.lock().unwrap().get(&id).cloned())
     }
@@ -1231,6 +1188,51 @@ fn store_is_object_safe_and_roundtrips() {
     block_on(store.delete_document(source.id)).unwrap();
     block_on(store.delete_document(source.id)).unwrap();
     assert_eq!(block_on(store.get_document(source.id)).unwrap(), None);
+}
+
+#[test]
+fn custom_store_atomic_chat_default_fails_closed() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::default());
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+    };
+    let owner = crate::model::OwnerId::local();
+
+    let created =
+        block_on(store.create_chat_with_project_defaults_and_settings_scoped(&owner, &chat, &[]))
+            .unwrap();
+    assert_eq!(created, chat);
+
+    let rejected = Chat {
+        id: ChatId::new(),
+        ..chat
+    };
+    block_on(store.set_setting("model", &serde_json::json!("before"))).unwrap();
+    let error = block_on(store.create_chat_with_project_defaults_and_settings_scoped(
+        &owner,
+        &rejected,
+        &[("model".into(), serde_json::json!("after"))],
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::Store(message)
+            if message == "atomic chat creation with setting updates is not implemented by this Store"
+    ));
+    assert_eq!(block_on(store.get_chat(rejected.id)).unwrap(), None);
+    assert_eq!(
+        block_on(store.get_setting("model")).unwrap(),
+        Some(serde_json::json!("before"))
+    );
 }
 
 #[test]
