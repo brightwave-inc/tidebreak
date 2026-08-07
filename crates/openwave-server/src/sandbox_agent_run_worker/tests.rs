@@ -36,8 +36,8 @@ use super::config::{
     sandbox_system_prompt, SandboxAgentRunWorkerOutcome, SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
 };
 use super::model_step::{
-    complete_sandbox_task, delegated_file_admission_matches, sandbox_request, SandboxCompletion,
-    SandboxToolCallDisposition, SandboxToolCallIntent,
+    complete_sandbox_task, delegated_file_admission_matches, sandbox_request, sandbox_row_budget,
+    SandboxCompletion, SandboxToolCallDisposition, SandboxToolCallIntent,
 };
 
 #[derive(Default)]
@@ -1325,7 +1325,7 @@ async fn cancellation_fence_prevents_a_stale_worker_from_parking_web_search() {
                     arguments: serde_json::json!({"query":"OpenWave"}),
                     disposition: SandboxToolCallDisposition::Execute,
                 }],
-                0,
+                &sandbox_row_budget(&[]),
                 "",
             )
             .await
@@ -2616,12 +2616,30 @@ fn sandbox_chat() -> Chat {
     }
 }
 
-#[derive(Default)]
+/// Emits `plan_calls` successive `update_task_plan` calls, then `done` for
+/// every step after that.
 struct TaskPlanThenDoneProvider {
     requests: Mutex<Vec<ChatRequest>>,
+    plan_calls: usize,
+}
+
+impl Default for TaskPlanThenDoneProvider {
+    fn default() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            plan_calls: 2,
+        }
+    }
 }
 
 impl TaskPlanThenDoneProvider {
+    fn with_plan_calls(plan_calls: usize) -> Self {
+        Self {
+            plan_calls,
+            ..Self::default()
+        }
+    }
+
     fn plan_call(id: &str, arguments: &str) -> Vec<ProviderEvent> {
         vec![
             ProviderEvent::TextDelta {
@@ -2672,19 +2690,21 @@ impl ModelProvider for TaskPlanThenDoneProvider {
             requests.push(request);
             requests.len()
         };
-        let events = match call_number {
-            1 => Self::plan_call(
+        let events = if call_number == 1 {
+            Self::plan_call(
                 "plan_1",
                 r#"{"steps":[{"content":"read the brief","status":"in_progress"},{"content":"write the summary","status":"pending"}]}"#,
-            ),
-            2 => Self::plan_call(
-                "plan_2",
+            )
+        } else if call_number <= self.plan_calls {
+            Self::plan_call(
+                &format!("plan_{call_number}"),
                 r#"{"steps":[{"content":"read the brief","status":"completed"},{"content":"write the summary","status":"in_progress"}]}"#,
-            ),
-            // Two attempts to finish: the first still has an open step and is
-            // handed back, the second is accepted whether or not the model
-            // closed the plan.
-            _ => Self::done_call(&format!("done_{call_number}")),
+            )
+        } else {
+            // Every later step tries to finish. The first attempt may still
+            // have an open step and be handed back; a later one is accepted
+            // whether or not the model closed the plan.
+            Self::done_call(&format!("done_{call_number}"))
         };
         Ok(stream::iter(events).boxed())
     }
@@ -2801,6 +2821,170 @@ async fn a_sandbox_run_keeps_a_plan_and_is_reminded_once_before_it_finishes() {
 
     // The reminder is spent. A run that calls `done` again finishes, so a
     // model that will not close its list is never trapped.
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::Completed(id)
+    );
+}
+
+/// Plan bookkeeping has its own allowance and cannot starve the work the task
+/// is for.
+///
+/// The failure this pins is the one the shared budget would cause: a run told
+/// to keep its checklist current spends rows on it, and if those rows came out
+/// of the same 16 the commands and searches use, the run would run out of
+/// budget describing work it never got to do. At the plan cap only the plan
+/// tool goes away — everything else is still offered — and the durable store
+/// has to agree, or one of these parks would come back a conflict.
+#[tokio::test]
+async fn plan_rows_have_their_own_cap_and_leave_the_work_budget_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = sandbox_chat();
+    store.create_chat(&chat).await.unwrap();
+    let provider = Arc::new(TaskPlanThenDoneProvider::with_plan_calls(
+        openwave_core::MAX_SANDBOX_TASK_PLAN_CALLS,
+    ));
+    let worker = SandboxAgentRunWorker::new(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        AgentConfig {
+            model: "sandbox-model".into(),
+            // Generous, so the step budget is never what withdraws a tool here.
+            max_steps: 64,
+            ..AgentConfig::default()
+        },
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let plans = crate::sandbox_task_plan_worker::SandboxTaskPlanWorker::new(
+        store.clone(),
+        Arc::new(Notify::new()),
+        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerConfig::default(),
+    );
+    let spawn = CallId::new();
+    let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+    admit_sandbox(&store, chat.id, spawn, "Research this.").await;
+
+    for _ in 0..openwave_core::MAX_SANDBOX_TASK_PLAN_CALLS {
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
+        ));
+        assert!(matches!(
+            plans.run_once().await.unwrap(),
+            crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerOutcome::Resolved(_)
+        ));
+    }
+    let calls = store
+        .list_sandbox_tool_calls_for_agent_run(id)
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), openwave_core::MAX_SANDBOX_TASK_PLAN_CALLS);
+
+    // The plan is spent; the task's own tools are untouched.
+    let spent = sandbox_request(
+        &AgentConfig {
+            model: "m".into(),
+            max_steps: 64,
+            ..AgentConfig::default()
+        },
+        "task".into(),
+        &calls,
+        &*store,
+        false,
+    )
+    .await
+    .unwrap();
+    let offered: Vec<&str> = spent.tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        offered,
+        vec![
+            SANDBOX_EXEC_TOOL,
+            openwave_core::SANDBOX_WEB_SEARCH_TOOL,
+            openwave_core::SANDBOX_DONE_TOOL,
+            openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
+        ]
+    );
+}
+
+/// A run one model step from its ceiling submits instead of being reminded.
+///
+/// The reminder parks a row the next completion has to read, so it can only be
+/// offered while the run can still pay for that completion. Getting this wrong
+/// turns the nudge into a failure on exactly the runs that were about to
+/// finish: the step budget would be exceeded assembling the request that was
+/// supposed to carry the correction.
+#[tokio::test]
+async fn a_run_at_its_last_step_submits_rather_than_being_reminded() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = sandbox_chat();
+    store.create_chat(&chat).await.unwrap();
+    let provider = Arc::new(TaskPlanThenDoneProvider::with_plan_calls(1));
+    let worker = SandboxAgentRunWorker::new(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        AgentConfig {
+            model: "sandbox-model".into(),
+            // One checkpoint, then one completion to read it. `done` on that
+            // second step leaves no room for a third.
+            max_steps: 2,
+            ..AgentConfig::default()
+        },
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let plans = crate::sandbox_task_plan_worker::SandboxTaskPlanWorker::new(
+        store.clone(),
+        Arc::new(Notify::new()),
+        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerConfig::default(),
+    );
+    let spawn = CallId::new();
+    let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+    admit_sandbox(&store, chat.id, spawn, "Research this.").await;
+
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
+    ));
+    assert!(matches!(
+        plans.run_once().await.unwrap(),
+        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerOutcome::Resolved(_)
+    ));
+    // The plan is left with an open step, which is exactly what would earn a
+    // reminder if the run could afford one.
+    assert!(!openwave_core::open_task_plan_steps(
+        &store
+            .get_agent_run_task_plan(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .steps
+    )
+    .is_empty());
     assert_eq!(
         worker.run_once().await.unwrap(),
         SandboxAgentRunWorkerOutcome::Completed(id)

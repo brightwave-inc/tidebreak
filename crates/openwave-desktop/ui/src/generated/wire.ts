@@ -201,10 +201,14 @@ updated_at: string, };
  * A run's plan as a status row needs it: the count, and the current step.
  *
  * Step text is model-authored, like the command and query headlines the
- * activity history carries. It is bounded and single-line before it is ever
- * stored — the tool boundary rejects a step longer than
- * [`openwave_core::MAX_TASK_PLAN_STEP_CHARS`] or carrying control characters —
- * so the projection copies it as stored rather than re-clamping it here.
+ * activity history carries. The difference is that those go through the
+ * renderer clamp on the way out and this does not, so the tool boundary
+ * rejects on the way in against the very same predicate: a step longer than
+ * [`openwave_core::MAX_TASK_PLAN_STEP_CHARS`], or carrying any character the
+ * preview clamp would strip — control characters, the line and paragraph
+ * separators, the bidi overrides and isolates — never becomes a stored step.
+ * Copying it as stored is therefore not a gap in the clamp; it is the same
+ * rule enforced one surface earlier.
  */
 export type AgentRunTaskPlanProgress = { completed: number, total: number, 
 /**

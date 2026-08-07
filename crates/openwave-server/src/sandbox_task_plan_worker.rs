@@ -33,6 +33,7 @@ pub(crate) struct SandboxTaskPlanWorkerConfig {
     idle_cap: Duration,
     failure_delay: Duration,
     failure_delay_cap: Duration,
+    max_concurrency: usize,
 }
 
 impl Default for SandboxTaskPlanWorkerConfig {
@@ -43,6 +44,7 @@ impl Default for SandboxTaskPlanWorkerConfig {
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
             failure_delay_cap: Duration::from_secs(30),
+            max_concurrency: 2,
         }
     }
 }
@@ -68,6 +70,7 @@ impl SandboxTaskPlanWorker {
         config: SandboxTaskPlanWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
+        assert!(config.max_concurrency > 0);
         Self {
             store,
             wake,
@@ -76,6 +79,22 @@ impl SandboxTaskPlanWorker {
     }
 
     pub(crate) async fn run(self) {
+        let mut lanes = tokio::task::JoinSet::new();
+        for _ in 0..self.config.max_concurrency {
+            lanes.spawn(self.clone().run_lane());
+        }
+        let mut restart_backoff =
+            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
+        while let Some(result) = lanes.join_next().await {
+            if let Err(error) = result {
+                eprintln!("openwave: sandbox task-plan worker lane stopped: {error}");
+                tokio::time::sleep(restart_backoff.next_delay()).await;
+            }
+            lanes.spawn(self.clone().run_lane());
+        }
+    }
+
+    async fn run_lane(self) {
         let mut idle_delay = self.config.idle_min;
         let mut failure_backoff =
             LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);

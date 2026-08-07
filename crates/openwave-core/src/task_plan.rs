@@ -26,7 +26,11 @@ use serde_json::Value;
 
 use crate::{AgentRunId, ToolSpec, TurnId};
 
-/// Stable foreground-only tool name.
+/// Stable tool name, shared by the foreground turn and the sandbox surface.
+///
+/// One name, two spec descriptions: the foreground call commits and returns,
+/// while the sandbox call is a durable checkpoint that parks the run. See
+/// [`update_task_plan_tool_spec`] and [`sandbox_update_task_plan_tool_spec`].
 pub const UPDATE_TASK_PLAN_TOOL: &str = "update_task_plan";
 
 pub const MAX_TASK_PLAN_STEPS: usize = 20;
@@ -150,9 +154,21 @@ fn check_steps(steps: &[TaskPlanStep]) -> std::result::Result<(), String> {
                 index + 1
             ));
         }
-        if step.content.chars().any(char::is_control) {
+        // The same predicate the renderer clamps with. Step content is one of
+        // the few model-authored strings a surface shows verbatim rather than
+        // through the clamp, so the write side has to reject exactly what the
+        // read side would strip: control characters, the line/paragraph
+        // separators, and the bidi overrides and isolates that let one line
+        // rewrite the visual order of what is around it. Rejecting here rather
+        // than sanitizing keeps the stored plan the plan the model sent, and
+        // keeps a step that would clamp away to nothing from ever existing.
+        if step
+            .content
+            .chars()
+            .any(crate::preview::preview_formatting_character)
+        {
             return Err(format!(
-                "step {} contains control characters; send plain single-line text",
+                "step {} contains control or text-direction characters; send plain single-line text",
                 index + 1
             ));
         }
@@ -190,6 +206,28 @@ pub fn task_plan_summary(steps: &[TaskPlanStep]) -> String {
         }
         None => format!("Task plan updated: {completed}/{total} steps completed."),
     }
+}
+
+/// The same tool on the sandbox surface, described as it actually behaves.
+///
+/// The arguments and their bounds are the foreground spec's — one shared
+/// schema, so the two surfaces cannot drift into accepting different plans.
+/// The description cannot be shared: a background run's plan row lives in the
+/// host's database, so the call is a durable checkpoint that parks the run and
+/// resumes it with the result, and telling the model it "returns immediately
+/// and does not pause the turn" would be false on exactly the surface where the
+/// pause is real and paid for out of a budget.
+#[must_use]
+pub fn sandbox_update_task_plan_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<UpdateTaskPlanArgs>(
+        UPDATE_TASK_PLAN_TOOL,
+        "Record the ordered steps you intend to work through on this background task, so the \
+         reader can follow long work as it progresses. Send the complete list every time — each \
+         call replaces the previous plan. Keep exactly one step in_progress while you work on it, \
+         mark it completed as soon as it is done, and update the plan as you go rather than in a \
+         batch at the end. Like your other tools this call is a step: it pauses the task, records \
+         the plan, and hands the result back before you continue.",
+    )
 }
 
 #[must_use]
@@ -244,6 +282,25 @@ mod tests {
         let mut blank = sample();
         blank["steps"][0]["content"] = Value::String("   ".into());
         assert!(parse_update_task_plan_arguments(&blank).is_err());
+
+        // Step content is shown verbatim on surfaces that clamp everything
+        // else, so the write side rejects exactly what the renderer clamp
+        // strips — not just C0 controls, but the separators and bidi overrides
+        // that let one step rewrite the visual order of the rows around it. A
+        // plan the clamp would gut must never be storable in the first place.
+        for spoof in [
+            "line\u{2028}break",
+            "para\u{2029}break",
+            "\u{202e}drowkcab",
+            "\u{2066}isolated\u{2069}",
+        ] {
+            let mut formatted = sample();
+            formatted["steps"][0]["content"] = Value::String(spoof.into());
+            assert!(
+                parse_update_task_plan_arguments(&formatted).is_err(),
+                "{spoof:?} must not be storable"
+            );
+        }
     }
 
     #[test]
@@ -271,6 +328,16 @@ mod tests {
         assert!(
             crate::tool::strict_json_schema(&schema, crate::tool::OptionalProperties::Reject)
                 .is_some()
+        );
+        // The sandbox surface differs only in what it tells the model about
+        // pausing; both surfaces must accept exactly the same plan.
+        let sandbox = sandbox_update_task_plan_tool_spec();
+        assert_eq!(sandbox.name, UPDATE_TASK_PLAN_TOOL);
+        assert_eq!(sandbox.input_schema, schema);
+        assert_ne!(
+            sandbox.description,
+            update_task_plan_tool_spec().description,
+            "a checkpointed call must not claim it returns without pausing"
         );
     }
 }

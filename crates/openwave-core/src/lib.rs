@@ -103,11 +103,12 @@ pub use agent_tools::{
     SpawnSandboxAgentResult, WaitForAgentResult, WaitForAgentsArgs, WaitForAgentsResult,
     WebExtractArgs, WebSearchArgs, DEFAULT_WEB_SEARCH_RESULTS, MAX_SANDBOX_AGENT_TASK_CHARS,
     MAX_SANDBOX_DONE_OUTPUTS, MAX_SANDBOX_DONE_SUMMARY_CHARS, MAX_SANDBOX_EXEC_ARGUMENTS,
-    MAX_SANDBOX_EXEC_COMMAND_BYTES, MAX_SANDBOX_EXEC_CWD_BYTES, MAX_SANDBOX_TOOL_CALLS,
-    MAX_SANDBOX_TOOL_CALLS_PER_STEP, MAX_WAIT_FOR_AGENTS_CHILDREN, MAX_WEB_EXTRACT_URL_BYTES,
-    MAX_WEB_SEARCH_DOMAINS, MAX_WEB_SEARCH_QUERY_CHARS, MAX_WEB_SEARCH_RESULTS, SANDBOX_DONE_TOOL,
-    SANDBOX_EXEC_TOOL, SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_WEB_SEARCH_TOOL,
-    SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL, WEB_EXTRACT_TOOL, WEB_SEARCH_TOOL,
+    MAX_SANDBOX_EXEC_COMMAND_BYTES, MAX_SANDBOX_EXEC_CWD_BYTES, MAX_SANDBOX_TASK_PLAN_CALLS,
+    MAX_SANDBOX_TOOL_CALLS, MAX_SANDBOX_TOOL_CALLS_PER_STEP, MAX_WAIT_FOR_AGENTS_CHILDREN,
+    MAX_WEB_EXTRACT_URL_BYTES, MAX_WEB_SEARCH_DOMAINS, MAX_WEB_SEARCH_QUERY_CHARS,
+    MAX_WEB_SEARCH_RESULTS, SANDBOX_DONE_TOOL, SANDBOX_EXEC_TOOL, SANDBOX_READ_DELEGATED_FILE_TOOL,
+    SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL, WEB_EXTRACT_TOOL,
+    WEB_SEARCH_TOOL,
 };
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
@@ -245,9 +246,10 @@ pub use storage::{
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
-    open_task_plan_steps, parse_update_task_plan_arguments, task_plan_summary,
-    update_task_plan_tool_spec, AgentRunTaskPlan, TaskPlan, TaskPlanStep, TaskPlanStepStatus,
-    UpdateTaskPlanArgs, MAX_TASK_PLAN_STEPS, MAX_TASK_PLAN_STEP_CHARS, UPDATE_TASK_PLAN_TOOL,
+    open_task_plan_steps, parse_update_task_plan_arguments, sandbox_update_task_plan_tool_spec,
+    task_plan_summary, update_task_plan_tool_spec, AgentRunTaskPlan, TaskPlan, TaskPlanStep,
+    TaskPlanStepStatus, UpdateTaskPlanArgs, MAX_TASK_PLAN_STEPS, MAX_TASK_PLAN_STEP_CHARS,
+    UPDATE_TASK_PLAN_TOOL,
 };
 pub use tool::{
     input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, ScratchPriorContents,

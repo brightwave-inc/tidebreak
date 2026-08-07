@@ -10,8 +10,8 @@ use openwave_core::{
     AgentConfig, AgentError, AgentRun, AgentRunStatus, AgentRunSubmittedOutput, CallId,
     FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, RequestFolderAccessArgs,
     Result, ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest,
-    SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution, MAX_SANDBOX_TOOL_CALLS,
-    MAX_SANDBOX_TOOL_CALLS_PER_STEP,
+    SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution,
+    MAX_SANDBOX_TASK_PLAN_CALLS, MAX_SANDBOX_TOOL_CALLS, MAX_SANDBOX_TOOL_CALLS_PER_STEP,
 };
 use tokio::sync::Notify;
 
@@ -22,6 +22,10 @@ use crate::state::SandboxAttemptGuard;
 
 use super::config::*;
 use super::model_step::*;
+
+/// The receipt code the plan reminder writes, and the exact marker that says a
+/// run has already had its one push-back.
+const TASK_PLAN_INCOMPLETE: &str = "task_plan_incomplete";
 
 impl SandboxAgentRunWorker {
     #[cfg(test)]
@@ -430,12 +434,18 @@ impl SandboxAgentRunWorker {
         // Progress keys are per model step, not per parked row: one step can now
         // park several calls, and a replayed claim must land on the same key.
         let depth = sandbox_call_steps(&previous_calls).len();
-        let previous_rows = previous_calls.len();
+        let previous_budget = sandbox_row_budget(&previous_calls);
         let outcome = match completion {
             SandboxCompletion::Final(text) => self.submit_result(&run, lease_token, text).await,
             SandboxCompletion::ToolCalls(intents) => {
-                self.park_sandbox_tool_calls(run, lease_token, intents, previous_rows, &narration)
-                    .await
+                self.park_sandbox_tool_calls(
+                    run,
+                    lease_token,
+                    intents,
+                    &previous_budget,
+                    &narration,
+                )
+                .await
             }
             SandboxCompletion::Done {
                 provider_id,
@@ -443,7 +453,13 @@ impl SandboxAgentRunWorker {
                 outputs,
                 summary,
             } => match self
-                .done_plan_reminder(&run, &previous_calls, depth, agent_config.max_steps)
+                .done_plan_reminder(
+                    &run,
+                    &previous_calls,
+                    &previous_budget,
+                    depth,
+                    agent_config.max_steps,
+                )
                 .await?
             {
                 Some(message) => {
@@ -452,12 +468,18 @@ impl SandboxAgentRunWorker {
                         name: openwave_core::SANDBOX_DONE_TOOL.to_owned(),
                         arguments,
                         disposition: SandboxToolCallDisposition::Rejected {
-                            error_code: "task_plan_incomplete",
+                            error_code: TASK_PLAN_INCOMPLETE,
                             message,
                         },
                     };
-                    self.park_sandbox_tool_calls(run, lease_token, vec![intent], previous_rows, "")
-                        .await
+                    self.park_sandbox_tool_calls(
+                        run,
+                        lease_token,
+                        vec![intent],
+                        &previous_budget,
+                        "",
+                    )
+                    .await
                 }
                 None => {
                     self.submit_submission(&run, lease_token, &outputs, &summary)
@@ -712,30 +734,47 @@ impl SandboxAgentRunWorker {
     /// - it is a rejected tool call, the same feedback shape a call that
     ///   arrived with company already gets, so the run reads it as an ordinary
     ///   error result and keeps its attempt;
-    /// - it happens at most once per run. `done` is terminal, so the only way a
-    ///   `done` row exists at all is that the host already handed one back, and
-    ///   a second refusal would trap a run whose model will not close its list;
+    /// - it happens at most once per run, and the once is keyed on the reminder
+    ///   itself rather than on the presence of a `done` row. A `done` row can
+    ///   exist for reasons that have nothing to do with the plan — a `done`
+    ///   emitted alongside a sibling is answered with `must_be_alone`, and
+    ///   malformed arguments are answered too — and a model that calls tools in
+    ///   parallel is exactly the population this reminder is for. Only a prior
+    ///   receipt carrying [`TASK_PLAN_INCOMPLETE`] spends it;
     /// - it is withheld unless the run can afford the row it parks into and the
     ///   model step that consumes it, so the reminder never converts a run that
-    ///   was about to finish into a budget failure.
+    ///   was about to finish into a budget failure. The row it parks is a
+    ///   rejected `done`, which belongs to the work budget like any other
+    ///   non-plan row.
     ///
     /// A run with no plan, or one whose steps are all `completed`, is never
-    /// interrupted.
+    /// interrupted. Neither is a run that ends by simply producing final text
+    /// instead of calling `done`: that path has no tool call to hand back, and
+    /// inventing a synthetic one to reject would be a worse trade than missing
+    /// the reminder on a run that never asked to submit anything.
     async fn done_plan_reminder(
         &self,
         run: &AgentRun,
         previous_calls: &[openwave_core::SandboxToolCall],
+        previous_budget: &SandboxRowBudget,
         depth: usize,
         max_steps: usize,
     ) -> Result<Option<String>> {
-        if previous_calls
-            .iter()
-            .any(|call| call.name == openwave_core::SANDBOX_DONE_TOOL)
-        {
+        if previous_budget.work >= MAX_SANDBOX_TOOL_CALLS || depth.saturating_add(2) > max_steps {
             return Ok(None);
         }
-        if previous_calls.len() >= MAX_SANDBOX_TOOL_CALLS || depth.saturating_add(2) > max_steps {
-            return Ok(None);
+        for call in previous_calls
+            .iter()
+            .filter(|call| call.name == openwave_core::SANDBOX_DONE_TOOL)
+        {
+            let already_reminded = self
+                .store
+                .get_sandbox_tool_call_receipt(call.id)
+                .await?
+                .is_some_and(|receipt| receipt.error_code.as_deref() == Some(TASK_PLAN_INCOMPLETE));
+            if already_reminded {
+                return Ok(None);
+            }
         }
         let Some(plan) = self.store.get_agent_run_task_plan(run.id).await? else {
             return Ok(None);
@@ -792,15 +831,36 @@ impl SandboxAgentRunWorker {
         run: AgentRun,
         lease_token: uuid::Uuid,
         intents: Vec<SandboxToolCallIntent>,
-        previous_rows: usize,
+        previous_budget: &SandboxRowBudget,
         narration: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
         let emitted = intents.len();
-        let remaining = MAX_SANDBOX_TOOL_CALLS.saturating_sub(previous_rows);
-        if emitted == 0 || remaining == 0 {
-            // Tool advertisement is withdrawn before the budget runs out, so a
-            // step arriving with nothing left to spend has ignored a request
-            // that offered it no dispatchable tool at all.
+        // Each budget is spent by the rows that belong to it, so a batch is
+        // admitted call by call rather than by one count: a step that mixes a
+        // plan update with real work can exhaust one allowance while the other
+        // still has room. The prefix that fits is what parks.
+        let mut work_left = MAX_SANDBOX_TOOL_CALLS.saturating_sub(previous_budget.work);
+        let mut plan_left = MAX_SANDBOX_TASK_PLAN_CALLS.saturating_sub(previous_budget.plan);
+        let mut admitted = 0;
+        for intent in &intents {
+            if admitted == MAX_SANDBOX_TOOL_CALLS_PER_STEP {
+                break;
+            }
+            let left = if intent.name == openwave_core::UPDATE_TASK_PLAN_TOOL {
+                &mut plan_left
+            } else {
+                &mut work_left
+            };
+            if *left == 0 {
+                break;
+            }
+            *left -= 1;
+            admitted += 1;
+        }
+        if emitted == 0 || admitted == 0 {
+            // Tool advertisement is withdrawn before a budget runs out, so a
+            // step whose very first call has nothing left to spend has ignored
+            // a request that offered it no such tool at all.
             return self
                 .record_failure(
                     &run,
@@ -809,34 +869,32 @@ impl SandboxAgentRunWorker {
                 )
                 .await;
         }
-        let capacity = Ord::min(MAX_SANDBOX_TOOL_CALLS_PER_STEP, remaining);
         let mut intents = intents;
-        let mut dropped = 0;
-        if emitted > capacity {
+        let dropped = emitted - admitted;
+        if dropped > 0 {
             // The last call the step can afford is answered rather than run, so
             // the model learns why the rest are missing. Everything past it is
             // dropped outright: the transcript is rebuilt from rows, so a call
             // with no row simply never happened and leaves no dangling tool use.
-            dropped = emitted - capacity;
-            intents.truncate(capacity);
+            intents.truncate(admitted);
             let last = intents
                 .last_mut()
-                .expect("capacity is at least one when a step parks");
-            let (error_code, message) = if capacity == remaining {
-                (
-                    "tool_budget_exhausted",
-                    format!(
-                        "This task's tool budget is exhausted: this call and {dropped} other \
-                         call(s) in this step were not run. Finish with done."
-                    ),
-                )
-            } else {
+                .expect("at least one call is admitted when a step parks");
+            let (error_code, message) = if admitted == MAX_SANDBOX_TOOL_CALLS_PER_STEP {
                 (
                     "too_many_calls_in_step",
                     format!(
                         "A step may make at most {MAX_SANDBOX_TOOL_CALLS_PER_STEP} tool calls: \
                          this call and {dropped} other call(s) in this step were not run. Re-send \
                          them in a later step."
+                    ),
+                )
+            } else {
+                (
+                    "tool_budget_exhausted",
+                    format!(
+                        "This task's tool budget is exhausted: this call and {dropped} other \
+                         call(s) in this step were not run. Finish with done."
                     ),
                 )
             };
