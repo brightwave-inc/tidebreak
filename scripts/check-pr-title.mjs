@@ -19,7 +19,7 @@ export const ALLOWED_TYPES = [
 const RELEASING_TYPES = new Set(["feat", "fix", "perf", "deps", "revert"]);
 
 const TITLE_PATTERN = new RegExp(
-  `^(${ALLOWED_TYPES.join("|")})(?:\\(([a-z0-9][a-z0-9._/-]*)\\))?(!)?: (\\S.*)$`,
+  `^(${ALLOWED_TYPES.join("|")})(?:\\(([a-z0-9]+(?:[._/-][a-z0-9]+)*)\\))?(!)?: (\\S.*)$`,
 );
 
 export function parsePrTitle(title) {

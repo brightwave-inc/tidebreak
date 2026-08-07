@@ -68,3 +68,11 @@ test("uses readable acronyms in singleton scope prefixes", () => {
 `,
   );
 });
+
+test("keeps historical titles with malformed scopes without crashing", () => {
+  const notes = `### Bug Fixes
+- fix(ui/): keep release automation running ([#20](https://example.com/20)) by @octo
+`;
+
+  assert.equal(formatReleaseNotes(notes), notes);
+});
