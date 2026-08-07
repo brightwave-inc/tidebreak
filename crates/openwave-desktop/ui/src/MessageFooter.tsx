@@ -1,11 +1,19 @@
+import type { RefObject } from "react";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { ClipboardCopyButton } from "./ClipboardCopyButton";
+import {
+  ClipboardCopyButton,
+  copyPlainText,
+  copyRichText,
+  type ClipboardWriter,
+} from "./ClipboardCopyButton";
 
 type MessageFooterProps = {
   role: "user" | "assistant";
   text: string;
   createdAt?: string;
   settled?: boolean;
+  /** Rendered assistant Markdown, read only when Copy is clicked. */
+  richContentRef?: RefObject<HTMLElement | null>;
   /** A turn's assistant prose is split into one bubble per activity phase;
    *  the copy action and timestamp belong to the turn, so only the bubble
    *  that closes it carries them. */
@@ -17,6 +25,7 @@ export function MessageFooter({
   text,
   createdAt,
   settled = true,
+  richContentRef,
   sequenceEnd = true,
 }: MessageFooterProps) {
   if (role === "assistant" && !sequenceEnd) return null;
@@ -32,7 +41,9 @@ export function MessageFooter({
     <footer className="message-footer">
       {canCopy && (
         <ClipboardCopyButton
-          value={text}
+          copy={() =>
+            copyMessageContent(richContentRef?.current?.innerHTML ?? "", text)
+          }
           label="Copy"
           copiedAnnouncement="Message copied to clipboard."
           failedAnnouncement="Message could not be copied."
@@ -49,6 +60,20 @@ export function MessageFooter({
       )}
     </footer>
   );
+}
+
+/** Write the rendered message for rich editors and its source text everywhere. */
+export async function copyMessageContent(
+  html: string,
+  text: string,
+  clipboard: ClipboardWriter | undefined = globalThis.navigator?.clipboard,
+  item: typeof ClipboardItem | undefined = globalThis.ClipboardItem,
+): Promise<void> {
+  if (html.trim()) {
+    await copyRichText(html, text, clipboard, item);
+    return;
+  }
+  await copyPlainText(text, clipboard);
 }
 
 export function formatMessageTimestamp(

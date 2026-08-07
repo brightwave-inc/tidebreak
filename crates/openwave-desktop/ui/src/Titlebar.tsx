@@ -3,18 +3,24 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { WithTooltip } from "@/components/ui/tooltip";
-import { useDesktopNavigation } from "./DesktopNavigation";
+import type { DesktopNavigation } from "./DesktopNavigation";
+import { cn } from "@/lib/utils";
 
 /**
- * The macOS overlay titlebar: the strip the traffic lights sit in, which the
- * app has to furnish itself because the system chrome is hidden.
+ * The desktop titlebar: navigation stays available even where the native
+ * window decorations do not provide browser-style history controls.
  *
  * It carries navigation and the app's name and nothing else. The rail's own
  * collapse control stays in the rail — it acts on the rail, and putting a
  * second copy up here left two buttons for one job on adjacent rows.
  */
-export function Titlebar() {
-  const navigation = useDesktopNavigation();
+export function Titlebar({
+  macOverlay,
+  navigation,
+}: {
+  macOverlay: boolean;
+  navigation: DesktopNavigation;
+}) {
   // The host owns the display name: debug builds report "OpenWave [dev]" so a
   // dev window is distinguishable from an installed release. The titlebar only
   // renders inside the native host, where `getName` is always available.
@@ -30,7 +36,10 @@ export function Titlebar() {
   }, []);
 
   return (
-    <div className="titlebar" data-tauri-drag-region>
+    <div
+      className={cn("titlebar", macOverlay && "is-mac-overlay")}
+      data-tauri-drag-region
+    >
       <div className="titlebar-nav">
         <WithTooltip label="Back" side="bottom">
           <button

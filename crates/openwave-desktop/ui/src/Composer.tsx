@@ -251,6 +251,8 @@ export type ComposerProps = {
   cancelPending: boolean;
   disabled: boolean;
   draft: string;
+  /** Prior user messages, newest first, for terminal-style Up/Down recall. */
+  history?: readonly string[];
   modelMenu?: ReactNode;
   permissionMenu?: ReactNode;
   network?: ComposerNetwork;
@@ -280,6 +282,7 @@ export function Composer({
   cancelPending,
   disabled,
   draft,
+  history = [],
   modelMenu,
   permissionMenu,
   network,
@@ -308,6 +311,8 @@ export function Composer({
   // boolean flickers the drop hint on and off while the file is held still.
   const dragDepthRef = useRef(0);
   const selectionRef = useRef<{ start: number; end: number } | null>(null);
+  const historyIndexRef = useRef<number | null>(null);
+  const savedDraftRef = useRef("");
   const [dragging, setDragging] = useState(false);
   // The `/` token under the caret, as a piece of state rather than a derived
   // value: the caret moves without the draft changing, and a ref would leave
@@ -355,6 +360,8 @@ export function Composer({
   // means nothing in it.
   useLayoutEffect(() => {
     selectionRef.current = null;
+    historyIndexRef.current = null;
+    savedDraftRef.current = "";
     setSlashToken(null);
     setMentionToken(null);
   }, [resetKey]);
@@ -580,6 +587,7 @@ export function Composer({
     if (!canSubmit) return;
     const submissionKey = resetKey;
     await (active ? onSteer() : onSend());
+    historyIndexRef.current = null;
 
     // Restore focus after accepted guidance or a failed request. A new chat or
     // disabled composer must never receive focus from an older submission.
@@ -599,6 +607,9 @@ export function Composer({
   }
 
   function onChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    // A real edit leaves history mode. Programmatic recall calls moveCaret
+    // directly and therefore does not pass through this handler.
+    historyIndexRef.current = null;
     rememberSelection(event.target);
     syncSlashToken(event.target.value, event.target.selectionStart);
     onDraftChange(event.target.value);
@@ -641,6 +652,55 @@ export function Composer({
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     if (acceptTransfer(event.clipboardData)) event.preventDefault();
+  }
+
+  /** Terminal-style recall, claimed only at the start/end of the textarea. */
+  function handleHistoryKey(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ): boolean {
+    if (
+      event.shiftKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.nativeEvent.isComposing
+    ) {
+      return false;
+    }
+    const field = event.currentTarget;
+    const collapsed = field.selectionStart === field.selectionEnd;
+    if (!collapsed) return false;
+
+    if (event.key === "ArrowUp") {
+      const atStart = field.selectionStart === 0;
+      if (draft.trim() && !atStart) return false;
+      const nextIndex =
+        historyIndexRef.current === null ? 0 : historyIndexRef.current + 1;
+      const recalled = history[nextIndex];
+      if (recalled === undefined) return false;
+      if (historyIndexRef.current === null) savedDraftRef.current = draft;
+      historyIndexRef.current = nextIndex;
+      setSlashToken(null);
+      setMentionToken(null);
+      moveCaret(recalled, 0);
+      return true;
+    }
+
+    if (event.key !== "ArrowDown" || historyIndexRef.current === null) {
+      return false;
+    }
+    if (field.selectionEnd !== field.value.length) return false;
+    const nextIndex = historyIndexRef.current - 1;
+    if (nextIndex < 0) {
+      historyIndexRef.current = null;
+      moveCaret(savedDraftRef.current, savedDraftRef.current.length);
+      return true;
+    }
+    const recalled = history[nextIndex];
+    if (recalled === undefined) return false;
+    historyIndexRef.current = nextIndex;
+    moveCaret(recalled, recalled.length);
+    return true;
   }
 
   async function removeFolder(folder: ChatFolderAccess) {
@@ -848,6 +908,10 @@ export function Composer({
         onPaste={onPaste}
         onKeyDown={(event) => {
           if (handleSlashKey(event) || handleMentionKey(event)) {
+            event.preventDefault();
+            return;
+          }
+          if (handleHistoryKey(event)) {
             event.preventDefault();
             return;
           }

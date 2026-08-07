@@ -251,6 +251,28 @@ describe("ChatView", () => {
     scrollIntoView.mockRestore();
   });
 
+  it("keeps a transcript anchor in the URL until returning to the live tail", async () => {
+    useChatSessionStore.getState().update((session) => ({
+      ...session,
+      messages: [{ id: "m1", role: "user", text: "Earlier request" }],
+    }));
+    const user = userEvent.setup();
+    const { router } = await renderWithRouter(
+      <ChatView {...chatViewProps()} />,
+      { initialUrl: "/c/chat-1?at=m1" },
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Return to latest" }),
+    ).toBeInTheDocument();
+    expect(router.state.location.search).toHaveProperty("at", "m1");
+
+    await user.click(screen.getByRole("button", { name: "Return to latest" }));
+    await waitFor(() =>
+      expect(router.state.location.search).not.toHaveProperty("at"),
+    );
+  });
+
   it("sends an approval decision through its own client", async () => {
     useChatSessionStore.getState().update((session) => ({
       ...session,

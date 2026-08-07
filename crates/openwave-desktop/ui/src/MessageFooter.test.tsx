@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { formatMessageTimestamp, MessageFooter } from "./MessageFooter";
+import {
+  copyMessageContent,
+  formatMessageTimestamp,
+  MessageFooter,
+} from "./MessageFooter";
 
 describe("MessageFooter", () => {
   it("renders copy and a machine-readable timestamp for a settled assistant message", () => {
@@ -59,5 +63,34 @@ describe("MessageFooter", () => {
     expect(
       formatMessageTimestamp("not-a-date", new Date("2026-07-20T12:00:00Z")),
     ).toBeNull();
+  });
+
+  it("copies rendered HTML beside the message's plain text", async () => {
+    const writes: ClipboardItem[][] = [];
+    class TestClipboardItem {
+      readonly types: string[];
+      constructor(readonly data: Record<string, Blob>) {
+        this.types = Object.keys(data);
+      }
+      async getType(type: string): Promise<Blob> {
+        return this.data[type] ?? new Blob();
+      }
+    }
+    const clipboard = {
+      writeText: async () => undefined,
+      write: async (items: ClipboardItem[]) => {
+        writes.push(items);
+      },
+    };
+
+    await copyMessageContent(
+      "<table><tbody><tr><td>Total</td></tr></tbody></table>",
+      "| Total |",
+      clipboard,
+      TestClipboardItem as unknown as typeof ClipboardItem,
+    );
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.[0]?.types).toEqual(["text/plain", "text/html"]);
   });
 });

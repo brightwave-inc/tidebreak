@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const TICK_INTERVAL_MS = 20;
 const SMOOTHING_FACTOR = 18;
+const FINISH_SMOOTHING_FACTOR = 5;
 
 /**
  * How far the animation may trail its target before it stops animating and
@@ -43,7 +44,7 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
 
   const tick = useCallback(() => {
     const target = targetRef.current;
-    if (!liveRef.current || document.visibilityState !== "visible") {
+    if (document.visibilityState !== "visible") {
       timerRef.current = null;
       showImmediately(target);
       return;
@@ -69,7 +70,14 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
 
     const nextLength = Math.min(
       target.length,
-      current.length + Math.max(1, Math.ceil(remaining / SMOOTHING_FACTOR)),
+      current.length +
+        Math.max(
+          1,
+          Math.ceil(
+            remaining /
+              (liveRef.current ? SMOOTHING_FACTOR : FINISH_SMOOTHING_FACTOR),
+          ),
+        ),
     );
     showImmediately(target.slice(0, nextLength));
     timerRef.current = window.setTimeout(tick, TICK_INTERVAL_MS);
@@ -77,6 +85,7 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
 
   useEffect(() => {
     const previousTarget = targetRef.current;
+    const wasLive = liveRef.current;
     targetRef.current = text;
     liveRef.current = live;
 
@@ -88,8 +97,17 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
       return;
     }
     if (!live) {
-      stop();
-      showImmediately(text);
+      // A stream that just ended may still have a small presentation buffer.
+      // Drain it quickly instead of snapping the final characters into place.
+      // Ordinary historical updates still render immediately.
+      const canFinishSmoothly =
+        wasLive && text.startsWith(displayedRef.current);
+      if (!canFinishSmoothly) {
+        stop();
+        showImmediately(text);
+      } else if (timerRef.current === null) {
+        tick();
+      }
       return;
     }
     if (text === previousTarget) return;

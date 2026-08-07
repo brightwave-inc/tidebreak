@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo } from "react";
+import { Fragment, memo, useMemo, useRef } from "react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
@@ -645,6 +645,10 @@ export function groupMessageItems(
     // One phase per contiguous run of activity, however long. A phase that
     // splits at every assistant sentence is not a phase.
     const phase: ChatMessage[] = [];
+    // Activity can resume through several assistant snapshots while remaining
+    // one expandable phase. The collapsed live label should describe only the
+    // latest snapshot; the expanded rail still preserves the whole phase.
+    let latestSnapshotStart = 0;
     while (index < messages.length) {
       if (isActivityMessage(messages[index])) {
         phase.push(messages[index]!);
@@ -663,6 +667,7 @@ export function groupMessageItems(
         let ahead = index + 1;
         while (isInvisibleAssistant(messages[ahead])) ahead += 1;
         if (isActivityMessage(messages[ahead])) {
+          latestSnapshotStart = phase.length;
           index = ahead;
           continue;
         }
@@ -678,6 +683,10 @@ export function groupMessageItems(
       ),
     );
     const activities = phase.filter(
+      (entry): entry is ToolMessage =>
+        entry.role === "tool" && !parked.has(entry.callId),
+    );
+    const latestActivities = phase.slice(latestSnapshotStart).filter(
       (entry): entry is ToolMessage =>
         entry.role === "tool" && !parked.has(entry.callId),
     );
@@ -744,6 +753,14 @@ export function groupMessageItems(
               entry.name !== "wait_for_agents",
           )
         : activities;
+    const latestRailActivities =
+      spawns.length > 0
+        ? latestActivities.filter(
+            (entry) =>
+              entry.name !== "spawn_sandbox_agent" &&
+              entry.name !== "wait_for_agents",
+          )
+        : latestActivities;
 
     // The rail and every card inside carry their own boundary, so this one is
     // only a backstop for the phase's own frame.
@@ -754,6 +771,10 @@ export function groupMessageItems(
       >
         <ToolActivityGroup
           activities={railActivities}
+          labelActivities={latestRailActivities}
+          anchorIds={phase.flatMap((entry) =>
+            entry.role === "tool" ? [entry.id] : [],
+          )}
           groupIndex={groupIndex}
           animate={animateStreaming}
         >
@@ -1005,12 +1026,16 @@ function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
 function AssistantMessageBody({
   text,
   streaming,
+  containerRef,
 }: {
   text: string;
   streaming: boolean;
+  containerRef?: React.Ref<HTMLDivElement>;
 }) {
   const displayed = useStreamingTypewriter(text, streaming);
-  return <MessageMarkdown>{displayed}</MessageMarkdown>;
+  return (
+    <MessageMarkdown containerRef={containerRef}>{displayed}</MessageMarkdown>
+  );
 }
 
 /**
@@ -1052,6 +1077,7 @@ function MessageBubbleImpl({
   onRetry?: () => void;
 }) {
   const sourceNav = useSourceNav();
+  const richContentRef = useRef<HTMLDivElement | null>(null);
   // One way into the source panel for both anchors a citation has: the phrase
   // in the prose and the row at the foot of the message open the same place.
   const openSource = useMemo(
@@ -1101,6 +1127,7 @@ function MessageBubbleImpl({
             <AssistantMessageBody
               text={message.text}
               streaming={busy && animateStreaming}
+              containerRef={richContentRef}
             />
           )}
           <AssistantSources
@@ -1114,6 +1141,7 @@ function MessageBubbleImpl({
             text={stripCitationDirectives(message.text)}
             createdAt={message.createdAt}
             settled={!busy}
+            richContentRef={richContentRef}
             sequenceEnd={sequenceEnd}
           />
         </article>
@@ -1124,7 +1152,11 @@ function MessageBubbleImpl({
   if (message.role === "user") {
     return (
       <div className="message-user-frame">
-        <article className="message message-user" aria-label="You">
+        <article
+          className="message message-user"
+          aria-label="You"
+          data-transcript-anchor={message.id}
+        >
           {message.images &&
             message.images.length > 0 &&
             imageClient &&

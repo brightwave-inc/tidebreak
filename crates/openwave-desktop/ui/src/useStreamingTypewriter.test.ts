@@ -37,7 +37,7 @@ describe("useStreamingTypewriter", () => {
     expect(result.current).toBe("Searching the web and 1 other task");
   });
 
-  it("finishes immediately when a live step settles", async () => {
+  it("drains the remaining buffer smoothly when a live step settles", async () => {
     vi.useFakeTimers();
     const { result, rerender } = renderHook(
       ({ text, live }) => useStreamingTypewriter(text, live),
@@ -48,9 +48,13 @@ describe("useStreamingTypewriter", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(20);
     });
-    rerender({ text: "Searched the web and 1 other task", live: false });
+    rerender({ text: "Searching the web and 1 other task", live: false });
 
-    expect(result.current).toBe("Searched the web and 1 other task");
+    expect(result.current).not.toBe("Searching the web and 1 other task");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current).toBe("Searching the web and 1 other task");
   });
 
   // A reconnect replays the active turn's whole journal in a burst (#1716);

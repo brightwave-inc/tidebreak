@@ -486,6 +486,13 @@ body {
   min-height: calc(var(--transcript-viewport, 100dvh) - 8rem);
 }
 
+/* Zero-height landing point for transcript rail and table-of-contents jumps. */
+.transcript-anchor {
+  display: block;
+  height: 0;
+  scroll-margin-top: 1.5rem;
+}
+
 /* Scroll-edge fades: soften whichever edges have more content beyond them, so
    the transcript reads as continuing past the frame rather than clipped.
    Painted as overlays on the wrapper rather than a mask-image on `.messages`:
@@ -1377,8 +1384,8 @@ body {
 }
 
 
-/* macOS overlay titlebar: one strip carries the traffic lights, back and
-   forward, the app's name, and drags the window. */
+/* Desktop titlebar: one strip carries back/forward, the app name, and a drag
+   region. macOS reserves additional room for the overlay traffic lights. */
 .app-shell.with-titlebar {
   flex-direction: column;
 }
@@ -1388,9 +1395,13 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding-left: 84px;
+  padding-left: 1rem;
   padding-right: 1rem;
   border-bottom: 1px solid var(--color-border);
+}
+
+.titlebar.is-mac-overlay {
+  padding-left: 84px;
 }
 
 .titlebar-nav {
