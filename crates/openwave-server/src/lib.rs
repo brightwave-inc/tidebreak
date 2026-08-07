@@ -76,6 +76,7 @@ mod scoped_store;
 pub mod secret_rehome;
 mod source_tools;
 mod state;
+mod task_plan_tool;
 mod turn_worker;
 mod view_frames;
 pub mod voice_transcription;
@@ -532,6 +533,7 @@ pub fn app(state: AppState) -> Router {
             post(routes::decide_plan)
                 .layer(DefaultBodyLimit::max(routes::MAX_PLAN_DECISION_BODY_BYTES)),
         )
+        .route("/chats/{id}/task-plan", get(routes::get_task_plan))
         .route("/chats/{id}/approvals", get(routes::list_pending_approvals))
         .route(
             "/chats/{id}/approvals/{call_id}",
@@ -1237,6 +1239,9 @@ fn agent_deps(
             source_store.clone(),
         )))
         .with(Box::new(create_app))
+        .with(Box::new(task_plan_tool::UpdateTaskPlanTool::new(
+            source_store.clone(),
+        )))
         .with(web_search)
         .with(web_extract);
     tools.register_validated_client(

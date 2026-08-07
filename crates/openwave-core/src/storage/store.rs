@@ -2454,6 +2454,26 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Replace a chat's task plan and journal the bounded refresh hint.
+    ///
+    /// `call_id` names the already-admitted `update_task_plan` call, which is
+    /// what scopes the write to a turn. Steps must already be validated at the
+    /// tool boundary; storage records what it is given.
+    async fn update_task_plan(
+        &self,
+        _chat_id: ChatId,
+        _call_id: CallId,
+        _steps: &[crate::TaskPlanStep],
+        _updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::TaskPlan> {
+        turn_storage_unavailable()
+    }
+
+    /// The chat's current task plan, or `None` when it has never made one.
+    async fn get_task_plan(&self, _chat_id: ChatId) -> Result<Option<crate::TaskPlan>> {
+        turn_storage_unavailable()
+    }
+
     /// List a chat's tool calls in creation order.
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
 

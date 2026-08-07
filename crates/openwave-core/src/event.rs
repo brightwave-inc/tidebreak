@@ -183,6 +183,17 @@ pub enum AgentEvent {
         /// Turn that will resume after the decision commits.
         turn_id: TurnId,
     },
+    /// The foreground agent replaced this chat's task plan. Like
+    /// [`Self::PlanProposed`], this is only a bounded refresh hint: the steps
+    /// themselves live behind the renderer-safe task-plan route, so a plan that
+    /// is rewritten twenty times does not write twenty copies of itself into
+    /// the journal. The turn is not parked and continues immediately.
+    TaskPlanUpdated {
+        /// The tool call that committed the replacement.
+        call_id: CallId,
+        /// Turn that made the call.
+        turn_id: TurnId,
+    },
 }
 
 /// Whether to omit a defaulted `false` flag from a journal row.
@@ -290,6 +301,7 @@ mod tests {
             AgentEvent::CompactionStarted => 16,
             AgentEvent::CompactionFinished { .. } => 17,
             AgentEvent::PlanProposed { .. } => 18,
+            AgentEvent::TaskPlanUpdated { .. } => 19,
         }
     }
 
@@ -420,6 +432,10 @@ mod tests {
             AgentEvent::CompactionFinished { compacted: true },
             AgentEvent::PlanProposed {
                 call_id: CallId(id(5)),
+                turn_id: TurnId(id(1)),
+            },
+            AgentEvent::TaskPlanUpdated {
+                call_id: CallId(id(6)),
                 turn_id: TurnId(id(1)),
             },
         ]

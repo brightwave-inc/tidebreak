@@ -36,6 +36,7 @@ You are OpenWave, an assistant working with the user inside one conversation.
 
 const PLAN_MODE_HEADING: &str = "## Plan mode";
 const USER_QUESTIONS_HEADING: &str = "## User clarification";
+const TASK_PLAN_HEADING: &str = "## Task plan";
 const PRIVATE_SCRATCH_HEADING: &str = "## Private scratch";
 const SOURCES_HEADING: &str = "## Conversation sources and citations";
 const WEB_SEARCH_HEADING: &str = "## Public web research";
@@ -214,6 +215,18 @@ pub(crate) fn compose_for_surface(
                 "- Use `ask_user_questions` when work should continue but a missing choice would materially change the result or authorize a consequential action. Do not use it for minor reversible assumptions.",
                 "- Ask no more than three focused questions at once. Prefer clear mutually exclusive options, and allow a free-form answer only when the listed choices may not cover the user's intent.",
                 "- After asking, wait for the user's structured answer; do not guess, repeat the question in prose, or start the dependent work.",
+            ],
+        );
+    }
+
+    if has(openwave_core::UPDATE_TASK_PLAN_TOOL) {
+        push_section(
+            &mut prompt,
+            TASK_PLAN_HEADING,
+            &[
+                "- Use `update_task_plan` when a request needs several meaningful dependent steps, so the user can follow long work while it runs. A short answer or a single action needs no plan; do not create one for it.",
+                "- Keep exactly one step in_progress while you work on it. Mark it completed the moment it is done and start the next one, rather than updating the whole list at the end.",
+                "- Every call replaces the entire plan, so always send the complete list. Revise the steps when the work turns out differently instead of leaving a plan that no longer describes what you are doing.",
             ],
         );
     }
@@ -687,6 +700,7 @@ mod tests {
         for unavailable in [
             PLAN_MODE_HEADING,
             USER_QUESTIONS_HEADING,
+            TASK_PLAN_HEADING,
             PRIVATE_SCRATCH_HEADING,
             SOURCES_HEADING,
             WEB_SEARCH_HEADING,
@@ -718,6 +732,7 @@ mod tests {
             spec("read_file"),
             spec("write_file"),
             spec("ask_user_questions"),
+            spec("update_task_plan"),
             spec("list_sources"),
             spec("read_source"),
             spec("web_search"),
@@ -733,6 +748,7 @@ mod tests {
         for enabled in [
             PRIVATE_SCRATCH_HEADING,
             USER_QUESTIONS_HEADING,
+            TASK_PLAN_HEADING,
             SOURCES_HEADING,
             WEB_SEARCH_HEADING,
             WEB_EXTRACT_HEADING,
@@ -744,6 +760,7 @@ mod tests {
             "`read_file`",
             "`write_file`",
             "`ask_user_questions`",
+            "`update_task_plan`",
             "`list_sources`",
             "`read_source`",
             "`web_search`",

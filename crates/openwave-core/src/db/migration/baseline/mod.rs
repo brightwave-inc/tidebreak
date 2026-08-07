@@ -107,6 +107,7 @@ pub(super) fn tables() -> Vec<BaselineTable> {
         ),
         entry(tools::operation_log_table(), tools::operation_log_indexes()),
         entry(tools::plan_request_table(), tools::plan_request_indexes()),
+        entry(tools::task_plan_table(), tools::task_plan_indexes()),
         entry(
             tools::user_question_request_table(),
             tools::user_question_request_indexes(),

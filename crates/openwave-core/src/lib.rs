@@ -82,6 +82,7 @@ pub mod secret_cache;
 pub mod semantic_checkpoint;
 pub mod steer;
 pub mod storage;
+pub mod task_plan;
 pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
@@ -242,6 +243,11 @@ pub use storage::{
     RetrySandboxToolCallOutcome, SandboxAdmissionMode, SandboxProvision, SandboxProvisionState,
     SecretProvider, Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+};
+pub use task_plan::{
+    parse_update_task_plan_arguments, task_plan_summary, update_task_plan_tool_spec, TaskPlan,
+    TaskPlanStep, TaskPlanStepStatus, UpdateTaskPlanArgs, MAX_TASK_PLAN_STEPS,
+    MAX_TASK_PLAN_STEP_CHARS, UPDATE_TASK_PLAN_TOOL,
 };
 pub use tool::{
     input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, ScratchPriorContents,

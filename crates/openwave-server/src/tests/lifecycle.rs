@@ -3196,3 +3196,139 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
     let survived: Chat = json_body(survived).await;
     assert_eq!(survived.title, None, "a cross-owner patch changed nothing");
 }
+
+/// The plan is durable and replaceable: a turn that calls `update_task_plan`
+/// twice leaves exactly the second list behind the recovery route, with one
+/// refresh hint per call and no steps in the journal itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_replaces_its_task_plan_and_journals_only_a_refresh_hint() {
+    struct TwoPlansThenFinishProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for TwoPlansThenFinishProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("two-plans-then-finish")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let plan = |id: &str, fragment: &str| {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: id.into(),
+                        name: openwave_core::UPDATE_TASK_PLAN_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: fragment.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            };
+            let events = match call {
+                0 => plan(
+                    "plan_1",
+                    r#"{"steps":[{"content":"Read the failing test","status":"in_progress"},{"content":"Fix the parser","status":"pending"}]}"#,
+                ),
+                1 => plan(
+                    "plan_2",
+                    r#"{"steps":[{"content":"Read the failing test","status":"completed"},{"content":"Fix the parser","status":"in_progress"}]}"#,
+                ),
+                _ => vec![
+                    ProviderEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let mut tools = ToolRegistry::new();
+    tools = tools.with(Box::new(crate::task_plan_tool::UpdateTaskPlanTool::new(
+        store.clone(),
+    )));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(TwoPlansThenFinishProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "do the long thing").await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    let hints: Vec<&SequencedEvent> = events
+        .iter()
+        .filter(|event| matches!(event.event, AgentEvent::TaskPlanUpdated { .. }))
+        .collect();
+    assert_eq!(hints.len(), 2, "one hint per call: {events:?}");
+    for hint in hints {
+        let AgentEvent::TaskPlanUpdated { turn_id: on, .. } = hint.event else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(on, turn_id);
+        // The hint is bounded: nothing about the steps rides the journal.
+        let payload = serde_json::to_value(&hint.event).unwrap();
+        assert!(!payload.to_string().contains("Fix the parser"));
+    }
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/task-plan", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let plan: Option<openwave_core::TaskPlan> = json_body(response).await;
+    let plan = plan.expect("the turn recorded a plan");
+    assert_eq!(plan.turn_id, turn_id);
+    assert_eq!(
+        plan.steps
+            .iter()
+            .map(|step| step.status)
+            .collect::<Vec<_>>(),
+        vec![
+            openwave_core::TaskPlanStepStatus::Completed,
+            openwave_core::TaskPlanStepStatus::InProgress,
+        ],
+        "the second call replaced the first list rather than merging into it"
+    );
+}
