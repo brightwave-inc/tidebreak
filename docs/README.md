@@ -45,6 +45,9 @@ Project documentation, versioned alongside the code.
 - [What comes after v1](deferred.md) — the deliberately parked product scope,
   the v1 finishing work that remains actionable, and the conditions that bring
   future capabilities forward.
+- [Decision records](decisions) — numbered records of decisions later work has
+  to live with, each stating what was chosen, what was rejected, and what would
+  cause it to be revisited.
 
 More to come as the product surfaces land (running locally, API reference, and
 writing tools).
