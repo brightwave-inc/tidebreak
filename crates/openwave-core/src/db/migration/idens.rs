@@ -28,7 +28,7 @@ pub(crate) enum Document {
     Id,
     ChatId,
     ProjectId,
-    SourceUri,
+    OriginUri,
     MediaType,
     Title,
     SourceBlobId,

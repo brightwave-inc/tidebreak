@@ -302,7 +302,7 @@ accumulating duplicates.
 
 The row retains the final URL, sanitized title, fetch time, `text/markdown`
 media type, and extracted text. It has no original blob, parser fingerprint,
-source regions, or background work. `read_source` can open the stored text
+source regions, or background work. `read_document` can open the stored text
 later, and the model may cite its document id with the lightweight locator
 grammar or include the page URL directly in prose.
 

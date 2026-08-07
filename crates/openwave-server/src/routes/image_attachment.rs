@@ -29,7 +29,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use openwave_core::{
-    ChatId, DocumentSourceBlob, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
+    ChatId, DocumentBlob, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
 };
 
 use crate::error::ServerError;
@@ -227,7 +227,7 @@ pub(crate) fn inspect_image_bytes(bytes: &[u8]) -> Result<ImageRef, ServerError>
         ));
     }
     let image = ImageRef {
-        blob_id: DocumentSourceBlob::from_bytes(bytes).id,
+        blob_id: DocumentBlob::from_bytes(bytes).id,
         media_type,
         width,
         height,

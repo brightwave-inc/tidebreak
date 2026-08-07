@@ -169,7 +169,7 @@ pub(super) async fn materialize_attachments(
             ));
         };
         if bytes.len() > MAX_EXEC_WORKSPACE_FILE_BYTES
-            || openwave_core::DocumentSourceBlob::from_bytes(&bytes) != *source_blob
+            || openwave_core::DocumentBlob::from_bytes(&bytes) != *source_blob
         {
             return Err(CodeExecutionError::Unavailable(
                 "attached document bytes do not match their stored descriptor".into(),

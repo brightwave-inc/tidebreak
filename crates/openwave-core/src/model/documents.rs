@@ -9,14 +9,14 @@ use crate::id::{ChatId, DocumentId, ProjectId, TurnId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum SourceReadiness {
+pub enum DocumentReadiness {
     /// The source contains text a reader can be given.
     Readable,
     /// Durably stored and citable by name, but holding no text to read.
     StoredNoText,
 }
 
-impl SourceReadiness {
+impl DocumentReadiness {
     /// Derive readiness from whether canonical text is present.
     #[must_use]
     pub const fn of(readable: bool) -> Self {
@@ -39,7 +39,7 @@ impl SourceReadiness {
 
 /// Content-addressed raw source retained for original-file access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocumentSourceBlob {
+pub struct DocumentBlob {
     /// UUID key in the configured [`crate::BlobStore`].
     pub id: Uuid,
     /// SHA-256 digest of the exact source bytes.
@@ -48,7 +48,7 @@ pub struct DocumentSourceBlob {
     pub byte_len: u64,
 }
 
-impl DocumentSourceBlob {
+impl DocumentBlob {
     const CONTENT_NAMESPACE: Uuid = Uuid::from_u128(0xd262_91eb_f9f7_5b4d_a65d_4a44_70f8_081f);
 
     /// Describe source bytes using a deterministic content-addressed UUID.
@@ -88,13 +88,13 @@ pub struct DocumentSourceUpsert {
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, when known.
-    pub source_uri: Option<String>,
+    pub origin_uri: Option<String>,
     /// Media type used to select the parser.
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
     /// Immutable source bytes already published to the blob store.
-    pub source_blob: DocumentSourceBlob,
+    pub source_blob: DocumentBlob,
     /// Parsed text-of-record.
     pub canonical_text: String,
     /// Source metadata timestamp; workflow timestamps remain store-owned.
@@ -111,13 +111,13 @@ pub struct DocumentRecord {
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
-    pub source_uri: Option<String>,
+    pub origin_uri: Option<String>,
     /// Media type of the canonical content.
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
     /// Retained original raw bytes, when available.
-    pub source_blob: Option<DocumentSourceBlob>,
+    pub source_blob: Option<DocumentBlob>,
     /// Parsed text-of-record used by source readers.
     pub canonical_text: String,
     /// When this record was first created.
@@ -437,7 +437,7 @@ pub struct DocumentSummaryRecord {
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
-    pub source_uri: Option<String>,
+    pub origin_uri: Option<String>,
     /// Media type of the canonical content.
     pub media_type: String,
     /// Optional human-facing title.
@@ -455,8 +455,8 @@ pub struct DocumentSummaryRecord {
 impl DocumentSummaryRecord {
     /// What a caller can do with this source right now.
     #[must_use]
-    pub const fn readiness(&self) -> SourceReadiness {
-        SourceReadiness::of(self.readable)
+    pub const fn readiness(&self) -> DocumentReadiness {
+        DocumentReadiness::of(self.readable)
     }
 }
 
@@ -485,7 +485,7 @@ pub struct DocumentUpsert {
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
-    pub source_uri: Option<String>,
+    pub origin_uri: Option<String>,
     /// Media type of the canonical content.
     pub media_type: String,
     /// Optional human-facing title.
@@ -518,8 +518,8 @@ mod tests {
 
     #[test]
     fn source_blob_identity_is_deterministic_and_content_addressed() {
-        let first = DocumentSourceBlob::from_bytes(b"same source bytes");
-        assert_eq!(first, DocumentSourceBlob::from_bytes(b"same source bytes"));
+        let first = DocumentBlob::from_bytes(b"same source bytes");
+        assert_eq!(first, DocumentBlob::from_bytes(b"same source bytes"));
         assert_eq!(first.byte_len, 17);
         assert_eq!(
             first.sha256,
@@ -532,11 +532,11 @@ mod tests {
         assert!(first.has_content_addressed_id());
         assert_eq!(
             first,
-            DocumentSourceBlob::from_digest(first.sha256, first.byte_len)
+            DocumentBlob::from_digest(first.sha256, first.byte_len)
         );
         let mut invalid = first.clone();
         invalid.id = Uuid::new_v4();
         assert!(!invalid.has_content_addressed_id());
-        assert_ne!(first.id, DocumentSourceBlob::from_bytes(b"other").id);
+        assert_ne!(first.id, DocumentBlob::from_bytes(b"other").id);
     }
 }

@@ -37,8 +37,8 @@ import { isRendererToolName, type RendererToolName } from "./api";
  */
 const TOOL_ICONS: Record<RendererToolName, LucideIcon> = {
   search: FileSearch,
-  list_sources: List,
-  read_source: BookOpenText,
+  list_documents: List,
+  read_document: BookOpenText,
   read_tool_result: ScrollText,
   web_search: Globe,
   web_extract: Newspaper,

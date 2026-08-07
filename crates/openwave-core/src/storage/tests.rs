@@ -314,7 +314,7 @@ impl Store for MemStore {
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
         if document.media_type.is_empty()
-            || document.source_uri.as_deref() == Some("")
+            || document.origin_uri.as_deref() == Some("")
             || (document.chat_id.is_some() && document.project_id.is_some())
             || document
                 .chat_id
@@ -346,7 +346,7 @@ impl Store for MemStore {
             chat_id: document.chat_id,
             id: document.id,
             project_id: document.project_id,
-            source_uri: document.source_uri.clone(),
+            origin_uri: document.origin_uri.clone(),
             media_type: document.media_type.clone(),
             title: document.title.clone(),
             source_blob,
@@ -363,7 +363,7 @@ impl Store for MemStore {
         source: &DocumentSourceUpsert,
     ) -> Result<DocumentRecord> {
         if source.media_type.is_empty()
-            || source.source_uri.as_deref() == Some("")
+            || source.origin_uri.as_deref() == Some("")
             || !source.source_blob.has_content_addressed_id()
             || (source.chat_id.is_some() && source.project_id.is_some())
             || source
@@ -392,7 +392,7 @@ impl Store for MemStore {
             chat_id: source.chat_id,
             id: source.id,
             project_id: source.project_id,
-            source_uri: source.source_uri.clone(),
+            origin_uri: source.origin_uri.clone(),
             media_type: source.media_type.clone(),
             title: source.title.clone(),
             source_blob: Some(source.source_blob.clone()),
@@ -1113,7 +1113,7 @@ fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {
         chat_id: document.chat_id,
         id: document.id,
         project_id: document.project_id,
-        source_uri: document.source_uri.clone(),
+        origin_uri: document.origin_uri.clone(),
         media_type: document.media_type.clone(),
         title: document.title.clone(),
         source_byte_len: document.source_blob.as_ref().map(|blob| blob.byte_len),
@@ -1131,7 +1131,7 @@ fn mem_store_create_document_rejects_an_unknown_project() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
-        source_uri: None,
+        origin_uri: None,
         media_type: "text/plain".into(),
         title: None,
         source_blob: None,
@@ -1173,7 +1173,7 @@ fn store_is_object_safe_and_roundtrips() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
-        source_uri: Some("file:///mem-store.txt".into()),
+        origin_uri: Some("file:///mem-store.txt".into()),
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "atomic source".into(),
@@ -1257,7 +1257,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
-        source_uri: Some("file:///scoped.txt".into()),
+        origin_uri: Some("file:///scoped.txt".into()),
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "project A source".into(),

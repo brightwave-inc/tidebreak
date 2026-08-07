@@ -44,6 +44,7 @@ import {
   type PluginCatalog,
   type PluginEnableUpdate,
   type Project,
+  type ProjectDocumentPage,
   type PromptBody,
   type ProviderInfo,
   type ProviderKind,
@@ -730,6 +731,42 @@ export class ApiClient {
       method: "DELETE",
       headers: this.headers(),
     });
+  }
+
+  /** The files this project shares with every conversation filed under it. */
+  listProjectDocuments(projectId: string): Promise<ProjectDocumentPage> {
+    return this.json(`/projects/${encodeURIComponent(projectId)}/documents`, {
+      headers: this.headers(),
+    });
+  }
+
+  /**
+   * Share one conversation's file with the project that conversation belongs to.
+   *
+   * The conversation keeps its own copy — a document's owner is part of its id,
+   * so the project's is a different document and the transcript that referred to
+   * the original still resolves.
+   */
+  promoteDocumentToProject(
+    projectId: string,
+    chatId: string,
+    documentId: string,
+  ): Promise<{ document_id: string }> {
+    return this.json(
+      `/projects/${encodeURIComponent(projectId)}/documents/promote`,
+      {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({ chat_id: chatId, document_id: documentId }),
+      },
+    );
+  }
+
+  deleteProjectDocument(projectId: string, documentId: string): Promise<void> {
+    return this.json(
+      `/projects/${encodeURIComponent(projectId)}/documents/${encodeURIComponent(documentId)}`,
+      { method: "DELETE", headers: this.headers() },
+    );
   }
 
   /**

@@ -15,6 +15,7 @@ import { InboxView } from "./InboxView";
 import { useManagedPolicy } from "./managedPolicy";
 import type { PanelSearch } from "./panel/panelUrl";
 import { PluginsPage } from "./plugins/PluginsPage";
+import { ProjectFilesView } from "./ProjectFilesView";
 import { useProjectListStore } from "./ProjectListStore";
 import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
@@ -171,6 +172,33 @@ function ProjectChatRouteComponent() {
   return <ChatRoute key={chatId} chatId={chatId} />;
 }
 
+/**
+ * A project's own page: the files its conversations share.
+ *
+ * Reached from the project's row rather than by opening it, because opening a
+ * project means opening the conversations inside it — this page is about the
+ * material behind them, which a reader visits far less often.
+ */
+const projectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/p/$projectId",
+  component: ProjectRouteComponent,
+});
+
+function ProjectRouteComponent() {
+  const { projectId } = projectRoute.useParams();
+  useEffect(() => {
+    useProjectListStore.getState().expandProject(projectId);
+  }, [projectId]);
+  return (
+    <RouteFrame sidebar={<AppSidebar />}>
+      <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-auto">
+        <ProjectFilesView projectId={projectId} />
+      </div>
+    </RouteFrame>
+  );
+}
+
 export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -242,6 +270,7 @@ export const routeTree = rootRoute.addChildren([
   pluginDetailRoute,
   inboxRoute,
   chatRoute,
+  projectRoute,
   projectChatRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,

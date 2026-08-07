@@ -111,7 +111,7 @@ describe("hydrateTranscriptHistory", () => {
     const entries = hydrateTranscriptHistory([], [
       {
         call_id: "call-6",
-        tool: "list_sources",
+        tool: "list_documents",
         result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
@@ -119,7 +119,7 @@ describe("hydrateTranscriptHistory", () => {
       },
       {
         call_id: "call-7",
-        tool: "read_source",
+        tool: "read_document",
         result_unreadable: false,
         status: "completed",
         started_at: "2026-07-16T10:00:01Z",
@@ -136,8 +136,8 @@ describe("hydrateTranscriptHistory", () => {
     ]);
 
     expect(entries).toEqual([
-      expect.objectContaining({ name: "list_sources" }),
-      expect.objectContaining({ name: "read_source" }),
+      expect.objectContaining({ name: "list_documents" }),
+      expect.objectContaining({ name: "read_document" }),
       expect.objectContaining({ name: "search" }),
     ]);
   });

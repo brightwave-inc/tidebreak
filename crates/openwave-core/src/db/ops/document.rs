@@ -59,7 +59,7 @@ pub(in crate::db) async fn accept_source(
         id: Set(source.id.0),
         chat_id: Set(source.chat_id.map(|id| id.0)),
         project_id: Set(source.project_id.map(|id| id.0)),
-        source_uri: Set(source.source_uri.clone()),
+        origin_uri: Set(source.origin_uri.clone()),
         media_type: Set(source.media_type.clone()),
         title: Set(source.title.clone()),
         source_blob_id: Set(Some(source.source_blob.id)),
@@ -95,7 +95,7 @@ pub(in crate::db) async fn accept_source(
 }
 
 fn validate_source_input(source: &DocumentSourceUpsert) -> Result<()> {
-    if source.media_type.is_empty() || source.source_uri.as_deref() == Some("") {
+    if source.media_type.is_empty() || source.origin_uri.as_deref() == Some("") {
         return Err(AgentError::Store("invalid document source metadata".into()));
     }
     validate_document_source_blob(&source.source_blob)?;

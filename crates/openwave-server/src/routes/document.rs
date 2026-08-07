@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 use openwave_core::{
-    AgentError, ChatId, DocumentId, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId, SourceReadiness,
+    AgentError, ChatId, DocumentBlob, DocumentId, DocumentListCursor, DocumentReadiness,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
 };
 
 use crate::document_decode::decode_document;
@@ -34,6 +34,16 @@ pub struct IngestDocument {
     /// Media (MIME) type; defaults to `text/plain` when omitted.
     #[serde(default)]
     pub media_type: Option<String>,
+}
+
+/// Body of `POST /projects/{project_id}/documents/promote`.
+#[derive(Debug, Deserialize)]
+pub struct PromoteDocument {
+    /// The conversation that owns the document being promoted. It must belong to
+    /// the project in the path.
+    pub chat_id: ChatId,
+    /// The conversation-owned document to share with the project.
+    pub document_id: DocumentId,
 }
 
 /// Query parameters for raw-byte document ingestion.
@@ -66,7 +76,7 @@ pub struct IngestResult {
     /// The ingested document's id (derived from the URI when one is given).
     pub document_id: DocumentId,
     /// Whether the stored source has canonical text.
-    pub readiness: SourceReadiness,
+    pub readiness: DocumentReadiness,
 }
 
 /// Result of streamed native-file ingestion.
@@ -75,7 +85,7 @@ pub struct StreamedIngestResult {
     /// The content-derived id in this conversation.
     pub document_id: DocumentId,
     /// Whether the stored source has canonical text.
-    pub readiness: SourceReadiness,
+    pub readiness: DocumentReadiness,
     /// Whether this request found an existing source with the same immutable
     /// content rather than creating a second catalog record.
     pub already_present: bool,
@@ -112,7 +122,7 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             document_id: document.id,
             chat_id: document.chat_id,
             project_id: document.project_id,
-            uri: document.source_uri,
+            uri: document.origin_uri,
             media_type: document.media_type,
             title: document.title,
             source_byte_len: document.source_byte_len,
@@ -129,7 +139,7 @@ impl From<&DocumentRecord> for DocumentSummary {
             document_id: document.id,
             chat_id: document.chat_id,
             project_id: document.project_id,
-            uri: document.source_uri.clone(),
+            uri: document.origin_uri.clone(),
             media_type: document.media_type.clone(),
             title: document.title.clone(),
             source_byte_len: document.source_blob.as_ref().map(|source| source.byte_len),
@@ -275,6 +285,69 @@ pub async fn ingest_project_document(
     ingest_document_in_scope(&state, &store, None, Some(project_id), body).await
 }
 
+/// `POST /projects/{project_id}/documents/promote` — make a conversation's
+/// document a file of the project that conversation belongs to.
+///
+/// Promotion copies rather than moves. A document's owner is baked into its id,
+/// so the project's copy is a different document, and the conversation's
+/// transcript still refers to the original by the id it recorded — moving would
+/// leave every past tool call pointing at nothing. The two rows share one
+/// content-addressed blob, so the bytes are stored once.
+pub async fn promote_document_to_project(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path(project_id): Path<ProjectId>,
+    Json(body): Json<PromoteDocument>,
+) -> Result<impl IntoResponse, ServerError> {
+    store.require_project(project_id).await?;
+    let chat = store.require_chat(body.chat_id).await?;
+    if chat.project_id != Some(project_id) {
+        return Err(ServerError::bad_request(
+            "conversation does not belong to this project",
+        ));
+    }
+    let source = store
+        .get_document(body.document_id)
+        .await?
+        .filter(|document| document.chat_id == Some(body.chat_id))
+        .ok_or_else(|| {
+            ServerError::not_found(format!("document {} not found", body.document_id))
+        })?;
+    let Some(source_blob) = source.source_blob else {
+        return Err(ServerError::bad_request(
+            "document has no retained bytes to share with the project",
+        ));
+    };
+
+    // Derived from the project and the same URI, so promoting twice converges on
+    // one project file instead of accumulating copies.
+    let id = match source.origin_uri.as_deref() {
+        Some(uri) => DocumentId::derive_for_project(project_id, uri),
+        None => DocumentId::new(),
+    };
+    let document = store
+        .accept_document_source(&DocumentSourceUpsert {
+            id,
+            chat_id: None,
+            project_id: Some(project_id),
+            origin_uri: source.origin_uri,
+            media_type: source.media_type,
+            title: source.title,
+            source_blob,
+            canonical_text: source.canonical_text,
+            updated_at: Utc::now(),
+        })
+        .await?;
+    state.blob_retirement_wake.notify_one();
+    Ok((
+        StatusCode::CREATED,
+        Json(IngestResult {
+            document_id: id,
+            readiness: DocumentReadiness::of(document.is_readable()),
+        }),
+    ))
+}
+
 /// `POST /chats/{chat_id}/documents` — ingest a source owned by one conversation.
 pub async fn ingest_chat_document(
     State(state): State<AppState>,
@@ -394,7 +467,7 @@ pub async fn ingest_streamed_raw_chat_document(
                 StatusCode::OK,
                 Json(StreamedIngestResult {
                     document_id,
-                    readiness: SourceReadiness::of(existing.is_readable()),
+                    readiness: DocumentReadiness::of(existing.is_readable()),
                     already_present: true,
                 }),
             ));
@@ -420,7 +493,7 @@ pub async fn ingest_streamed_raw_chat_document(
             id: document_id,
             chat_id: Some(chat_id),
             project_id: None,
-            source_uri: None,
+            origin_uri: None,
             media_type,
             title,
             source_blob,
@@ -433,7 +506,7 @@ pub async fn ingest_streamed_raw_chat_document(
         StatusCode::CREATED,
         Json(StreamedIngestResult {
             document_id,
-            readiness: SourceReadiness::of(document.is_readable()),
+            readiness: DocumentReadiness::of(document.is_readable()),
             already_present: false,
         }),
     ))
@@ -471,19 +544,19 @@ async fn publish_document_source(
     store: &ScopedStore,
     chat_id: Option<ChatId>,
     project_id: Option<ProjectId>,
-    source_uri: Option<String>,
+    origin_uri: Option<String>,
     title: Option<String>,
     media_type: String,
     source_bytes: Vec<u8>,
 ) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
-    let source_uri = match source_uri.as_deref().map(str::trim) {
+    let origin_uri = match origin_uri.as_deref().map(str::trim) {
         // Trim before deriving the document id: a padded URI must resolve to the
         // same document as its unpadded form, or idempotent re-ingest breaks.
         Some(uri) if !uri.is_empty() => Some(uri.to_owned()),
         _ => None,
     };
     let title = normalize_document_title(title.as_deref())?;
-    let document_id = match (chat_id, project_id, source_uri.as_deref()) {
+    let document_id = match (chat_id, project_id, origin_uri.as_deref()) {
         (Some(chat_id), None, Some(uri)) => DocumentId::derive_for_chat(chat_id, uri),
         (None, Some(project_id), Some(uri)) => DocumentId::derive_for_project(project_id, uri),
         (None, None, Some(uri)) => DocumentId::derive(uri),
@@ -494,7 +567,7 @@ async fn publish_document_source(
             ));
         }
     };
-    let source_blob = DocumentSourceBlob::from_bytes(&source_bytes);
+    let source_blob = DocumentBlob::from_bytes(&source_bytes);
     let canonical_text = decode_document(&media_type, &source_bytes);
 
     // Publication intentionally precedes the catalog transaction so an
@@ -509,7 +582,7 @@ async fn publish_document_source(
             id: document_id,
             chat_id,
             project_id,
-            source_uri,
+            origin_uri,
             media_type,
             title,
             source_blob,
@@ -522,7 +595,7 @@ async fn publish_document_source(
         StatusCode::CREATED,
         Json(IngestResult {
             document_id,
-            readiness: SourceReadiness::of(document.is_readable()),
+            readiness: DocumentReadiness::of(document.is_readable()),
         }),
     ))
 }
@@ -542,9 +615,7 @@ fn raw_document_media_type(headers: &HeaderMap) -> Result<String, ServerError> {
     Ok(media_type.to_owned())
 }
 
-fn streamed_source_blob(
-    query: &StreamedRawDocumentQuery,
-) -> Result<DocumentSourceBlob, ServerError> {
+fn streamed_source_blob(query: &StreamedRawDocumentQuery) -> Result<DocumentBlob, ServerError> {
     if query.byte_len == 0 {
         return Err(ServerError::bad_request("content must not be empty"));
     }
@@ -559,7 +630,7 @@ fn streamed_source_blob(
     let sha256 = decode_sha256(&query.sha256).ok_or_else(|| {
         ServerError::bad_request("sha256 must be a 64-character hexadecimal digest")
     })?;
-    Ok(DocumentSourceBlob::from_digest(sha256, query.byte_len))
+    Ok(DocumentBlob::from_digest(sha256, query.byte_len))
 }
 
 fn decode_sha256(raw: &str) -> Option<[u8; 32]> {

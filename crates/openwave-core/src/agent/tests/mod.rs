@@ -7893,7 +7893,7 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
         created_at,
     };
     let text_id = crate::id::DocumentId::new();
-    let text_blob = crate::model::DocumentSourceBlob::from_bytes(b"decoded notes");
+    let text_blob = crate::model::DocumentBlob::from_bytes(b"decoded notes");
     let text = crate::model::MessageDocumentAttachment {
         message_id,
         chat_id: chat,
@@ -7906,7 +7906,7 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
         created_at,
     };
     let pdf_id = crate::id::DocumentId::new();
-    let pdf_blob = crate::model::DocumentSourceBlob::from_bytes(b"%PDF opaque");
+    let pdf_blob = crate::model::DocumentBlob::from_bytes(b"%PDF opaque");
     let pdf = crate::model::MessageDocumentAttachment {
         message_id,
         chat_id: chat,
@@ -7927,7 +7927,7 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
         document_id: oversized_id,
         title: Some("large.xlsx".into()),
         media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
-        source_blob: Some(crate::model::DocumentSourceBlob::from_digest(
+        source_blob: Some(crate::model::DocumentBlob::from_digest(
             [9; 32],
             crate::model::MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1,
         )),
@@ -7942,7 +7942,7 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
             document_id: crate::id::DocumentId::new(),
             title: Some(format!("extra-{ordinal}.bin")),
             media_type: "application/octet-stream".into(),
-            source_blob: Some(crate::model::DocumentSourceBlob::from_bytes(
+            source_blob: Some(crate::model::DocumentBlob::from_bytes(
                 format!("extra-{ordinal}").as_bytes(),
             )),
             readable: false,
@@ -7968,7 +7968,7 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
     assert!(text.contains(&text_id.to_string()));
     assert!(text.contains("\"title\":\"notes.txt\""));
     assert!(text.contains(&format!(
-        "route: readable via read_source(document_id=\"{text_id}\")"
+        "route: readable via read_document(document_id=\"{text_id}\")"
     )));
     let pdf_path = format!(
         "documents/{}",

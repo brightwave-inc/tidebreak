@@ -26,8 +26,8 @@ use ts_rs::TS;
 #[serde(rename_all = "snake_case")]
 pub enum RendererToolName {
     Search,
-    ListSources,
-    ReadSource,
+    ListDocuments,
+    ReadDocument,
     ReadToolResult,
     WebSearch,
     WebExtract,
@@ -63,8 +63,8 @@ impl From<&str> for RendererToolName {
     fn from(name: &str) -> Self {
         match name {
             "search" => Self::Search,
-            "list_sources" => Self::ListSources,
-            "read_source" => Self::ReadSource,
+            "list_documents" => Self::ListDocuments,
+            "read_document" => Self::ReadDocument,
             "read_tool_result" => Self::ReadToolResult,
             "web_search" => Self::WebSearch,
             crate::WEB_EXTRACT_TOOL => Self::WebExtract,
@@ -111,8 +111,8 @@ mod tests {
     fn every_renderer_visible_tool_keeps_its_name() {
         for name in [
             "search",
-            "list_sources",
-            "read_source",
+            "list_documents",
+            "read_document",
             "read_tool_result",
             "web_search",
             crate::WEB_EXTRACT_TOOL,

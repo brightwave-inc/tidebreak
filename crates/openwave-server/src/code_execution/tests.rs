@@ -23,7 +23,7 @@ use super::provider::exec_folder_grant_for_turn;
 use super::staging::{materialize_chat_attachments, prepare_execution_directories};
 
 use openwave_core::{
-    AgentError, ChatRootAttachment, DbStore, DocumentId, DocumentSourceBlob, DocumentSourceUpsert,
+    AgentError, ChatRootAttachment, DbStore, DocumentBlob, DocumentId, DocumentSourceUpsert,
     FsBlobStore, PermissionMode, RootAttachmentOrigin,
 };
 use uuid::Uuid;
@@ -321,19 +321,19 @@ async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
     store.create_chat(&chat).await.unwrap();
 
     let first_bytes = b"first opaque attachment";
-    let first_blob = DocumentSourceBlob::from_bytes(first_bytes);
+    let first_blob = DocumentBlob::from_bytes(first_bytes);
     blobs
         .put(first_blob.id, first_bytes.to_vec())
         .await
         .unwrap();
     let second_bytes = b"second opaque attachment";
-    let second_blob = DocumentSourceBlob::from_bytes(second_bytes);
+    let second_blob = DocumentBlob::from_bytes(second_bytes);
     blobs
         .put(second_blob.id, second_bytes.to_vec())
         .await
         .unwrap();
     let oversized_blob =
-        DocumentSourceBlob::from_digest([7; 32], MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1);
+        DocumentBlob::from_digest([7; 32], MAX_EXEC_WORKSPACE_FILE_BYTES as u64 + 1);
     let first_id = DocumentId::new();
     let second_id = DocumentId::new();
     let oversized_id = DocumentId::new();
@@ -342,7 +342,7 @@ async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
             id: first_id,
             chat_id: Some(chat.id),
             project_id: None,
-            source_uri: None,
+            origin_uri: None,
             media_type: "application/pdf".into(),
             title: Some("report.pdf".into()),
             source_blob: first_blob,
@@ -353,7 +353,7 @@ async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
             id: second_id,
             chat_id: Some(chat.id),
             project_id: None,
-            source_uri: None,
+            origin_uri: None,
             media_type: "application/pdf".into(),
             title: Some("report.pdf".into()),
             source_blob: second_blob,
@@ -364,7 +364,7 @@ async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
             id: oversized_id,
             chat_id: Some(chat.id),
             project_id: None,
-            source_uri: None,
+            origin_uri: None,
             media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
             title: Some("large.xlsx".into()),
             source_blob: oversized_blob,

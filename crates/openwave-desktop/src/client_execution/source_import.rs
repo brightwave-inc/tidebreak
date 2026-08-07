@@ -38,7 +38,7 @@ pub(super) struct ImportRequest {
     root_id: RootId,
     path: RelativePath,
     title: String,
-    source_uri: String,
+    origin_uri: String,
 }
 
 /// Exact bytes selected for one import and the overlay they came from, if any.
@@ -67,7 +67,7 @@ pub(super) fn parse(call: &ToolCallRecord) -> Result<ImportRequest, ()> {
         return Err(());
     }
     let title = title_from_path(path.as_str()).ok_or(())?;
-    let source_uri = format!(
+    let origin_uri = format!(
         "{CONNECTED_FOLDER_URI_SCHEME}:{}/{}",
         root_id.as_uuid(),
         path.as_str()
@@ -76,7 +76,7 @@ pub(super) fn parse(call: &ToolCallRecord) -> Result<ImportRequest, ()> {
         root_id,
         path,
         title,
-        source_uri,
+        origin_uri,
     })
 }
 
@@ -317,7 +317,7 @@ async fn publish(
     )
     .query(&[
         ("title", request.title.as_str()),
-        ("uri", request.source_uri.as_str()),
+        ("uri", request.origin_uri.as_str()),
     ])
     .header(reqwest::header::CONTENT_TYPE, media_type)
     .body(bytes);
@@ -388,7 +388,7 @@ fn unavailable(message: &str) -> StoredResolution {
 mod tests {
     use super::*;
     use openwave_core::{
-        CallId, DocumentSourceBlob, SourceReadiness, ToolCallExecution, ToolCallStatus, TurnId,
+        CallId, DocumentBlob, DocumentReadiness, ToolCallExecution, ToolCallStatus, TurnId,
     };
 
     fn import_call(path: &str, root_id: uuid::Uuid) -> ToolCallRecord {
@@ -421,18 +421,18 @@ mod tests {
         let again = parse(&import_call("reports/q3.pdf", root_id)).unwrap();
         // The same proposal must derive the same source, or a repeat import
         // would create a second document instead of recovering the first.
-        assert_eq!(first.source_uri, again.source_uri);
+        assert_eq!(first.origin_uri, again.origin_uri);
         assert_eq!(first.title, "q3.pdf");
         assert_eq!(
-            first.source_uri,
+            first.origin_uri,
             format!("connected-folder:{root_id}/reports/q3.pdf")
         );
         // The same relative path under a different root is a different source.
         let elsewhere = parse(&import_call("reports/q3.pdf", uuid::Uuid::new_v4())).unwrap();
-        assert_ne!(first.source_uri, elsewhere.source_uri);
+        assert_ne!(first.origin_uri, elsewhere.origin_uri);
         // Nothing in the identity is an absolute host path.
-        assert!(!first.source_uri.contains("/Users/"));
-        assert!(!first.source_uri.starts_with('/'));
+        assert!(!first.origin_uri.contains("/Users/"));
+        assert!(!first.origin_uri.starts_with('/'));
     }
 
     #[test]
@@ -479,7 +479,7 @@ mod tests {
             title: "q3.pdf".into(),
             media_type: "application/pdf".into(),
             bytes: 1_024,
-            readiness: SourceReadiness::StoredNoText,
+            readiness: DocumentReadiness::StoredNoText,
         });
         let StoredResolution::Completed { result, .. } = imported else {
             panic!("a successful import completes");
@@ -535,12 +535,12 @@ mod tests {
         // The ingest endpoint derives its retained blob digest from these
         // exact bytes, so the durable source identifies the staged revision.
         assert_eq!(
-            DocumentSourceBlob::from_bytes(&imported.bytes),
-            DocumentSourceBlob::from_bytes(b"staged document")
+            DocumentBlob::from_bytes(&imported.bytes),
+            DocumentBlob::from_bytes(b"staged document")
         );
         assert_ne!(
-            DocumentSourceBlob::from_bytes(&imported.bytes),
-            DocumentSourceBlob::from_bytes(b"pre-turn document")
+            DocumentBlob::from_bytes(&imported.bytes),
+            DocumentBlob::from_bytes(b"pre-turn document")
         );
 
         std::fs::remove_file(staged.join("reports/q3.docx")).unwrap();

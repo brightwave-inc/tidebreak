@@ -9,8 +9,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use openwave_core::{
-    AgentError, ApprovalClass, DocumentSourceBlob, ImageData, ImageMediaType, ImageRef, Result,
-    Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec, ToolUiView,
+    AgentError, ApprovalClass, DocumentBlob, ImageData, ImageMediaType, ImageRef, Result, Tool,
+    ToolCtx, ToolOutput, ToolRegistry, ToolSpec, ToolUiView,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -1198,7 +1198,7 @@ fn decode_image_content(item: &Value) -> Option<(ImageRef, ImageData)> {
         .into_dimensions()
         .ok()?;
     let image = ImageRef {
-        blob_id: DocumentSourceBlob::from_bytes(&bytes).id,
+        blob_id: DocumentBlob::from_bytes(&bytes).id,
         media_type: declared,
         width,
         height,
@@ -1981,7 +1981,7 @@ mod tests {
         // and never appears in the text the model reads.
         assert_eq!(split.images.len(), 1);
         let (image, data) = &split.images[0];
-        assert_eq!(image.blob_id, DocumentSourceBlob::from_bytes(&png).id);
+        assert_eq!(image.blob_id, DocumentBlob::from_bytes(&png).id);
         assert_eq!(image.media_type, ImageMediaType::Png);
         assert_eq!((image.width, image.height), (2, 1));
         assert_eq!(image.byte_len, png.len() as u64);

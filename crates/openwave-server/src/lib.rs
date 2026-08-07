@@ -167,6 +167,10 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
         )
         .route(
+            "/projects/{project_id}/documents/promote",
+            post(routes::promote_document_to_project),
+        )
+        .route(
             "/projects/{project_id}/documents/{document_id}",
             get(routes::get_project_document).delete(routes::delete_project_document),
         )
@@ -1242,10 +1246,10 @@ fn agent_deps(
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
         .with(Box::new(ExecTool::new(code_execution)))
-        .with(Box::new(source_tools::ListSourcesTool::new(
+        .with(Box::new(source_tools::ListDocumentsTool::new(
             source_store.clone(),
         )))
-        .with(Box::new(source_tools::ReadSourceTool::new(
+        .with(Box::new(source_tools::ReadDocumentTool::new(
             source_store.clone(),
         )))
         .with(Box::new(source_tools::ReadToolResultTool::new(

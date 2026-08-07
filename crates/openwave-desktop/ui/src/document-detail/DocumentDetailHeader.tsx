@@ -1,4 +1,4 @@
-import { AlignLeft, Download, FileText } from "lucide-react";
+import { AlignLeft, Check, Download, FileText, FolderPlus } from "lucide-react";
 
 import { PanelBreadcrumb } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,10 @@ export function DocumentDetailActions({
   canDownload,
   downloading,
   onDownload,
+  canAddToProject,
+  sharing,
+  shared,
+  onAddToProject,
 }: {
   view: DocumentView;
   onViewChange: (view: DocumentView) => void;
@@ -39,9 +43,36 @@ export function DocumentDetailActions({
   canDownload?: boolean;
   downloading?: boolean;
   onDownload: () => void;
+  /** Only conversations filed under a project have somewhere to share to. */
+  canAddToProject?: boolean;
+  sharing?: boolean;
+  /** Held for the rest of the panel's life, so the click reads as done. */
+  shared?: boolean;
+  onAddToProject: () => void;
 }) {
   return (
     <div className="flex items-center gap-2">
+      {canAddToProject && (
+        <WithTooltip
+          label={shared ? "In the project" : "Add to project"}
+        >
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            disabled={sharing || shared}
+            onClick={onAddToProject}
+          >
+            {shared ? (
+              <Check className="size-4" />
+            ) : (
+              <FolderPlus className="size-4" />
+            )}
+            <span className="sr-only">
+              {shared ? "In the project" : "Add to project"}
+            </span>
+          </Button>
+        </WithTooltip>
+      )}
       {canDownload && (
         <WithTooltip label="Download">
           <Button

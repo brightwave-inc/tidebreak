@@ -1,10 +1,10 @@
 # 1. Project Files, Chat Attachments, and the Vocabulary for Both
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-07
 - Owners: desktop
 - Related: [How OpenWave works](../how-openwave-works.md) (document model),
-  [Tool architecture](../tools.md) (the `list_sources`/`read_source` pair),
+  [Tool architecture](../tools.md) (the document-reading tool pair),
   [Host access and connected folders](../host-access.md) (the grant subject a
   conversation carries, and the creation-time root snapshot this record
   deliberately diverges from)
@@ -141,10 +141,12 @@ with the implementation.
 ## Consequences
 
 - **Renaming tools touches a persisted contract.** Tool names are recorded in
-  the journal and replayed to providers, so historical calls must keep
-  replaying under the names they were made with. Pre-1.0 is the moment to
-  absorb this; the replay-time renaming already used to avoid vendor
-  web-search collisions is the mechanism.
+  the journal and replayed to providers, so a database written before the
+  rename holds calls under names nothing answers to any more. Pre-1.0 that is
+  settled by the schema epoch rather than by carrying aliases: the rename bumps
+  `DESKTOP_SCHEMA_EPOCH`, which discards databases written by an older epoch, so
+  no journal ever replays a retired name and no compatibility shim outlives the
+  change. After 1.0 the same rename would need replay-time translation instead.
 - **The project needs a page.** Explicit promotion requires somewhere to
   promote to, and project files need somewhere to be listed and removed. This
   is the largest cost in the record and is UI work, not plumbing.
@@ -167,7 +169,7 @@ with the implementation.
 - A file promoted to a project becomes readable in a chat created *before* the
   promotion. A snapshot implementation passes every other check here and fails
   this one, which is the point of stating it.
-- A turn recorded before the rename still replays into a well-formed provider
-  request.
+- No journal reaches replay holding a retired tool name — the schema epoch bump
+  is what makes that true, so the check is that the epoch moved with the rename.
 - A project holding more files than the listing cap does not starve a
   conversation's own attachments out of `list_documents`.

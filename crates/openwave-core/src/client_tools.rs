@@ -360,7 +360,7 @@ pub struct WriteOutputToConnectedFolderArgs {
 pub enum ImportConnectedFileResult {
     /// The file became a source in this conversation.
     Imported {
-        /// Id usable with `list_sources` and `read_source`.
+        /// Id usable with `list_documents` and `read_document`.
         document_id: uuid::Uuid,
         /// Bounded leaf name safe for display.
         title: String,
@@ -369,7 +369,7 @@ pub enum ImportConnectedFileResult {
         /// Decoded size of the imported source.
         bytes: u64,
         /// What can be done with the source now.
-        readiness: crate::SourceReadiness,
+        readiness: crate::DocumentReadiness,
     },
     /// Nothing was imported, and no host detail explains why.
     Unavailable {
@@ -709,7 +709,7 @@ mod tests {
             title: "q3.pdf".into(),
             media_type: "application/pdf".into(),
             bytes: 2_048,
-            readiness: crate::SourceReadiness::StoredNoText,
+            readiness: crate::DocumentReadiness::StoredNoText,
         };
         let encoded = serde_json::to_value(&result).unwrap();
         assert_eq!(encoded["status"], "imported");

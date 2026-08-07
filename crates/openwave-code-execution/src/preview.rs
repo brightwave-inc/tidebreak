@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat};
-use openwave_core::{DocumentSourceBlob, ImageData, ImageMediaType, ImageRef, MAX_IMAGE_BYTES};
+use openwave_core::{DocumentBlob, ImageData, ImageMediaType, ImageRef, MAX_IMAGE_BYTES};
 
 use crate::MAX_WORKSPACE_FILE_BYTES;
 
@@ -149,7 +149,7 @@ fn prepare_preview(candidate: &Candidate) -> Result<(ImageRef, ImageData), ()> {
         .dimensions();
     let byte_len = u64::try_from(prepared.len()).map_err(|_| ())?;
     let image = ImageRef {
-        blob_id: DocumentSourceBlob::from_bytes(&prepared).id,
+        blob_id: DocumentBlob::from_bytes(&prepared).id,
         media_type,
         width,
         height,

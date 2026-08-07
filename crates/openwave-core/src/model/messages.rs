@@ -7,7 +7,7 @@ use crate::image::ImageRef;
 use crate::provider::MessageReasoning;
 
 use super::chat_settings::Role;
-use super::documents::DocumentSourceBlob;
+use super::documents::DocumentBlob;
 
 /// One message in a chat: user input or assistant text.
 ///
@@ -182,8 +182,8 @@ pub struct MessageDocumentAttachment {
     /// Media type captured from the document record.
     pub media_type: String,
     /// Retained original bytes, when the document has them.
-    pub source_blob: Option<DocumentSourceBlob>,
-    /// Whether `read_source` can return decoded canonical text.
+    pub source_blob: Option<DocumentBlob>,
+    /// Whether `read_document` can return decoded canonical text.
     pub readable: bool,
     /// When the attachment was recorded.
     pub created_at: DateTime<Utc>,
@@ -293,7 +293,7 @@ fn attachment_context(images: &[ImageRef], documents: &[MessageDocumentAttachmen
 fn attachment_route(document: &MessageDocumentAttachment) -> String {
     if document.readable {
         return format!(
-            "readable via read_source(document_id=\"{}\")",
+            "readable via read_document(document_id=\"{}\")",
             document.document_id
         );
     }

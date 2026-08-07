@@ -700,14 +700,17 @@ those routes on their primary bearer because they do not have a webview trust
 boundary. The native bridge imports bytes for the composer and returns only the
 document identity and bounded chip metadata to the renderer.
 
-The chat's `list_sources` and `read_source` tools can see only documents owned by
-that exact conversation. Direct reads become available as soon as decoding
-publishes canonical text and include lightweight positions the model can cite. A page
+The chat's `list_documents` and `read_document` tools see the documents owned by
+that exact conversation, plus the files of the project it is filed under, if any.
+The union is resolved at read time rather than snapshotted, so a file shared with
+a project after a conversation started is readable in that conversation without
+reattaching it. Direct reads become available as soon as decoding publishes
+canonical text and include lightweight positions the model can cite. A page
 fetched by `web_extract` becomes one of those documents, so a claim drawn from
 the public web is anchored and reopenable on the same terms as one drawn from an
 imported file; it arrives already parsed, so it is citable immediately.
-Conversationless legacy documents, project-scoped documents, and sources owned
-by other chats are not reachable through the current desktop journey.
+Conversationless legacy documents and documents owned by other chats or by other
+projects are not reachable.
 
 Conversation reopen uses an atomic transcript snapshot plus a terminal event
 cursor. The desktop then replays and follows later events, so durable history

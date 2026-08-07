@@ -670,7 +670,7 @@ impl ExtractedPageSink for HostExtractedPageSink {
             id: DocumentId::derive_for_chat(chat_id, &page.url),
             chat_id: Some(chat_id),
             project_id: None,
-            source_uri: Some(page.url.clone()),
+            origin_uri: Some(page.url.clone()),
             media_type: EXTRACTED_PAGE_MEDIA_TYPE.into(),
             title: (!title.is_empty()).then_some(title),
             // Keep exactly what the model read so its human-scale locators and

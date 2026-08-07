@@ -57,7 +57,7 @@ const listing: ConnectedAppsInfo = {
       name: "docs",
       health: "healthy",
       tool_count: 3,
-      tools: ["search", "fetch", "list_sources"],
+      tools: ["search", "fetch", "list_documents"],
       diagnostic: null,
       curated: null,
       gateway_endpoint: null,
@@ -164,7 +164,7 @@ describe("ConnectedAppsPanel", () => {
     await user.click(screen.getByRole("button", { name: "3 tools" }));
     const tool = screen.getByText("search");
     expect(tool).toHaveClass("font-mono");
-    expect(screen.getByText("list_sources")).toBeInTheDocument();
+    expect(screen.getByText("list_documents")).toBeInTheDocument();
     // Only the clicked entry expanded.
     expect(screen.queryByText("sentry__proxy_api")).not.toBeInTheDocument();
   });

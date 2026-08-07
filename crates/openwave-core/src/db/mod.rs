@@ -34,10 +34,10 @@ use crate::model::Role;
 use crate::model::{
     validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunTier,
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
-    Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
+    Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
+    NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
+    RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
     SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
     TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
 };
@@ -82,7 +82,7 @@ struct DocumentSummaryRow {
     id: uuid::Uuid,
     chat_id: Option<uuid::Uuid>,
     project_id: Option<uuid::Uuid>,
-    source_uri: Option<String>,
+    origin_uri: Option<String>,
     media_type: String,
     title: Option<String>,
     source_byte_len: Option<i64>,
@@ -389,7 +389,7 @@ impl Store for DbStore {
             id: Set(document.id.0),
             chat_id: Set(document.chat_id.map(|id| id.0)),
             project_id: Set(document.project_id.map(|id| id.0)),
-            source_uri: Set(document.source_uri.clone()),
+            origin_uri: Set(document.origin_uri.clone()),
             media_type: Set(document.media_type.clone()),
             title: Set(document.title.clone()),
             source_blob_id: Set(document.source_blob.as_ref().map(|blob| blob.id)),
@@ -2426,7 +2426,7 @@ async fn list_document_summaries_on(
             entities::document::Column::Id,
             entities::document::Column::ChatId,
             entities::document::Column::ProjectId,
-            entities::document::Column::SourceUri,
+            entities::document::Column::OriginUri,
             entities::document::Column::MediaType,
             entities::document::Column::Title,
             entities::document::Column::SourceByteLen,
@@ -2491,7 +2491,7 @@ where
         id: Set(document.id.0),
         chat_id: Set(document.chat_id.map(|id| id.0)),
         project_id: Set(document.project_id.map(|id| id.0)),
-        source_uri: Set(document.source_uri.clone()),
+        origin_uri: Set(document.origin_uri.clone()),
         media_type: Set(document.media_type.clone()),
         title: Set(document.title.clone()),
         source_blob_id: Set(None),
@@ -2564,7 +2564,7 @@ fn validate_project_attachments(project: &Project) -> Result<()> {
     validate_project_root_projection(project).map_err(|message| AgentError::Store(message.into()))
 }
 
-fn validate_document_source_blob(blob: &DocumentSourceBlob) -> Result<i64> {
+fn validate_document_source_blob(blob: &DocumentBlob) -> Result<i64> {
     if !blob.has_content_addressed_id() {
         return Err(AgentError::Store(
             "document source blob id does not match its SHA-256 digest".into(),
@@ -2578,7 +2578,7 @@ fn source_blob_from_model(
     id: Option<uuid::Uuid>,
     sha256: Option<Vec<u8>>,
     byte_len: Option<i64>,
-) -> Result<Option<DocumentSourceBlob>> {
+) -> Result<Option<DocumentBlob>> {
     match (id, sha256, byte_len) {
         (None, None, None) => Ok(None),
         (Some(id), Some(sha256), Some(byte_len)) => {
@@ -2588,7 +2588,7 @@ fn source_blob_from_model(
             let byte_len = u64::try_from(byte_len).map_err(|_| {
                 AgentError::Store("stored document source length must be nonnegative".into())
             })?;
-            let blob = DocumentSourceBlob {
+            let blob = DocumentBlob {
                 id,
                 sha256,
                 byte_len,
@@ -2611,7 +2611,7 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
         id: DocumentId(model.id),
         chat_id: model.chat_id.map(ChatId),
         project_id: model.project_id.map(ProjectId),
-        source_uri: model.source_uri,
+        origin_uri: model.origin_uri,
         media_type: model.media_type,
         title: model.title,
         source_blob: source_blob_from_model(
@@ -2630,7 +2630,7 @@ fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryR
         id: DocumentId(row.id),
         chat_id: row.chat_id.map(ChatId),
         project_id: row.project_id.map(ProjectId),
-        source_uri: row.source_uri,
+        origin_uri: row.origin_uri,
         media_type: row.media_type,
         title: row.title,
         source_byte_len: row

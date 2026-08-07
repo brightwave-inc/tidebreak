@@ -15,8 +15,8 @@ The current foreground agent surface contains eighteen tools:
 | `list_dir` | List a private-scratch directory | Server, read-only |
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
-| `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
-| `read_source` | Read a bounded canonical-text range from one source | Server, read-only |
+| `list_documents` | List bounded metadata for this conversation's documents and its project's files | Server, read-only |
+| `read_document` | Read a bounded canonical-text range from one source | Server, read-only |
 | `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
 | `web_search` | Search the public web through the configured provider (Exa, Tavily, Brave, or a self-hosted SearXNG) | Server, sensitive approval |
 | `web_extract` | Fetch one exact public page URL, return its readable content through the configured provider or the built-in engine, and keep it as a source of the conversation | Server, sensitive approval |
@@ -47,7 +47,7 @@ PDF or Office document under an approved root previously had no route into the
 conversation at all — the user had to find the same file again through the
 composer picker. The import moves bytes natively into the conversation-scoped
 ingest API and returns a document id; it never returns the contents, so the
-agent still reads the result through `list_sources` and `read_source` like any
+agent still reads the result through `list_documents` and `read_document` like any
 other source. Media type is decided from the bytes rather than from the path
 the model named, the attachment is rechecked immediately before the source is
 published so a detach that wins the race discards the bytes, and the source
@@ -86,8 +86,8 @@ same turn; reload, restart, cancellation, and answer races are storage-backed.
 Sandbox agents never receive the definition. See
 [Durable user questions](user-questions.md).
 
-`list_sources` discovers the conversation's exact corpus without loading
-content. `read_source` reads one bounded Unicode-character range; the text is
+`list_documents` discovers what the conversation can read — its own documents
+followed by the files of the project holding it — without loading content. `read_document` reads one bounded Unicode-character range; the text is
 available the moment a source is stored, because ingestion decodes
 synchronously. The model cites what it reads inline, naming the document id
 and a coarse locator — a page or page range, a line range, or a workbook
@@ -96,7 +96,7 @@ sheet — and no reference resolution happens server-side.
 `web_extract` joins that tier from the other direction: a page it fetches is
 stored as an ordinary source of the conversation, so the model can cite the
 stored document the same way or put the page URL directly in prose, and
-`read_source` can reach the page afterwards. See
+`read_document` can reach the page afterwards. See
 [Web search](web-search.md#fetched-pages-as-sources).
 
 ## Core module layout
