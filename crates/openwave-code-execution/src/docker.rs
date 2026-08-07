@@ -67,6 +67,7 @@
 //! the honest answer is that a command can reach the internet.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Component, Path};
 use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
@@ -114,6 +115,16 @@ const CONTAINER_PREFIX: &str = "openwave-exec-";
 /// this backend creates, so an operator (or a later host-driven sweep) can
 /// enumerate them with `docker ps --filter label=openwave.exec-workspace`.
 const WORKSPACE_LABEL: &str = "openwave.exec-workspace";
+/// Label carrying the runtime/image/container contract a workspace was created
+/// for. A deterministic workspace name alone is not enough to prove a
+/// container belongs to this provider configuration: changing the image (or a
+/// future confinement contract) must replace the old container rather than
+/// silently adopting it.
+const CONFIGURATION_LABEL: &str = "openwave.exec-configuration";
+/// Bump when the `docker run` confinement or keepalive contract changes in a
+/// way that makes an already-running container unsafe or incompatible to
+/// reuse.
+const CONTAINER_CONTRACT_REVISION: &str = "1";
 /// Process-count ceiling: comfortably above a shell pipeline, a Python
 /// helper, or a headless LibreOffice conversion, and far below what a fork
 /// bomb needs to wedge the host.
@@ -274,21 +285,40 @@ impl DockerExecutionProvider {
     /// restarted reuses the files a previous session left in the workspace.
     async fn ensure_container(&self, workspace_id: &str) -> Result<String, CodeExecutionError> {
         let name = container_name(workspace_id);
+        let configuration = self.configuration_identity();
         if let Some(existing) = self.inspect_container(&name).await? {
-            if existing.running {
-                return Ok(existing.id);
-            }
-            // A stopped container created with `--rm` is on its way out; only
-            // one created without it can be restarted. Either way, a start
-            // that fails is not fatal — a fresh container serves just as well.
-            if self.control(&start_args(&name)).await.is_ok() {
-                if let Some(started) = self.inspect_container(&name).await? {
-                    if started.running {
-                        return Ok(started.id);
+            match existing.disposition(workspace_id, &configuration) {
+                ExistingContainerDisposition::Adopt => {
+                    if existing.running {
+                        return Ok(existing.id);
                     }
+                    // A stopped container created with `--rm` is on its way
+                    // out; only one created without it can be restarted.
+                    // Either way, a start that fails is not fatal — a fresh
+                    // container serves just as well.
+                    if self.control(&start_args(&existing.id)).await.is_ok() {
+                        if let Some(started) = self.inspect_container(&existing.id).await? {
+                            if started.running
+                                && matches!(
+                                    started.disposition(workspace_id, &configuration),
+                                    ExistingContainerDisposition::Adopt
+                                )
+                            {
+                                return Ok(started.id);
+                            }
+                        }
+                    }
+                    self.remove_container(&existing.id).await?;
+                }
+                ExistingContainerDisposition::Replace => {
+                    self.remove_container(&existing.id).await?;
+                }
+                ExistingContainerDisposition::Conflict => {
+                    return Err(CodeExecutionError::Unavailable(
+                        "the workspace container name is already in use".into(),
+                    ));
                 }
             }
-            let _ = self.remove_container(&name).await;
         }
         match self.control(&self.run_args(workspace_id)).await {
             Ok(stdout) => parse_container_id(&stdout).ok_or_else(|| {
@@ -300,7 +330,15 @@ impl DockerExecutionProvider {
             // create this workspace's container; adopt what is there.
             Err(ControlFailure::Refused(stderr)) if is_name_conflict(&stderr) => {
                 match self.inspect_container(&name).await? {
-                    Some(existing) if existing.running => Ok(existing.id),
+                    Some(existing)
+                        if existing.running
+                            && matches!(
+                                existing.disposition(workspace_id, &configuration),
+                                ExistingContainerDisposition::Adopt
+                            ) =>
+                    {
+                        Ok(existing.id)
+                    }
                     _ => Err(CodeExecutionError::Unavailable(
                         "the workspace container could not be started".into(),
                     )),
@@ -352,6 +390,8 @@ impl DockerExecutionProvider {
             container_name(workspace_id),
             "--label".to_owned(),
             format!("{WORKSPACE_LABEL}={workspace_id}"),
+            "--label".to_owned(),
+            format!("{CONFIGURATION_LABEL}={}", self.configuration_identity()),
             // Confinement. The container is the boundary; each of these is a
             // control the commands inside cannot recover.
             "--user".to_owned(),
@@ -386,6 +426,25 @@ impl DockerExecutionProvider {
             self.image.clone(),
             CONTAINER_LIFETIME.as_secs().to_string(),
         ]
+    }
+
+    fn configuration_fingerprint(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"docker\n");
+        hasher.update(CONTAINER_CONTRACT_REVISION.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.binary.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.image.as_bytes());
+        hasher.finalize().into()
+    }
+
+    fn configuration_identity(&self) -> String {
+        let mut encoded = String::with_capacity(64);
+        for byte in self.configuration_fingerprint() {
+            write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        encoded
     }
 
     async fn run_docker_command(
@@ -488,12 +547,7 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
     /// pooled session to those means changing either replaces the container
     /// rather than reusing one built from the previous image.
     fn credential_fingerprint(&self) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(b"docker\n");
-        hasher.update(self.binary.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(self.image.as_bytes());
-        hasher.finalize().into()
+        self.configuration_fingerprint()
     }
 
     /// No egress policy is compiled into a container, so every container this
@@ -812,6 +866,27 @@ impl From<ControlFailure> for CodeExecutionError {
 struct ContainerState {
     id: String,
     running: bool,
+    workspace: Option<String>,
+    configuration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingContainerDisposition {
+    Adopt,
+    Replace,
+    Conflict,
+}
+
+impl ContainerState {
+    fn disposition(&self, workspace_id: &str, configuration: &str) -> ExistingContainerDisposition {
+        if self.workspace.as_deref() != Some(workspace_id) {
+            return ExistingContainerDisposition::Conflict;
+        }
+        if self.configuration.as_deref() != Some(configuration) {
+            return ExistingContainerDisposition::Replace;
+        }
+        ExistingContainerDisposition::Adopt
+    }
 }
 
 struct CapturedOutput {
@@ -896,7 +971,9 @@ fn inspect_args(reference: &str) -> Vec<String> {
     vec![
         "inspect".to_owned(),
         "--format".to_owned(),
-        "{{.Id}}\t{{.State.Running}}".to_owned(),
+        format!(
+            "{{{{.Id}}}}\t{{{{.State.Running}}}}\t{{{{index .Config.Labels \"{WORKSPACE_LABEL}\"}}}}\t{{{{index .Config.Labels \"{CONFIGURATION_LABEL}\"}}}}"
+        ),
         reference.to_owned(),
     ]
 }
@@ -982,12 +1059,24 @@ fn parse_container_id(stdout: &[u8]) -> Option<String> {
 
 fn parse_inspect(stdout: &[u8]) -> Option<ContainerState> {
     let line = String::from_utf8_lossy(stdout);
-    let (id, running) = line.trim().split_once('\t')?;
+    let mut fields = line.trim_end_matches(['\r', '\n']).splitn(4, '\t');
+    let (Some(id), Some(running), Some(workspace), Some(configuration)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
     validate_container_id(id).ok()?;
     Some(ContainerState {
         id: id.to_owned(),
         running: running.trim() == "true",
+        workspace: parsed_label(workspace),
+        configuration: parsed_label(configuration),
     })
+}
+
+fn parsed_label(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value != "<no value>").then(|| value.to_owned())
 }
 
 /// Turn the helper's `type<TAB>size<TAB>name` lines into workspace entries.
@@ -1103,6 +1192,16 @@ mod tests {
         assert!(flag("--pids-limit").is_some());
         assert!(flag("--memory").is_some());
         assert!(args.contains(&"--rm".to_owned()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--label", "openwave.exec-workspace=chat-123"]));
+        let expected_configuration = format!(
+            "{CONFIGURATION_LABEL}={}",
+            provider().configuration_identity()
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--label", expected_configuration.as_str()]));
         // The workspace is an anonymous volume — a `--volume` argument with a
         // host side would be a bind mount, which this backend never makes.
         assert_eq!(flag("--volume").map(String::as_str), Some(WORKSPACE_ROOT));
@@ -1184,14 +1283,67 @@ mod tests {
     /// identifier is refused where it enters rather than where it is used.
     #[test]
     fn container_identities_from_the_runtime_are_re_proved() {
-        let state = parse_inspect(b"9f2c4a\ttrue\n").unwrap();
+        let state = parse_inspect(b"9f2c4a\ttrue\tchat-123\tconfiguration-123\n").unwrap();
         assert_eq!(state.id, "9f2c4a");
         assert!(state.running);
-        assert!(!parse_inspect(b"9f2c4a\tfalse\n").unwrap().running);
-        assert!(parse_inspect(b"--privileged\ttrue").is_none());
+        assert_eq!(state.workspace.as_deref(), Some("chat-123"));
+        assert_eq!(state.configuration.as_deref(), Some("configuration-123"));
+        let unlabeled = parse_inspect(b"9f2c4a\tfalse\t<no value>\t\n").unwrap();
+        assert!(!unlabeled.running);
+        assert_eq!(unlabeled.workspace, None);
+        assert_eq!(unlabeled.configuration, None);
+        assert!(parse_inspect(b"--privileged\ttrue\tchat-123\tconfiguration-123").is_none());
         assert!(parse_container_id(b"  9f2c4a  \n").is_some());
         assert!(parse_container_id(b"/etc/passwd").is_none());
         assert!(parse_container_id(b"").is_none());
+    }
+
+    /// A workspace name is routing, not provenance. Only a container carrying
+    /// both OpenWave's workspace label and this provider configuration may be
+    /// adopted; legacy/mismatched OpenWave containers are replaceable, while
+    /// an unrelated name collision must not be deleted.
+    #[test]
+    fn container_adoption_requires_workspace_and_configuration_identity() {
+        let configuration = provider().configuration_identity();
+        let state = |workspace: Option<&str>, configured: Option<&str>| ContainerState {
+            id: "9f2c4a".to_owned(),
+            running: true,
+            workspace: workspace.map(str::to_owned),
+            configuration: configured.map(str::to_owned),
+        };
+
+        assert_eq!(
+            state(Some("chat-123"), Some(&configuration)).disposition("chat-123", &configuration),
+            ExistingContainerDisposition::Adopt
+        );
+        assert_eq!(
+            state(Some("chat-123"), Some("stale-configuration"))
+                .disposition("chat-123", &configuration),
+            ExistingContainerDisposition::Replace
+        );
+        assert_eq!(
+            state(Some("chat-123"), None).disposition("chat-123", &configuration),
+            ExistingContainerDisposition::Replace
+        );
+        assert_eq!(
+            state(None, None).disposition("chat-123", &configuration),
+            ExistingContainerDisposition::Conflict
+        );
+        assert_eq!(
+            state(Some("other-chat"), Some(&configuration)).disposition("chat-123", &configuration),
+            ExistingContainerDisposition::Conflict
+        );
+
+        assert_ne!(
+            provider().configuration_identity(),
+            provider()
+                .with_image("ghcr.io/example/image:latest")
+                .configuration_identity()
+        );
+        assert_ne!(
+            provider().configuration_identity(),
+            provider().with_binary("podman").configuration_identity()
+        );
     }
 
     /// A container that vanished must reach the session layer as `Missing` so
