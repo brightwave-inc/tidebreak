@@ -239,6 +239,10 @@ pub async fn put_provider(
         // the write and replace the key) and revokes the refresh token
         // instead of dropping it locally while it stays live at OpenAI.
         state.chatgpt.sign_out().await?;
+    } else if kind == ProviderKind::Openai && body.enabled == Some(false) {
+        // Completing sign-in forces enabled=true. Drop an in-flight attempt
+        // so it cannot overwrite an explicit disable that landed first.
+        state.chatgpt.cancel_pending().await;
     }
     let info = providers::update_provider(
         &*state.store,

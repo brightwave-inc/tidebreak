@@ -563,12 +563,8 @@ async fn callback(
     Query(query): Query<CallbackQuery>,
 ) -> Response {
     if query.state.as_deref() != Some(state.expected_state.as_str()) {
-        // Report the mismatch so the waiter fails now instead of holding the
-        // callback port until the sign-in timeout expires.
-        let _ = state.sender.try_send(CallbackResult {
-            code: None,
-            error: Some("authorization state did not match".to_owned()),
-        });
+        // Keep waiting: a stray hit on the fixed loopback port must not
+        // retire the attempt before the real browser redirect arrives.
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Html(callback_page(
