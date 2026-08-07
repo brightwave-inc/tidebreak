@@ -61,6 +61,7 @@ describe("typed model selection", () => {
 
   it("uses product-facing provider labels", () => {
     expect(providerLabel("openai")).toBe("OpenAI");
+    expect(providerLabel("xai")).toBe("xAI");
     expect(providerLabel("gemini")).toBe("Google Gemini");
     expect(providerLabel("openai_compatible")).toBe("OpenAI-compatible");
   });

@@ -11,11 +11,14 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["anthropic", "openai", "openai-compat", "gemini"]
+default = ["anthropic", "openai", "xai", "openai-compat", "gemini"]
 # The Anthropic (Messages API) provider adapter.
 anthropic = ["_http"]
 # Native OpenAI Responses API adapter.
 openai = ["_http"]
+# First-party xAI Responses API adapter. It reuses the shared Responses
+# transport while retaining a distinct provider identity and error profile.
+xai = ["openai"]
 # OpenAI-compatible Chat Completions adapter (OpenRouter, vLLM, …).
 openai-compat = ["_http"]
 # Google Gemini Developer API adapter (native GenerateContent protocol).

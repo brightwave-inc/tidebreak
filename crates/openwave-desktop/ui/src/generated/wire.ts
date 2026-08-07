@@ -929,8 +929,11 @@ export type ConsentVerb = { "kind": "tool", action: RendererToolName, approval: 
 export type CredentialPlacement = "bearer" | { "header": string };
 
 /**
- * Conservative, user-inspectable capabilities for one model served by an
- * OpenAI-compatible endpoint.
+ * User-inspectable routing limits and capabilities for one configured model.
+ *
+ * OpenAI-compatible rows are validated to the conservative text-only shape.
+ * xAI rows may opt into the capabilities its first-party Responses adapter
+ * actually carries end to end.
  */
 export type CustomModelConfig = { 
 /**
@@ -957,7 +960,19 @@ context_window: number,
 /**
  * Maximum output sent to the endpoint.
  */
-max_output_tokens: number, };
+max_output_tokens: number, 
+/**
+ * Inputs OpenWave may place on this model's request.
+ */
+input_modalities: Array<InputModality>, 
+/**
+ * Whether the model uses xAI's reasoning request shape.
+ */
+supports_reasoning: boolean, 
+/**
+ * Reasoning-effort levels accepted by the model, ascending.
+ */
+reasoning_efforts: Array<ReasoningEffort>, };
 
 /**
  * Wire mirror of the admission gate's typed denial reasons
@@ -1168,12 +1183,12 @@ export type HostRootId = string;
 /**
  * Image formats OpenWave will send to a provider.
  *
- * Deliberately closed. Every variant here is accepted by both the Anthropic
- * and OpenAI image APIs, so a value of this type can always be shaped for the
- * selected provider — adapters never have to reject a media type at send time.
- * Vector and exotic raster formats are excluded rather than passed through:
- * an unsupported type must fail at the trusted ingest boundary, where the user
- * can still act on it, not deep inside a turn.
+ * Deliberately closed. Every variant here is accepted by the baseline
+ * Anthropic and OpenAI image APIs. A provider with a narrower documented set
+ * must refuse its unsupported variants before egress (xAI, for example,
+ * accepts only PNG and JPEG) rather than passing them through to a provider
+ * 400. Vector and exotic raster formats are excluded at the trusted ingest
+ * boundary instead of being passed through at all.
  */
 export type ImageMediaType = "png" | "jpeg" | "webp" | "gif";
 
@@ -1891,7 +1906,7 @@ has_credential: boolean,
  */
 auth_mode?: ProviderAuthMode, 
 /**
- * Explicit custom model entries for this endpoint.
+ * Explicit configured model entries for this endpoint.
  */
 models: Array<CustomModelConfig>, };
 
@@ -1899,7 +1914,7 @@ models: Array<CustomModelConfig>, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "openai_compatible" | "model_gateway";
 
 /**
  * How hard a reasoning-capable model should think before answering.

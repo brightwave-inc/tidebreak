@@ -29,7 +29,12 @@ import { cn } from "@/lib/utils";
  * not reshuffle when a provider is configured or a custom endpoint gains a
  * model — muscle memory is worth more here than catalog order.
  */
-const PROVIDER_ORDER: readonly ProviderKind[] = ["anthropic", "openai", "gemini"];
+const PROVIDER_ORDER: readonly ProviderKind[] = [
+  "anthropic",
+  "openai",
+  "xai",
+  "gemini",
+];
 
 const UNVERIFIED_TOOLTIP =
   "OpenWave hasn't verified tool-calling and streaming for this model; issues are likely the model or provider, not the app";

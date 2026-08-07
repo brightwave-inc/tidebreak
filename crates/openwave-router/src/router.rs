@@ -25,6 +25,8 @@ use crate::GeminiProvider;
 use crate::OpenAiCompatProvider;
 #[cfg(feature = "openai")]
 use crate::OpenAiProvider;
+#[cfg(feature = "xai")]
+use crate::XaiProvider;
 
 /// Header a model-gateway deployment reads to group inference into one
 /// conversation. Gateway adapters opt in explicitly; direct providers never
@@ -106,6 +108,8 @@ pub enum RouteKind {
     Anthropic,
     /// Native OpenAI Responses API (api.openai.com).
     Openai,
+    /// Native xAI Responses API (api.x.ai).
+    Xai,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
     /// Google Gemini Developer API (native GenerateContent protocol).
@@ -127,6 +131,7 @@ impl RouteKind {
         match self {
             RouteKind::Anthropic => "anthropic",
             RouteKind::Openai => "openai",
+            RouteKind::Xai => "xai",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
             RouteKind::ModelGateway => "model_gateway",
@@ -147,6 +152,7 @@ impl RouteKind {
         match value {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
+            "xai" => Some(Self::Xai),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
             "model_gateway" => Some(Self::ModelGateway),
@@ -249,6 +255,7 @@ impl Router {
         for kind in [
             RouteKind::Anthropic,
             RouteKind::Openai,
+            RouteKind::Xai,
             RouteKind::Gemini,
             RouteKind::ModelGateway,
             RouteKind::ModelGatewayOpenai,
@@ -302,7 +309,7 @@ impl ModelProvider for Router {
         ProviderId::new("router")
     }
 
-    async fn stream(&self, mut req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let Some(kind) = self.select_for(req.provider.as_ref(), &req.model) else {
             return Err(AgentError::config(format!(
                 "provider `{}` is unavailable or cannot serve model `{}`",
@@ -318,8 +325,9 @@ impl ModelProvider for Router {
                 req.model
             )));
         };
-        // The route hint is host policy, not provider wire data.
-        req.provider = None;
+        // The route hint is host policy, not provider wire data, but adapters
+        // retain it for origin-gating provider-native replay. Their encoders
+        // must never serialize it into the provider request body.
         adapter.stream(req).await
     }
 }
@@ -401,6 +409,11 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             }
             Some(Arc::new(p))
         }
+        #[cfg(feature = "xai")]
+        // xAI credentials are valid only for the fixed first-party endpoint.
+        // Ignore even a directly constructed route override so stale config
+        // cannot redirect the bearer token around the server's collector.
+        RouteKind::Xai => Some(Arc::new(XaiProvider::new(route.api_key.clone()))),
         #[cfg(feature = "openai-compat")]
         RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
@@ -439,6 +452,8 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         RouteKind::Gemini => None,
         #[cfg(not(feature = "openai"))]
         RouteKind::Openai => None,
+        #[cfg(not(feature = "xai"))]
+        RouteKind::Xai => None,
         #[cfg(not(feature = "openai-compat"))]
         RouteKind::OpenaiCompatible => None,
     }
@@ -497,7 +512,13 @@ fn fnv1a64(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "xai")]
+    use openwave_core::provider::{ContentBlock, MessageReasoning, ReasoningOrigin};
     use openwave_core::ImageAttachments;
+    #[cfg(feature = "xai")]
+    use openwave_core::{ChatMessage, Role};
+    #[cfg(feature = "xai")]
+    use serde_json::json;
 
     fn route(kind: RouteKind, key: &str, models: &[&str], base: Option<&str>) -> Route {
         Route {
@@ -532,6 +553,28 @@ mod tests {
         let router = Router::build(vec![route(RouteKind::Openai, "sk-o", &["gpt-4o"], None)]);
         assert_eq!(router.select("gpt-4o"), Some(RouteKind::Openai));
         assert_eq!(router.select("unknown"), None);
+    }
+
+    #[test]
+    fn explicit_xai_model_selects_xai_without_compat_fallback() {
+        let router = Router::build(vec![
+            route(RouteKind::Xai, "xai-key", &["grok-custom"], None),
+            route(
+                RouteKind::OpenaiCompatible,
+                "compat-key",
+                &[],
+                Some("http://127.0.0.1:1234/v1"),
+            ),
+        ]);
+        assert_eq!(router.select("grok-custom"), Some(RouteKind::Xai));
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("xai")), "grok-custom"),
+            Some(RouteKind::Xai)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("openai")), "grok-custom"),
+            None
+        );
     }
 
     #[test]
@@ -733,5 +776,80 @@ mod tests {
             Err(err) => assert!(err.to_string().contains("unavailable")),
             Ok(_) => panic!("expected fail-closed error"),
         }
+    }
+
+    #[cfg(feature = "xai")]
+    struct XaiShapingProbe {
+        body: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<serde_json::Value>>>,
+    }
+
+    #[cfg(feature = "xai")]
+    #[async_trait]
+    impl ModelProvider for XaiShapingProbe {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("xai")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let body =
+                crate::openai::build_request_json_for(&req, crate::openai::ResponsesProfile::Xai)?;
+            if let Some(tx) = self.body.lock().unwrap().take() {
+                let _ = tx.send(body);
+            }
+            Ok(Box::pin(futures::stream::empty::<ProviderEvent>()))
+        }
+    }
+
+    #[cfg(feature = "xai")]
+    #[tokio::test]
+    async fn router_preserves_xai_identity_for_reasoning_replay_without_serializing_it() {
+        let reasoning = json!({
+            "id": "rs_previous",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed",
+            "encrypted_content": "opaque-previous",
+        });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut adapters: HashMap<RouteKind, Arc<dyn ModelProvider>> = HashMap::new();
+        adapters.insert(
+            RouteKind::Xai,
+            Arc::new(XaiShapingProbe {
+                body: std::sync::Mutex::new(Some(tx)),
+            }),
+        );
+        let router = Router {
+            adapters,
+            curated: HashMap::from([("xai::grok-test".into(), RouteKind::Xai)]),
+            has_openai_compat: false,
+            fingerprint: String::new(),
+        };
+
+        let _stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("xai")),
+                model: "grok-test".into(),
+                reasoning_model: true,
+                messages: vec![ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "first answer".into(),
+                    }],
+                    reasoning: MessageReasoning::captured(
+                        ReasoningOrigin {
+                            provider: Some(ProviderId::new("xai")),
+                            model: "grok-test".into(),
+                        },
+                        vec![reasoning.clone()],
+                    ),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let body = rx.await.unwrap();
+        assert_eq!(body["input"][0], reasoning);
+        assert!(body.get("provider").is_none());
     }
 }

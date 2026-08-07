@@ -12,7 +12,7 @@ use crate::providers::ProviderKind;
 ///
 /// `snake_case` matches the strings `as_str` has always produced, so the enum
 /// serializes exactly as the hand-built list of strings it replaces on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum InputModality {
     /// Plain text and structured text content.
@@ -513,6 +513,7 @@ mod tests {
         match provider {
             ProviderKind::Anthropic => true,
             ProviderKind::Openai => true,
+            ProviderKind::Xai => true,
             ProviderKind::Gemini => true,
             ProviderKind::OpenaiCompatible => false,
             ProviderKind::ModelGateway => true,

@@ -562,6 +562,9 @@ impl GatewayRuntime {
                     upstream_id: model.upstream_id,
                     context_window: clamp_u32(model.context_window, 32_768),
                     max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+                    input_modalities: vec![crate::model_registry::InputModality::Text],
+                    supports_reasoning: false,
+                    reasoning_efforts: Vec::new(),
                 })
             })
             .collect();
@@ -1191,6 +1194,7 @@ mod tests {
                         display_name: Some("Opus (gateway)".to_string()),
                         context_window: 200_000,
                         max_output_tokens: 32_000,
+                        ..Default::default()
                     },
                     CustomModelConfig {
                         id: "anthropic-us-claude-opus-5".to_string(),
@@ -1198,6 +1202,7 @@ mod tests {
                         display_name: None,
                         context_window: 200_000,
                         max_output_tokens: 32_000,
+                        ..Default::default()
                     },
                     CustomModelConfig {
                         id: "acme-inhouse-llm".to_string(),
@@ -1205,6 +1210,7 @@ mod tests {
                         display_name: None,
                         context_window: 200_000,
                         max_output_tokens: 32_000,
+                        ..Default::default()
                     },
                 ],
                 model_protocols: Default::default(),
@@ -2086,6 +2092,7 @@ mod tests {
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,
+                    ..Default::default()
                 }],
             },
         )
@@ -2201,6 +2208,7 @@ mod tests {
                 display_name: None,
                 context_window: 32_768,
                 max_output_tokens: 4_096,
+                ..Default::default()
             }],
         };
         providers::write_config(
@@ -2278,6 +2286,7 @@ mod tests {
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,
+                    ..Default::default()
                 }],
             },
         )
@@ -2330,6 +2339,7 @@ mod tests {
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,
+                    ..Default::default()
                 }],
             },
         )

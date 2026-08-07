@@ -40,6 +40,8 @@ export function providerLabel(provider: ProviderKind): string {
       return "Anthropic";
     case "openai":
       return "OpenAI";
+    case "xai":
+      return "xAI";
     case "gemini":
       return "Google Gemini";
     case "openai_compatible":

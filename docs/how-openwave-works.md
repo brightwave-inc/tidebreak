@@ -154,10 +154,13 @@ reports what each role resolves to so a client can label the automatic choice.
 
 OpenAI-compatible endpoints can register custom model IDs and their context and
 output limits in provider settings. Those models enter the same catalog with
-conservative text-only, non-reasoning capabilities. Existing unqualified model
-settings are migrated at the API boundary when exactly one configured provider
-owns the ID. Ambiguous IDs fail closed and must be reselected with their
-provider, so routing never depends on registry order.
+conservative text-only, non-reasoning capabilities. xAI also uses explicit
+configured model rows because the models available to an API key can change
+independently of an OpenWave release; each row records its own limits, image
+input support, reasoning support, and accepted effort levels. Existing
+unqualified model settings are migrated at the API boundary when exactly one
+configured provider owns the ID. Ambiguous IDs fail closed and must be
+reselected with their provider, so routing never depends on registry order.
 
 ## What happens during a chat turn
 
@@ -300,9 +303,9 @@ independently reauthorizes its live grant. Resolve checks attachment authority
 again, which discards content if a detach won while the read was in flight. A
 crash after possible broker dispatch becomes a safe unavailable result instead
 of another read.
-The model router supports Anthropic, OpenAI, and OpenAI-compatible endpoints. It
-fails closed: if no enabled provider with a usable credential can serve the
-selected model, no model request is sent.
+The model router supports Anthropic, OpenAI, xAI, Gemini, and OpenAI-compatible
+endpoints. It fails closed: if no enabled provider with a usable credential can
+serve the selected model, no model request is sent.
 
 ### Tool calls are small state machines too
 

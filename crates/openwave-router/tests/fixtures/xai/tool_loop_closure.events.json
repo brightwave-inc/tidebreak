@@ -1,0 +1,51 @@
+[
+  {
+    "text": "Checking the files. ",
+    "type": "reasoning_delta"
+  },
+  {
+    "data": {
+      "encrypted_content": "opaque-current",
+      "id": "rs_current",
+      "status": "completed",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "type": "reasoning_block"
+  },
+  {
+    "text": "a.toml is read. ",
+    "type": "text_delta"
+  },
+  {
+    "text": "Retrying b.toml.",
+    "type": "text_delta"
+  },
+  {
+    "id": "call_3",
+    "index": 0,
+    "name": "read_file",
+    "type": "tool_call_started"
+  },
+  {
+    "fragment": "{\"path\":",
+    "index": 0,
+    "type": "tool_call_args_delta"
+  },
+  {
+    "fragment": "\"b.toml\"}",
+    "index": 0,
+    "type": "tool_call_args_delta"
+  },
+  {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 128,
+    "input_tokens": 284,
+    "output_tokens": 37,
+    "type": "usage"
+  },
+  {
+    "reason": "tool_use",
+    "type": "stop"
+  }
+]

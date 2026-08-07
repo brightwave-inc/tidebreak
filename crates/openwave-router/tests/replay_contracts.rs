@@ -1,6 +1,6 @@
 //! Replay contracts: what each provider adapter actually puts on the wire.
 //!
-//! Adapters translate one normalized [`ChatRequest`] into four very different
+//! Adapters translate one normalized [`ChatRequest`] into several provider
 //! request shapes, and the translation is where provider drift bites: a new
 //! model generation starts rejecting a parameter an older one accepted, and the
 //! first thing anyone sees is a 400 in a user's turn. The unit tests in each
@@ -79,7 +79,7 @@ const REDACTED: &str = "<redacted>";
 
 /// The canonical requests every adapter is measured against.
 ///
-/// One list, shared by all four providers, so a fixture diff reads as "this is
+/// One list, shared by all adapters, so a fixture diff reads as "this is
 /// how provider X shapes the same turn" and the scenarios cannot drift apart
 /// per adapter.
 fn scenarios(model: &str) -> Vec<(&'static str, ChatRequest)> {

@@ -658,8 +658,8 @@ pub enum ProviderEvent {
     /// One reasoning block, complete and opaque, as the provider emitted it.
     ///
     /// Where `ReasoningDelta` is display text, this is the replayable
-    /// artifact (an Anthropic `thinking` or `redacted_thinking` block,
-    /// signature included). `data` is the block exactly as the provider
+    /// artifact (an Anthropic `thinking` / `redacted_thinking` block or an xAI
+    /// encrypted `reasoning` item). `data` is the block exactly as the provider
     /// accepts it back; consumers must not parse, filter, or reorder it,
     /// because replay validity depends on the blocks matching what the model
     /// generated. Carried in-memory for one turn at most — it is never
