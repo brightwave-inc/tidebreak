@@ -34,13 +34,12 @@ pub struct Message {
     /// prompt. `None` means the model sees `content` byte-for-byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_content: Option<String>,
-    /// Reasoning blocks this message's step produced, with the route that
-    /// minted them.
+    /// Provider-native replay blocks this message's step produced, with the
+    /// route that minted them.
     ///
-    /// Persisted so an assistant message keeps its reasoning across a reload
-    /// and can be replayed to the same model on a later turn. Empty for every
-    /// user message, and for an assistant step whose reasoning had no message
-    /// row to ride (a tool step with no prose preamble writes no message).
+    /// Persisted so an assistant message keeps reasoning or signed tool state
+    /// across a reload and can replay it to the same model on a later turn.
+    /// Empty for every user message.
     #[serde(default, skip_serializing_if = "MessageReasoning::is_empty")]
     pub reasoning: MessageReasoning,
     /// When it was created.

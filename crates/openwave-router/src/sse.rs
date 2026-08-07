@@ -108,6 +108,23 @@ pub fn frame_data(frame: &str) -> Option<serde_json::Value> {
 /// credentials or request fragments, so only a short single-line excerpt that
 /// passes conservative secret redaction reaches `TurnFailed`.
 pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
+    safe_http_error_redacting(provider, status, body, &[])
+}
+
+/// Build a client-safe provider error while treating exact caller-supplied
+/// values as secrets.
+///
+/// Vertex adapters use this for the service-account project id: Google may put
+/// the full `projects/{project_id}/...` resource in an otherwise ordinary
+/// permission or not-found message. The status and an unrelated enum-style
+/// code remain useful, but any code or message containing a known value is
+/// omitted whole rather than partially rewritten.
+pub fn safe_http_error_redacting(
+    provider: &str,
+    status: u16,
+    body: &str,
+    sensitive_values: &[&str],
+) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let error = parsed
         .as_ref()
@@ -115,14 +132,15 @@ pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
     let raw_code = error
         .and_then(|error| error.get("type").or_else(|| error.get("code")))
         .and_then(serde_json::Value::as_str);
-    let code = raw_code.filter(|code| safe_error_code(code));
+    let code = raw_code
+        .filter(|code| safe_error_code(code) && !contains_sensitive_value(code, sensitive_values));
     let message = raw_code
         .is_none_or(safe_error_code)
         .then(|| {
             error
                 .and_then(|error| error.get("message"))
                 .and_then(serde_json::Value::as_str)
-                .and_then(safe_error_message)
+                .and_then(|message| safe_error_message(message, sensitive_values))
         })
         .flatten();
 
@@ -175,10 +193,13 @@ fn safe_error_code(code: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
-fn safe_error_message(message: &str) -> Option<String> {
+fn safe_error_message(message: &str, sensitive_values: &[&str]) -> Option<String> {
     const MAX_ERROR_MESSAGE_CHARS: usize = 240;
     let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() || contains_secret_marker(&collapsed) {
+    if collapsed.is_empty()
+        || contains_secret_marker(&collapsed)
+        || contains_sensitive_value(&collapsed, sensitive_values)
+    {
         return None;
     }
     let mut excerpt: String = collapsed.chars().take(MAX_ERROR_MESSAGE_CHARS).collect();
@@ -186,6 +207,13 @@ fn safe_error_message(message: &str) -> Option<String> {
         excerpt.push('…');
     }
     Some(excerpt)
+}
+
+fn contains_sensitive_value(text: &str, sensitive_values: &[&str]) -> bool {
+    let lower = text.to_ascii_lowercase();
+    sensitive_values
+        .iter()
+        .any(|value| !value.is_empty() && lower.contains(value.to_ascii_lowercase().as_str()))
 }
 
 fn contains_secret_marker(message: &str) -> bool {
@@ -258,6 +286,18 @@ pub fn classify_provider_error(
     body: &str,
     retry_after: Option<Duration>,
 ) -> openwave_core::error::AgentError {
+    classify_provider_error_redacting(provider, status, body, retry_after, &[])
+}
+
+/// Classify a provider HTTP error while preventing known values from entering
+/// the client-visible message.
+pub fn classify_provider_error_redacting(
+    provider: &str,
+    status: u16,
+    body: &str,
+    retry_after: Option<Duration>,
+    sensitive_values: &[&str],
+) -> openwave_core::error::AgentError {
     use openwave_core::error::{AgentError, ProviderFailure};
 
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
@@ -272,7 +312,7 @@ pub fn classify_provider_error(
         .and_then(|error| error.get("message"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let safe = || safe_http_error(provider, status, body);
+    let safe = || safe_http_error_redacting(provider, status, body, sensitive_values);
 
     if status == 400
         && (code == "context_length_exceeded" || message.contains("prompt is too long"))
@@ -486,5 +526,22 @@ mod tests {
             safe_http_error("gemini", 400, secret),
             "gemini returned 400"
         );
+    }
+
+    #[test]
+    fn known_vertex_project_is_removed_while_status_and_code_remain() {
+        let project_id = "customer-project-123";
+        let body = serde_json::json!({
+            "error": {
+                "code": "permission_denied",
+                "message": format!(
+                    "Permission denied on projects/{project_id}/locations/global"
+                ),
+            }
+        })
+        .to_string();
+        let error = safe_http_error_redacting("vertex", 403, &body, &[project_id]);
+        assert_eq!(error, "vertex returned 403 (permission_denied)");
+        assert!(!error.contains(project_id));
     }
 }

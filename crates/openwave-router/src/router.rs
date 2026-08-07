@@ -25,10 +25,10 @@ use crate::GeminiProvider;
 use crate::OpenAiCompatProvider;
 #[cfg(feature = "openai")]
 use crate::OpenAiProvider;
-#[cfg(feature = "xai")]
-use crate::XaiProvider;
 #[cfg(all(feature = "anthropic", feature = "gemini"))]
 use crate::VertexProvider;
+#[cfg(feature = "xai")]
+use crate::XaiProvider;
 
 /// Native request protocol used by one curated Vertex model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

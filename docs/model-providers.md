@@ -78,7 +78,9 @@ Consequences:
 Existing machinery that already follows this:
 
 - [`MessageReasoning::replayable_for`](../crates/openwave-core/src/provider.rs)
-  — thinking blocks only for the minting route.
+  — thinking blocks and signed Gemini function-call state only for the minting
+  route. Foreign or legacy Gemini history uses Google's documented validator
+  bypass instead of replaying another route's opaque signature.
 - [`ProviderToolReplay::replayable_for`](../crates/openwave-core/src/provider.rs)
   — provider-executed native blocks only for the minting route.
 - Host-shaped cleartext on `ProviderExecutedToolCall.output` — what foreign
@@ -113,7 +115,10 @@ Vertex rows remain provider-qualified (`vertex::<model>`), even when the raw
 model id matches a direct Anthropic or Gemini row. That identity is also the
 native-replay boundary: a Claude reasoning block produced through Vertex may
 replay only to the same Vertex model. Switching to direct Anthropic (or the
-reverse) drops the opaque block and keeps the portable transcript.
+reverse) drops the opaque block and keeps the portable transcript. Gemini
+`thoughtSignature` values follow the same rule between direct Gemini and
+Vertex Gemini, while durable function-call ids remain paired with their
+responses on either route.
 
 ## Checklist for a new provider-coupled feature
 

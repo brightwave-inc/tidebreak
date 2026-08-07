@@ -1547,6 +1547,17 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes[0].base_url, None);
     assert_eq!(routes[0].curated_models, ["grok-account-model"]);
 
+    let configured = providers::resolve_model_policy(&*store, "grok-account-model", false)
+        .await
+        .unwrap()
+        .expect("a bare configured xAI id resolves to its sole owner");
+    assert_eq!(configured.provider, providers::ProviderKind::Xai);
+    let curated = providers::resolve_model_policy(&*store, "gpt-5.6-sol", false)
+        .await
+        .unwrap()
+        .expect("a bare curated id keeps the registry's direct owner");
+    assert_eq!(curated.provider, providers::ProviderKind::Openai);
+
     let router = openwave_router::Router::build(routes);
     assert_eq!(
         router.select_for(

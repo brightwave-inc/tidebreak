@@ -19,17 +19,20 @@
               "args": {
                 "path": "a.toml"
               },
+              "id": "call_1",
               "name": "read_file"
             },
-            "thoughtSignature": "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+            "thoughtSignature": "c2lnbmF0dXJlLW9uZQ=="
           },
           {
             "functionCall": {
               "args": {
                 "path": "b.toml"
               },
+              "id": "call_2",
               "name": "read_file"
-            }
+            },
+            "thoughtSignature": "c2lnbmF0dXJlLXR3bw=="
           }
         ],
         "role": "model"
@@ -38,6 +41,7 @@
         "parts": [
           {
             "functionResponse": {
+              "id": "call_1",
               "name": "read_file",
               "response": {
                 "output": "retries = 3"
@@ -46,6 +50,7 @@
           },
           {
             "functionResponse": {
+              "id": "call_2",
               "name": "read_file",
               "response": {
                 "error": "no such file"

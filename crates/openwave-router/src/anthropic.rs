@@ -23,8 +23,8 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, drain_frames, frame_data,
-    read_bounded_error_body,
+    classify_in_band_error, classify_provider_error, classify_provider_error_redacting,
+    drain_frames, frame_data, read_bounded_error_body,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -352,12 +352,21 @@ impl AnthropicProvider {
         if !status.is_success() {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(classify_provider_error(
-                self.provider_name(),
-                status.as_u16(),
-                &body,
-                retry_after,
-            ));
+            return Err(match &self.vertex {
+                Some(vertex) => classify_provider_error_redacting(
+                    self.provider_name(),
+                    status.as_u16(),
+                    &body,
+                    retry_after,
+                    &[vertex.project_id.as_str()],
+                ),
+                None => classify_provider_error(
+                    self.provider_name(),
+                    status.as_u16(),
+                    &body,
+                    retry_after,
+                ),
+            });
         }
         Ok(response)
     }
@@ -3022,5 +3031,67 @@ mod tests {
             })
             .await;
         assert_eq!(source.0.lock().unwrap().as_slice(), &[Some(conversation)]);
+    }
+
+    #[tokio::test]
+    async fn vertex_error_does_not_expose_the_service_account_project() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        const PROJECT_ID: &str = "customer-project-123";
+
+        struct StaticToken;
+
+        #[async_trait::async_trait]
+        impl crate::BearerTokenSource for StaticToken {
+            async fn bearer_token(&self) -> openwave_core::Result<String> {
+                Ok("vertex-bearer".into())
+            }
+        }
+
+        async fn deny() -> impl IntoResponse {
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": {
+                        "code": "permission_denied",
+                        "message": format!(
+                            "Permission denied on projects/{PROJECT_ID}/locations/global"
+                        ),
+                    }
+                })),
+            )
+        }
+
+        let app = Router::new().fallback(post(deny));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider =
+            AnthropicProvider::vertex(PROJECT_ID, "global", std::sync::Arc::new(StaticToken))
+                .unwrap()
+                .with_base_url(format!("http://{address}"));
+        let error = match provider
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("vertex")),
+                model: "claude-opus-4-8".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("Vertex Claude unexpectedly accepted the denied request"),
+        };
+        server.abort();
+
+        assert!(matches!(error, AgentError::Authentication(_)));
+        let visible = error.to_string();
+        assert!(visible.contains("vertex returned 403"), "{visible}");
+        assert!(visible.contains("permission_denied"), "{visible}");
+        assert!(!visible.contains(PROJECT_ID), "{visible}");
     }
 }

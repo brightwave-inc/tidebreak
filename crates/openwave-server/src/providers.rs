@@ -325,6 +325,7 @@ impl ProviderKind {
                 self,
                 ProviderKind::Anthropic
                     | ProviderKind::Openai
+                    | ProviderKind::Xai
                     | ProviderKind::Gemini
                     | ProviderKind::OpenaiCompatible
             ),
@@ -1638,8 +1639,8 @@ pub async fn collect_routes(
                 kind,
                 ProviderKind::Gemini | ProviderKind::Xai | ProviderKind::Vertex
             ))
-                .then_some(config.base_url)
-                .flatten(),
+            .then_some(config.base_url)
+            .flatten(),
             curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
                 .chain(config.models.into_iter().map(|model| model.id))

@@ -48,14 +48,15 @@ pub struct ReasoningOrigin {
     pub model: String,
 }
 
-/// A message's opaque reasoning blocks, bound to the route that minted them.
+/// A message's opaque provider replay blocks, bound to the route that minted
+/// them.
 ///
-/// The blocks are provider values kept in emission order and kept whole — a
-/// message replays either all of them or none, because a provider that
-/// validates replay (Anthropic) rejects rearranged, edited, or partially
-/// dropped reasoning. They stay a `Vec`: a provider may emit several in one
-/// step, and flattening them into one block would lose both the count and the
-/// per-block signatures.
+/// Most blocks are reasoning artifacts (Anthropic thinking or xAI encrypted
+/// reasoning). Gemini also uses this channel for compact signed-function-call
+/// records: the opaque `thoughtSignature` belongs to the assistant step and
+/// must return only to the exact route that minted it. Values stay in emission
+/// order and whole — a message replays either all of them or none, because a
+/// validating provider rejects rearranged, edited, or partially dropped state.
 ///
 /// The origin travels with the blocks so a consumer can tell whether they are
 /// valid input for the request it is about to send. Blocks and origin are set
@@ -655,17 +656,17 @@ pub enum ProviderEvent {
         /// The reasoning fragment.
         text: String,
     },
-    /// One reasoning block, complete and opaque, as the provider emitted it.
+    /// One replay block, complete and opaque, as the provider emitted it.
     ///
-    /// Where `ReasoningDelta` is display text, this is the replayable
-    /// artifact (an Anthropic `thinking` / `redacted_thinking` block or an xAI
-    /// encrypted `reasoning` item). `data` is the block exactly as the provider
-    /// accepts it back; consumers must not parse, filter, or reorder it,
-    /// because replay validity depends on the blocks matching what the model
-    /// generated. Carried in-memory for one turn at most — it is never
-    /// journaled or persisted.
+    /// Where `ReasoningDelta` is display text, this is replayable native state:
+    /// an Anthropic `thinking` / `redacted_thinking` block, an xAI encrypted
+    /// `reasoning` item, or a compact Gemini call-id/`thoughtSignature` record.
+    /// Consumers must not filter or reorder it because replay validity depends
+    /// on matching what the model generated. Carried in-memory for one turn at
+    /// most — it is never journaled directly, though the agent may persist it
+    /// with the assistant message for later same-route replay.
     ReasoningBlock {
-        /// The provider-native block, replayed verbatim.
+        /// The provider-native replay state.
         data: Value,
     },
     /// A tool call has begun; name and id are known.

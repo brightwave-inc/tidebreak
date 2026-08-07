@@ -51,7 +51,7 @@ pub use openai::OpenAiProvider;
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
 pub use router::{BearerTokenSource, Route, RouteKind, Router, VertexModelFamily, VertexRoute};
-#[cfg(feature = "xai")]
-pub use xai::XaiProvider;
 #[cfg(all(feature = "anthropic", feature = "gemini"))]
 pub use vertex::VertexProvider;
+#[cfg(feature = "xai")]
+pub use xai::XaiProvider;

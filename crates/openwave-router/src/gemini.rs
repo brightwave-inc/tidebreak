@@ -2,10 +2,11 @@
 //!
 //! Gemini's GenerateContent protocol differs materially from OpenAI-compatible
 //! chat completions: output limits live under `generationConfig`, streamed SSE
-//! frames are complete (but partial) responses, and tool results carry no call
-//! id at all — they are correlated to their calls by function name and order. Keeping that conversion here makes the
-//! catalog's Gemini rows honest rather than depending on a compatibility layer
-//! silently accepting or dropping fields it does not understand.
+//! frames are complete (but partial) responses, and current tool calls carry
+//! ids plus opaque thought signatures that must survive a same-route replay.
+//! Keeping that conversion here makes the catalog's Gemini rows honest rather
+//! than depending on a compatibility layer silently accepting or dropping
+//! fields it does not understand.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -27,8 +28,9 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, drain_frames, frame_data_raw,
-    read_bounded_error_body,
+    classify_in_band_error, classify_provider_error, classify_provider_error_redacting,
+    drain_frames, frame_data_raw, read_bounded_error_body, safe_http_error,
+    safe_http_error_redacting,
 };
 use crate::BearerTokenSource;
 
@@ -255,7 +257,16 @@ impl ModelProvider for GeminiProvider {
         if !status.is_success() {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(classify_gemini_error(status.as_u16(), &body, retry_after));
+            let project_id = match &self.endpoint_family {
+                EndpointFamily::VertexAi { project_id, .. } => Some(project_id.as_str()),
+                EndpointFamily::DeveloperApi => None,
+            };
+            return Err(classify_gemini_error(
+                status.as_u16(),
+                &body,
+                retry_after,
+                project_id,
+            ));
         }
 
         let ceiling = crate::http::timeouts().total_stream;
@@ -376,7 +387,13 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
 
     let grounding = declares_search_grounding(req);
     let mut body = json!({
-        "contents": gemini_contents(&req.messages, &req.images, grounding)?,
+        "contents": gemini_contents(
+            &req.messages,
+            &req.images,
+            grounding,
+            req.provider.as_ref(),
+            &req.model,
+        )?,
         "generationConfig": generation_config,
     });
     if let Some(system) = &req.system {
@@ -416,10 +433,11 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
 /// `toolConfig.includeServerSideToolInvocations` set: that flag turns on tool
 /// context circulation, which drops `AUTO` function-calling mode and requires
 /// every later turn to replay the model's own parts verbatim, including part
-/// ids and opaque `thoughtSignature` values. OpenWave stores provider-neutral
-/// history precisely so a chat can switch models mid-conversation, so it sends
-/// the documented signature bypass and mints its own call ids — replaying what
-/// circulation demands is not something this adapter can do today.
+/// ids and opaque `thoughtSignature` values. OpenWave captures those parts as
+/// route-originated replay state for ordinary host tool calls, but it still
+/// stores provider-neutral history so a chat can switch models. On a foreign
+/// route the native state flattens away and the documented signature bypass
+/// keeps that older history portable.
 ///
 /// Dropping the host's tools to make room for grounding would be worse than
 /// ignoring grounding: the turn would lose the agent's whole tool loop. So the
@@ -834,14 +852,17 @@ fn gemini_thinking_level(effort: ReasoningEffort) -> &'static str {
 /// Gemini requires all responses to the parallel calls in one model turn to
 /// form one following user message. The stored transcript keeps tool results as
 /// independent messages, so consecutive pure result messages are coalesced.
-/// Neither side of the protocol carries a call id, so that ordering is the only
-/// correlation the model has and the coalescing pass is load-bearing.
+/// Current Gemini calls and responses both carry the durable call id. The
+/// coalescing pass remains load-bearing because Gemini requires every response
+/// to parallel calls in one model turn to share the following user message.
 /// `rename_client_web_search` rewrites the name of historical client-style
 /// `web_search` calls — see [`PRIOR_WEB_SEARCH_TOOL`].
 fn gemini_contents(
     messages: &[openwave_core::provider::ChatMessage],
     images: &ImageAttachments,
     rename_client_web_search: bool,
+    provider: Option<&ProviderId>,
+    model: &str,
 ) -> Result<Vec<Value>> {
     let rename = rename_client_web_search;
     let tool_names: HashMap<&str, &str> = messages
@@ -866,20 +887,23 @@ fn gemini_contents(
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => parts.push(json!({ "text": text })),
-                ContentBlock::ToolUse { name, input, .. } => {
-                    // `FunctionCall` has no id field, and ids minted by other
-                    // providers must never reach Gemini: a call is correlated
-                    // to its response by function name and part order.
+                ContentBlock::ToolUse { id, name, input } => {
                     let mut part = json!({
                         "functionCall": {
+                            "id": id,
                             "name": replayed_tool_name(name, rename),
                             "args": input,
                         },
                     });
-                    // Gemini validates the first call part of each model turn.
-                    // We deliberately use its portable bypass rather than
-                    // persisting opaque provider state in a cross-model chat.
-                    if !attached_signature {
+                    // Same-route history restores the provider's opaque bytes
+                    // exactly. Foreign or legacy history has no valid native
+                    // signature, so only that fallback takes the documented
+                    // validator bypass.
+                    if let Some(signature) = gemini_thought_signature(message, provider, model, id)
+                    {
+                        part["thoughtSignature"] = signature;
+                        attached_signature = true;
+                    } else if !attached_signature {
                         part["thoughtSignature"] = json!(thought_signature_bypass());
                         attached_signature = true;
                     }
@@ -895,8 +919,8 @@ fn gemini_contents(
                             "gemini tool result has no matching function call".to_string(),
                         )
                     })?;
-                    // `FunctionResponse` likewise carries no id, and its
-                    // `response` struct expresses failure with an `error` key.
+                    // Its `response` struct expresses failure with an `error`
+                    // key; the id and name together match the original call.
                     let response = if *is_error {
                         json!({ "error": content })
                     } else {
@@ -904,6 +928,7 @@ fn gemini_contents(
                     };
                     parts.push(json!({
                         "functionResponse": {
+                            "id": tool_use_id,
                             "name": name,
                             "response": response,
                         },
@@ -980,6 +1005,24 @@ fn gemini_contents(
         }
     }
     Ok(merged)
+}
+
+/// The exact thought signature captured for `tool_use_id`, but only when the
+/// message state came from this provider+model route.
+fn gemini_thought_signature(
+    message: &openwave_core::provider::ChatMessage,
+    provider: Option<&ProviderId>,
+    model: &str,
+    tool_use_id: &str,
+) -> Option<Value> {
+    message
+        .reasoning
+        .replayable_for(provider, model)
+        .iter()
+        .find(|part| part.pointer("/functionCall/id").and_then(Value::as_str) == Some(tool_use_id))
+        .and_then(|part| part.get("thoughtSignature"))
+        .filter(|signature| signature.is_string())
+        .cloned()
 }
 
 #[derive(Default)]
@@ -1093,6 +1136,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 let index = state.next_tool_index;
                 state.next_tool_index = state.next_tool_index.saturating_add(1);
                 state.saw_tool_call = true;
+                if part.get("thoughtSignature").is_some_and(Value::is_string) {
+                    events.push(ProviderEvent::ReasoningBlock {
+                        data: json!({
+                            "functionCall": {"id": id.clone()},
+                            "thoughtSignature": part["thoughtSignature"].clone(),
+                        }),
+                    });
+                }
                 events.push(ProviderEvent::ToolCallStarted {
                     index,
                     id,
@@ -1325,6 +1376,7 @@ fn classify_gemini_error(
     status: u16,
     body: &str,
     retry_after: Option<std::time::Duration>,
+    vertex_project_id: Option<&str>,
 ) -> AgentError {
     let prompt_too_long = serde_json::from_str::<Value>(body)
         .ok()
@@ -1342,15 +1394,24 @@ fn classify_gemini_error(
                 || message.contains("maximum number of tokens")
         });
     if prompt_too_long {
-        return AgentError::PromptTooLong(crate::sse::safe_http_error("gemini", status, body));
+        let message = match vertex_project_id {
+            Some(project_id) => safe_http_error_redacting("gemini", status, body, &[project_id]),
+            None => safe_http_error("gemini", status, body),
+        };
+        return AgentError::PromptTooLong(message);
     }
-    classify_provider_error("gemini", status, body, retry_after)
+    match vertex_project_id {
+        Some(project_id) => {
+            classify_provider_error_redacting("gemini", status, body, retry_after, &[project_id])
+        }
+        None => classify_provider_error("gemini", status, body, retry_after),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::{ChatMessage, MessageReasoning};
+    use openwave_core::provider::{ChatMessage, MessageReasoning, ReasoningOrigin};
     use openwave_core::tool::{Tool, ToolSpec};
     use openwave_core::{
         ask_user_questions_tool_spec, create_app_tool_spec, exit_plan_mode_tool_spec,
@@ -1607,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_results_correlate_by_name_and_order_without_ids() {
+    fn tool_calls_and_results_preserve_ids_and_same_route_signatures() {
         let messages = vec![
             ChatMessage {
                 role: Role::Assistant,
@@ -1623,7 +1684,22 @@ mod tests {
                         input: json!({"path": "two"}),
                     },
                 ],
-                reasoning: MessageReasoning::default(),
+                reasoning: MessageReasoning::captured(
+                    ReasoningOrigin {
+                        provider: Some(ProviderId::new("gemini")),
+                        model: "gemini-3.6-flash".into(),
+                    },
+                    vec![
+                        json!({
+                            "functionCall": {"id": "call_one"},
+                            "thoughtSignature": "b3BhcXVlLXNpZ25hdHVyZS0x",
+                        }),
+                        json!({
+                            "functionCall": {"id": "call_two"},
+                            "thoughtSignature": "b3BhcXVlLXNpZ25hdHVyZS0y",
+                        }),
+                    ],
+                ),
             },
             ChatMessage {
                 role: Role::User,
@@ -1649,33 +1725,21 @@ mod tests {
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0]["role"], "model");
 
-        // The proto has no id on either side; correlation is by function name
-        // and the order of the parts, so no provider-minted id may leak out.
         let calls = contents[0]["parts"].as_array().unwrap();
-        for call in calls {
-            assert!(call["functionCall"].get("id").is_none());
-            assert!(call["functionCall"].get("call_id").is_none());
-        }
+        assert_eq!(calls[0]["functionCall"]["id"], "call_one");
+        assert_eq!(calls[1]["functionCall"]["id"], "call_two");
         assert_eq!(calls[0]["functionCall"]["args"]["path"], "one");
         assert_eq!(calls[1]["functionCall"]["args"]["path"], "two");
-
-        // `thoughtSignature` is proto `bytes`, so the JSON value must be the
-        // base64 encoding of the bypass token, not the token itself, and it
-        // rides only the first call part of the turn.
-        let signature = calls[0]["thoughtSignature"].as_str().unwrap();
-        assert_eq!(
-            String::from_utf8(BASE64.decode(signature).unwrap()).unwrap(),
-            THOUGHT_SIGNATURE_BYPASS
-        );
-        assert!(calls[1].get("thoughtSignature").is_none());
+        assert_eq!(calls[0]["thoughtSignature"], "b3BhcXVlLXNpZ25hdHVyZS0x");
+        assert_eq!(calls[1]["thoughtSignature"], "b3BhcXVlLXNpZ25hdHVyZS0y");
 
         let responses = contents[1]["parts"].as_array().unwrap();
         assert_eq!(responses.len(), 2);
-        for response in responses {
-            assert_eq!(response["functionResponse"]["name"], "read_file");
-            assert!(response["functionResponse"].get("id").is_none());
-            assert!(response["functionResponse"].get("call_id").is_none());
-        }
+        assert_eq!(responses[0]["functionResponse"]["id"], "call_one");
+        assert_eq!(responses[1]["functionResponse"]["id"], "call_two");
+        assert!(responses
+            .iter()
+            .all(|response| response["functionResponse"]["name"] == "read_file"));
         assert_eq!(
             responses[0]["functionResponse"]["response"]["output"],
             "one"
@@ -1687,6 +1751,71 @@ mod tests {
         assert!(responses[1]["functionResponse"]["response"]
             .get("is_error")
             .is_none());
+    }
+
+    #[test]
+    fn vertex_replays_its_signature_and_route_switches_use_the_legacy_bypass() {
+        let tool_message = |origin_provider: &str| ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_one".into(),
+                name: "read_file".into(),
+                input: json!({"path": "one"}),
+            }],
+            reasoning: MessageReasoning::captured(
+                ReasoningOrigin {
+                    provider: Some(ProviderId::new(origin_provider)),
+                    model: "gemini-3.6-flash".into(),
+                },
+                vec![json!({
+                    "functionCall": {"id": "call_one"},
+                    "thoughtSignature": "dmVydGV4LW9wYXF1ZS1zaWduYXR1cmU=",
+                })],
+            ),
+        };
+
+        let mut vertex = request(vec![tool_message("vertex")]);
+        vertex.provider = Some(ProviderId::new("vertex"));
+        let body = build_request_json(&vertex).unwrap();
+        assert_eq!(
+            body["contents"][0]["parts"][0]["thoughtSignature"],
+            "dmVydGV4LW9wYXF1ZS1zaWduYXR1cmU="
+        );
+
+        let mut switched = request(vec![tool_message("gemini")]);
+        switched.provider = Some(ProviderId::new("vertex"));
+        let body = build_request_json(&switched).unwrap();
+        let signature = body["contents"][0]["parts"][0]["thoughtSignature"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(BASE64.decode(signature).unwrap()).unwrap(),
+            THOUGHT_SIGNATURE_BYPASS
+        );
+
+        let legacy = request(vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_one".into(),
+                name: "read_file".into(),
+                input: json!({"path": "one"}),
+            }],
+            reasoning: MessageReasoning::default(),
+        }]);
+        let body = build_request_json(&legacy).unwrap();
+        assert_eq!(
+            String::from_utf8(
+                BASE64
+                    .decode(
+                        body["contents"][0]["parts"][0]["thoughtSignature"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap(),
+            THOUGHT_SIGNATURE_BYPASS
+        );
     }
 
     // ── Image blocks ───────────────────────────────────────────────
@@ -1755,8 +1884,8 @@ mod tests {
             json!({"candidates":[{"content":{"parts":[
                 {"thought": true, "text":"considering"},
                 {"text":"I'll inspect it."},
-                {"functionCall":{"id":"call_1", "name":"read_file", "args":{"path":"a"}}},
-                {"functionCall":{"id":"call_2", "name":"read_file", "args":{"path":"b"}}}
+                {"functionCall":{"id":"call_1", "name":"read_file", "args":{"path":"a"}}, "thoughtSignature":"c2lnbmF0dXJlLW9uZQ=="},
+                {"functionCall":{"id":"call_2", "name":"read_file", "args":{"path":"b"}}, "thoughtSignature":"c2lnbmF0dXJlLXR3bw=="}
             ]}}]}),
             json!({"candidates":[{"finishReason":"STOP"}], "usageMetadata": {
                 "promptTokenCount": 10,
@@ -1774,6 +1903,12 @@ mod tests {
                 ProviderEvent::TextDelta {
                     text: "I'll inspect it.".into()
                 },
+                ProviderEvent::ReasoningBlock {
+                    data: json!({
+                        "functionCall": {"id": "call_1"},
+                        "thoughtSignature": "c2lnbmF0dXJlLW9uZQ==",
+                    })
+                },
                 ProviderEvent::ToolCallStarted {
                     index: 0,
                     id: "call_1".into(),
@@ -1782,6 +1917,12 @@ mod tests {
                 ProviderEvent::ToolCallArgsDelta {
                     index: 0,
                     fragment: r#"{"path":"a"}"#.into()
+                },
+                ProviderEvent::ReasoningBlock {
+                    data: json!({
+                        "functionCall": {"id": "call_2"},
+                        "thoughtSignature": "c2lnbmF0dXJlLXR3bw==",
+                    })
                 },
                 ProviderEvent::ToolCallStarted {
                     index: 1,
@@ -2117,5 +2258,52 @@ mod tests {
             "read_file"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn vertex_error_does_not_expose_the_service_account_project() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        const PROJECT_ID: &str = "customer-project-123";
+
+        async fn deny() -> impl IntoResponse {
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": {
+                        "code": "permission_denied",
+                        "message": format!(
+                            "Permission denied on projects/{PROJECT_ID}/locations/global"
+                        ),
+                    }
+                })),
+            )
+        }
+
+        let app = Router::new().fallback(post(deny));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = GeminiProvider::vertex(PROJECT_ID, "global", Arc::new(StaticToken))
+            .unwrap()
+            .with_base_url(format!("http://{address}"));
+        let error = match provider
+            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("Vertex Gemini unexpectedly accepted the denied request"),
+        };
+        server.abort();
+
+        assert!(matches!(error, AgentError::Authentication(_)));
+        let visible = error.to_string();
+        assert!(visible.contains("gemini returned 403"), "{visible}");
+        assert!(visible.contains("permission_denied"), "{visible}");
+        assert!(!visible.contains(PROJECT_ID), "{visible}");
     }
 }

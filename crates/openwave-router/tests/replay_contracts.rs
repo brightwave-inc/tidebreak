@@ -44,7 +44,7 @@ use futures::StreamExt;
 use openwave_core::model::ReasoningEffort;
 use openwave_core::{
     ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
-    ResponseFormat, Role, ToolChoice, ToolSpec,
+    ProviderId, ReasoningOrigin, ResponseFormat, Role, ToolChoice, ToolSpec,
 };
 use openwave_router::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiProvider};
 use openwave_router::{BearerTokenSource, VertexModelFamily, VertexProvider};
@@ -179,6 +179,28 @@ fn tool_loop_closure(model: &str) -> ChatRequest {
     }
 }
 
+fn gemini_tool_loop_closure(model: &str, provider: &str) -> ChatRequest {
+    let mut request = tool_loop_closure(model);
+    request.provider = Some(ProviderId::new(provider));
+    request.messages[1].reasoning = MessageReasoning::captured(
+        ReasoningOrigin {
+            provider: Some(ProviderId::new(provider)),
+            model: model.to_string(),
+        },
+        vec![
+            json!({
+                "functionCall": {"id": "call_1"},
+                "thoughtSignature": "c2lnbmF0dXJlLW9uZQ==",
+            }),
+            json!({
+                "functionCall": {"id": "call_2"},
+                "thoughtSignature": "c2lnbmF0dXJlLXR3bw==",
+            }),
+        ],
+    );
+    request
+}
+
 /// A schema-constrained answer from a reasoning model.
 ///
 /// The constraint is the interesting part: three adapters express it three ways,
@@ -304,7 +326,7 @@ async fn vertex_gemini_replay_request_contract() {
     check_scenario(
         "vertex_gemini",
         "tool_loop_closure",
-        tool_loop_closure("gemini-3.6-flash"),
+        gemini_tool_loop_closure("gemini-3.6-flash", "vertex"),
         |base_url| {
             Arc::new(
                 VertexProvider::new(
@@ -351,6 +373,11 @@ async fn check_adapter(
     build: impl Fn(&str) -> Arc<dyn ModelProvider>,
 ) {
     for (scenario, request) in scenarios(model) {
+        let request = if provider == "gemini" && scenario == "tool_loop_closure" {
+            gemini_tool_loop_closure(model, "gemini")
+        } else {
+            request
+        };
         let recording = recorded_response(provider, scenario);
         let response_body = recording
             .clone()
