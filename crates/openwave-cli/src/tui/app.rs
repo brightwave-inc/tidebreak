@@ -23,9 +23,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tui_textarea::TextArea;
 
 use super::overlays::{
     AgentsOverlay, ChatsOverlay, HelpOverlay, ModeOverlay, ModelOverlay, MoveOverlay,
@@ -660,7 +660,7 @@ impl App {
         };
         self.composer = super::composer::new(vec![format!("/{name} ")]);
         // Cursor to the end.
-        self.composer.move_cursor(tui_textarea::CursorMove::End);
+        self.composer.move_cursor(ratatui_textarea::CursorMove::End);
         self.slash_selected = 0;
     }
 

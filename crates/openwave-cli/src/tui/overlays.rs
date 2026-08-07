@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use openwave_core::{AgentRunId, ChatId, ProjectId};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use super::render;
 use super::theme;
