@@ -25,9 +25,9 @@ use openwave_code_execution::{
     ScratchDir, StagedChange, WriteSnapshotSink,
 };
 use openwave_core::{
-    BlobStore, ChatId, DocumentSourceBlob, ExecFileChange, ExecFileRejectionReason,
-    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents,
-    Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    BlobStore, ChatId, DocumentBlob, ExecFileChange, ExecFileRejectionReason, ExecFileSnapshot,
+    ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents, Store, TurnId,
+    MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -189,7 +189,7 @@ impl WriteSnapshotSink for TurnSnapshotSink {
             }
             PriorContents::Unreadable => (None, None, ExecUndoState::PriorUnreadable),
             PriorContents::Bytes(bytes) => {
-                let blob = DocumentSourceBlob::from_bytes(&bytes);
+                let blob = DocumentBlob::from_bytes(&bytes);
                 // Serialize writers for this exact content address, exactly as
                 // the attachment and document publish paths do, so a retirer
                 // deleting the same bytes cannot interleave with this write.
@@ -976,7 +976,7 @@ async fn undo_file_change(
 async fn load_prior_bytes(blobs: &dyn BlobStore, snapshot: &ExecFileSnapshot) -> Option<Vec<u8>> {
     let blob_id = snapshot.file.prior_blob_id?;
     let bytes = blobs.get(blob_id).await.ok()??;
-    let source = DocumentSourceBlob::from_bytes(&bytes);
+    let source = DocumentBlob::from_bytes(&bytes);
     let byte_len = snapshot.file.prior_byte_len?;
     (source.id == blob_id && source.byte_len == byte_len).then_some(bytes)
 }
@@ -1082,7 +1082,7 @@ mod tests {
         std::fs::create_dir_all(&granted).unwrap();
 
         let original = b"original bytes";
-        let original_source = DocumentSourceBlob::from_bytes(original);
+        let original_source = DocumentBlob::from_bytes(original);
         std::fs::write(granted.join("notes.md"), original).unwrap();
         std::fs::write(granted.join("removed.txt"), b"bring me back").unwrap();
 
@@ -1193,7 +1193,7 @@ mod tests {
         let restored = std::fs::read(granted.join("notes.md")).unwrap();
         assert_eq!(restored, original);
         assert_eq!(
-            DocumentSourceBlob::from_bytes(&restored).sha256,
+            DocumentBlob::from_bytes(&restored).sha256,
             original_source.sha256
         );
         assert_eq!(
@@ -1346,7 +1346,7 @@ mod tests {
         let blobs = FsBlobStore::new(home.path().join("blobs"));
         let before = b"old workbook bytes";
         let after = b"new workbook bytes";
-        let prior = DocumentSourceBlob::from_bytes(before);
+        let prior = DocumentBlob::from_bytes(before);
         blobs.put(prior.id, before.to_vec()).await.unwrap();
         std::fs::write(granted.join("forecast.xlsx"), after).unwrap();
         let turn_id = TurnId::new();

@@ -2,6 +2,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronRight,
   Ellipsis,
+  Files,
   Folder,
   FolderOpen,
   Pencil,
@@ -123,6 +124,12 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
                 onRenameDraftChange={setProjectRenameDraft}
                 onToggle={() => toggleProjectExpanded(project.id)}
                 onNewChat={() => newChatInProject(project.id)}
+                onOpenFiles={() =>
+                  void navigate({
+                    to: "/p/$projectId",
+                    params: { projectId: project.id },
+                  })
+                }
                 onStartRename={() => startProjectRename(project)}
                 onCommitRename={() => commitProjectRename(project)}
                 onCancelRename={cancelProjectRename}
@@ -183,6 +190,7 @@ function ProjectRow({
   onRenameDraftChange,
   onToggle,
   onNewChat,
+  onOpenFiles,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -197,6 +205,7 @@ function ProjectRow({
   onRenameDraftChange: (draft: string) => void;
   onToggle: () => void;
   onNewChat: () => void;
+  onOpenFiles: () => void;
   onStartRename: () => void;
   onCommitRename: () => void;
   onCancelRename: () => void;
@@ -268,6 +277,10 @@ function ProjectRow({
           <DropdownMenuItem onSelect={onNewChat}>
             <SquarePen />
             New chat
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onOpenFiles}>
+            <Files />
+            Project files
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={onStartRename}>
             <Pencil />

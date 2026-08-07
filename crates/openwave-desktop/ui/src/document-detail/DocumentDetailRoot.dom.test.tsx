@@ -7,10 +7,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   HttpError,
   type ApiClient,
+  type Chat,
   type DocumentDetail,
 } from "@/api";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { AssistantSource } from "@/AssistantSources";
+import { useChatListStore } from "@/ChatListStore";
 import { useChatSessionStore } from "@/ChatSessionStore";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { clearFileDownloadCache } from "@/document/useFileDownload";
@@ -610,5 +612,58 @@ describe("DocumentDetailRoot load failures", () => {
 
     expect(await screen.findByText("The document could not be loaded.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+});
+
+describe("sharing an attachment with the project", () => {
+  afterEach(() => {
+    useChatListStore.getState().setChats([]);
+  });
+
+  async function openPanelForChat(chat: Partial<Chat> & { id: string }) {
+    useChatListStore.getState().setChats([chat as Chat]);
+    const client = {
+      getChatDocument: vi.fn().mockResolvedValue(detail()),
+      getChatDocumentFile: vi.fn().mockResolvedValue({
+        bytes: new TextEncoder().encode("bytes"),
+        contentType: "image/png",
+      }),
+      promoteDocumentToProject: vi.fn().mockResolvedValue({ document_id: "doc-2" }),
+    };
+    await renderWithRouter(
+      <AppContextProvider value={{ client } as unknown as AppContextValue}>
+        <DocumentDetailRoot chatId={chat.id} documentID="doc-1" />
+      </AppContextProvider>,
+      { initialUrl: `/c/${chat.id}?left=sources.doc-1&right=chat` },
+    );
+    return client;
+  }
+
+  it("offers the project only to a conversation that is in one", async () => {
+    const client = await openPanelForChat({
+      id: "chat-1",
+      project_id: "project-1",
+    });
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Add to project" }),
+    );
+    await waitFor(() =>
+      expect(client.promoteDocumentToProject).toHaveBeenCalledWith(
+        "project-1",
+        "chat-1",
+        "doc-1",
+      ),
+    );
+    // The click is spent: a second one would only make the same project file
+    // again, so the control reports the state it reached instead.
+    expect(await screen.findByRole("button", { name: "In the project" })).toBeDisabled();
+  });
+
+  it("offers nothing to a loose conversation, which has no project to share with", async () => {
+    await openPanelForChat({ id: "chat-1", project_id: null });
+    // Wait for the document itself, so the absence is a decision rather than
+    // the panel not having loaded yet.
+    expect(await screen.findByText("Floor plan.png")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add to project" })).toBeNull();
   });
 });

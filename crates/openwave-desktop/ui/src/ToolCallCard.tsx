@@ -112,17 +112,17 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Source search complete",
     settled: "Searched sources",
   },
-  list_sources: {
-    label: "Check sources",
-    active: "Checking sources",
-    complete: "Sources checked",
-    settled: "Checked sources",
+  list_documents: {
+    label: "Check files",
+    active: "Checking files",
+    complete: "Files checked",
+    settled: "Checked files",
   },
-  read_source: {
-    label: "Read a source",
-    active: "Reading a source",
-    complete: "Source read complete",
-    settled: "Read a source",
+  read_document: {
+    label: "Read a file",
+    active: "Reading a file",
+    complete: "File read complete",
+    settled: "Read a file",
   },
   read_tool_result: {
     label: "Re-read a tool result",

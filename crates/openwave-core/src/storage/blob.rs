@@ -6,7 +6,7 @@ use futures::{
 use std::ops::Range;
 
 use crate::error::{AgentError, Result};
-use crate::model::DocumentSourceBlob;
+use crate::model::DocumentBlob;
 
 use super::types::BlobStream;
 
@@ -32,7 +32,7 @@ pub trait BlobStore: Send + Sync {
     /// Filesystem-backed storage overrides this to write each chunk directly
     /// to its durable temporary file. Other implementations retain a correct
     /// fallback while they add their own streaming primitive.
-    async fn put_stream(&self, source: DocumentSourceBlob, mut chunks: BlobStream) -> Result<()> {
+    async fn put_stream(&self, source: DocumentBlob, mut chunks: BlobStream) -> Result<()> {
         let mut bytes = Vec::new();
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk?;
@@ -49,7 +49,7 @@ pub trait BlobStore: Send + Sync {
             }
             bytes.extend_from_slice(&chunk);
         }
-        if DocumentSourceBlob::from_bytes(&bytes) != source {
+        if DocumentBlob::from_bytes(&bytes) != source {
             return Err(AgentError::Store(
                 "streamed blob does not match its declared digest".into(),
             ));

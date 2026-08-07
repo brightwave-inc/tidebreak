@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 
+import { toast } from "sonner";
+
 import { HttpError, type DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
+import { useChatListStore } from "@/ChatListStore";
+import { friendlyErrorMessage } from "@/lib/utils";
 import {
   DocumentDetails,
   isDocumentRenderable,
@@ -53,12 +57,15 @@ export function DocumentDetailRoot({
   const [reloads, setReloads] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shared, setShared] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setInfo(null);
     setLoadError(null);
     setDownloadError(null);
+    setShared(false);
     void client
       .getChatDocument(chatId, documentID)
       .then((next) => {
@@ -140,6 +147,29 @@ export function DocumentDetailRoot({
 
   const documentName = info ? documentTitle(info) : undefined;
 
+  // Only offered where there is somewhere to promote to. A file is shared with
+  // a project by a deliberate act here rather than by arriving in one of its
+  // conversations, so a project holds what someone meant it to hold.
+  const projectId =
+    useChatListStore((state) => state.chats).find((chat) => chat.id === chatId)
+      ?.project_id ?? null;
+
+  async function onAddToProject() {
+    if (!projectId || sharing) return;
+    setSharing(true);
+    try {
+      await client.promoteDocumentToProject(projectId, chatId, documentID);
+      setShared(true);
+      toast.success("Added to the project.");
+    } catch (caught) {
+      toast.error(
+        friendlyErrorMessage(caught, "Could not add this file to the project."),
+      );
+    } finally {
+      setSharing(false);
+    }
+  }
+
   async function onDownload() {
     if (downloading) return;
     setDownloading(true);
@@ -169,6 +199,10 @@ export function DocumentDetailRoot({
           canDownload={canDownload && info != null}
           downloading={downloading}
           onDownload={() => void onDownload()}
+          canAddToProject={projectId != null && info != null}
+          sharing={sharing}
+          shared={shared}
+          onAddToProject={() => void onAddToProject()}
         />
       }
     >

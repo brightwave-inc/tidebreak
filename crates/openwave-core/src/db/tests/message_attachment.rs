@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::image::{ImageMediaType, ImageRef};
-use crate::model::{DocumentSourceBlob, MAX_MESSAGE_ATTACHMENTS};
+use crate::model::{DocumentBlob, MAX_MESSAGE_ATTACHMENTS};
 
 fn image_for(bytes: &[u8], width: u32, height: u32) -> ImageRef {
-    let blob = DocumentSourceBlob::from_bytes(bytes);
+    let blob = DocumentBlob::from_bytes(bytes);
     ImageRef {
         blob_id: blob.id,
         media_type: ImageMediaType::Png,
@@ -108,7 +108,7 @@ async fn message_context_is_persisted_for_the_model_without_changing_visible_con
     document.chat_id = Some(chat.id);
     document.title = Some("meeting-notes.pdf".into());
     document.media_type = "application/pdf".into();
-    document.source_blob = Some(DocumentSourceBlob::from_bytes(b"opaque pdf"));
+    document.source_blob = Some(DocumentBlob::from_bytes(b"opaque pdf"));
     document.canonical_text.clear();
     store.create_document(&document).await.unwrap();
 
@@ -191,12 +191,12 @@ async fn file_attachments_persist_with_the_message_and_join_its_idempotency_proo
     first.chat_id = Some(chat.id);
     first.title = Some("brief.pdf".into());
     first.media_type = "application/pdf".into();
-    first.source_blob = Some(DocumentSourceBlob::from_bytes(b"pdf bytes"));
+    first.source_blob = Some(DocumentBlob::from_bytes(b"pdf bytes"));
     let mut second = sample_document(None);
     second.chat_id = Some(chat.id);
     second.title = Some("notes.txt".into());
     second.media_type = "text/plain".into();
-    second.source_blob = Some(DocumentSourceBlob::from_bytes(b"notes"));
+    second.source_blob = Some(DocumentBlob::from_bytes(b"notes"));
     store.create_document(&first).await.unwrap();
     store.create_document(&second).await.unwrap();
 
@@ -502,7 +502,7 @@ impl ReferenceClass {
     const ALL: [Self; 2] = [Self::Document, Self::MessageAttachment];
 
     /// Create one live reference of this class to `blob`.
-    async fn establish(self, store: &DbStore, blob: &DocumentSourceBlob) {
+    async fn establish(self, store: &DbStore, blob: &DocumentBlob) {
         match self {
             Self::Document => {
                 let source = sample_raw_source(
@@ -550,7 +550,7 @@ async fn enqueue_retirement_despite_reference(store: &DbStore, blob_id: uuid::Uu
 #[tokio::test]
 async fn every_reference_class_blocks_every_retirement_decision() {
     for class in ReferenceClass::ALL {
-        let blob = DocumentSourceBlob::from_bytes(b"bytes shared across reference classes");
+        let blob = DocumentBlob::from_bytes(b"bytes shared across reference classes");
 
         // Site 1: the orphan audit must never queue a referenced blob.
         {
@@ -736,7 +736,7 @@ async fn deleting_a_chat_retires_only_the_attachment_blobs_it_still_owns() {
 #[tokio::test]
 async fn an_attachment_blob_shared_with_a_document_survives_either_owner() {
     let (_dir, store) = temp_store().await;
-    let blob = DocumentSourceBlob::from_bytes(b"bytes both a source and an attachment reference");
+    let blob = DocumentBlob::from_bytes(b"bytes both a source and an attachment reference");
     let image = ImageRef {
         blob_id: blob.id,
         media_type: ImageMediaType::Png,

@@ -53,12 +53,12 @@ describe("toolCallPresentation", () => {
     expect(JSON.stringify(presentation)).not.toContain("sensitive_path");
   });
 
-  it("distinguishes source discovery from direct source reads", () => {
-    expect(toolCallPresentation("list_sources", "running").title).toBe(
-      "Checking sources",
+  it("distinguishes file discovery from direct file reads", () => {
+    expect(toolCallPresentation("list_documents", "running").title).toBe(
+      "Checking files",
     );
-    expect(toolCallPresentation("read_source", "completed").title).toBe(
-      "Read a source",
+    expect(toolCallPresentation("read_document", "completed").title).toBe(
+      "Read a file",
     );
   });
 

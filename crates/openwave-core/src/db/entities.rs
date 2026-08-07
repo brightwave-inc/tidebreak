@@ -36,7 +36,7 @@ pub mod document {
         pub id: Uuid,
         pub chat_id: Option<Uuid>,
         pub project_id: Option<Uuid>,
-        pub source_uri: Option<String>,
+        pub origin_uri: Option<String>,
         pub media_type: String,
         pub title: Option<String>,
         pub source_blob_id: Option<Uuid>,

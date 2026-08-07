@@ -16,7 +16,7 @@ pub(super) fn document_table() -> TableCreateStatement {
         .col(ColumnDef::new(Document::Id).uuid().not_null().primary_key())
         .col(ColumnDef::new(Document::ChatId).uuid())
         .col(ColumnDef::new(Document::ProjectId).uuid())
-        .col(ColumnDef::new(Document::SourceUri).text())
+        .col(ColumnDef::new(Document::OriginUri).text())
         .col(ColumnDef::new(Document::MediaType).text().not_null())
         .col(ColumnDef::new(Document::Title).text())
         .col(ColumnDef::new(Document::SourceBlobId).uuid())
@@ -66,9 +66,9 @@ pub(super) fn document_table() -> TableCreateStatement {
         )
         .check(Expr::col(Document::MediaType).ne(""))
         .check(
-            Expr::col(Document::SourceUri)
+            Expr::col(Document::OriginUri)
                 .is_null()
-                .or(Expr::col(Document::SourceUri).ne("")),
+                .or(Expr::col(Document::OriginUri).ne("")),
         )
         .to_owned()
 }

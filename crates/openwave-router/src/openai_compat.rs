@@ -834,7 +834,7 @@ mod tests {
                     }),
                 },
                 ToolSpec {
-                    name: "read_source".into(),
+                    name: "read_document".into(),
                     description: "read a source".into(),
                     input_schema: json!({
                         "type": "object",

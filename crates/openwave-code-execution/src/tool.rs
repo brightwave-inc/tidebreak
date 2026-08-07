@@ -474,7 +474,7 @@ mod tests {
             self.scans.fetch_add(1, Ordering::SeqCst);
             let bytes = vec![1, 2, 3];
             let image = openwave_core::ImageRef {
-                blob_id: openwave_core::DocumentSourceBlob::from_bytes(&bytes).id,
+                blob_id: openwave_core::DocumentBlob::from_bytes(&bytes).id,
                 media_type: openwave_core::ImageMediaType::Png,
                 width: 1,
                 height: 1,

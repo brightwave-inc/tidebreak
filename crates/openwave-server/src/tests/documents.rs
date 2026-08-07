@@ -696,7 +696,7 @@ async fn streamed_raw_ingest_accepts_full_size_chunked_sources_and_deduplicates_
     // endpoint publishes the blob from the stream rather than collecting it
     // through Axum's buffered-body extractor first.
     let raw = vec![b'x'; MAX_RAW_DOCUMENT_BYTES];
-    let source_blob = openwave_core::DocumentSourceBlob::from_bytes(&raw);
+    let source_blob = openwave_core::DocumentBlob::from_bytes(&raw);
     let sha256: String = source_blob
         .sha256
         .iter()
@@ -833,7 +833,7 @@ async fn raw_ingest_persists_a_safe_title_without_requiring_a_source_path() {
     let document_id = accepted["document_id"].as_str().unwrap().parse().unwrap();
     let document = store.get_document(document_id).await.unwrap().unwrap();
     assert_eq!(document.title.as_deref(), Some("meeting notes.md"));
-    assert_eq!(document.source_uri, None);
+    assert_eq!(document.origin_uri, None);
 
     let spoofed = post_raw(
         &router,
@@ -1190,7 +1190,7 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
             chat_id: None,
             id: project_document_id,
             project_id: Some(project.id),
-            source_uri: Some("file:///project-secret.txt".into()),
+            origin_uri: Some("file:///project-secret.txt".into()),
             media_type: "text/plain".into(),
             title: None,
             source_blob: None,
@@ -1301,7 +1301,7 @@ async fn document_catalog_cursor_preserves_nanosecond_ordering() {
                 id,
                 chat_id: None,
                 project_id: None,
-                source_uri: Some(format!("file:///{nanos}.txt")),
+                origin_uri: Some(format!("file:///{nanos}.txt")),
                 media_type: "text/plain".into(),
                 title: None,
                 source_blob: None,
@@ -1548,8 +1548,8 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
     let binary_doc = store.get_document(binary_id).await.unwrap().unwrap();
     assert!(binary_doc.canonical_text.is_empty());
     assert_eq!(
-        openwave_core::SourceReadiness::of(binary_doc.is_readable()),
-        openwave_core::SourceReadiness::StoredNoText
+        openwave_core::DocumentReadiness::of(binary_doc.is_readable()),
+        openwave_core::DocumentReadiness::StoredNoText
     );
 }
 
@@ -1621,11 +1621,11 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
     assert!(!system_prompt.contains("must-not-be-copied"));
     let names: Vec<String> = surface.tools.specs().into_iter().map(|s| s.name).collect();
     assert!(
-        names.iter().any(|n| n == "list_sources"),
+        names.iter().any(|n| n == "list_documents"),
         "source listing tool registered"
     );
     assert!(
-        names.iter().any(|n| n == "read_source"),
+        names.iter().any(|n| n == "read_document"),
         "direct source read tool registered"
     );
     assert!(
@@ -1801,4 +1801,105 @@ async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
     assert_eq!(record.canonical_text, "rebuildable source");
     assert!(record.source_blob.is_some());
     assert_eq!(delete(id).await.status(), StatusCode::ACCEPTED);
+}
+
+/// Promotion shares a conversation's file with its project without disturbing
+/// the conversation's own copy, which its transcript still refers to by id.
+#[tokio::test]
+async fn promoting_a_document_shares_it_with_the_project_and_keeps_the_original() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let project = make_project(&router, &bearer).await;
+    let elsewhere = make_project(&router, &bearer).await;
+    let chat: Chat = json_body(
+        post_json(
+            &router,
+            &bearer,
+            "/chats",
+            serde_json::json!({"project_id": project.id}),
+        )
+        .await,
+    )
+    .await;
+    let loose: Chat =
+        json_body(post_json(&router, &bearer, "/chats", serde_json::json!({})).await).await;
+
+    let uri = "file:///handbook.txt";
+    let attached: serde_json::Value = json_body(
+        post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/documents", chat.id),
+            serde_json::json!({"uri": uri, "content": "shared handbook"}),
+        )
+        .await,
+    )
+    .await;
+    let attached_id: openwave_core::DocumentId =
+        attached["document_id"].as_str().unwrap().parse().unwrap();
+
+    let promote = |project_id: openwave_core::ProjectId, chat_id: openwave_core::ChatId| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{project_id}/documents/promote"),
+                serde_json::json!({"chat_id": chat_id, "document_id": attached_id}),
+            )
+            .await
+        }
+    };
+
+    let response = promote(project.id, chat.id).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let promoted: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        promoted["document_id"],
+        openwave_core::DocumentId::derive_for_project(project.id, uri).to_string()
+    );
+
+    // The conversation's own document survives, and the project's copy carries
+    // the same text without a second blob write.
+    let original = store.get_document(attached_id).await.unwrap().unwrap();
+    assert_eq!(original.chat_id, Some(chat.id));
+    let shared = store
+        .get_document(promoted["document_id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shared.project_id, Some(project.id));
+    assert_eq!(shared.canonical_text, original.canonical_text);
+    assert_eq!(shared.source_blob, original.source_blob);
+
+    // Promoting again converges rather than accumulating copies.
+    assert_eq!(
+        promote(project.id, chat.id).await.status(),
+        StatusCode::CREATED
+    );
+    let listing = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/projects/{}/documents", project.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let page: serde_json::Value = json_body(listing).await;
+    assert_eq!(page["documents"].as_array().unwrap().len(), 1);
+
+    // A conversation outside the project cannot push a file into it.
+    assert_eq!(
+        promote(elsewhere.id, chat.id).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        promote(project.id, loose.id).await.status(),
+        StatusCode::BAD_REQUEST
+    );
 }

@@ -248,6 +248,29 @@ export type RuntimeSettings = Settings;
 
 export type Project = WireProject;
 
+/**
+ * One file a project shares with the conversations filed under it.
+ *
+ * Narrower than the catalog summary the route serves: the renderer is given
+ * neither the source `uri`, which can name a place on the reader's disk, nor
+ * the ownership columns it already knows from the route it asked.
+ */
+export type ProjectDocument = {
+  document_id: string;
+  media_type: string;
+  title: string | null;
+  source_byte_len: number | null;
+  readable: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+/** One page of a project's files, newest first. */
+export type ProjectDocumentPage = {
+  documents: ProjectDocument[];
+  next_cursor: string | null;
+};
+
 /** The fixed, host-owned search providers supported by this build. */
 export type WebSearchProviderKind = WireWebSearchProviderKind;
 

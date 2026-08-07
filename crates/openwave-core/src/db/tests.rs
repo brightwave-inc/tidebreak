@@ -1,6 +1,6 @@
 use super::*;
 use crate::model::{
-    ChatRootAttachment, DocumentSourceBlob, DocumentSourceUpsert, RootAttachmentChangeAction,
+    ChatRootAttachment, DocumentBlob, DocumentSourceUpsert, RootAttachmentChangeAction,
     RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
     ToolCallExecution, ToolCallResolution, ToolCallStatus, MAX_ATTACHMENT_REVISION,
     MAX_ROOT_ATTACHMENTS,
@@ -156,16 +156,12 @@ fn sample_project() -> Project {
     }
 }
 
-fn sample_raw_source(
-    id: DocumentId,
-    uri: &str,
-    source_blob: DocumentSourceBlob,
-) -> DocumentSourceUpsert {
+fn sample_raw_source(id: DocumentId, uri: &str, source_blob: DocumentBlob) -> DocumentSourceUpsert {
     DocumentSourceUpsert {
         id,
         chat_id: None,
         project_id: None,
-        source_uri: Some(uri.into()),
+        origin_uri: Some(uri.into()),
         media_type: "application/octet-stream".into(),
         title: None,
         source_blob,
@@ -180,7 +176,7 @@ fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
         chat_id: None,
         id: DocumentId::new(),
         project_id,
-        source_uri: Some("file:///資料/notes.md".into()),
+        origin_uri: Some("file:///資料/notes.md".into()),
         media_type: "text/markdown".into(),
         title: Some("Résumé 📈".into()),
         source_blob: None,
@@ -787,7 +783,7 @@ async fn project_deletion_serializes_with_synchronous_source_ingestion() {
         let mut source = sample_raw_source(
             DocumentId::new(),
             &format!("file:///project-race-{attempt}.bin"),
-            DocumentSourceBlob::from_digest([attempt.saturating_add(1); 32], 1),
+            DocumentBlob::from_digest([attempt.saturating_add(1); 32], 1),
         );
         source.project_id = Some(project.id);
 
@@ -843,7 +839,7 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(missing),
-        source_uri: Some("file:///missing-project.txt".into()),
+        origin_uri: Some("file:///missing-project.txt".into()),
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "missing project".into(),
@@ -856,7 +852,7 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
     let mut staged = sample_raw_source(
         DocumentId::new(),
         "file:///missing-project.bin",
-        DocumentSourceBlob::from_digest([0x41; 32], 1),
+        DocumentBlob::from_digest([0x41; 32], 1),
     );
     staged.project_id = Some(missing);
     assert!(matches!(
@@ -887,7 +883,7 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     in_a.created_at = DateTime::<Utc>::from_timestamp(2_000, 0).unwrap();
     let mut in_b = sample_document(Some(project_b.id));
     in_b.created_at = DateTime::<Utc>::from_timestamp(3_000, 0).unwrap();
-    in_b.source_blob = Some(DocumentSourceBlob::from_digest([0x5a; 32], 8_192));
+    in_b.source_blob = Some(DocumentBlob::from_digest([0x5a; 32], 8_192));
 
     for document in [&unscoped, &in_a, &in_b] {
         store.create_document(document).await.unwrap();
@@ -900,7 +896,7 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
         chat_id: None,
         id: in_b.id,
         project_id: in_b.project_id,
-        source_uri: in_b.source_uri.clone(),
+        origin_uri: in_b.origin_uri.clone(),
         media_type: in_b.media_type.clone(),
         title: in_b.title.clone(),
         canonical_text: in_b.canonical_text.clone(),
@@ -1048,8 +1044,12 @@ async fn summaries_derive_readiness_from_canonical_text() {
     assert_eq!(
         readable,
         vec![
-            (with_text.id, true, crate::SourceReadiness::Readable),
-            (without_text.id, false, crate::SourceReadiness::StoredNoText,),
+            (with_text.id, true, crate::DocumentReadiness::Readable),
+            (
+                without_text.id,
+                false,
+                crate::DocumentReadiness::StoredNoText,
+            ),
         ]
     );
     // The listing decides emptiness in the database, so it must still never
@@ -1091,7 +1091,7 @@ async fn live_document_cannot_move_between_project_corpora() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
-        source_uri: Some("file:///scoped.txt".into()),
+        origin_uri: Some("file:///scoped.txt".into()),
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "project A source".into(),
@@ -1116,15 +1116,15 @@ async fn document_constraints_reject_invalid_catalog_state() {
     assert!(store.create_document(&empty_media_type).await.is_err());
 
     let mut empty_source_uri = sample_document(None);
-    empty_source_uri.source_uri = Some(String::new());
+    empty_source_uri.origin_uri = Some(String::new());
     assert!(store.create_document(&empty_source_uri).await.is_err());
 
     let mut oversized_source = sample_document(None);
-    oversized_source.source_blob = Some(DocumentSourceBlob::from_digest([0; 32], u64::MAX));
+    oversized_source.source_blob = Some(DocumentBlob::from_digest([0; 32], u64::MAX));
     assert!(store.create_document(&oversized_source).await.is_err());
 
     let mut invalid_source_id = sample_document(None);
-    let mut invalid_blob = DocumentSourceBlob::from_digest([0x11; 32], 512);
+    let mut invalid_blob = DocumentBlob::from_digest([0x11; 32], 512);
     invalid_blob.id = uuid::Uuid::new_v4();
     invalid_source_id.source_blob = Some(invalid_blob);
     assert!(store.create_document(&invalid_source_id).await.is_err());
@@ -1134,7 +1134,7 @@ async fn document_constraints_reject_invalid_catalog_state() {
     );
 
     let mut valid_source = sample_document(None);
-    valid_source.source_blob = Some(DocumentSourceBlob::from_digest([0x22; 32], 512));
+    valid_source.source_blob = Some(DocumentBlob::from_digest([0x22; 32], 512));
     store.create_document(&valid_source).await.unwrap();
     assert!(entities::document::Entity::update_many()
         .col_expr(
@@ -1166,10 +1166,10 @@ async fn synchronous_source_accept_publishes_blob_and_text_together() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
-        source_uri: Some("file:///report.txt".into()),
+        origin_uri: Some("file:///report.txt".into()),
         media_type: "text/plain".into(),
         title: Some("Report".into()),
-        source_blob: DocumentSourceBlob::from_digest([0x33; 32], 4_096),
+        source_blob: DocumentBlob::from_digest([0x33; 32], 4_096),
         canonical_text: "Page one".into(),
         updated_at: Utc::now(),
     };
@@ -1199,7 +1199,7 @@ async fn synchronous_source_accept_publishes_blob_and_text_together() {
 #[tokio::test]
 async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() {
     let (_dir, store) = temp_store().await;
-    let shared_blob = DocumentSourceBlob::from_digest([0x51; 32], 51);
+    let shared_blob = DocumentBlob::from_digest([0x51; 32], 51);
     let source_a = sample_raw_source(
         DocumentId::new(),
         "file:///shared-a.bin",
@@ -1219,8 +1219,8 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
 
     let replacement_b = sample_raw_source(
         source_b.id,
-        source_b.source_uri.as_deref().unwrap(),
-        DocumentSourceBlob::from_digest([0x52; 32], 52),
+        source_b.origin_uri.as_deref().unwrap(),
+        DocumentBlob::from_digest([0x52; 32], 52),
     );
     store.accept_document_source(&replacement_b).await.unwrap();
     let queued = store
@@ -1250,8 +1250,8 @@ async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() 
 
     let replacement_a = sample_raw_source(
         source_a.id,
-        source_a.source_uri.as_deref().unwrap(),
-        DocumentSourceBlob::from_digest([0x53; 32], 53),
+        source_a.origin_uri.as_deref().unwrap(),
+        DocumentBlob::from_digest([0x53; 32], 53),
     );
     store.accept_document_source(&replacement_a).await.unwrap();
     let requeued = store
@@ -1295,13 +1295,13 @@ async fn source_replacement_rolls_back_when_blob_retirement_cannot_be_enqueued()
     let original = sample_raw_source(
         DocumentId::new(),
         "file:///rollback-source.bin",
-        DocumentSourceBlob::from_digest([0x61; 32], 61),
+        DocumentBlob::from_digest([0x61; 32], 61),
     );
     let original_record = store.accept_document_source(&original).await.unwrap();
     let replacement = sample_raw_source(
         original.id,
-        original.source_uri.as_deref().unwrap(),
-        DocumentSourceBlob::from_digest([0x62; 32], 62),
+        original.origin_uri.as_deref().unwrap(),
+        DocumentBlob::from_digest([0x62; 32], 62),
     );
     store
         .conn
@@ -1345,7 +1345,7 @@ async fn document_delete_rolls_back_when_blob_retirement_cannot_be_enqueued() {
     let source = sample_raw_source(
         DocumentId::new(),
         "file:///rollback-delete.bin",
-        DocumentSourceBlob::from_digest([0x63; 32], 63),
+        DocumentBlob::from_digest([0x63; 32], 63),
     );
     let record = store.accept_document_source(&source).await.unwrap();
     store
@@ -1439,7 +1439,7 @@ async fn the_file_change_journal_keeps_only_the_newest_retained_turns() {
 
     let mut turns = Vec::new();
     for index in 0..(EXEC_SNAPSHOT_RETAINED_TURNS + 1) {
-        let blob = DocumentSourceBlob::from_bytes(format!("revision {index}").as_bytes());
+        let blob = DocumentBlob::from_bytes(format!("revision {index}").as_bytes());
         let turn_id = TurnId::new();
         store
             .record_exec_file_snapshots(
@@ -1512,7 +1512,7 @@ async fn orphan_blob_retirement_only_queues_missing_or_completed_episodes() {
     let referenced = sample_raw_source(
         DocumentId::new(),
         "file:///referenced-orphan-audit.bin",
-        DocumentSourceBlob::from_digest([0x7b; 32], 81),
+        DocumentBlob::from_digest([0x7b; 32], 81),
     );
     store.accept_document_source(&referenced).await.unwrap();
     assert!(!store
@@ -1581,7 +1581,7 @@ async fn stale_orphan_snapshot_cannot_reset_a_new_worker_lease() {
 #[tokio::test]
 async fn blob_retirement_claim_cancels_referenced_candidates() {
     let (_dir, store) = temp_store().await;
-    let shared_blob = DocumentSourceBlob::from_digest([0x71; 32], 71);
+    let shared_blob = DocumentBlob::from_digest([0x71; 32], 71);
     let source_a = sample_raw_source(
         DocumentId::new(),
         "file:///claim-shared-a.bin",
@@ -1596,8 +1596,8 @@ async fn blob_retirement_claim_cancels_referenced_candidates() {
     store.accept_document_source(&source_b).await.unwrap();
     let replacement = sample_raw_source(
         source_a.id,
-        source_a.source_uri.as_deref().unwrap(),
-        DocumentSourceBlob::from_digest([0x72; 32], 72),
+        source_a.origin_uri.as_deref().unwrap(),
+        DocumentBlob::from_digest([0x72; 32], 72),
     );
     store.accept_document_source(&replacement).await.unwrap();
 
@@ -1631,7 +1631,7 @@ async fn blob_retirement_claim_and_heartbeat_require_the_live_lease() {
     let source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-claim.bin",
-        DocumentSourceBlob::from_digest([0x73; 32], 73),
+        DocumentBlob::from_digest([0x73; 32], 73),
     );
     store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
@@ -1708,7 +1708,7 @@ async fn blob_retirement_completion_requires_the_exact_live_lease() {
     let source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-complete.bin",
-        DocumentSourceBlob::from_digest([0x75; 32], 75),
+        DocumentBlob::from_digest([0x75; 32], 75),
     );
     store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
@@ -1774,7 +1774,7 @@ async fn blob_retirement_final_validation_cancels_a_new_authoritative_reference(
     let retired_source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-final-check.bin",
-        DocumentSourceBlob::from_digest([0x79; 32], 79),
+        DocumentBlob::from_digest([0x79; 32], 79),
     );
     store.accept_document_source(&retired_source).await.unwrap();
     store.delete_document(retired_source.id).await.unwrap();
@@ -1793,7 +1793,7 @@ async fn blob_retirement_final_validation_cancels_a_new_authoritative_reference(
     let live_source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-final-check-live.bin",
-        DocumentSourceBlob::from_digest([0x7a; 32], 80),
+        DocumentBlob::from_digest([0x7a; 32], 80),
     );
     store.accept_document_source(&live_source).await.unwrap();
     // Simulate an uncoordinated external catalog writer to exercise the final
@@ -1845,7 +1845,7 @@ async fn blob_retirement_failure_retries_then_exhausts_the_attempt_budget() {
     let source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-failure.bin",
-        DocumentSourceBlob::from_digest([0x76; 32], 76),
+        DocumentBlob::from_digest([0x76; 32], 76),
     );
     store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
@@ -1981,7 +1981,7 @@ async fn blob_retirement_claim_skips_an_exhausted_lease_and_returns_later_work()
     let exhausted_source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-exhausted-first.bin",
-        DocumentSourceBlob::from_digest([0x77; 32], 77),
+        DocumentBlob::from_digest([0x77; 32], 77),
     );
     store
         .accept_document_source(&exhausted_source)
@@ -2013,7 +2013,7 @@ async fn blob_retirement_claim_skips_an_exhausted_lease_and_returns_later_work()
     let later_source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-later-work.bin",
-        DocumentSourceBlob::from_digest([0x78; 32], 78),
+        DocumentBlob::from_digest([0x78; 32], 78),
     );
     store.accept_document_source(&later_source).await.unwrap();
     store.delete_document(later_source.id).await.unwrap();
@@ -2048,7 +2048,7 @@ async fn expired_blob_retirement_leases_are_reclaimed_then_fail_at_the_attempt_l
     let source = sample_raw_source(
         DocumentId::new(),
         "file:///retire-reclaim.bin",
-        DocumentSourceBlob::from_digest([0x74; 32], 74),
+        DocumentBlob::from_digest([0x74; 32], 74),
     );
     store.accept_document_source(&source).await.unwrap();
     store.delete_document(source.id).await.unwrap();
@@ -2125,7 +2125,7 @@ async fn concurrent_blob_retirement_claimers_never_share_a_blob() {
         let source = sample_raw_source(
             DocumentId::new(),
             &format!("file:///retire-concurrent-{index}.bin"),
-            DocumentSourceBlob::from_digest([0x80 + index as u8; 32], 80 + index),
+            DocumentBlob::from_digest([0x80 + index as u8; 32], 80 + index),
         );
         store.accept_document_source(&source).await.unwrap();
         store.delete_document(source.id).await.unwrap();
@@ -2167,7 +2167,7 @@ async fn document_upsert_rolls_back_when_project_is_unknown() {
         chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
-        source_uri: None,
+        origin_uri: None,
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "content".into(),
@@ -2184,7 +2184,7 @@ async fn repeated_document_upserts_are_last_write_wins_and_preserve_creation_tim
         chat_id: None,
         id: DocumentId::new(),
         project_id: None,
-        source_uri: None,
+        origin_uri: None,
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "first".into(),
@@ -7872,7 +7872,7 @@ async fn delete_chat_atomically_retires_only_its_owned_sources() {
 
     let mut owned = sample_document(None);
     owned.chat_id = Some(chat.id);
-    owned.source_blob = Some(DocumentSourceBlob::from_bytes(b"owned source bytes"));
+    owned.source_blob = Some(DocumentBlob::from_bytes(b"owned source bytes"));
     let owned_id = owned.id;
     let blob_id = owned.source_blob.as_ref().unwrap().id;
     store.create_document(&owned).await.unwrap();
@@ -7929,7 +7929,7 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
                 id,
                 chat_id: Some(chat_id),
                 project_id: None,
-                source_uri: Some(uri.into()),
+                origin_uri: Some(uri.into()),
                 media_type: "text/plain".into(),
                 title: None,
                 canonical_text: text.into(),
@@ -7958,7 +7958,7 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
             id: DocumentId::new(),
             chat_id: Some(first_chat.id),
             project_id: Some(project.id),
-            source_uri: None,
+            origin_uri: None,
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "invalid double scope".into(),
@@ -10594,10 +10594,10 @@ async fn owner_scoped_queries_partition_root_aggregates() {
         id: DocumentId::new(),
         chat_id: Some(chat.id),
         project_id: None,
-        source_uri: None,
+        origin_uri: None,
         media_type: "text/plain".into(),
         title: None,
-        source_blob: DocumentSourceBlob::from_bytes(b"alice's notes"),
+        source_blob: DocumentBlob::from_bytes(b"alice's notes"),
         canonical_text: "alice's notes".into(),
         updated_at: Utc::now(),
     };

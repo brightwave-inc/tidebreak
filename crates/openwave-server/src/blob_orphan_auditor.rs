@@ -287,8 +287,8 @@ mod tests {
     use std::fs::{File, FileTimes};
 
     use openwave_core::{
-        BlobRetirementStatus, BlobStore, DbStore, DocumentId, DocumentSourceBlob,
-        DocumentSourceUpsert, FsBlobStore,
+        BlobRetirementStatus, BlobStore, DbStore, DocumentBlob, DocumentId, DocumentSourceUpsert,
+        FsBlobStore,
     };
 
     use super::*;
@@ -314,13 +314,13 @@ mod tests {
         )
     }
 
-    fn source(blob: DocumentSourceBlob) -> DocumentSourceUpsert {
+    fn source(blob: DocumentBlob) -> DocumentSourceUpsert {
         let id = DocumentId::new();
         DocumentSourceUpsert {
             id,
             chat_id: None,
             project_id: None,
-            source_uri: Some(format!("file:///{id}.bin")),
+            origin_uri: Some(format!("file:///{id}.bin")),
             media_type: "application/octet-stream".into(),
             title: None,
             source_blob: blob,
@@ -360,9 +360,9 @@ mod tests {
         let root = dir.path().join("blobs");
         let store = store(&dir).await;
         let blobs = FsBlobStore::new(&root);
-        let old_orphan = DocumentSourceBlob::from_bytes(b"old orphan");
-        let young_orphan = DocumentSourceBlob::from_bytes(b"young orphan");
-        let referenced = DocumentSourceBlob::from_bytes(b"old referenced");
+        let old_orphan = DocumentBlob::from_bytes(b"old orphan");
+        let young_orphan = DocumentBlob::from_bytes(b"young orphan");
+        let referenced = DocumentBlob::from_bytes(b"old referenced");
         blobs
             .put(old_orphan.id, b"old orphan".to_vec())
             .await
@@ -437,7 +437,7 @@ mod tests {
         store.create_chat(&chat).await.unwrap();
 
         let blobs = FsBlobStore::new(&root);
-        let prior = DocumentSourceBlob::from_bytes(b"the user's original notes");
+        let prior = DocumentBlob::from_bytes(b"the user's original notes");
         blobs
             .put(prior.id, b"the user's original notes".to_vec())
             .await
@@ -481,7 +481,7 @@ mod tests {
         let mut blob_ids = Vec::new();
         for index in 0..3_u8 {
             let bytes = vec![index; 8];
-            let blob = DocumentSourceBlob::from_bytes(&bytes);
+            let blob = DocumentBlob::from_bytes(&bytes);
             blobs.put(blob.id, bytes).await.unwrap();
             age_blob(&root, blob.id, Duration::from_secs(2 * 60 * 60));
             blob_ids.push(blob.id);
@@ -516,7 +516,7 @@ mod tests {
         let root = dir.path().join("blobs");
         let store = store(&dir).await;
         let blobs = FsBlobStore::new(&root);
-        let blob = DocumentSourceBlob::from_bytes(b"recently republished");
+        let blob = DocumentBlob::from_bytes(b"recently republished");
         blobs
             .put(blob.id, b"recently republished".to_vec())
             .await

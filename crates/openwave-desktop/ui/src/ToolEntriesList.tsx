@@ -52,7 +52,7 @@ const ENTRY_ICONS: Record<ResultEntryKind, LucideIcon> = {
 const LIST_VERBS: Readonly<Partial<Record<string, string>>> = {
   search: "Searched",
   web_search: "Found",
-  list_sources: "Checked",
+  list_documents: "Checked",
   list_dir: "Found",
   list_folder: "Found",
   list_connected_folders: "Found",

@@ -285,17 +285,17 @@ pub(crate) fn compose_for_surface(
         push_section(&mut prompt, PRIVATE_SCRATCH_HEADING, &lines);
     }
 
-    if ["list_sources", "search", "read_source"]
+    if ["list_documents", "search", "read_document"]
         .iter()
         .any(|name| has(name))
     {
         let mut lines = Vec::new();
-        if has("list_sources") {
+        if has("list_documents") {
             lines.push(
-                "- Use `list_sources` to discover files added to this conversation when the user refers to a source without an exact identifier.",
+                "- Use `list_documents` to discover the files this conversation can read when the user refers to one without an exact identifier. It lists the files added to this conversation and the files held by its project, which sibling conversations share.",
             );
         }
-        if has("read_source") {
+        if has("read_document") {
             lines.push(
                 "- A file attachment announces its exact document id and truthful read or exec route in the user message. Follow that route directly instead of rediscovering the attachment first.",
             );
@@ -305,11 +305,12 @@ pub(crate) fn compose_for_surface(
                 "- Use `search` to find relevant passages across this conversation's indexed sources.",
             );
         }
-        if has("read_source") {
-            lines
-                .push("- Use `read_source` when direct source text or a specific range is needed.");
+        if has("read_document") {
+            lines.push(
+                "- Use `read_document` when direct source text or a specific range is needed.",
+            );
         }
-        if has("search") || has("read_source") || has("web_extract") {
+        if has("search") || has("read_document") || has("web_extract") {
             lines.push(
                 "- When a source tool returns an opaque source reference, reproduce it exactly beside the claim it supports. Never invent, alter, or reuse a reference for unsupported text.",
             );
@@ -386,7 +387,7 @@ pub(crate) fn compose_for_surface(
                 "- Use `import_connected_file` for a PDF, Office document, or other file `read_connected_file` cannot return as text. It adds the file to this conversation as a source; it does not return the contents.",
             );
             lines.push(
-                "- An import finishes before the tool returns. Read it when `list_sources` reports it as readable, and treat `stored_no_text` as a file you can name but have not read.",
+                "- An import finishes before the tool returns. Read it when `list_documents` reports it as readable, and treat `stored_no_text` as a file you can name but have not read.",
             );
         }
         if has("request_folder_access") {
@@ -788,8 +789,8 @@ mod tests {
             spec("write_file"),
             spec("ask_user_questions"),
             spec("update_task_plan"),
-            spec("list_sources"),
-            spec("read_source"),
+            spec("list_documents"),
+            spec("read_document"),
             spec("web_search"),
             spec("web_extract"),
             spec("list_connected_folders"),
@@ -816,8 +817,8 @@ mod tests {
             "`write_file`",
             "`ask_user_questions`",
             "`update_task_plan`",
-            "`list_sources`",
-            "`read_source`",
+            "`list_documents`",
+            "`read_document`",
             "`web_search`",
             "`web_extract`",
             "`list_connected_folders`",
@@ -847,7 +848,7 @@ mod tests {
 
     #[test]
     fn plan_mode_adds_the_planning_contract_and_nothing_else() {
-        let specs = [spec("read_file"), spec("list_sources")];
+        let specs = [spec("read_file"), spec("list_documents")];
         let plan = compose_for_surface(
             &specs,
             &[],
@@ -888,7 +889,7 @@ mod tests {
     #[test]
     fn composition_is_stable_across_registration_order_and_duplicates() {
         let forward = vec![
-            spec("read_source"),
+            spec("read_document"),
             spec("search"),
             spec("exec"),
             spec("spawn_sandbox_agent"),
@@ -1376,8 +1377,8 @@ mod tests {
             spec("write_file"),
             spec("ask_user_questions"),
             spec("search"),
-            spec("list_sources"),
-            spec("read_source"),
+            spec("list_documents"),
+            spec("read_document"),
             spec("web_search"),
             spec("web_extract"),
             spec("request_folder_access"),
@@ -1402,10 +1403,11 @@ mod tests {
             false,
         );
 
-        // Re-pinned for the baseline Python set the exec section now names.
+        // Re-pinned for the document tool rename and the project files the
+        // source guidance now describes.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:9e3935b243daf4374b539dad23836d7f004174257cb901de8331c55ee6efdb32"
+            "foreground-v2:sha256:29d371c329153041be14b07d0af9dced4702a863f8d54fc7f063c5d51dfbba9b"
         );
     }
 }

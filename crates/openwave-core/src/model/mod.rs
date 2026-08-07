@@ -20,11 +20,11 @@ pub(crate) fn is_false(value: &bool) -> bool {
 
 pub use chat_settings::{NetworkPolicy, PermissionMode, ReasoningEffort, Role};
 pub use documents::{
-    BlobRetirement, BlobRetirementStatus, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    BlobRetirement, BlobRetirementStatus, DocumentBlob, DocumentListCursor, DocumentReadiness,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
     ExecFileChange, ExecFileRejection, ExecFileRejectionReason, ExecFileRejectionRecord,
-    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, SourceReadiness,
-    EXEC_SNAPSHOT_RETAINED_TURNS, MAX_EXEC_SNAPSHOT_BYTES,
+    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, EXEC_SNAPSHOT_RETAINED_TURNS,
+    MAX_EXEC_SNAPSHOT_BYTES,
 };
 pub use identity::{
     BeginRootAttachmentChange, ChatRootAttachment, OwnerId, Project, RootAttachmentChange,

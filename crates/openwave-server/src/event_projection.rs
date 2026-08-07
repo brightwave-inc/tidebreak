@@ -995,12 +995,12 @@ mod tests {
     #[test]
     fn source_tools_use_fixed_renderer_names() {
         assert_eq!(
-            RendererToolName::from(crate::source_tools::LIST_SOURCES_TOOL),
-            RendererToolName::ListSources
+            RendererToolName::from(crate::source_tools::LIST_DOCUMENTS_TOOL),
+            RendererToolName::ListDocuments
         );
         assert_eq!(
-            RendererToolName::from(crate::source_tools::READ_SOURCE_TOOL),
-            RendererToolName::ReadSource
+            RendererToolName::from(crate::source_tools::READ_DOCUMENT_TOOL),
+            RendererToolName::ReadDocument
         );
     }
 

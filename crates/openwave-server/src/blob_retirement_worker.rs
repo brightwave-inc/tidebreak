@@ -337,9 +337,7 @@ mod tests {
     use std::sync::{Condvar, Mutex as StdMutex};
 
     use async_trait::async_trait;
-    use openwave_core::{
-        DbStore, DocumentId, DocumentSourceBlob, DocumentSourceUpsert, FsBlobStore,
-    };
+    use openwave_core::{DbStore, DocumentBlob, DocumentId, DocumentSourceUpsert, FsBlobStore};
 
     use super::*;
 
@@ -370,12 +368,12 @@ mod tests {
         )
     }
 
-    fn source(id: DocumentId, blob: DocumentSourceBlob) -> DocumentSourceUpsert {
+    fn source(id: DocumentId, blob: DocumentBlob) -> DocumentSourceUpsert {
         DocumentSourceUpsert {
             id,
             chat_id: None,
             project_id: None,
-            source_uri: Some(format!("file:///{id}.bin")),
+            origin_uri: Some(format!("file:///{id}.bin")),
             media_type: "application/octet-stream".into(),
             title: None,
             source_blob: blob,
@@ -400,7 +398,7 @@ mod tests {
         let blob_writes = Arc::new(BlobWriteGuard::new(dir.path().join("blob-locks")));
         let worker = worker(store.clone(), blobs.clone(), blob_writes);
         let bytes = b"retire this source".to_vec();
-        let descriptor = DocumentSourceBlob::from_bytes(&bytes);
+        let descriptor = DocumentBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes).await.unwrap();
         let source = source(DocumentId::new(), descriptor.clone());
         store.accept_document_source(&source).await.unwrap();
@@ -430,7 +428,7 @@ mod tests {
         let blob_writes = Arc::new(BlobWriteGuard::new(dir.path().join("blob-locks")));
         let worker = worker(store.clone(), blobs.clone(), blob_writes.clone());
         let bytes = b"shared source survives".to_vec();
-        let descriptor = DocumentSourceBlob::from_bytes(&bytes);
+        let descriptor = DocumentBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes.clone()).await.unwrap();
         let retired_source = source(DocumentId::new(), descriptor.clone());
         store.accept_document_source(&retired_source).await.unwrap();
@@ -518,7 +516,7 @@ mod tests {
         let blob_writes = Arc::new(BlobWriteGuard::new(dir.path().join("blob-locks")));
         let worker = worker(store.clone(), blobs.clone(), blob_writes);
         let bytes = b"retry deleting this source".to_vec();
-        let descriptor = DocumentSourceBlob::from_bytes(&bytes);
+        let descriptor = DocumentBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes).await.unwrap();
         let source = source(DocumentId::new(), descriptor.clone());
         store.accept_document_source(&source).await.unwrap();
@@ -584,7 +582,7 @@ mod tests {
         let blob_writes = Arc::new(BlobWriteGuard::new(dir.path().join("blob-locks")));
         let worker = worker(store.clone(), blobs.clone(), blob_writes.clone());
         let bytes = b"blocking retirement".to_vec();
-        let descriptor = DocumentSourceBlob::from_bytes(&bytes);
+        let descriptor = DocumentBlob::from_bytes(&bytes);
         blobs.put(descriptor.id, bytes).await.unwrap();
         let source = source(DocumentId::new(), descriptor.clone());
         store.accept_document_source(&source).await.unwrap();

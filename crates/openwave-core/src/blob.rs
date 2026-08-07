@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::{AgentError, BlobMetadata, BlobStore, BlobStream, DocumentSourceBlob, Result};
+use crate::{AgentError, BlobMetadata, BlobStore, BlobStream, DocumentBlob, Result};
 
 /// Filesystem-backed opaque byte storage.
 ///
@@ -110,7 +110,7 @@ impl BlobStore for FsBlobStore {
         .map_err(|error| AgentError::Store(format!("blob write task failed: {error}")))?
     }
 
-    async fn put_stream(&self, source: DocumentSourceBlob, mut chunks: BlobStream) -> Result<()> {
+    async fn put_stream(&self, source: DocumentBlob, mut chunks: BlobStream) -> Result<()> {
         if !source.has_content_addressed_id() {
             return Err(AgentError::Store(
                 "streamed source blob id does not match its SHA-256 digest".into(),
@@ -246,7 +246,7 @@ impl BlobStore for FsBlobStore {
 fn write_streamed_blob(
     root: &Path,
     access: &RwLock<()>,
-    source: DocumentSourceBlob,
+    source: DocumentBlob,
     receiver: &mut tokio::sync::mpsc::Receiver<Result<Vec<u8>>>,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
@@ -284,7 +284,7 @@ fn write_streamed_blob(
                 .map_err(|error| blob_error("write temporary file", error))?;
         }
         let sha256: [u8; 32] = digest.finalize().into();
-        if DocumentSourceBlob::from_digest(sha256, byte_len) != source {
+        if DocumentBlob::from_digest(sha256, byte_len) != source {
             return Err(AgentError::Store(
                 "streamed blob does not match its declared digest".into(),
             ));
@@ -316,7 +316,7 @@ fn write_streamed_blob(
     result
 }
 
-fn existing_file_matches_source(path: &Path, source: &DocumentSourceBlob) -> Result<bool> {
+fn existing_file_matches_source(path: &Path, source: &DocumentBlob) -> Result<bool> {
     use sha2::{Digest, Sha256};
 
     let mut file =
@@ -337,7 +337,7 @@ fn existing_file_matches_source(path: &Path, source: &DocumentSourceBlob) -> Res
         digest.update(&buffer[..read]);
     }
     let sha256: [u8; 32] = digest.finalize().into();
-    Ok(DocumentSourceBlob::from_digest(sha256, byte_len) == *source)
+    Ok(DocumentBlob::from_digest(sha256, byte_len) == *source)
 }
 
 #[cfg(not(windows))]
@@ -481,7 +481,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = FsBlobStore::new(directory.path());
         let bytes = [vec![b'a'; 64 * 1024], vec![b'b'; 64 * 1024], vec![b'c'; 17]].concat();
-        let source = DocumentSourceBlob::from_bytes(&bytes);
+        let source = DocumentBlob::from_bytes(&bytes);
         let chunks = stream::iter(vec![
             Ok(bytes[..64 * 1024].to_vec()),
             Ok(bytes[64 * 1024..128 * 1024].to_vec()),

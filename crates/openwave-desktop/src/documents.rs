@@ -15,7 +15,7 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use futures::{stream, StreamExt};
-use openwave_core::{ChatId, DocumentId, DocumentSourceBlob, SourceReadiness, Store};
+use openwave_core::{ChatId, DocumentBlob, DocumentId, DocumentReadiness, Store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
@@ -51,7 +51,7 @@ pub(crate) struct ImportedDocument {
 #[derive(Debug, Deserialize)]
 pub(crate) struct IngestResponse {
     pub(crate) document_id: Uuid,
-    pub(crate) readiness: SourceReadiness,
+    pub(crate) readiness: DocumentReadiness,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,7 +163,7 @@ enum DocumentImportSource {
 struct PreparedDocumentImport {
     display_name: String,
     media_type: String,
-    source_blob: DocumentSourceBlob,
+    source_blob: DocumentBlob,
     file: std::fs::File,
 }
 
@@ -811,7 +811,7 @@ fn prepare_selected_document(
             Path::new(&display_name),
         ),
         display_name,
-        source_blob: DocumentSourceBlob::from_digest(sha256, byte_len),
+        source_blob: DocumentBlob::from_digest(sha256, byte_len),
         file,
     })
 }

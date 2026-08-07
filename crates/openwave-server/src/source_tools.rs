@@ -1,44 +1,58 @@
-//! Foreground tools for inspecting sources owned by the current conversation.
+//! Foreground tools for inspecting sources the current conversation can read.
 //!
-//! These tools discover files attached to the current conversation and read a
-//! bounded range of one parsed source.
+//! These tools discover files attached to the current conversation, together
+//! with the files held by the project it belongs to, and read a bounded range
+//! of one parsed source.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    citation_authoring_instruction, ApprovalClass, CallId, DocumentId, DocumentScope, Result,
-    Store, Tool, ToolCtx, ToolOutput, ToolSpec,
+    citation_authoring_instruction, ApprovalClass, CallId, DocumentId, DocumentScope,
+    DocumentSummaryRecord, Result, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub(crate) const LIST_SOURCES_TOOL: &str = "list_sources";
-pub(crate) const READ_SOURCE_TOOL: &str = "read_source";
+pub(crate) const LIST_DOCUMENTS_TOOL: &str = "list_documents";
+pub(crate) const READ_DOCUMENT_TOOL: &str = "read_document";
 pub(crate) const READ_TOOL_RESULT_TOOL: &str = "read_tool_result";
 
-const MAX_LISTED_SOURCES: u64 = 100;
+/// Listed per scope rather than over the union, so a project holding hundreds
+/// of files cannot crowd a conversation's own three out of the listing.
+const MAX_LISTED_DOCUMENTS: u64 = 100;
 const DEFAULT_READ_CHARACTERS: usize = 12_000;
 const MAX_READ_CHARACTERS: usize = 32_000;
 
-/// List bounded metadata for sources owned by the active conversation.
-pub(crate) struct ListSourcesTool {
+/// List bounded metadata for the sources the active conversation can read.
+pub(crate) struct ListDocumentsTool {
     store: Arc<dyn Store>,
 }
 
-impl ListSourcesTool {
+impl ListDocumentsTool {
     pub(crate) fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
+    }
+
+    /// One scope's newest sources, and whether the scope held more.
+    async fn listed(&self, scope: DocumentScope) -> Result<(Vec<DocumentSummaryRecord>, bool)> {
+        let mut records = self
+            .store
+            .list_document_summaries(scope, None, MAX_LISTED_DOCUMENTS + 1)
+            .await?;
+        let truncated = records.len() > MAX_LISTED_DOCUMENTS as usize;
+        records.truncate(MAX_LISTED_DOCUMENTS as usize);
+        Ok((records, truncated))
     }
 }
 
 /// Read a bounded Unicode-character range from one parsed conversation source.
-pub(crate) struct ReadSourceTool {
+pub(crate) struct ReadDocumentTool {
     store: Arc<dyn Store>,
 }
 
-impl ReadSourceTool {
+impl ReadDocumentTool {
     pub(crate) fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
     }
@@ -75,7 +89,7 @@ struct EmptyArgs {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadSourceArgs {
+struct ReadDocumentArgs {
     document_id: Uuid,
     #[serde(default)]
     offset: usize,
@@ -84,16 +98,18 @@ struct ReadSourceArgs {
 }
 
 #[async_trait]
-impl Tool for ListSourcesTool {
+impl Tool for ListDocumentsTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: LIST_SOURCES_TOOL.into(),
-            description: "List files added as sources to this exact conversation, newest first. \
-                          Use this when the user refers to an added or attached file without an \
-                          exact document id; then use read_source for direct text. Each source \
-                          reports one status: `readable` means read_source can return its text; \
-                          `stored_no_text` means the file is kept and can be named but holds no \
-                          text to find, so do not claim to have read it."
+            name: LIST_DOCUMENTS_TOOL.into(),
+            description: "List files this conversation can read, newest first. These are the \
+                          files added to this exact conversation, plus the files held by the \
+                          project it belongs to, which every conversation in that project \
+                          shares. Use this when the user refers to an added or attached file \
+                          without an exact document id; then use read_document for direct text. \
+                          Each source reports one status: `readable` means read_document can \
+                          return its text; `stored_no_text` means the file is kept and can be \
+                          named but holds no text to find, so do not claim to have read it."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -113,84 +129,132 @@ impl Tool for ListSourcesTool {
                 "invalid arguments: expected an empty object",
             ));
         }
-        let records = match self
-            .store
-            .list_document_summaries(
-                DocumentScope::Chat(ctx.chat_id),
-                None,
-                MAX_LISTED_SOURCES + 1,
-            )
-            .await
-        {
-            Ok(records) => records,
-            Err(_) => {
-                return Ok(ToolOutput::error(
-                    "could not list this conversation's sources",
-                ))
-            }
+        let (conversation, conversation_truncated) =
+            match self.listed(DocumentScope::Chat(ctx.chat_id)).await {
+                Ok(listed) => listed,
+                Err(_) => {
+                    return Ok(ToolOutput::error(
+                        "could not list this conversation's sources",
+                    ))
+                }
+            };
+        // Resolved now rather than snapshotted when the conversation was
+        // created: a file added to the project today is meant to reach the
+        // conversation that has been running since yesterday.
+        let (project, project_truncated) = match ctx.project_id {
+            Some(project_id) => match self.listed(DocumentScope::Project(project_id)).await {
+                Ok(listed) => listed,
+                Err(_) => return Ok(ToolOutput::error("could not list this project's files")),
+            },
+            None => (Vec::new(), false),
         };
-        if records.is_empty() {
-            return Ok(
-                ToolOutput::text("No sources have been added to this conversation.")
-                    // Projected empty rather than not projected: "no sources" and "the
-                    // renderer was told nothing" are different facts, and only the card
-                    // can tell them apart.
-                    .with_entries(Vec::new()),
-            );
+
+        if conversation.is_empty() && project.is_empty() {
+            let message = if ctx.project_id.is_some() {
+                "No files have been added to this conversation or to its project."
+            } else {
+                "No sources have been added to this conversation."
+            };
+            return Ok(ToolOutput::text(message)
+                // Projected empty rather than not projected: "no sources" and "the
+                // renderer was told nothing" are different facts, and only the card
+                // can tell them apart.
+                .with_entries(Vec::new()));
         }
 
-        let truncated = records.len() > MAX_LISTED_SOURCES as usize;
         // The readiness word is the one thing a reader has to see here: a
         // source that holds no readable text is a source the next answer will
         // quietly fail to use.
-        let entries = records
+        //
+        // The conversation's own files come first in both projections. A busy
+        // project should not push the file the user just attached to the
+        // bottom of the list.
+        let entries = conversation
             .iter()
-            .take(MAX_LISTED_SOURCES as usize)
-            .map(|record| {
-                openwave_core::ResultEntry::new(
-                    openwave_core::ResultEntryKind::Source,
-                    record.title.as_deref().unwrap_or("Untitled source"),
-                )
-                .with_media_type(record.media_type.clone())
-                .with_meta(readiness_label(record.readiness().as_str()))
-            })
+            .map(|record| entry(record, SourceOrigin::Conversation))
+            .chain(
+                project
+                    .iter()
+                    .map(|record| entry(record, SourceOrigin::Project)),
+            )
             .collect();
-        let visible = records
-            .into_iter()
-            .take(MAX_LISTED_SOURCES as usize)
-            .map(|record| {
-                json!({
-                    "document_id": record.id,
-                    "title": record.title,
-                    "media_type": record.media_type,
-                    // Deliberately the combined readiness rather than the raw
-                    // lifecycle: a source that parsed to nothing is `ready`,
-                    // and reporting that would send the agent to search a
-                    // document it can never match.
-                    "status": record.readiness().as_str(),
-                })
-            })
+        let visible = conversation
+            .iter()
+            .map(|record| row(record, SourceOrigin::Conversation))
+            .chain(
+                project
+                    .iter()
+                    .map(|record| row(record, SourceOrigin::Project)),
+            )
             .collect::<Vec<_>>();
         let body = json!({
             "order": "newest_first",
             "sources": visible,
-            "truncated": truncated,
+            "truncated": conversation_truncated || project_truncated,
         });
         Ok(ToolOutput::text(format!(
-            "Sources in this conversation:\n{}",
+            "Sources this conversation can read:\n{}",
             serde_json::to_string_pretty(&body).expect("bounded source metadata always serializes")
         ))
         .with_entries(entries))
     }
 }
 
+/// Where a listed source came from, which is the one thing the model has to
+/// know beyond its text: a project file is shared with sibling conversations,
+/// so what is said about it is said in front of all of them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceOrigin {
+    Conversation,
+    Project,
+}
+
+impl SourceOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Project => "project",
+        }
+    }
+}
+
+fn row(record: &DocumentSummaryRecord, origin: SourceOrigin) -> Value {
+    json!({
+        "document_id": record.id,
+        "title": record.title,
+        "media_type": record.media_type,
+        "scope": origin.as_str(),
+        // Deliberately the combined readiness rather than the raw
+        // lifecycle: a source that parsed to nothing is `ready`,
+        // and reporting that would send the agent to search a
+        // document it can never match.
+        "status": record.readiness().as_str(),
+    })
+}
+
+fn entry(record: &DocumentSummaryRecord, origin: SourceOrigin) -> openwave_core::ResultEntry {
+    let readiness = readiness_label(record.readiness().as_str());
+    let meta = match origin {
+        SourceOrigin::Conversation => readiness.to_string(),
+        SourceOrigin::Project => format!("Project file · {readiness}"),
+    };
+    openwave_core::ResultEntry::new(
+        openwave_core::ResultEntryKind::Source,
+        record.title.as_deref().unwrap_or("Untitled source"),
+    )
+    .with_media_type(record.media_type.clone())
+    .with_meta(meta)
+}
+
 #[async_trait]
-impl Tool for ReadSourceTool {
+impl Tool for ReadDocumentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: READ_SOURCE_TOOL.into(),
-            description: "Read a bounded, line-numbered text range from one source in this exact \
-                          conversation. Use the shown document id and line range in citations."
+            name: READ_DOCUMENT_TOOL.into(),
+            description: "Read a bounded, line-numbered text range from one source this \
+                          conversation can read — either a file added to this conversation or \
+                          a file held by its project. Use the shown document id and line range \
+                          in citations."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -198,7 +262,7 @@ impl Tool for ReadSourceTool {
                     "document_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "A document_id returned by list_sources or search."
+                        "description": "A document_id returned by list_documents or search."
                     },
                     "offset": {
                         "type": "integer",
@@ -223,9 +287,9 @@ impl Tool for ReadSourceTool {
     }
 
     async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let args = match serde_json::from_value::<ReadSourceArgs>(args) {
+        let args = match serde_json::from_value::<ReadDocumentArgs>(args) {
             Ok(args) if !args.document_id.is_nil() => args,
-            _ => return Ok(ToolOutput::error("invalid read_source arguments")),
+            _ => return Ok(ToolOutput::error("invalid read_document arguments")),
         };
         let max_characters = args.max_characters.unwrap_or(DEFAULT_READ_CHARACTERS);
         if !(1..=MAX_READ_CHARACTERS).contains(&max_characters) {
@@ -236,8 +300,12 @@ impl Tool for ReadSourceTool {
 
         let document_id = DocumentId::from(args.document_id);
         let document = match self.store.get_document(document_id).await {
+            // Owned by this conversation, or held by the project this
+            // conversation belongs to. Ownership is exclusive, so exactly one
+            // of these can hold for any document.
             Ok(Some(document))
-                if document.chat_id == Some(ctx.chat_id) && document.project_id.is_none() =>
+                if (document.chat_id == Some(ctx.chat_id) && document.project_id.is_none())
+                    || (document.project_id.is_some() && document.project_id == ctx.project_id) =>
             {
                 document
             }
@@ -512,7 +580,7 @@ mod tests {
             id: DocumentId::new(),
             chat_id: Some(chat.id),
             project_id: None,
-            source_uri: None,
+            origin_uri: None,
             media_type: "text/plain".into(),
             title: Some("brief.txt".into()),
             canonical_text: "Aé🌊\nGrounded fact".into(),
@@ -534,14 +602,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_opaque_attachment_points_read_source_at_exec_documents() {
+    async fn an_opaque_attachment_points_read_document_at_exec_documents() {
         let (_directory, store, chat, _document_id) = source_fixture().await;
         let opaque = store
             .upsert_document(&DocumentUpsert {
                 id: DocumentId::new(),
                 chat_id: Some(chat.id),
                 project_id: None,
-                source_uri: None,
+                origin_uri: None,
                 media_type: "application/pdf".into(),
                 title: Some("opaque.pdf".into()),
                 canonical_text: String::new(),
@@ -549,7 +617,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let output = ReadSourceTool::new(store)
+        let output = ReadDocumentTool::new(store)
             .execute(
                 &ToolCtx::without_private_scratch(chat.id, None),
                 json!({ "document_id": opaque.id }),
@@ -675,10 +743,10 @@ mod tests {
 
     #[test]
     fn readiness_never_reports_an_unreadable_source_as_usable() {
-        use openwave_core::SourceReadiness;
+        use openwave_core::DocumentReadiness;
 
-        assert_eq!(SourceReadiness::of(false).as_str(), "stored_no_text");
-        assert_eq!(SourceReadiness::of(true).as_str(), "readable");
+        assert_eq!(DocumentReadiness::of(false).as_str(), "stored_no_text");
+        assert_eq!(DocumentReadiness::of(true).as_str(), "readable");
     }
 
     #[tokio::test]
@@ -686,7 +754,7 @@ mod tests {
         let (_directory, store, chat, _document_id) = source_fixture().await;
         let context = ToolCtx::without_private_scratch(chat.id, None);
 
-        let listed = ListSourcesTool::new(store.clone())
+        let listed = ListDocumentsTool::new(store.clone())
             .execute(&context, json!({}))
             .await
             .unwrap();
@@ -695,6 +763,78 @@ mod tests {
         assert!(listed.content.contains("\"status\": \"readable\""));
         assert!(!listed.content.contains("queued"));
         assert!(!listed.content.contains("\"ready\""));
+    }
+
+    #[tokio::test]
+    async fn a_project_file_reaches_a_conversation_that_predates_it() {
+        let (_directory, store, chat, _document_id) = source_fixture().await;
+        let project = openwave_core::Project {
+            id: openwave_core::ProjectId::new(),
+            title: Some("Q3".into()),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_project(&project).await.unwrap();
+        let elsewhere = openwave_core::Project {
+            id: openwave_core::ProjectId::new(),
+            title: Some("Q4".into()),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_project(&elsewhere).await.unwrap();
+
+        // Added to the project *after* the conversation already exists, which
+        // is the case a creation-time snapshot would get wrong.
+        let shared = store
+            .upsert_document(&DocumentUpsert {
+                id: DocumentId::new(),
+                chat_id: None,
+                project_id: Some(project.id),
+                origin_uri: None,
+                media_type: "text/plain".into(),
+                title: Some("handbook.txt".into()),
+                canonical_text: "Shared across the project".into(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let context = ToolCtx::without_private_scratch(chat.id, Some(project.id));
+        let listed = ListDocumentsTool::new(store.clone())
+            .execute(&context, json!({}))
+            .await
+            .unwrap();
+        assert!(!listed.is_error, "{}", listed.content);
+        assert!(listed.content.contains("handbook.txt"));
+        assert!(listed.content.contains("\"scope\": \"project\""));
+        // The conversation's own file is still listed, and still first: a
+        // project's files must not displace what the user just attached.
+        let own = listed.content.find("brief.txt").expect("own file listed");
+        assert!(own < listed.content.find("handbook.txt").unwrap());
+
+        let read = ReadDocumentTool::new(store.clone())
+            .execute(&context, json!({ "document_id": shared.id }))
+            .await
+            .unwrap();
+        assert!(!read.is_error, "{}", read.content);
+        assert!(read.content.contains("Shared across the project"));
+
+        // Sharing reaches exactly the project holding the file. A conversation
+        // in another project, or in none, gets nothing — holding the id does
+        // not help it.
+        for outsider in [Some(elsewhere.id), None] {
+            let denied = ReadDocumentTool::new(store.clone())
+                .execute(
+                    &ToolCtx::without_private_scratch(chat.id, outsider),
+                    json!({ "document_id": shared.id }),
+                )
+                .await
+                .unwrap();
+            assert!(denied.is_error);
+            assert!(!denied.content.contains("Shared across the project"));
+        }
     }
 
     #[tokio::test]
@@ -716,14 +856,14 @@ mod tests {
         let context = ToolCtx::without_private_scratch(chat.id, None);
         let other_context = ToolCtx::without_private_scratch(other_chat.id, None);
 
-        let listed = ListSourcesTool::new(store.clone())
+        let listed = ListDocumentsTool::new(store.clone())
             .execute(&context, json!({}))
             .await
             .unwrap();
         assert!(!listed.is_error);
         assert!(listed.content.contains("brief.txt"));
         assert!(listed.content.contains(&document_id.to_string()));
-        let isolated = ListSourcesTool::new(store.clone())
+        let isolated = ListDocumentsTool::new(store.clone())
             .execute(&other_context, json!({}))
             .await
             .unwrap();
@@ -732,7 +872,7 @@ mod tests {
             "No sources have been added to this conversation."
         );
 
-        let read = ReadSourceTool::new(store.clone())
+        let read = ReadDocumentTool::new(store.clone())
             .execute(
                 &context,
                 json!({
@@ -749,7 +889,7 @@ mod tests {
             .content
             .contains(&format!("doc={document_id} lines=N-M")));
 
-        let denied = ReadSourceTool::new(store)
+        let denied = ReadDocumentTool::new(store)
             .execute(&other_context, json!({ "document_id": document_id }))
             .await
             .unwrap();
