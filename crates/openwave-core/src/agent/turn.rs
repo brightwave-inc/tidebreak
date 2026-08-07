@@ -504,10 +504,17 @@ impl Agent {
                             // a UI can surface it. Emitted only for the request that
                             // actually went out (after any retry climb).
                             if reduced {
+                                // Against what the step would have sent, not
+                                // the raw transcript: a prefix a checkpoint
+                                // already stands in for was never headed out,
+                                // so counting it would overstate the cut.
+                                let original_tokens = self.model_view_tokens(
+                                    &transcript,
+                                    checkpoint.as_ref(),
+                                    checkpoint_boundary,
+                                );
                                 events.send(AgentEvent::ContextTruncated {
-                                    original_tokens: context::estimate_transcript_tokens(
-                                        &transcript,
-                                    ) as u32,
+                                    original_tokens: original_tokens as u32,
                                     fitted_tokens: fitted_tokens as u32,
                                 });
                             }

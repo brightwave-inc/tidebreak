@@ -108,7 +108,7 @@ impl Agent {
     /// describes — and counting tool results at a size no request carries
     /// would put the trigger and [`select_compaction_boundary`]'s target on
     /// different scales.
-    fn model_view_tokens(
+    pub(crate) fn model_view_tokens(
         &self,
         transcript: &[ChatMessage],
         checkpoint: Option<&ContextCheckpoint>,
