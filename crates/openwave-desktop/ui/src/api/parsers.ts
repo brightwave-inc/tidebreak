@@ -333,7 +333,8 @@ export function parseTaskPlan(value: unknown): TaskPlan | null {
   };
 }
 
-export function parsePendingUserQuestions(  value: unknown,
+export function parsePendingUserQuestions(
+  value: unknown,
 ): PendingUserQuestions | null {
   if (
     !isRecord(value) ||
