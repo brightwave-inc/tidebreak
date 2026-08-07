@@ -218,9 +218,7 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
                 resolution_status(resolution)
             });
         any_live |= resolution.is_none();
-        let (error_code, error_detail) = resolution
-            .as_ref()
-            .map_or((None, None), |resolution| resolution_error(resolution));
+        let (error_code, error_detail) = resolution.as_ref().map_or((None, None), resolution_error);
         entities::sandbox_tool_call::ActiveModel {
             id: Set(call.id.0),
             agent_run_id: Set(agent_run_id.0),
