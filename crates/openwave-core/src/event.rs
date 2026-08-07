@@ -461,14 +461,24 @@ mod tests {
     }
 
     /// `AgentEvent` is written into `event.payload` and read back, so its field
-    /// names are a storage format, not only a wire format. Nothing else pins
-    /// them: the desktop schema epoch covers SQLite migrations, and a rename
-    /// changes no table. `list_events` collects into `Result<Vec<_>>`, so one
-    /// unreadable row fails a whole chat's history rather than one message.
+    /// names are a storage format, not only a wire format — and nothing else
+    /// pins them.
+    ///
+    /// Pre-v1 this test is a change *detector*, not a compatibility contract:
+    /// bumping `DESKTOP_SCHEMA_EPOCH` deletes the whole database, journal rows
+    /// included, so no row written under an older shape can reach this code.
+    /// What still bites is a payload change that ships *without* the bump —
+    /// `list_events` collects into `Result<Vec<_>>`, so one unreadable row
+    /// fails a whole chat's history rather than one message, silently until
+    /// someone opens an old chat.
     ///
     /// Regenerate with `UPDATE_JOURNAL_FIXTURE=1 cargo test -p openwave-core`.
-    /// A diff here means the journal format changed, which needs a
-    /// `#[serde(alias)]` or a migration — not a refreshed fixture.
+    /// A diff here means the journal format changed, which needs an epoch bump
+    /// — not a refreshed fixture on its own.
+    ///
+    /// At v1 this inverts: databases stop being disposable, and the fix for a
+    /// diff becomes a `#[serde(alias)]` or a migration. See
+    /// `docs/decisions/0002-pre-v1-schema-and-persisted-format-mutability.md`.
     #[test]
     fn the_journal_event_shape_is_pinned() {
         let rendered = format!(
@@ -485,81 +495,10 @@ mod tests {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         assert_eq!(
             existing, rendered,
-            "the journal event shape changed; existing chats may no longer load. \
-             If this is deliberate, add #[serde(alias)] or a migration, then \
-             regenerate with UPDATE_JOURNAL_FIXTURE=1 cargo test -p openwave-core"
+            "the journal event shape changed; if this is deliberate, bump \
+             DESKTOP_SCHEMA_EPOCH in openwave-server so existing databases are \
+             discarded, then regenerate with UPDATE_JOURNAL_FIXTURE=1 cargo \
+             test -p openwave-core"
         );
-    }
-
-    /// The direct statement of the compatibility property: bytes that a previous
-    /// binary wrote still parse, and parse back to the same value.
-    ///
-    /// Separate from the comparison above because it fails for a different
-    /// reason. A rename shows up in both, but a field that stops being optional
-    /// only shows up here.
-    #[test]
-    fn journal_rows_written_before_this_build_still_load() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(JOURNAL_FIXTURE);
-        let stored = std::fs::read_to_string(&path).expect("the journal fixture is checked in");
-        let loaded: Vec<AgentEvent> =
-            serde_json::from_str(&stored).expect("stored journal rows still deserialize");
-        assert_eq!(
-            loaded,
-            journal_samples(),
-            "a stored journal row no longer round-trips to the value it was written from"
-        );
-    }
-
-    /// `ApprovalRequired` rows written before the free-text `summary` field was
-    /// retired still carry it in `event.payload`; the extra key must stay
-    /// ignorable, or one such row makes a whole chat's history unreadable.
-    #[test]
-    fn approval_rows_with_the_retired_summary_field_still_load() {
-        let legacy = serde_json::json!({
-            "type": "approval_required",
-            "call_id": id(2),
-            "tool_name": "exec",
-            "class": "sensitive",
-            "kind": "exec_may_run_networked_command",
-            "summary": "exec requires approval",
-        });
-        let loaded: AgentEvent = serde_json::from_value(legacy).expect("legacy row deserializes");
-        assert_eq!(
-            loaded,
-            AgentEvent::ApprovalRequired {
-                auto_judging: false,
-                call_id: CallId(id(2)),
-                tool_name: "exec".into(),
-                class: ApprovalClass::Sensitive,
-                kind: crate::approval::ToolApprovalKind::ExecMayRunNetworkedCommand,
-                grant_scopes: Vec::new(),
-                preview: None,
-            }
-        );
-    }
-
-    /// Exec previews written before the staging list joined the projection have
-    /// no `files` key. They must read back as "staged nothing" — the narrow
-    /// reading — rather than failing the row and taking a chat's history with
-    /// it.
-    #[test]
-    fn exec_previews_written_without_a_staging_list_still_load() {
-        let legacy = serde_json::json!({
-            "type": "approval_required",
-            "call_id": id(2),
-            "tool_name": "exec",
-            "class": "sensitive",
-            "kind": "exec_may_run_networked_command",
-            "preview": { "tool": "exec", "command": "git", "args": ["status"], "cwd": "." },
-        });
-        let loaded: AgentEvent = serde_json::from_value(legacy).expect("legacy row deserializes");
-        let AgentEvent::ApprovalRequired {
-            preview: Some(crate::preview::ToolActionPreview::Exec { files, .. }),
-            ..
-        } = loaded
-        else {
-            panic!("the row is an exec approval with a preview");
-        };
-        assert!(files.is_empty());
     }
 }
