@@ -16,7 +16,6 @@ import {
   type AgentRunCancellationSnapshot,
   type AgentRunSnapshot,
   type AgentRunTaskPlan as WireAgentRunTaskPlan,
-  type AgentRunTaskPlanProgress as WireAgentRunTaskPlanProgress,
   type Chat as WireChat,
   type ChatTranscript as WireChatTranscript,
   type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
@@ -401,9 +400,6 @@ export type TaskPlan = WireTaskPlan;
  * carrying no turn because a run is one delegated task start to finish.
  */
 export type AgentRunTaskPlan = WireAgentRunTaskPlan;
-
-/** A run's plan as a status row needs it: the count and the current step. */
-export type AgentRunTaskPlanProgress = WireAgentRunTaskPlanProgress;
 export type TaskPlanStep = WireTaskPlanStep;
 export type TaskPlanStepStatus = WireTaskPlanStepStatus;
 

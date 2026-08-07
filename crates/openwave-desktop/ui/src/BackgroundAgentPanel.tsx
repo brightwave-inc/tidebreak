@@ -209,7 +209,13 @@ function BackgroundAgentDetail({
         {run.task_plan && (
           <div className="flex flex-col gap-1.5">
             <AgentRunTaskPlanProgress run={run} live={live} />
-            <AgentRunTaskPlanChecklist state={taskPlan} live={live} />
+            <AgentRunTaskPlanChecklist
+              state={taskPlan}
+              live={live}
+              // The strip above the timeline does not scroll, so the plan is
+              // capped to leave the activity pane below it its own room.
+              className="max-h-40"
+            />
           </div>
         )}
         {run.submitted_outputs.length > 0 && (

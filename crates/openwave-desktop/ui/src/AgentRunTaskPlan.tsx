@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { AgentRun, AgentRunTaskPlan } from "./api";
 import { TaskPlanStepList } from "./TaskPlanSteps";
@@ -10,6 +10,25 @@ export type AgentRunTaskPlanState = {
   error: boolean;
   loaded: boolean;
   plan: AgentRunTaskPlan | null;
+  /** Read the list again after a failure; the effect alone never retries. */
+  retry: () => void;
+};
+
+/** The held read, plus the run it is an answer about. */
+type HeldTaskPlan = {
+  runId: string | null;
+  loading: boolean;
+  error: boolean;
+  loaded: boolean;
+  plan: AgentRunTaskPlan | null;
+};
+
+const NO_PLAN_HELD: HeldTaskPlan = {
+  runId: null,
+  loading: false,
+  error: false,
+  loaded: false,
+  plan: null,
 };
 
 /**
@@ -20,6 +39,15 @@ export type AgentRunTaskPlanState = {
  * the list exactly when it has actually changed, and never while the reader
  * has it closed. Mirrors `useAgentRunActivity`, which observes the run's
  * activity history the same way.
+ *
+ * The held answer remembers which run it is about. A panel that switches runs
+ * without remounting would otherwise show the previous run's steps under the
+ * new run's heading until the next read lands — a wrong answer rather than a
+ * late one.
+ *
+ * A settled run's `updated_at` never changes again, so nothing would re-run
+ * the effect after a failed read. The retry is therefore explicit rather than
+ * a matter of waiting.
  */
 export function useAgentRunTaskPlan(
   runId: string | null,
@@ -27,38 +55,49 @@ export function useAgentRunTaskPlan(
   enabled: boolean,
   loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>,
 ): AgentRunTaskPlanState {
-  const [state, setState] = useState<AgentRunTaskPlanState>({
-    loading: false,
-    error: false,
-    loaded: false,
-    plan: null,
-  });
+  const [held, setHeld] = useState<HeldTaskPlan>(NO_PLAN_HELD);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!enabled || runId === null) return;
     let cancelled = false;
-    setState((current) => ({
-      ...current,
-      loading: !current.loaded,
-      error: false,
-    }));
+    setHeld((current) =>
+      current.runId === runId
+        ? { ...current, loading: !current.loaded, error: false }
+        : { ...NO_PLAN_HELD, runId, loading: true },
+    );
     loadTaskPlan(runId)
       .then((plan) => {
         if (!cancelled) {
-          setState({ loading: false, error: false, loaded: true, plan });
+          setHeld({ runId, loading: false, error: false, loaded: true, plan });
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setState((current) => ({ ...current, loading: false, error: true }));
+          setHeld((current) =>
+            current.runId === runId
+              ? { ...current, loading: false, error: true }
+              : current,
+          );
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [enabled, runId, updatedAt, loadTaskPlan]);
+  }, [enabled, runId, updatedAt, loadTaskPlan, attempt]);
 
-  return state;
+  const retry = useCallback(() => setAttempt((current) => current + 1), []);
+
+  // Answers about another run are not this run's to show, not even for the
+  // one commit before the effect resets them.
+  const current = held.runId === runId ? held : NO_PLAN_HELD;
+  return {
+    loading: current.loading,
+    error: current.error,
+    loaded: current.loaded,
+    plan: current.plan,
+    retry,
+  };
 }
 
 /**
@@ -95,14 +134,7 @@ export function AgentRunTaskPlanProgress({
             aria-label="Task plan progress"
           />
         )}
-        <span
-          className={cn(
-            "shrink-0 text-xs tabular-nums text-muted-foreground",
-            // With no bar beside it the count would otherwise float in the
-            // middle of the row.
-            !live && "order-first",
-          )}
-        >
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
           {completed}/{progress.total} steps
         </span>
       </div>
@@ -131,26 +163,41 @@ export function AgentRunTaskPlanChecklist({
 }: {
   state: AgentRunTaskPlanState;
   live: boolean;
+  /**
+   * The frame around the list, including its height cap. The caller owns it:
+   * these lists are nested inside scrollers of their own, and a cap chosen
+   * here would stack a second scrollbar inside the first.
+   */
   className?: string;
 }) {
-  if (state.error) {
+  // A failed refresh is not evidence the plan is gone. While a good read is
+  // still held it keeps rendering, and the failure costs nothing visible —
+  // the next successful read replaces it.
+  if (state.error && state.plan === null) {
     return (
-      <p className={cn("text-xs text-muted-foreground", className)} role="status">
-        The task plan could not be loaded.
-      </p>
+      <div
+        className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
+        role="status"
+      >
+        <span>The task plan could not be loaded.</span>
+        <button
+          type="button"
+          className="shrink-0 font-medium text-primary hover:underline"
+          onClick={state.retry}
+        >
+          Retry
+        </button>
+      </div>
     );
   }
   // Nothing while the first read is in flight: the progress line above already
   // says a plan exists and how far it has got, so a skeleton here would only
   // make the row jump.
-  if (!state.loaded || state.plan === null) return null;
+  if (state.plan === null) return null;
 
   return (
     <TaskPlanStepList
-      className={cn(
-        "grid max-h-48 gap-1.5 overflow-y-auto text-xs",
-        className,
-      )}
+      className={cn("grid gap-1.5 overflow-y-auto text-xs", className)}
       steps={state.plan.steps}
       live={live}
     />

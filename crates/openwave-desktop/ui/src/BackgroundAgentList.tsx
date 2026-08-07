@@ -393,7 +393,14 @@ function BackgroundAgentRow({
       {expanded && (
         <div id={contentId} className="mt-2 flex flex-col gap-2 pl-5">
           {run.task_plan && (
-            <AgentRunTaskPlanChecklist state={taskPlan} live={live} />
+            <AgentRunTaskPlanChecklist
+              state={taskPlan}
+              live={live}
+              // Shallow on purpose: this row already sits inside the list's
+              // own 12rem viewport, so a tall checklist here would nest a
+              // second scrollbar and push its siblings out of reach.
+              className="max-h-24"
+            />
           )}
           <AgentActivityTimeline
             state={activity}
