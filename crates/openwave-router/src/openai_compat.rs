@@ -1564,6 +1564,7 @@ mod tests {
                     as std::sync::Arc<dyn crate::BearerTokenSource>
             }),
             vertex: None,
+            bedrock: None,
             chatgpt_account_id: None,
         }])
     }
