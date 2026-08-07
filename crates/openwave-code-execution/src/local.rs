@@ -1166,18 +1166,27 @@ fn macos_profile(
         .map(|grant| sandbox_subpath(grant.overlay.as_ref().unwrap_or(&grant.path)))
         .collect::<Result<Vec<_>, _>>()?
         .join("\n  ");
-    let mut grant_ancestors = folder_grants
-        .iter()
-        .flat_map(|grant| std::iter::once(&grant.path).chain(grant.overlay.as_ref()))
-        .flat_map(|path| path.ancestors().skip(1))
-        .collect::<Vec<_>>();
-    grant_ancestors.sort_unstable();
-    grant_ancestors.dedup();
-    let grant_metadata = grant_ancestors
+    // Runtimes and package managers commonly walk toward the filesystem root
+    // with metadata-only probes while resolving symlinks, prefixes, and
+    // node_modules. Their explicitly allowed subtree is not enough for that
+    // walk when a denied ancestor such as `/Users` remains opaque. Name only
+    // the ancestors of paths the sandbox already receives through cwd, HOME,
+    // PATH, or an explicit grant; their contents stay unreadable.
+    let dynamic_metadata = sandbox_metadata_ancestors(
+        [
+            Some(workspace),
+            Some(env_home),
+            developer_dir,
+            document_scripts_dir,
+            shared_package_cache,
+            managed_node_dir,
+        ]
         .into_iter()
-        .map(sandbox_literal)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n  ");
+        .flatten()
+        .chain(folder_grants.iter().flat_map(|grant| {
+            std::iter::once(grant.path.as_path()).chain(grant.overlay.as_deref())
+        })),
+    )?;
     let workspace = sandbox_subpath(workspace)?;
     // The per-chat env home backs the sandboxed process's HOME/TMPDIR. It is
     // writable like the workspace but lives outside the model-visible tree, so
@@ -1195,10 +1204,27 @@ fn macos_profile(
          {network}\n\
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
-         (allow file-read-metadata\n  {runtime_metadata}\n  {grant_metadata})\n\
+         (allow file-read-metadata\n  {runtime_metadata}\n  {dynamic_metadata})\n\
          (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {package_cache}\n  {managed_node}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
          (allow file-write*\n  {granted_writes}\n  {workspace}\n  {env_home}\n  (literal \"/dev/null\"))\n"
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_metadata_ancestors<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> Result<String, CodeExecutionError> {
+    let mut ancestors = paths
+        .into_iter()
+        .flat_map(|path| path.ancestors().skip(1))
+        .collect::<Vec<_>>();
+    ancestors.sort_unstable();
+    ancestors.dedup();
+    ancestors
+        .into_iter()
+        .map(sandbox_literal)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|entries| entries.join("\n  "))
 }
 
 #[cfg(target_os = "macos")]
@@ -1781,6 +1807,9 @@ mod tests {
 
         let with_node = profile(Some(node));
         assert!(with_node.contains(&sandbox_subpath(node).unwrap()));
+        assert!(with_node.contains("(literal \"/Users\")"));
+        assert!(with_node
+            .contains("(literal \"/Users/test/Library/Application Support/OpenWave/node\")"));
         let write_rule = with_node
             .split("(allow file-write*")
             .nth(1)
@@ -1825,12 +1854,25 @@ mod tests {
             .unwrap();
         assert_eq!(without.stdout, "no-node");
 
+        let denied_ancestor = runtime
+            .ancestors()
+            .find(|path| *path == Path::new("/private"))
+            .expect("macOS temporary directories resolve below /private")
+            .to_path_buf();
         let provider = provider.with_managed_node(Some(runtime));
+        let script = format!(
+            "node --version; stat -f %N '{}' >/dev/null && printf metadata-ok",
+            denied_ancestor.display()
+        );
         let with = provider
-            .execute(request(workspace, "call-node", script))
+            .execute(request(workspace, "call-node", &script))
             .await
             .unwrap();
-        assert_eq!(with.stdout, "v22.11.0", "stderr: {}", with.stderr);
+        assert_eq!(
+            with.stdout, "v22.11.0metadata-ok",
+            "stderr: {}",
+            with.stderr
+        );
     }
 
     #[cfg(target_os = "macos")]

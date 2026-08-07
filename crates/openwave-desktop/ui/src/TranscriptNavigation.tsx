@@ -18,6 +18,12 @@ const RAIL_STORAGE_KEY = "openwave.transcript-rail-visible";
 const INDICATOR_SIZE = 24;
 const PROXIMITY_THRESHOLD = 400;
 
+export type RailIndicatorCandidate = {
+  anchorId: string;
+  desiredTop: number;
+  distanceFromViewport: number;
+};
+
 export type TranscriptNavigationEntry = {
   anchorId: string;
   kind: "user" | "tool";
@@ -222,6 +228,7 @@ function useRailPositions(
         }
       }
 
+      const candidates: RailIndicatorCandidate[] = [];
       for (const entry of entries) {
         const indicator = refs.current.get(entry.anchorId);
         if (!indicator) continue;
@@ -239,10 +246,19 @@ function useRailPositions(
           continue;
         }
 
-        const top = Math.max(
-          0,
-          Math.min(relativeTop, container.height - INDICATOR_SIZE),
-        );
+        candidates.push({
+          anchorId: entry.anchorId,
+          desiredTop: Math.max(
+            0,
+            Math.min(relativeTop, container.height - INDICATOR_SIZE),
+          ),
+          distanceFromViewport:
+            relativeTop < 0
+              ? -relativeTop
+              : relativeTop > container.height
+                ? relativeTop - container.height
+                : 0,
+        });
         const opacity =
           relativeTop < 0
             ? 1 - Math.abs(relativeTop) / PROXIMITY_THRESHOLD
@@ -251,8 +267,19 @@ function useRailPositions(
                 (relativeTop - container.height) / PROXIMITY_THRESHOLD
               : 1;
         indicator.style.display = "";
-        indicator.style.transform = `translateY(${top}px)`;
         indicator.style.opacity = String(Math.max(0, opacity));
+      }
+
+      const tops = layoutRailIndicatorTops(candidates, container.height);
+      for (const candidate of candidates) {
+        const indicator = refs.current.get(candidate.anchorId);
+        if (!indicator) continue;
+        const top = tops.get(candidate.anchorId);
+        if (top === undefined) {
+          indicator.style.display = "none";
+          continue;
+        }
+        indicator.style.transform = `translateY(${top}px)`;
       }
     };
 
@@ -276,4 +303,50 @@ function useRailPositions(
   }, [entries, scrollElement, visible]);
 
   return refs;
+}
+
+/**
+ * Keep fixed-size transcript indicators from landing on top of one another.
+ *
+ * Several offscreen anchors clamp to the same top or bottom edge, and dense
+ * activity can put nearby onscreen anchors less than one icon apart. Prefer
+ * the entries nearest the viewport when there is not room for every button,
+ * then push the retained positions apart while staying inside the rail.
+ */
+export function layoutRailIndicatorTops(
+  candidates: readonly RailIndicatorCandidate[],
+  containerHeight: number,
+): Map<string, number> {
+  const capacity = Math.max(0, Math.floor(containerHeight / INDICATOR_SIZE));
+  if (capacity === 0 || candidates.length === 0) return new Map();
+
+  const retained = [...candidates]
+    .sort(
+      (left, right) =>
+        left.distanceFromViewport - right.distanceFromViewport ||
+        left.desiredTop - right.desiredTop,
+    )
+    .slice(0, capacity)
+    .sort((left, right) => left.desiredTop - right.desiredTop);
+  const maxTop = containerHeight - INDICATOR_SIZE;
+  const tops: number[] = [];
+  for (const candidate of retained) {
+    const previous = tops.at(-1);
+    tops.push(
+      previous === undefined
+        ? candidate.desiredTop
+        : Math.max(candidate.desiredTop, previous + INDICATOR_SIZE),
+    );
+  }
+
+  // The forward pass can push a bottom cluster below the rail. Pull it back
+  // from the end; because retained.length <= capacity, this cannot cross zero.
+  tops[tops.length - 1] = Math.min(tops[tops.length - 1]!, maxTop);
+  for (let index = tops.length - 2; index >= 0; index -= 1) {
+    tops[index] = Math.min(tops[index]!, tops[index + 1]! - INDICATOR_SIZE);
+  }
+
+  return new Map(
+    retained.map((candidate, index) => [candidate.anchorId, tops[index]!] as const),
+  );
 }
