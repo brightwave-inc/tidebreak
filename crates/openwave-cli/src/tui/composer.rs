@@ -3,11 +3,11 @@
 //! delete, alt+arrow word motion, and ctrl+z/ctrl+shift+z undo/redo.
 //!
 //! Everything funnels through [`Composer::key`], which maps the raw key onto
-//! either a `tui-textarea` `Input` or a direct method call (undo/redo live on
+//! either a `ratatui-textarea` `Input` or a direct method call (undo/redo live on
 //! the textarea itself, not in its input vocabulary).
 
 use ratatui::style::{Modifier, Style};
-use tui_textarea::{CursorMove, Input, TextArea};
+use ratatui_textarea::{CursorMove, Input, TextArea};
 
 use super::theme;
 
