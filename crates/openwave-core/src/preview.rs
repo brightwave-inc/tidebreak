@@ -657,6 +657,25 @@ pub enum ExecBackend {
     Docker,
 }
 
+/// One question as it was asked, with what the reader chose.
+///
+/// Labels rather than option ids: the recap is read by a person, and the ids
+/// are an internal handle they never saw. A question the reader skipped
+/// carries neither a selection nor an answer, which is how the card knows to
+/// say so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AnsweredUserQuestion {
+    /// The prompt the reader answered.
+    pub question: String,
+    /// Labels of the options chosen, in the order the question listed them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<String>,
+    /// The reader's own words, when the question allowed them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub custom_answer: Option<String>,
+}
+
 /// What a call produced, in a form a human can read.
 ///
 /// A command's output is the whole reason to run it. Withholding it leaves the
@@ -727,6 +746,34 @@ pub enum ToolResultPreview {
         /// that silently lists the first fifty of two hundred results is
         /// telling the reader something false.
         elided: u32,
+    },
+    /// The answers a parked `ask_user_questions` call was resolved with.
+    ///
+    /// Built where the answer commits rather than by [`ToolResultPreview::build`]:
+    /// this call resolves outside the agent loop, so there is no `ToolOutput`
+    /// to read it out of. Carries only the presentation fields the pending
+    /// card already showed, plus what the reader chose.
+    UserQuestions {
+        answers: Vec<AnsweredUserQuestion>,
+        /// Whatever the reader added on their own, when they added any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        additional_context: Option<String>,
+    },
+    /// The decision a parked `exit_plan_mode` call was resolved with.
+    ///
+    /// Built at the deciding transaction, on the same terms as
+    /// [`ToolResultPreview::UserQuestions`]. The plan text is the same
+    /// model-authored markdown the approval card already rendered.
+    PlanDecision {
+        title: String,
+        plan: String,
+        /// Whether the reader approved the plan as proposed.
+        accepted: bool,
+        /// What the reader asked to change, when they sent it back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        feedback: Option<String>,
     },
 }
 
@@ -893,6 +940,9 @@ impl ToolResultPreview {
             // An empty list is still something to show, and saying so is the
             // point: the card reports that the call found nothing.
             Self::Entries { .. } => true,
+            // A recap of what the reader chose, which is the whole reason the
+            // turn parked. Skipping everything is itself the answer.
+            Self::UserQuestions { .. } | Self::PlanDecision { .. } => true,
         }
     }
 }

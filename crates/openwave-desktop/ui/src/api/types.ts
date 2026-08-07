@@ -504,7 +504,36 @@ export type ToolResultPreview =
       failures: ResultFailure[];
       /** Rows the server bounded away, counted rather than shown. */
       elided: number;
+    }
+  | {
+      /** The answers a parked question call was resolved with. */
+      tool: "user_questions";
+      answers: AnsweredUserQuestion[];
+      /** Whatever the reader added on their own, when they added any. */
+      additionalContext: string | null;
+    }
+  | {
+      /** The decision a parked plan proposal was resolved with. */
+      tool: "plan_decision";
+      title: string;
+      plan: string;
+      accepted: boolean;
+      /** What the reader asked to change, when they sent it back. */
+      feedback: string | null;
     };
+
+/**
+ * One question as it was asked, with what the reader chose.
+ *
+ * A question with neither a selection nor an answer was skipped, which the
+ * recap says out loud rather than omitting the row.
+ */
+export type AnsweredUserQuestion = {
+  question: string;
+  /** Option labels, in the order the question listed them. */
+  selected: string[];
+  customAnswer: string | null;
+};
 
 /** One row of a listed result. */
 export type ResultEntry = {

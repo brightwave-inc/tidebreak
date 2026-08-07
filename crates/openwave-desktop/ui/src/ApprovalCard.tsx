@@ -255,12 +255,12 @@ export function approvalAsk(
 }
 
 /** How many grants show before the rest move behind "More options". */
-const INLINE_GRANTS = 1;
+const INLINE_GRANTS = 2;
 
 /**
  * Narrowest grant first, decline last.
  *
- * The broader rungs start hidden. Every option on screen is one keystroke
+ * The widest rungs start hidden. Every option on screen is one keystroke
  * away, so a list that shows "don't ask again" beside "just this once" makes
  * the widest grant as cheap as the narrowest — and scope is easy to widen by
  * accident and hard to notice afterwards.
@@ -295,9 +295,12 @@ export function approvalOptions(
   ];
 
   const grants = canRemember ? grantLadder(preview, scope, grantRungs) : [];
-  const visible = expanded ? grants : grants.slice(0, INLINE_GRANTS);
+  // Folding a single rung costs a row to save a row: the list is no shorter for
+  // hiding it, and the reader pays a keystroke to see what was already there.
+  const fold = !expanded && grants.length > INLINE_GRANTS + 1;
+  const visible = fold ? grants.slice(0, INLINE_GRANTS) : grants;
   options.push(...visible);
-  if (grants.length > visible.length) {
+  if (fold) {
     options.push({ kind: "more", key: "more", label: "More options" });
   }
   options.push(declineOption());

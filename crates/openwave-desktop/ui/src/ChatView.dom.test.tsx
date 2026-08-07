@@ -163,6 +163,48 @@ describe("ChatView", () => {
     expect(await screen.findByText("Which quarter?")).toBeInTheDocument();
   });
 
+  it("stands the question in the composer's place until it is answered", async () => {
+    // A parked question is the one thing the turn wants back, so it takes the
+    // slot the composer would otherwise fill: nothing to scroll off, and no
+    // field inviting a reply the turn will not read.
+    const user = userEvent.setup();
+    usePendingPrompts.setState({
+      chatId: "chat-1",
+      userQuestions: [
+        {
+          callId: "call-q",
+          turnId: "turn-1",
+          askedAt: "2026-07-24T00:00:00.000Z",
+          questions: [
+            {
+              id: "q1",
+              header: "Scope",
+              question: "Which quarter?",
+              options: [],
+              questionType: "single_select",
+              allowFreeForm: true,
+            },
+          ],
+        },
+      ] as never,
+    });
+
+    await renderChatView();
+
+    expect(await screen.findByText("Which quarter?")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Skip questions" }));
+    act(() => {
+      usePendingPrompts.setState({ chatId: "chat-1", userQuestions: [] });
+    });
+
+    // Answered, the slot is the composer's again.
+    expect(
+      await screen.findByRole("textbox", { name: "Message" }),
+    ).toBeInTheDocument();
+  });
+
   it("reveals the card a deep link named, then drops it from the URL", async () => {
     // What the inbox promises: opening an item lands on the exact card that
     // parked, not at the bottom of a transcript the reader has to search.

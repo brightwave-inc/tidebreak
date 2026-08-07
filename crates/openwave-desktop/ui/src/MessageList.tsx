@@ -8,12 +8,8 @@ import type {
   AgentRunTaskPlan,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
-  PendingPlanApproval,
-  PendingUserQuestions,
-  PlanDecision,
   ToolActionPreview,
   ToolResultPreview,
-  UserQuestionAnswer,
   ExecFileChangeSummary,
   ModelInfo,
 } from "./api";
@@ -33,6 +29,8 @@ import { ThinkingAccordion } from "./ThinkingAccordion";
 import { stripCitationDirectives } from "./citationDirectives";
 import { MessageCitationsProvider } from "./InlineCitation";
 import { McpAppCard } from "./McpAppCard";
+import { PlanDecisionResultCard } from "./PlanDecisionResultCard";
+import { UserQuestionsResultCard } from "./UserQuestionsResultCard";
 import { OutputCardList } from "./OutputCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -41,8 +39,7 @@ import {
   ToolActivityUnavailable,
 } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
-import { PlanApprovalCard } from "./PlanApprovalCard";
-import { UserQuestionsCard } from "./UserQuestionsCard";
+import { isolatedCard } from "./PendingCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 import {
@@ -193,16 +190,19 @@ type MessageListProps = {
   chatId?: string;
   folderAccessRequests: PendingFolderAccessRequest[];
   outputWritebackRequests?: PendingOutputWritebackRequest[];
-  userQuestionRequests?: PendingUserQuestions[];
-  planApprovalRequests?: PendingPlanApproval[];
+  /**
+   * How many questions and plan approvals are parked on the reader. Their cards
+   * stand in the composer's slot rather than the transcript, so the list never
+   * renders them — it only needs to know a turn is waiting on someone, so that
+   * an otherwise-empty chat isn't greeted and the Working indicator stays down.
+   */
+  pendingPromptCount?: number;
   nativeHost: boolean;
   nativeBusy: boolean;
   resolvingFolderCalls: Set<string>;
   folderAccessErrors: Record<string, string>;
   resolvingOutputWritebackCalls?: Set<string>;
   outputWritebackErrors?: Record<string, string>;
-  answeringQuestionCalls?: Set<string>;
-  userQuestionErrors?: Record<string, string>;
   decidingApprovalCalls: Set<string>;
   approvalErrors: Record<string, string>;
   /** How far a remembered approval reaches, for the card's labels. */
@@ -254,15 +254,6 @@ type MessageListProps = {
     decision: OutputWritebackDecision,
   ) => void;
   onOutputWritebackCancel?: (callId: string, turnId: string) => void;
-  onAnswerUserQuestions?: (
-    callId: string,
-    answers: UserQuestionAnswer[],
-    additionalUserContext?: string,
-  ) => void;
-  decidingPlanCalls?: Set<string>;
-  planApprovalErrors?: Record<string, string>;
-  onPlanDecision?: (callId: string, decision: PlanDecision) => void;
-  onPlanCancel?: (turnId: string) => void;
   onSelectPrompt?: (prompt: string) => void;
   /** Resend the failed turn. Offered only on the transcript's newest failure. */
   onRetryTurn?: (turn: RetryableTurn) => void;
@@ -280,15 +271,13 @@ export function MessageList({
   chatId,
   folderAccessRequests,
   outputWritebackRequests = [],
-  userQuestionRequests = [],
+  pendingPromptCount = 0,
   nativeHost,
   nativeBusy,
   resolvingFolderCalls,
   folderAccessErrors,
   resolvingOutputWritebackCalls = new Set(),
   outputWritebackErrors = {},
-  answeringQuestionCalls = new Set(),
-  userQuestionErrors = {},
   decidingApprovalCalls,
   approvalErrors,
   grantScope,
@@ -314,12 +303,6 @@ export function MessageList({
   onFolderAccessCancel,
   onOutputWritebackDecision = () => undefined,
   onOutputWritebackCancel = () => undefined,
-  onAnswerUserQuestions = () => undefined,
-  planApprovalRequests = [],
-  decidingPlanCalls = new Set<string>(),
-  planApprovalErrors = {},
-  onPlanDecision = () => undefined,
-  onPlanCancel = () => undefined,
   onSelectPrompt,
   onRetryTurn,
   hydrated = true,
@@ -371,7 +354,7 @@ export function MessageList({
     messages.length === 0 &&
     folderAccessRequests.length === 0 &&
     outputWritebackRequests.length === 0 &&
-    userQuestionRequests.length === 0 &&
+    pendingPromptCount === 0 &&
     !busy;
 
   if (isEmpty) {
@@ -439,39 +422,6 @@ export function MessageList({
           request.callId,
         ),
       )}
-      {userQuestionRequests.map((request) =>
-        isolatedCard(
-          `user-questions-${request.callId}`,
-          `${answeringQuestionCalls.has(request.callId)} ${userQuestionErrors[request.callId] ?? ""}`,
-          <UserQuestionsCard
-            request={request}
-            working={answeringQuestionCalls.has(request.callId)}
-            error={userQuestionErrors[request.callId]}
-            onAnswer={(answers, additionalUserContext) =>
-              onAnswerUserQuestions(
-                request.callId,
-                answers,
-                additionalUserContext,
-              )
-            }
-          />,
-          request.callId,
-        ),
-      )}
-      {planApprovalRequests.map((request) =>
-        isolatedCard(
-          `plan-approval-${request.callId}`,
-          `${decidingPlanCalls.has(request.callId)} ${planApprovalErrors[request.callId] ?? ""}`,
-          <PlanApprovalCard
-            request={request}
-            working={decidingPlanCalls.has(request.callId)}
-            error={planApprovalErrors[request.callId]}
-            onDecide={(decision) => onPlanDecision(request.callId, decision)}
-            onCancel={() => onPlanCancel(request.turnId)}
-          />,
-          request.callId,
-        ),
-      )}
       {compacting ? (
         <AssistantWorkingIndicator compacting />
       ) : (
@@ -480,8 +430,7 @@ export function MessageList({
           busy,
           folderAccessRequests.length +
             outputWritebackRequests.length +
-            userQuestionRequests.length +
-            planApprovalRequests.length,
+            pendingPromptCount,
           streamStalled,
         ) && <AssistantWorkingIndicator />
       )}
@@ -818,46 +767,6 @@ export function groupMessageItems(
   return { items, lastTurnStart };
 }
 
-/**
- * One card, contained.
- *
- * Cards render model-influenced data through several defensive parsers, and one
- * of them being wrong must not cost the card next to it. The siblings that make
- * this matter are the cards the turn is waiting on — an approval prompt, a
- * folder-access request, a question put to the user. A pending decision that
- * renders as nothing leaves the reader with no way to answer, no explanation,
- * and a turn that cannot proceed.
- *
- * `signature` is the data the card draws on, reduced to what decides whether it
- * can render, so a card that threw mid-stream is retried when its call moves on
- * rather than staying broken for the life of the transcript.
- */
-function isolatedCard(
-  key: string,
-  signature: string,
-  card: ReactNode,
-  /**
-   * The parked call this card decides, when it decides one. It is written to
-   * the DOM so a deep link from the inbox can find the card it named — the
-   * transcript is otherwise addressable only by scroll position.
-   */
-  pendingCallId?: string,
-): ReactNode {
-  return (
-    <ErrorBoundary
-      key={key}
-      resetKey={signature}
-      fallback={<ToolActivityUnavailable />}
-    >
-      {pendingCallId ? (
-        <div data-pending-call-id={pendingCallId}>{card}</div>
-      ) : (
-        card
-      )}
-    </ErrorBoundary>
-  );
-}
-
 /** What deciding a card needs beyond the entry it is deciding about. */
 type CardContext = {
   parked: Set<string>;
@@ -1037,6 +946,31 @@ function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
         resourceUri={entry.result.resourceUri}
         chatId={chatId}
         callId={entry.callId}
+      />,
+    );
+  }
+  // A settled question round or plan decision is keyed on the *result*: the
+  // card exists to say what the reader chose, which the arguments never held.
+  // Still parked, the pinned card above the composer is asking the same thing.
+  if (entry.result?.tool === "user_questions" && !parked.has(entry.callId)) {
+    return isolatedCard(
+      entry.id,
+      "",
+      <UserQuestionsResultCard
+        answers={entry.result.answers}
+        additionalContext={entry.result.additionalContext}
+      />,
+    );
+  }
+  if (entry.result?.tool === "plan_decision" && !parked.has(entry.callId)) {
+    return isolatedCard(
+      entry.id,
+      "",
+      <PlanDecisionResultCard
+        title={entry.result.title}
+        plan={entry.result.plan}
+        accepted={entry.result.accepted}
+        feedback={entry.result.feedback}
       />,
     );
   }
