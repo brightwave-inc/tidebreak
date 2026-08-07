@@ -75,13 +75,11 @@ JOIN agent_run p
 JOIN turn_agent_run_wait_member m
   ON m.wait_id = w.id AND m.parent_run_id = w.parent_run_id
  AND m.origin_turn_id = w.turn_id AND m.chat_id = w.chat_id
-JOIN sandbox_agent_admission a
-  ON a.child_run_id = m.child_run_id AND a.parent_run_id = w.parent_run_id
- AND a.origin_turn_id = w.turn_id AND a.chat_id = w.chat_id
 JOIN agent_run c
   ON c.id = m.child_run_id AND c.chat_id = w.chat_id AND c.depth = 1
  AND c.parent_id = w.parent_run_id AND c.parent_depth = 0
- AND c.spawn_call_id = a.spawn_call_id
+ AND c.origin_turn_id = w.turn_id AND c.admitted_at IS NOT NULL
+ AND c.spawn_call_id IS NOT NULL
 JOIN agent_run_inbox i
   ON i.child_run_id = m.child_run_id AND i.parent_run_id = w.parent_run_id
  AND i.chat_id = w.chat_id AND i.parent_depth = 0
@@ -295,24 +293,18 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         }));
     }
     for child_run_id in child_run_ids {
-        let admission = entities::sandbox_agent_admission::Entity::find_by_id(child_run_id.0)
-            .one(&transaction)
-            .await
-            .map_err(store_err)?;
         let child = entities::agent_run::Entity::find()
             .filter(entities::agent_run::Column::Id.eq(child_run_id.0))
             .one(&transaction)
             .await
             .map_err(store_err)?;
-        let valid = admission.zip(child).is_some_and(|(admission, child)| {
-            admission.origin_turn_id == turn_id.0
-                && admission.parent_run_id == turn.agent_run_id
-                && admission.chat_id == turn.chat_id
-                && admission.child_run_id == child.id
+        let valid = child.is_some_and(|child| {
+            child.admitted_at.is_some()
+                && child.origin_turn_id == Some(turn_id.0)
                 && child.parent_id == Some(turn.agent_run_id)
                 && child.chat_id == turn.chat_id
                 && child.tier == AgentRunTier::Background.as_str()
-                && child.spawn_call_id == Some(admission.spawn_call_id)
+                && child.spawn_call_id.is_some()
         });
         if !valid {
             transaction.commit().await.map_err(store_err)?;

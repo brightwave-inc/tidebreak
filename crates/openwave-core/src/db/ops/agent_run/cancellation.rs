@@ -242,6 +242,30 @@ pub(in crate::db) async fn finish_agent_run_cancellation(
 /// Keeping the outer scheduler lock makes cancellation-request provenance and
 /// the child lifecycle transition one serial decision with worker claims,
 /// direct cancellation, acknowledgements, and reaping.
+/// The admitted sandbox children of one origin turn, oldest admission first.
+///
+/// The parent-run and chat agreement the separate admission table had to be
+/// checked for is now the same row's `parent_id`/`chat_id`, so the filter
+/// states it instead of validating it afterwards.
+async fn admitted_children_of_origin_turn_on<C>(
+    conn: &C,
+    turn: &entities::turn_run::Model,
+) -> Result<Vec<entities::agent_run::Model>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::OriginTurnId.eq(turn.id))
+        .filter(entities::agent_run::Column::AdmittedAt.is_not_null())
+        .filter(entities::agent_run::Column::ParentId.eq(turn.agent_run_id))
+        .filter(entities::agent_run::Column::ChatId.eq(turn.chat_id))
+        .order_by_asc(entities::agent_run::Column::AdmittedAt)
+        .order_by_asc(entities::agent_run::Column::Id)
+        .all(conn)
+        .await
+        .map_err(store_err)
+}
+
 pub(in crate::db) async fn cancel_sandbox_children_for_origin_turn_on<C>(
     conn: &C,
     turn: &entities::turn_run::Model,
@@ -251,33 +275,12 @@ pub(in crate::db) async fn cancel_sandbox_children_for_origin_turn_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let admissions = entities::sandbox_agent_admission::Entity::find()
-        .filter(entities::sandbox_agent_admission::Column::OriginTurnId.eq(turn.id))
-        .order_by_asc(entities::sandbox_agent_admission::Column::AdmittedAt)
-        .order_by_asc(entities::sandbox_agent_admission::Column::ChildRunId)
-        .all(conn)
-        .await
-        .map_err(store_err)?;
-    for admission in admissions {
-        if admission.parent_run_id != turn.agent_run_id || admission.chat_id != turn.chat_id {
+    let children = admitted_children_of_origin_turn_on(conn, turn).await?;
+    for child in children {
+        let child_id = AgentRunId(child.id);
+        if child.tier != AgentRunTier::Background.as_str() {
             return Err(AgentError::Store(format!(
-                "sandbox admission {} does not match origin turn {}",
-                admission.child_run_id, turn.id
-            )));
-        }
-        let child_id = AgentRunId(admission.child_run_id);
-        let Some(child) = find_by_id_on(conn, child_id).await? else {
-            return Err(AgentError::Store(format!(
-                "sandbox admission references missing child {child_id}"
-            )));
-        };
-        if child.parent_id != Some(turn.agent_run_id)
-            || child.chat_id != turn.chat_id
-            || child.tier != AgentRunTier::Background.as_str()
-            || child.spawn_call_id != Some(admission.spawn_call_id)
-        {
-            return Err(AgentError::Store(format!(
-                "sandbox child {child_id} does not match its admission"
+                "sandbox child {child_id} is not a background run"
             )));
         }
         agent_run_from_model(child.clone())?;
@@ -364,39 +367,23 @@ where
         )));
     }
 
-    let admissions = entities::sandbox_agent_admission::Entity::find()
-        .filter(entities::sandbox_agent_admission::Column::OriginTurnId.eq(turn.id))
-        .order_by_asc(entities::sandbox_agent_admission::Column::AdmittedAt)
-        .order_by_asc(entities::sandbox_agent_admission::Column::ChildRunId)
-        .all(conn)
-        .await
-        .map_err(store_err)?;
-    let mut unsettled = Vec::with_capacity(admissions.len());
-    for admission in admissions {
-        if admission.parent_run_id != turn.agent_run_id
-            || admission.chat_id != turn.chat_id
-            || AgentRunId(admission.child_run_id)
-                != AgentRunId::sandbox_for_spawn_call(crate::CallId(admission.spawn_call_id))
-        {
+    let children = admitted_children_of_origin_turn_on(conn, turn).await?;
+    let mut unsettled = Vec::with_capacity(children.len());
+    for child in children {
+        let child_id = AgentRunId(child.id);
+        if child.spawn_call_id.is_none_or(|spawn_call_id| {
+            child_id != AgentRunId::sandbox_for_spawn_call(crate::CallId(spawn_call_id))
+        }) {
             return Err(AgentError::Store(format!(
-                "sandbox admission {} does not match origin turn {}",
-                admission.child_run_id, turn.id
+                "sandbox child {child_id} does not derive from its spawn call"
             )));
         }
-        let child_id = AgentRunId(admission.child_run_id);
-        let child = find_by_id_on(conn, child_id).await?.ok_or_else(|| {
-            AgentError::Store(format!(
-                "sandbox admission references missing child {child_id}"
-            ))
-        })?;
-        if child.parent_id != Some(turn.agent_run_id)
-            || child.chat_id != turn.chat_id
+        if child.chat_id != turn.chat_id
             || child.tier != AgentRunTier::Background.as_str()
             || child.depth != 1
-            || child.spawn_call_id != Some(admission.spawn_call_id)
         {
             return Err(AgentError::Store(format!(
-                "sandbox child {child_id} does not match its admission"
+                "sandbox child {child_id} does not match its origin turn"
             )));
         }
         agent_run_from_model(child.clone())?;
@@ -527,14 +514,9 @@ where
             run.id
         )));
     };
-    let admission = entities::sandbox_agent_admission::Entity::find_by_id(run.id)
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store(format!("sandbox run {} is missing admission", run.id)))?;
-    if admission.parent_run_id != parent_id || admission.chat_id != run.chat_id {
+    if run.admitted_at.is_none() {
         return Err(AgentError::Store(format!(
-            "sandbox run {} has a mismatched admission",
+            "sandbox run {} was never admitted",
             run.id
         )));
     }
@@ -771,12 +753,8 @@ async fn cancellation_context_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let admission = entities::sandbox_agent_admission::Entity::find_by_id(run.id)
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store(format!("sandbox run {} is missing admission", run.id)))?;
-    let turn = entities::turn_run::Entity::find_by_id(admission.origin_turn_id)
+    let admission = super::sandbox_agent_admission_from_model(run)?;
+    let turn = entities::turn_run::Entity::find_by_id(admission.origin_turn_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -786,7 +764,7 @@ where
                 run.id
             ))
         })?;
-    if turn.agent_run_id != admission.parent_run_id || turn.chat_id != admission.chat_id {
+    if turn.agent_run_id != admission.parent_run_id.0 || turn.chat_id != admission.chat_id.0 {
         return Err(AgentError::Store(format!(
             "sandbox admission {} does not match its origin turn",
             run.id
@@ -932,16 +910,7 @@ where
                 run.id
             ))
         })?;
-    let admission = entities::sandbox_agent_admission::Entity::find_by_id(run.id)
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| {
-            AgentError::Store(format!(
-                "cancelling sandbox run {} is missing admission",
-                run.id
-            ))
-        })?;
+    let admission = super::sandbox_agent_admission_from_model(run)?;
     let valid = run.tier == AgentRunTier::Background.as_str()
         && run.status == AgentRunStatus::Cancelling.as_str()
         && run.lease_token == Some(receipt.lease_token)
@@ -950,8 +919,7 @@ where
         && claim.agent_run_id == Some(run.id)
         && claim.attempt_count == Some(receipt.attempt_count)
         && claim.claim_count == Some(receipt.claim_count)
-        && admission.parent_run_id == run.parent_id.unwrap_or_default()
-        && admission.chat_id == run.chat_id;
+        && Some(admission.parent_run_id.0) == run.parent_id;
     if !valid {
         return Err(AgentError::Store(format!(
             "sandbox cancellation request does not match live run {}",
@@ -988,16 +956,7 @@ where
             run.id
         ))
     })?;
-    let admission = entities::sandbox_agent_admission::Entity::find_by_id(run.id)
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| {
-            AgentError::Store(format!(
-                "cancelled sandbox run {} is missing admission",
-                run.id
-            ))
-        })?;
+    let admission = super::sandbox_agent_admission_from_model(run)?;
     let result_model = entities::agent_run_result::Entity::find_by_id(run.id)
         .one(conn)
         .await
@@ -1019,7 +978,7 @@ where
                 run.id
             ))
         })?;
-    let origin_turn = entities::turn_run::Entity::find_by_id(admission.origin_turn_id)
+    let origin_turn = entities::turn_run::Entity::find_by_id(admission.origin_turn_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1029,18 +988,14 @@ where
                 run.id
             ))
         })?;
-    let inbox_model = find_agent_run_inbox_on(
-        conn,
-        AgentRunId(admission.parent_run_id),
-        AgentRunId(run.id),
-    )
-    .await?
-    .ok_or_else(|| {
-        AgentError::Store(format!(
-            "cancelled sandbox run {} is missing inbox delivery",
-            run.id
-        ))
-    })?;
+    let inbox_model = find_agent_run_inbox_on(conn, admission.parent_run_id, AgentRunId(run.id))
+        .await?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "cancelled sandbox run {} is missing inbox delivery",
+                run.id
+            ))
+        })?;
     let inbox = load_agent_run_inbox_entry_on(conn, inbox_model).await?;
     let inbox_lifecycle_valid = match reason {
         AgentRunCancellationReason::ParentTurnCancelled
@@ -1080,13 +1035,10 @@ where
         && claim.claim_count == Some(receipt.claim_count)
         && result.payload == AgentRunResultPayload::Cancelled { reason }
         && inbox.result == result
-        && inbox.parent_run_id == AgentRunId(admission.parent_run_id)
-        && inbox.chat_id == ChatId(admission.chat_id)
-        && admission.child_run_id == run.id
-        && admission.parent_run_id == run.parent_id.unwrap_or_default()
-        && admission.chat_id == run.chat_id
-        && origin_turn.agent_run_id == admission.parent_run_id
-        && origin_turn.chat_id == admission.chat_id
+        && inbox.parent_run_id == admission.parent_run_id
+        && inbox.chat_id == admission.chat_id
+        && origin_turn.agent_run_id == admission.parent_run_id.0
+        && origin_turn.chat_id == admission.chat_id.0
         && inbox_lifecycle_valid;
     if !valid {
         return Err(AgentError::Store(format!(

@@ -464,12 +464,6 @@ where
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("sandbox spawn receipt lost its child".into()))?;
-    let admission =
-        entities::sandbox_agent_admission::Entity::find_by_id(checkpoint.child_run_id.0)
-            .one(conn)
-            .await
-            .map_err(store_err)?
-            .ok_or_else(|| AgentError::Store("sandbox spawn receipt lost its admission".into()))?;
     let call_model = entities::tool_call::Entity::find_by_id(checkpoint.call_id.0)
         .one(conn)
         .await
@@ -513,12 +507,10 @@ where
         && call_model.client_lease_expires_at.is_none();
     let raw_history_order = call_model.history_order;
     let call = tool_call_from_model(call_model)?;
-    if admission.child_run_id != checkpoint.child_run_id.0
-        || admission.parent_run_id != checkpoint.parent_run_id.0
-        || admission.origin_turn_id != checkpoint.origin_turn_id.0
-        || admission.chat_id != checkpoint.chat_id.0
-        || admission.spawn_call_id != checkpoint.call_id.0
-        || admission.admitted_at > checkpoint.committed_at
+    if child.origin_turn_id != Some(checkpoint.origin_turn_id.0)
+        || child
+            .admitted_at
+            .is_none_or(|admitted_at| admitted_at > checkpoint.committed_at)
         || child.id != checkpoint.child_run_id.0
         || child.chat_id != checkpoint.chat_id.0
         || child.parent_id != Some(checkpoint.parent_run_id.0)
@@ -527,12 +519,12 @@ where
         || child.tier != crate::AgentRunTier::Background.as_str()
         || child.depth != i16::from(AgentRun::MAX_DEPTH)
         || child.input.as_deref() != Some(arguments.task.as_str())
-        || admission.delegated_root_id
+        || child.delegated_root_id
             != arguments
                 .resource
                 .as_ref()
                 .map(|resource| *resource.root_id.as_uuid())
-        || admission.delegated_relative_path.as_deref()
+        || child.delegated_relative_path.as_deref()
             != arguments
                 .resource
                 .as_ref()

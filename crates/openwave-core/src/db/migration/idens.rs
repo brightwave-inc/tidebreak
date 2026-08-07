@@ -201,21 +201,12 @@ pub(crate) enum AgentRun {
     FinishedAt,
     LastErrorCode,
     LastErrorDetail,
-    CreatedAt,
-    UpdatedAt,
-}
-
-#[derive(DeriveIden)]
-pub(crate) enum SandboxAgentAdmission {
-    Table,
-    ChildRunId,
-    ParentRunId,
     OriginTurnId,
-    ChatId,
-    SpawnCallId,
     DelegatedRootId,
     DelegatedRelativePath,
     AdmittedAt,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]

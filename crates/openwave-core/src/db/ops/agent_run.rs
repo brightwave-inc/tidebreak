@@ -67,6 +67,11 @@ where
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        // Only a sandbox child admitted through a spawn call carries these.
+        origin_turn_id: Set(None),
+        delegated_root_id: Set(None),
+        delegated_relative_path: Set(None),
+        admitted_at: Set(None),
         created_at: Set(created_at),
         updated_at: Set(created_at),
     }
@@ -198,6 +203,11 @@ pub(in crate::db) async fn accept_agent_run(
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        // Only a sandbox child admitted through a spawn call carries these.
+        origin_turn_id: Set(None),
+        delegated_root_id: Set(None),
+        delegated_relative_path: Set(None),
+        admitted_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -389,10 +399,10 @@ pub(in crate::db) async fn get_sandbox_agent_admission(
     store: &DbStore,
     child_run_id: AgentRunId,
 ) -> Result<Option<SandboxAgentAdmission>> {
-    entities::sandbox_agent_admission::Entity::find_by_id(child_run_id.0)
-        .one(&store.conn)
-        .await
-        .map_err(store_err)?
+    find_by_id_on(&store.conn, child_run_id)
+        .await?
+        .filter(|run| run.admitted_at.is_some())
+        .as_ref()
         .map(sandbox_agent_admission_from_model)
         .transpose()
 }
@@ -534,28 +544,21 @@ where
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        // The admission facts ride on the run itself. One insert, so a child
+        // row and its admission can no longer disagree.
+        origin_turn_id: Set(Some(origin_turn_id.0)),
+        delegated_root_id: Set(resource.map(|resource| *resource.root_id.as_uuid())),
+        delegated_relative_path: Set(resource.map(|resource| resource.relative_path.clone())),
+        admitted_at: Set(Some(created_at)),
         created_at: Set(created_at),
         updated_at: Set(created_at),
     }
     .insert(conn)
     .await
     .map_err(store_err)?;
-    let admission = entities::sandbox_agent_admission::ActiveModel {
-        child_run_id: Set(child_run_id.0),
-        parent_run_id: Set(parent_id.0),
-        origin_turn_id: Set(origin_turn_id.0),
-        chat_id: Set(chat_id.0),
-        spawn_call_id: Set(spawn_call_id.0),
-        delegated_root_id: Set(resource.map(|resource| *resource.root_id.as_uuid())),
-        delegated_relative_path: Set(resource.map(|resource| resource.relative_path.clone())),
-        admitted_at: Set(created_at),
-    }
-    .insert(conn)
-    .await
-    .map_err(store_err)?;
     Ok(AdmitSandboxAgentRunOutcome::Accepted {
+        admission: sandbox_agent_admission_from_model(&child)?,
         child: agent_run_from_model(child)?,
-        admission: sandbox_agent_admission_from_model(admission)?,
     })
 }
 
@@ -572,42 +575,41 @@ where
     C: sea_orm::ConnectionTrait,
 {
     let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
-    let existing_admission = entities::sandbox_agent_admission::Entity::find()
+    let Some(child) = entities::agent_run::Entity::find()
         .filter(
             Condition::any()
-                .add(entities::sandbox_agent_admission::Column::ChildRunId.eq(child_run_id.0))
-                .add(entities::sandbox_agent_admission::Column::SpawnCallId.eq(spawn_call_id.0)),
+                .add(entities::agent_run::Column::Id.eq(child_run_id.0))
+                .add(entities::agent_run::Column::SpawnCallId.eq(spawn_call_id.0)),
         )
         .one(conn)
         .await
-        .map_err(store_err)?;
-    if let Some(admission) = existing_admission {
-        let child = find_by_id_on(conn, AgentRunId(admission.child_run_id)).await?;
-        let exact = admission.child_run_id == child_run_id.0
-            && admission.parent_run_id == parent_id.0
-            && admission.origin_turn_id == origin_turn_id.0
-            && admission.chat_id == chat_id.0
-            && admission.spawn_call_id == spawn_call_id.0
-            && admission.delegated_root_id == resource.map(|resource| *resource.root_id.as_uuid())
-            && admission.delegated_relative_path.as_deref()
-                == resource.map(|resource| resource.relative_path.as_str())
-            && child.as_ref().is_some_and(|child| {
-                child.chat_id == chat_id.0
-                    && child.parent_id == Some(parent_id.0)
-                    && child.spawn_call_id == Some(spawn_call_id.0)
-                    && child.tier == AgentRunTier::Background.as_str()
-                    && child.input.as_deref() == Some(input)
-            });
-        return Ok(Some(if exact {
-            AdmitSandboxAgentRunOutcome::Existing {
-                child: agent_run_from_model(child.expect("exact admission has child"))?,
-                admission: sandbox_agent_admission_from_model(admission)?,
-            }
-        } else {
-            AdmitSandboxAgentRunOutcome::IdentityConflict
-        }));
-    }
-    Ok(None)
+        .map_err(store_err)?
+        .filter(|run| run.admitted_at.is_some())
+    else {
+        return Ok(None);
+    };
+    // The admission facts are columns of this row now, so the pairwise drift
+    // check the two tables needed is gone: there is nothing left for the run
+    // and its admission to disagree about. What remains is whether this retry
+    // describes the same spawn as the one already admitted.
+    let exact = child.id == child_run_id.0
+        && child.chat_id == chat_id.0
+        && child.parent_id == Some(parent_id.0)
+        && child.origin_turn_id == Some(origin_turn_id.0)
+        && child.spawn_call_id == Some(spawn_call_id.0)
+        && child.delegated_root_id == resource.map(|resource| *resource.root_id.as_uuid())
+        && child.delegated_relative_path.as_deref()
+            == resource.map(|resource| resource.relative_path.as_str())
+        && child.tier == AgentRunTier::Background.as_str()
+        && child.input.as_deref() == Some(input);
+    Ok(Some(if exact {
+        AdmitSandboxAgentRunOutcome::Existing {
+            admission: sandbox_agent_admission_from_model(&child)?,
+            child: agent_run_from_model(child)?,
+        }
+    } else {
+        AdmitSandboxAgentRunOutcome::IdentityConflict
+    }))
 }
 
 pub(in crate::db) async fn get_agent_run(
@@ -653,15 +655,10 @@ pub(in crate::db) async fn claim_agent_run(
                 transaction.commit().await.map_err(store_err)?;
                 return Ok(None);
             };
-            let admitted = entities::sandbox_agent_admission::Entity::find_by_id(agent_run_id)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?
-                .is_some();
             let existing = find_by_id_on(&transaction, AgentRunId(agent_run_id))
                 .await?
                 .filter(|run| {
-                    admitted
+                    run.admitted_at.is_some()
                         && run.tier == AgentRunTier::Background.as_str()
                         && matches!(run.status.as_str(), "running" | "cancelling")
                         && Some(run.attempt_count) == receipt.attempt_count
@@ -927,12 +924,7 @@ pub(in crate::db) async fn claim_container_agent_run(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let admitted = entities::sandbox_agent_admission::Entity::find_by_id(candidate.id)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    let claimable = admitted
+    let claimable = candidate.admitted_at.is_some()
         && candidate.tier == AgentRunTier::Background.as_str()
         && candidate.execution_location == AgentRunExecutionLocation::Container.as_str()
         && candidate.status == AgentRunStatus::Queued.as_str()
@@ -1930,8 +1922,9 @@ where
 
 fn admitted_child_id_subquery() -> sea_orm::sea_query::SelectStatement {
     sea_orm::sea_query::Query::select()
-        .column(entities::sandbox_agent_admission::Column::ChildRunId)
-        .from(entities::sandbox_agent_admission::Entity)
+        .column(entities::agent_run::Column::Id)
+        .from(entities::agent_run::Entity)
+        .and_where(entities::agent_run::Column::AdmittedAt.is_not_null())
         .to_owned()
 }
 
@@ -2281,15 +2274,24 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
     })
 }
 
-fn sandbox_agent_admission_from_model(
-    model: entities::sandbox_agent_admission::Model,
+/// Project the admission view of an admitted sandbox child from its run row.
+///
+/// The caller has already established that this run was admitted; the `NOT
+/// NULL` unwraps below are the schema's `admitted_at IS NOT NULL` implies
+/// `origin_turn_id IS NOT NULL` CHECK read back, and a row that violates them
+/// is reported rather than silently reshaped.
+pub(super) fn sandbox_agent_admission_from_model(
+    model: &entities::agent_run::Model,
 ) -> Result<SandboxAgentAdmission> {
-    let resource = match (model.delegated_root_id, model.delegated_relative_path) {
+    let resource = match (
+        model.delegated_root_id,
+        model.delegated_relative_path.as_deref(),
+    ) {
         (Some(root_id), Some(relative_path)) => Some(SandboxAgentFileResource {
             root_id: crate::HostRootId::from_uuid(root_id).map_err(|error| {
                 AgentError::Store(format!("invalid delegated root id: {error}"))
             })?,
-            relative_path,
+            relative_path: relative_path.to_owned(),
         }),
         (None, None) => None,
         _ => {
@@ -2298,14 +2300,15 @@ fn sandbox_agent_admission_from_model(
             ));
         }
     };
+    let invalid = || AgentError::Store("invalid stored sandbox agent admission".into());
     let admission = SandboxAgentAdmission {
-        child_run_id: AgentRunId(model.child_run_id),
-        parent_run_id: AgentRunId(model.parent_run_id),
-        origin_turn_id: TurnId(model.origin_turn_id),
+        child_run_id: AgentRunId(model.id),
+        parent_run_id: AgentRunId(model.parent_id.ok_or_else(invalid)?),
+        origin_turn_id: TurnId(model.origin_turn_id.ok_or_else(invalid)?),
         chat_id: ChatId(model.chat_id),
-        spawn_call_id: CallId(model.spawn_call_id),
+        spawn_call_id: CallId(model.spawn_call_id.ok_or_else(invalid)?),
         resource,
-        admitted_at: model.admitted_at,
+        admitted_at: model.admitted_at.ok_or_else(invalid)?,
     };
     if admission.child_run_id != AgentRunId::sandbox_for_spawn_call(admission.spawn_call_id)
         || admission.parent_run_id.0.is_nil()
@@ -2316,9 +2319,7 @@ fn sandbox_agent_admission_from_model(
             .as_ref()
             .is_some_and(|resource| !resource.is_well_formed())
     {
-        return Err(AgentError::Store(
-            "invalid stored sandbox agent admission".into(),
-        ));
+        return Err(invalid());
     }
     Ok(admission)
 }

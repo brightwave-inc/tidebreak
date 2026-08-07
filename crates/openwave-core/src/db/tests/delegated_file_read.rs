@@ -223,14 +223,12 @@ async fn delegated_read_requires_exact_admission_and_empty_arguments() {
 
     let (_third_dir, third_store) = temp_store().await;
     let (_chat, corrupt_run, corrupt_lease, _resource) = delegated_sandbox(&third_store).await;
-    crate::db::entities::sandbox_agent_admission::Entity::update_many()
+    crate::db::entities::agent_run::Entity::update_many()
         .col_expr(
-            crate::db::entities::sandbox_agent_admission::Column::DelegatedRelativePath,
+            crate::db::entities::agent_run::Column::DelegatedRelativePath,
             sea_orm::sea_query::Expr::value(Some("../escaped.txt".to_owned())),
         )
-        .filter(
-            crate::db::entities::sandbox_agent_admission::Column::ChildRunId.eq(corrupt_run.id.0),
-        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(corrupt_run.id.0))
         .exec(&third_store.conn)
         .await
         .unwrap();

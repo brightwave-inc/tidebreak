@@ -74,6 +74,25 @@ pub(super) fn agent_run_claim_indexes() -> Vec<IndexCreateStatement> {
     ]
 }
 
+/// An admitted sandbox child carries the turn that spawned it, and a delegated
+/// root is a pair or nothing at all.
+///
+/// `admitted_at` is the discriminator: it is set exactly on the runs that came
+/// in through a spawn call, and those are the runs that have an origin turn.
+fn agent_run_admission_check() -> SimpleExpr {
+    Expr::col(AgentRun::AdmittedAt)
+        .is_null()
+        .or(Expr::col(AgentRun::OriginTurnId).is_not_null())
+        .and(
+            Expr::col(AgentRun::DelegatedRootId)
+                .is_null()
+                .and(Expr::col(AgentRun::DelegatedRelativePath).is_null())
+                .or(Expr::col(AgentRun::DelegatedRootId)
+                    .is_not_null()
+                    .and(Expr::col(AgentRun::DelegatedRelativePath).is_not_null())),
+        )
+}
+
 pub(super) fn agent_run_table() -> TableCreateStatement {
     Table::create()
         .table(AgentRun::Table)
@@ -116,6 +135,14 @@ pub(super) fn agent_run_table() -> TableCreateStatement {
             ColumnDef::new(AgentRun::LastErrorDetail)
                 .string_len(crate::model::AgentRun::MAX_ERROR_DETAIL_LEN as u32),
         )
+        // The admission facts for a sandbox-hosted child: the turn that spawned
+        // it, the optional delegated root it may reach, and when it was
+        // admitted. Null on every run that was not admitted through a spawn
+        // call, which is what `admitted_at` discriminates on.
+        .col(ColumnDef::new(AgentRun::OriginTurnId).uuid())
+        .col(ColumnDef::new(AgentRun::DelegatedRootId).uuid())
+        .col(ColumnDef::new(AgentRun::DelegatedRelativePath).text())
+        .col(ColumnDef::new(AgentRun::AdmittedAt).timestamp_with_time_zone())
         .col(
             ColumnDef::new(AgentRun::CreatedAt)
                 .timestamp_with_time_zone()
@@ -168,7 +195,14 @@ pub(super) fn agent_run_table() -> TableCreateStatement {
                 .to_col(AgentRunClaim::ClaimCount)
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        // `origin_turn_id` carries no foreign key, unlike the admission row it
+        // replaces. `turn_run` already references `agent_run`, so a key back the
+        // other way is a cycle, and neither engine can add one after both tables
+        // exist — SQLite has no `ALTER TABLE ADD CONSTRAINT` at all. The turn is
+        // read and fenced in the same transaction that admits the child, which
+        // is the only writer that sets this column.
         .check(agent_run_shape_check())
+        .check(agent_run_admission_check())
         .check(agent_run_lease_check())
         .check(agent_run_finished_check())
         .check(agent_run_error_check())
@@ -206,6 +240,26 @@ pub(super) fn agent_run_indexes() -> Vec<IndexCreateStatement> {
             .col(AgentRun::ChatId)
             .col(AgentRun::SpawnCallId)
             .unique()
+            .to_owned(),
+        // Backs `fk_turn_agent_run_wait_member_admission`: a wait member names
+        // the child it waits on together with the turn and parent that admitted
+        // it, and this is what makes that quadruple addressable.
+        Index::create()
+            .name("idx_agent_run_wait_owner")
+            .table(AgentRun::Table)
+            .col(AgentRun::Id)
+            .col(AgentRun::OriginTurnId)
+            .col(AgentRun::ParentId)
+            .col(AgentRun::ChatId)
+            .unique()
+            .to_owned(),
+        // Outstanding admitted children of one turn, oldest first.
+        Index::create()
+            .name("idx_agent_run_admitted_outstanding")
+            .table(AgentRun::Table)
+            .col(AgentRun::OriginTurnId)
+            .col(AgentRun::AdmittedAt)
+            .col(AgentRun::Id)
             .to_owned(),
         Index::create()
             .name("idx_agent_run_spawn_call")
@@ -1027,11 +1081,11 @@ pub(super) fn turn_agent_run_wait_member_table() -> TableCreateStatement {
                 .from_col(TurnAgentRunWaitMember::OriginTurnId)
                 .from_col(TurnAgentRunWaitMember::ParentRunId)
                 .from_col(TurnAgentRunWaitMember::ChatId)
-                .to_tbl(SandboxAgentAdmission::Table)
-                .to_col(SandboxAgentAdmission::ChildRunId)
-                .to_col(SandboxAgentAdmission::OriginTurnId)
-                .to_col(SandboxAgentAdmission::ParentRunId)
-                .to_col(SandboxAgentAdmission::ChatId)
+                .to_tbl(AgentRun::Table)
+                .to_col(AgentRun::Id)
+                .to_col(AgentRun::OriginTurnId)
+                .to_col(AgentRun::ParentId)
+                .to_col(AgentRun::ChatId)
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .check(Expr::col(TurnAgentRunWaitMember::Position).gte(0))
