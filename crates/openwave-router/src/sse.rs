@@ -233,7 +233,7 @@ fn contains_sensitive_value(text: &str, sensitive_values: &[&str]) -> bool {
 
 fn contains_secret_marker(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    [
+    if [
         "sk-",
         "aiza",
         "absk",
@@ -256,6 +256,55 @@ fn contains_secret_marker(message: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    // AWS credential fields are emitted in several naming styles: process
+    // credentials use PascalCase, SDKs commonly use camelCase, and environment
+    // variables and shared config use separators. Compare a compact form so
+    // every spelling fails closed, including harmless punctuation or spacing
+    // inserted around a field name.
+    let compact = lower
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>();
+    if [
+        "accesskeyid",
+        "secretaccesskey",
+        "sessiontoken",
+        "xamzsecuritytoken",
+        "aws4hmacsha256credential",
+        "xamzcredential",
+    ]
+    .iter()
+    .any(|marker| compact.contains(marker))
+    {
+        return true;
+    }
+
+    contains_aws_access_key_id(message)
+}
+
+/// Recognize a bare 20-character AWS access key ID without treating ordinary
+/// words containing `asia` as credentials. Long-term keys use `AKIA`; temporary
+/// STS credentials use `ASIA`.
+fn contains_aws_access_key_id(message: &str) -> bool {
+    const ACCESS_KEY_ID_LEN: usize = 20;
+    let bytes = message.as_bytes();
+    bytes
+        .windows(ACCESS_KEY_ID_LEN)
+        .enumerate()
+        .any(|(start, candidate)| {
+            let has_prefix = candidate[..4].eq_ignore_ascii_case(b"AKIA")
+                || candidate[..4].eq_ignore_ascii_case(b"ASIA");
+            let has_valid_body = candidate[4..].iter().all(u8::is_ascii_alphanumeric);
+            let starts_at_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let end = start + ACCESS_KEY_ID_LEN;
+            let ends_at_boundary = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            has_prefix && has_valid_body && starts_at_boundary && ends_at_boundary
+        })
 }
 
 /// Longest provider-requested wait taken at face value.
