@@ -16,12 +16,14 @@ mod sandbox;
 mod tools;
 mod turn;
 
-/// The seed rows the baseline inserts: single-row advisory-lock tables whose
-/// presence is what serializes the claim paths.
+/// The seed rows the baseline inserts: one `advisory_lock` row per claim path,
+/// whose presence is what serializes it. The names come from
+/// [`crate::db::ops::AdvisoryLockName`], which is what the acquire path filters
+/// on.
 pub(super) const SEED_STATEMENTS: &[&str] = &[
-    "INSERT INTO turn_claim_lock (id) VALUES (1) ON CONFLICT DO NOTHING",
-    "INSERT INTO agent_run_claim_lock (id) VALUES (1) ON CONFLICT DO NOTHING",
-    "INSERT INTO turn_agent_run_wait_lock (id) VALUES (1) ON CONFLICT DO NOTHING",
+    "INSERT INTO advisory_lock (name) VALUES ('turn_claim') ON CONFLICT DO NOTHING",
+    "INSERT INTO advisory_lock (name) VALUES ('agent_run_claim') ON CONFLICT DO NOTHING",
+    "INSERT INTO advisory_lock (name) VALUES ('turn_agent_run_wait') ON CONFLICT DO NOTHING",
 ];
 
 /// A table and the named indexes that belong to it. Implicit indexes come
@@ -62,18 +64,12 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             chat::blob_retirement_table(),
             chat::blob_retirement_indexes(),
         ),
+        // The advisory locks every claim path serializes on.
+        entry(turn::advisory_lock_table(), turn::advisory_lock_indexes()),
         // Turn scheduling.
-        entry(
-            turn::turn_claim_lock_table(),
-            turn::turn_claim_lock_indexes(),
-        ),
         entry(turn::turn_claim_table(), turn::turn_claim_indexes()),
         entry(turn::turn_failure_table(), turn::turn_failure_indexes()),
         // Agent runs.
-        entry(
-            agent_run::agent_run_claim_lock_table(),
-            agent_run::agent_run_claim_lock_indexes(),
-        ),
         entry(
             agent_run::agent_run_claim_table(),
             agent_run::agent_run_claim_indexes(),
@@ -120,10 +116,6 @@ pub(super) fn tables() -> Vec<BaselineTable> {
         entry(
             turn::context_checkpoint_table(),
             turn::context_checkpoint_indexes(),
-        ),
-        entry(
-            agent_run::turn_agent_run_wait_lock_table(),
-            agent_run::turn_agent_run_wait_lock_indexes(),
         ),
         // Documents, outputs, and attachments.
         entry(content::document_table(), content::document_indexes()),

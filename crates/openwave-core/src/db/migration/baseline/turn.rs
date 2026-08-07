@@ -5,21 +5,24 @@ use sea_orm_migration::prelude::*;
 use crate::db::migration::idens::*;
 use crate::model::{TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus};
 
-/// Single-row table serializing claim allocation across workers.
-pub(super) fn turn_claim_lock_table() -> TableCreateStatement {
+/// The advisory locks that serialize the claim paths against each other.
+///
+/// One row per lock name, seeded by [`super::SEED_STATEMENTS`]. Taking a lock
+/// is a no-op `UPDATE` of its row, so the row's *existence* is what serializes
+/// workers — a missing row is a hard error rather than an unserialized path.
+pub(super) fn advisory_lock_table() -> TableCreateStatement {
     Table::create()
-        .table(TurnClaimLock::Table)
+        .table(AdvisoryLock::Table)
         .col(
-            ColumnDef::new(TurnClaimLock::Id)
-                .integer()
+            ColumnDef::new(AdvisoryLock::Name)
+                .string_len(64)
                 .not_null()
                 .primary_key(),
         )
-        .check(Expr::col(TurnClaimLock::Id).eq(1))
         .to_owned()
 }
 
-pub(super) fn turn_claim_lock_indexes() -> Vec<IndexCreateStatement> {
+pub(super) fn advisory_lock_indexes() -> Vec<IndexCreateStatement> {
     vec![]
 }
 

@@ -772,15 +772,6 @@ pub(super) fn user_question_table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
-            ColumnDef::new(UserQuestion::AnswerOptionId)
-                .string_len(crate::MAX_QUESTION_OPTION_ID_CHARS as u32),
-        )
-        .col(
-            ColumnDef::new(UserQuestion::AnswerFreeForm)
-                .string_len(crate::MAX_FREE_FORM_ANSWER_CHARS as u32),
-        )
-        .col(ColumnDef::new(UserQuestion::AnsweredAt).timestamp_with_time_zone())
-        .col(
             ColumnDef::new(UserQuestion::QuestionType)
                 .string_len(16)
                 .not_null()
@@ -806,20 +797,6 @@ pub(super) fn user_question_table() -> TableCreateStatement {
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .check(Expr::col(UserQuestion::Position).between(0, crate::MAX_USER_QUESTIONS as i32 - 1))
-        .check(
-            Expr::col(UserQuestion::AnswerOptionId)
-                .is_null()
-                .and(Expr::col(UserQuestion::AnswerFreeForm).is_null())
-                .and(Expr::col(UserQuestion::AnsweredAt).is_null())
-                .or(Expr::col(UserQuestion::AnswerOptionId)
-                    .is_not_null()
-                    .and(Expr::col(UserQuestion::AnswerFreeForm).is_null())
-                    .and(Expr::col(UserQuestion::AnsweredAt).is_not_null()))
-                .or(Expr::col(UserQuestion::AnswerOptionId)
-                    .is_null()
-                    .and(Expr::col(UserQuestion::AnswerFreeForm).is_not_null())
-                    .and(Expr::col(UserQuestion::AnsweredAt).is_not_null())),
-        )
         .to_owned()
 }
 

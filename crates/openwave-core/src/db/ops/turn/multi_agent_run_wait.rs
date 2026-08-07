@@ -70,7 +70,6 @@ JOIN turn_run t
   ON t.id = w.turn_id AND t.chat_id = w.chat_id AND t.agent_run_id = w.parent_run_id
 JOIN tool_call tc
   ON tc.id = w.id AND tc.chat_id = w.chat_id AND tc.turn_id = w.turn_id
- AND tc.history_order = w.history_order
 JOIN agent_run p
   ON p.id = w.parent_run_id AND p.chat_id = w.chat_id AND p.depth = 0
 JOIN turn_agent_run_wait_member m
@@ -105,8 +104,7 @@ WHERE w.status = 'waiting' AND w.condition = 'all'
   AND t.cache_read_input_tokens >= w.cache_read_input_tokens
   AND t.cache_creation_input_tokens >= w.cache_creation_input_tokens
   AND p.tier = 'foreground' AND p.status = 'active' AND p.parent_id IS NULL
-  AND tc.provider_id = w.provider_id AND tc.name = 'wait_for_agents'
-  AND tc.arguments = w.arguments AND tc.execution = 'orchestration'
+  AND tc.name = 'wait_for_agents' AND tc.execution = 'orchestration'
   AND tc.status = 'pending' AND tc.result IS NULL AND tc.error_code IS NULL
   AND tc.error_detail IS NULL AND tc.resolved_at IS NULL
   AND tc.client_executor_id IS NULL AND tc.client_lease_token IS NULL
@@ -208,8 +206,6 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
             && stored.condition == condition.as_str()
             && stored.park_lease_token == lease_token
             && stored.expected_steer_revision == expected_steer_revision
-            && stored.provider_id == request.provider_id
-            && stored.arguments == request.arguments
             && stored.event_ordinal == request.event_ordinal
             && progress_from_model(&stored)? == progress
             && member_ids(&members) == child_run_ids
@@ -402,9 +398,6 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         parent_run_id: Set(turn.agent_run_id),
         turn_id: Set(turn.id),
         chat_id: Set(turn.chat_id),
-        provider_id: Set(request.provider_id.clone()),
-        history_order: Set(history_order),
-        arguments: Set(request.arguments.clone()),
         condition: Set(condition.as_str().into()),
         park_lease_token: Set(lease_token),
         expected_steer_revision: Set(expected_steer_revision),
@@ -741,7 +734,6 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         .filter(entities::tool_call::Column::Id.eq(wait_id.0))
         .filter(entities::tool_call::Column::ChatId.eq(stored.chat_id))
         .filter(entities::tool_call::Column::TurnId.eq(stored.turn_id))
-        .filter(entities::tool_call::Column::HistoryOrder.eq(stored.history_order))
         .filter(
             entities::tool_call::Column::Execution.eq(ToolCallExecution::Orchestration.as_str()),
         )
@@ -1136,21 +1128,8 @@ pub(super) async fn acquire_wait_set_lock<C>(conn: &C) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
-    let locked = entities::turn_agent_run_wait_lock::Entity::update_many()
-        .col_expr(
-            entities::turn_agent_run_wait_lock::Column::Id,
-            sea_orm::sea_query::Expr::col(entities::turn_agent_run_wait_lock::Column::Id),
-        )
-        .filter(entities::turn_agent_run_wait_lock::Column::Id.eq(1))
-        .exec(conn)
+    crate::db::ops::acquire_advisory_lock(conn, crate::db::ops::AdvisoryLockName::TurnAgentRunWait)
         .await
-        .map_err(store_err)?;
-    if locked.rows_affected != 1 {
-        return Err(AgentError::Store(
-            "agent-run wait serialization lock is missing".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn member_ids(members: &[entities::turn_agent_run_wait_member::Model]) -> Vec<AgentRunId> {
@@ -1219,9 +1198,6 @@ fn wait_from_models(
         parent_run_id: AgentRunId(wait.parent_run_id),
         turn_id: TurnId(wait.turn_id),
         chat_id: crate::ChatId(wait.chat_id),
-        provider_id: wait.provider_id.clone(),
-        history_order: wait.history_order,
-        arguments: wait.arguments.clone(),
         child_run_ids: member_ids(&members),
         condition,
         park_lease_token: wait.park_lease_token,

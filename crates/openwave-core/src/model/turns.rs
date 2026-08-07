@@ -201,6 +201,10 @@ impl AgentRunWaitCondition {
 ///
 /// Child order is part of immutable request identity. Results are returned in
 /// this order even when the children finish in a different order.
+///
+/// The provider-facing identity of the request — provider id, history order,
+/// and canonical arguments — lives on the `wait_for_agents` tool call this
+/// shares an id with, and is not mirrored here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnAgentRunWaitSet {
     /// Stable model-call identity for this wait request.
@@ -211,12 +215,6 @@ pub struct TurnAgentRunWaitSet {
     pub turn_id: TurnId,
     /// Conversation shared by the turn and every child.
     pub chat_id: ChatId,
-    /// Provider-facing identity for the pending orchestration tool use.
-    pub provider_id: String,
-    /// Stable position of the tool use in reconstructed model history.
-    pub history_order: i64,
-    /// Canonical closed `wait_for_agents` arguments.
-    pub arguments: serde_json::Value,
     /// Bounded, unique children in caller-requested order.
     pub child_run_ids: Vec<crate::id::AgentRunId>,
     /// Completion policy committed as immutable request identity.

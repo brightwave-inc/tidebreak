@@ -646,6 +646,22 @@ pub mod sandbox_spawn_checkpoint {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod advisory_lock {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "advisory_lock")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub name: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod agent_run_claim {
     use sea_orm::entity::prelude::*;
 
@@ -659,22 +675,6 @@ pub mod agent_run_claim {
         pub claim_count: Option<i32>,
         pub claimed_at: DateTimeUtc,
         pub lease_expires_at: Option<DateTimeUtc>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod agent_run_claim_lock {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "agent_run_claim_lock")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: i32,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -843,10 +843,6 @@ pub mod turn_agent_run_wait_set {
         pub parent_run_id: Uuid,
         pub turn_id: Uuid,
         pub chat_id: Uuid,
-        pub provider_id: String,
-        pub history_order: i64,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub arguments: Json,
         pub condition: String,
         pub park_lease_token: Uuid,
         pub expected_steer_revision: i64,
@@ -863,22 +859,6 @@ pub mod turn_agent_run_wait_set {
         pub parked_at: DateTimeUtc,
         pub closed_at: Option<DateTimeUtc>,
         pub resume_token: Option<Uuid>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod turn_agent_run_wait_lock {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_agent_run_wait_lock")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: i32,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -968,22 +948,6 @@ pub mod turn_claim {
         pub claim_count: i32,
         pub claimed_at: DateTimeUtc,
         pub lease_expires_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod turn_claim_lock {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_claim_lock")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: i32,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1127,9 +1091,6 @@ pub mod user_question {
         pub options: Json,
         pub question_type: String,
         pub allow_free_form: bool,
-        pub answer_option_id: Option<String>,
-        pub answer_free_form: Option<String>,
-        pub answered_at: Option<DateTimeUtc>,
         #[sea_orm(column_type = "JsonBinary")]
         pub answer_selected_option_ids: Option<Json>,
         pub answer_custom_answer: Option<String>,

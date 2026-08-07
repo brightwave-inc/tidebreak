@@ -246,6 +246,12 @@ pub(crate) enum SandboxSpawnCheckpoint {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum AdvisoryLock {
+    Table,
+    Name,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum AgentRunClaim {
     Table,
     Token,
@@ -254,12 +260,6 @@ pub(crate) enum AgentRunClaim {
     ClaimCount,
     ClaimedAt,
     LeaseExpiresAt,
-}
-
-#[derive(DeriveIden)]
-pub(crate) enum AgentRunClaimLock {
-    Table,
-    Id,
 }
 
 #[derive(DeriveIden)]
@@ -322,9 +322,6 @@ pub(crate) enum TurnAgentRunWaitSet {
     ParentRunId,
     TurnId,
     ChatId,
-    ProviderId,
-    HistoryOrder,
-    Arguments,
     Condition,
     ParkLeaseToken,
     ExpectedSteerRevision,
@@ -341,12 +338,6 @@ pub(crate) enum TurnAgentRunWaitSet {
     ParkedAt,
     ClosedAt,
     ResumeToken,
-}
-
-#[derive(DeriveIden)]
-pub(crate) enum TurnAgentRunWaitLock {
-    Table,
-    Id,
 }
 
 #[derive(DeriveIden)]
@@ -577,12 +568,6 @@ pub(crate) enum TurnClaim {
 }
 
 #[derive(DeriveIden)]
-pub(crate) enum TurnClaimLock {
-    Table,
-    Id,
-}
-
-#[derive(DeriveIden)]
 pub(crate) enum TurnFailure {
     Table,
     LeaseToken,
@@ -744,9 +729,6 @@ pub(crate) enum UserQuestion {
     Options,
     QuestionType,
     AllowFreeForm,
-    AnswerOptionId,
-    AnswerFreeForm,
-    AnsweredAt,
     AnswerSelectedOptionIds,
     AnswerCustomAnswer,
     ResponseRecordedAt,
