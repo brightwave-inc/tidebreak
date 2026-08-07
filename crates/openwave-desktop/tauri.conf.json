@@ -52,7 +52,22 @@
     "targets": "all",
     "macOS": {
       "infoPlist": "Info.plist",
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "dmg": {
+        "background": "dmg/background.tiff",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 165,
+          "y": 205
+        },
+        "applicationFolderPosition": {
+          "x": 495,
+          "y": 205
+        }
+      }
     },
     "resources": {
       "../../scripts/exec-documents/": "exec-scripts/",
