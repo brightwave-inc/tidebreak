@@ -78,13 +78,47 @@ Consequences:
 Existing machinery that already follows this:
 
 - [`MessageReasoning::replayable_for`](../crates/openwave-core/src/provider.rs)
-  — thinking blocks only for the minting route.
+  — thinking blocks and signed Gemini function-call state only for the minting
+  route. Foreign or legacy Gemini history uses Google's documented validator
+  bypass instead of replaying another route's opaque signature.
 - [`ProviderToolReplay::replayable_for`](../crates/openwave-core/src/provider.rs)
   — provider-executed native blocks only for the minting route.
 - Host-shaped cleartext on `ProviderExecutedToolCall.output` — what foreign
   adapters and the UI always have.
 - Registry flags such as `supports_vendor_web_search` — honest absence beats
   a half-working path.
+
+## Google Vertex AI
+
+Vertex is a first-class serving provider, not a Gemini credential mode. One
+validated Google Cloud service account can route two curated native protocol
+families:
+
+- Gemini models use Vertex GenerateContent under the `google` publisher.
+- Claude models use Anthropic Messages through Vertex `streamRawPredict`.
+
+The provider uses the `global` Vertex location for every curated row;
+credentials cannot supply an endpoint. A regional value written by an older
+build remains unavailable until it is changed to `global`, and new regional
+values are rejected. Uploaded service-account JSON is exchanged only through
+Google's fixed OAuth token endpoint and never appears in the provider API
+response. Custom Vertex hosts, regional and multi-region locations, ambient
+Application Default Credentials, and arbitrary Model Garden entries are not
+promised by this surface.
+
+Legacy Gemini service-account configurations keep their existing validated
+location setting for compatibility with older regional models. Curated Gemini 3
+requests still use the global endpoint. New service-account configurations
+belong under the global-only Vertex provider.
+
+Vertex rows remain provider-qualified (`vertex::<model>`), even when the raw
+model id matches a direct Anthropic or Gemini row. That identity is also the
+native-replay boundary: a Claude reasoning block produced through Vertex may
+replay only to the same Vertex model. Switching to direct Anthropic (or the
+reverse) drops the opaque block and keeps the portable transcript. Gemini
+`thoughtSignature` values follow the same rule between direct Gemini and
+Vertex Gemini, while durable function-call ids remain paired with their
+responses on either route.
 
 ## Checklist for a new provider-coupled feature
 

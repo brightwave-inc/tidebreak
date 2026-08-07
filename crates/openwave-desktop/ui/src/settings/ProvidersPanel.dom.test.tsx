@@ -282,11 +282,64 @@ describe("ProvidersPanel", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("configures Gemini service-account auth without projecting the secret", async () => {
+  it("configures Vertex service-account auth without projecting the secret", async () => {
+    const vertex: ProviderInfo = {
+      kind: "vertex",
+      enabled: false,
+      vertex_location: "us-central1",
+      has_credential: false,
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue(vertex);
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[vertex]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    const locationNotice = screen.getByText(
+      (_, element) =>
+        element?.tagName === "P" &&
+        element.textContent?.includes(
+          "This provider uses the global Vertex location",
+        ) === true,
+    );
+    expect(locationNotice).toHaveTextContent(
+      /saving updates its location to global/i,
+    );
+    expect(
+      screen.queryByLabelText("Vertex AI location"),
+    ).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Google service account JSON"), {
+      target: { value: '  {"type":"service_account","private_key":"secret"}  ' },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("vertex", {
+        enabled: true,
+        vertex_location: "global",
+        credential: {
+          type: "service_account",
+          json: '{"type":"service_account","private_key":"secret"}',
+        },
+      }),
+    );
+  });
+
+  it("retains regional location editing for a legacy Gemini service account", async () => {
     const gemini: ProviderInfo = {
       kind: "gemini",
-      enabled: false,
-      has_credential: false,
+      enabled: true,
+      vertex_location: "us-central1",
+      has_credential: true,
+      auth_mode: "service_account",
       models: [],
     };
     const putProvider = vi.fn().mockResolvedValue(gemini);
@@ -300,18 +353,11 @@ describe("ProvidersPanel", () => {
       />,
     );
 
-    const user = userEvent.setup();
-    await user.click(screen.getByLabelText("Gemini credential type"));
-    await user.click(
-      await screen.findByRole("option", {
-        name: "Google Cloud service account",
-      }),
+    expect(screen.getByText(/Gemini 3 requests always use/i)).toHaveTextContent(
+      /global endpoint/i,
     );
     fireEvent.change(screen.getByLabelText("Vertex AI location"), {
-      target: { value: "us-central1" },
-    });
-    fireEvent.change(screen.getByLabelText("Google service account JSON"), {
-      target: { value: '  {"type":"service_account","private_key":"secret"}  ' },
+      target: { value: "us-east5" },
     });
     fireEvent.click(
       screen.getByRole("button", { name: "Save configuration" }),
@@ -320,11 +366,7 @@ describe("ProvidersPanel", () => {
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("gemini", {
         enabled: true,
-        vertex_location: "us-central1",
-        credential: {
-          type: "service_account",
-          json: '{"type":"service_account","private_key":"secret"}',
-        },
+        vertex_location: "us-east5",
       }),
     );
   });

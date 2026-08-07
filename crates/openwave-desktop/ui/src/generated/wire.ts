@@ -1480,7 +1480,8 @@ vendor: ProviderKind | null,
  */
 verification: VerificationTier, 
 /**
- * Whether the provider is enabled, configured, and credentialed.
+ * Whether the provider is enabled, configured, credentialed, and able to
+ * serve this model at its configured endpoint/location.
  */
 available: boolean, 
 /**
@@ -1875,7 +1876,7 @@ export type PromptOrigin = "builtin" | "user";
 /**
  * How a provider's credential was established.
  */
-export type ProviderAuthMode = "api_key" | "chatgpt";
+export type ProviderAuthMode = "api_key" | "chatgpt" | "service_account";
 
 /**
  * Public view of a provider — never includes the credential itself.
@@ -1894,7 +1895,9 @@ enabled: boolean,
  */
 base_url?: string, 
 /**
- * Vertex AI location. Never includes the project id from the credential.
+ * Vertex AI location. The first-class Vertex provider is global-only;
+ * legacy Gemini service-account configurations may retain a region. Never
+ * includes the project id from the credential.
  */
 vertex_location?: string, 
 /**
@@ -1914,7 +1917,7 @@ models: Array<CustomModelConfig>, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "openai_compatible" | "model_gateway";
 
 /**
  * How hard a reasoning-capable model should think before answering.

@@ -89,7 +89,7 @@ pub(crate) fn rebuild_transcript_with_boundary(
                 push_tool_batch(
                     &mut out,
                     &batches[batch_i],
-                    text.is_some().then_some(*message),
+                    (text.is_some() || !message.reasoning.is_empty()).then_some(*message),
                     max_result_bytes,
                     image_input,
                 );
@@ -355,11 +355,11 @@ pub(crate) fn push_tool_batch(
         out.push(ChatMessage {
             role: Role::Assistant,
             content: blocks,
-            // The step's reasoning was persisted with its prose preamble, so
-            // it comes back here. A step that wrote no preamble has no message
-            // row to have carried any, and replaying nothing is the valid
-            // degradation. Whether these blocks actually go on the wire is the
-            // adapter's call: they replay only to the route that minted them.
+            // The step's provider-native replay state was persisted with its
+            // assistant message. Tool-only steps may use an empty message as
+            // that durable carrier. Whether these blocks actually go on the
+            // wire is the adapter's call: they replay only to the route that
+            // minted them.
             reasoning: assistant
                 .map(|message| message.reasoning.clone())
                 .unwrap_or_default(),

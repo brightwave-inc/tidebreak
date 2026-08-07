@@ -54,6 +54,7 @@ const UTILITY_DEFAULTS: &[&str] = &[
     "anthropic::claude-haiku-4-5-20251001",
     "openai::gpt-5.4-nano",
     "gemini::gemini-3.5-flash-lite",
+    "vertex::gemini-3.5-flash-lite",
 ];
 
 impl ModelRole {
@@ -266,11 +267,9 @@ async fn usable_policy(
     let Some(policy) = providers::resolve_model_policy(store, selection, false).await? else {
         return Ok(None);
     };
-    Ok(
-        providers::provider_is_usable(store, secrets, policy.provider, managed)
-            .await?
-            .then_some(policy),
-    )
+    Ok(providers::model_is_usable(store, secrets, &policy, managed)
+        .await?
+        .then_some(policy))
 }
 
 /// Resolve the `utility` role into the shape the agent carries for one turn.
@@ -330,6 +329,34 @@ mod tests {
         }
     }
 
+    struct RegionalVertexUtilitySecrets;
+
+    #[async_trait::async_trait]
+    impl SecretProvider for RegionalVertexUtilitySecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            if key == ProviderKind::Vertex.credential_key() {
+                panic!("regional Vertex must be rejected before its credential is read");
+            }
+            if key == ProviderKind::Openai.credential_key() {
+                return Ok(Some(
+                    serde_json::to_string(&crate::providers::ProviderCredential::api_key(
+                        "sk-openai",
+                    ))
+                    .unwrap(),
+                ));
+            }
+            Ok(None)
+        }
+
+        async fn set_secret(&self, key: &str, _value: &str) -> Result<()> {
+            panic!("test must not write secret `{key}`")
+        }
+
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            panic!("test must not delete secret `{key}`")
+        }
+    }
+
     #[test]
     fn every_role_default_names_a_curated_model() {
         for &role in ModelRole::ALL {
@@ -364,6 +391,60 @@ mod tests {
                 "a user credentialed only on {provider} has no default utility model",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn utility_selection_skips_a_stored_regional_vertex_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory
+                    .path()
+                    .join("regional-vertex-utility.db")
+                    .display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(RegionalVertexUtilitySecrets);
+        let os_policy = crate::managed_policy::NoOsPolicy;
+
+        providers::write_config(
+            &*store,
+            ProviderKind::Vertex,
+            &ProviderConfig {
+                enabled: true,
+                vertex_location: Some("us-east5".into()),
+                ..ProviderConfig::disabled()
+            },
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            ProviderKind::Openai,
+            &ProviderConfig {
+                enabled: true,
+                ..ProviderConfig::disabled()
+            },
+        )
+        .await
+        .unwrap();
+        write_selection(
+            &*store,
+            ModelRole::Utility,
+            Some("vertex::gemini-3.5-flash-lite"),
+        )
+        .await
+        .unwrap();
+
+        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+            .await
+            .unwrap()
+            .expect("utility falls through to another usable provider");
+        assert_eq!(utility.provider, Some(ProviderId::new("openai")));
+        assert_eq!(utility.model, "gpt-5.4-nano");
     }
 
     /// Utility work on a managed profile: the curated defaults all name BYOK

@@ -170,8 +170,8 @@ impl ModelProvider for ToolSurfaceRecordingProvider {
     }
 }
 
-/// Streams a reasoning block beside its tool call, then answers,
-/// recording the reasoning each request carried.
+/// Streams a provider replay block beside a tool-only step, then answers,
+/// recording the native state each request carried.
 struct ReasoningRecordingProvider {
     calls: AtomicUsize,
     seen: Arc<Mutex<Vec<Vec<Value>>>>,
@@ -198,9 +198,6 @@ impl ModelProvider for ReasoningRecordingProvider {
                         "thinking": "plan: read the note first",
                         "signature": "sig-1",
                     }),
-                },
-                ProviderEvent::TextDelta {
-                    text: "checking the note".into(),
                 },
                 ProviderEvent::ToolCallStarted {
                     index: 0,
@@ -2662,13 +2659,12 @@ async fn a_changed_argument_resets_the_repeat_streak() {
     );
 }
 
-/// A reasoning block streamed on one step must ride the step's assistant
-/// message — verbatim and whole — into the next step's request, and must
-/// survive the turn: it is persisted with that message, so a later turn
-/// rebuilt from the store still carries it. Whether it goes on the wire is
-/// then the adapter's call — see the router's replay gate.
+/// A provider replay block streamed on a tool-only step must gain a durable
+/// empty assistant carrier, ride verbatim into the next request, and survive
+/// the turn. Whether it goes on the wire is then the adapter's call — see the
+/// router's replay gate.
 #[tokio::test]
-async fn reasoning_blocks_survive_the_turn_that_produced_them() {
+async fn tool_only_provider_replay_survives_the_turn_that_produced_it() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
     let db = tempfile::tempdir().unwrap();

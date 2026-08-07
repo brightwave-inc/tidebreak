@@ -19,6 +19,7 @@ use serde_json::json;
 
 use openwave_core::error::{AgentError, Result};
 
+use crate::google::valid_resource_segment;
 use crate::BearerTokenSource;
 
 const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -136,27 +137,6 @@ fn decode_pkcs8_pem(pem: &str) -> Result<Vec<u8>> {
     STANDARD.decode(encoded).map_err(|_| {
         AgentError::config("Google service-account credential has an invalid private_key")
     })
-}
-
-/// Validate a Google project/location path segment before interpolating it
-/// into a Vertex URL.
-pub fn valid_resource_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 63
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-}
-
-/// Validate a Vertex location without pinning a list that goes stale whenever
-/// Google adds a region.
-pub fn valid_vertex_location(value: &str) -> bool {
-    value == "global"
-        || (valid_resource_segment(value)
-            && value.contains('-')
-            && value.ends_with(|character: char| character.is_ascii_digit()))
 }
 
 #[derive(Clone)]

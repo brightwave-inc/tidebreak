@@ -102,10 +102,10 @@
     ]
   },
   "headers": {
-    "content-type": "application/json",
-    "x-goog-api-key": "<redacted>"
+    "authorization": "<redacted>",
+    "content-type": "application/json"
   },
   "method": "POST",
-  "path": "/v1beta/models/gemini-3.6-flash:streamGenerateContent",
+  "path": "/v1/projects/test-project/locations/global/publishers/google/models/gemini-3.6-flash:streamGenerateContent",
   "query": "alt=sse"
 }

@@ -11,13 +11,6 @@ import { openSignInPage } from "../openSignInPage";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "../components/ConfirmDialog";
@@ -104,10 +97,12 @@ function ProviderRow({
   client: ApiClient;
   onChanged: () => void;
 }) {
+  const isFirstClassVertex = info.kind === "vertex";
+  const usesServiceAccount =
+    isFirstClassVertex ||
+    (info.kind === "gemini" && info.auth_mode === "service_account");
   const [key, setKey] = useState("");
-  const [credentialType, setCredentialType] = useState<
-    "api_key" | "service_account"
-  >("api_key");
+  const credentialType = usesServiceAccount ? "service_account" : "api_key";
   const [serviceAccountJson, setServiceAccountJson] = useState("");
   const [vertexLocation, setVertexLocation] = useState(
     info.vertex_location ?? "global",
@@ -152,8 +147,10 @@ function ProviderRow({
       if (key.trim()) {
         body.credential = { type: "api_key", key: key.trim() };
       }
-      if (info.kind === "gemini" && credentialType === "service_account") {
-        body.vertex_location = vertexLocation.trim() || "global";
+      if (usesServiceAccount && credentialType === "service_account") {
+        body.vertex_location = isFirstClassVertex
+          ? "global"
+          : vertexLocation.trim() || "global";
         if (serviceAccountJson.trim()) {
           body.credential = {
             type: "service_account",
@@ -455,95 +452,100 @@ function ProviderRow({
         />
       ) : (
         <>
-      {info.kind === "gemini" && (
-        <label className="grid gap-1 text-xs text-muted-foreground">
-          Credential type
-          <Select
-            value={credentialType}
-            disabled={saving}
-            onValueChange={(value) =>
-              setCredentialType(value as "api_key" | "service_account")
-            }
-          >
-            <SelectTrigger aria-label="Gemini credential type" className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="api_key">Gemini API key</SelectItem>
-              <SelectItem value="service_account">
-                Google Cloud service account
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
-      )}
-      {credentialType === "api_key" && (
-        <Input
-          type="password"
-          placeholder="API key"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          autoComplete="off"
-        />
-      )}
-      {info.kind === "gemini" && credentialType === "service_account" && (
-        <>
-          <Input
-            type="text"
-            aria-label="Vertex AI location"
-            placeholder="Vertex AI location"
-            value={vertexLocation}
-            onChange={(event) => setVertexLocation(event.target.value)}
-            autoComplete="off"
-          />
-          <p className="text-xs text-muted-foreground">
-            Gemini 3 models always use Google&apos;s global endpoint. This
-            location applies to models that support regional Vertex endpoints.
-          </p>
-          <Textarea
-            aria-label="Google service account JSON"
-            className="min-h-28 font-mono text-sm text-foreground"
-            placeholder="Paste the Google service-account JSON key file"
-            value={serviceAccountJson}
-            onChange={(event) => setServiceAccountJson(event.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          disabled={
-            saving ||
-            (!info.has_credential &&
-              credentialType === "api_key" &&
-              info.kind !== "openai_compatible" &&
-              !key.trim()) ||
-            (!info.has_credential &&
-              info.kind === "gemini" &&
-              credentialType === "service_account" &&
-              !serviceAccountJson.trim()) ||
-            (info.kind === "openai_compatible" &&
-              models.some((model) => !model.id.trim())) ||
-            (info.kind === "xai" &&
-              (models.length === 0 || models.some((model) => !model.id.trim())))
-          }
-          onClick={() => void save(true)}
-        >
-          Save configuration
-        </Button>
-        {info.has_credential && (
-          <Button
-            type="button"
-            variant="destructive"
-            disabled={saving}
-            onClick={() => void clearCredential()}
-          >
-            Clear
-          </Button>
-        )}
-      </div>
+          {credentialType === "api_key" && (
+            <Input
+              type="password"
+              placeholder="API key"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              autoComplete="off"
+            />
+          )}
+          {usesServiceAccount && credentialType === "service_account" && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                {isFirstClassVertex
+                  ? "Vertex AI uses this service account for native Gemini and Claude requests. OpenWave derives Google hosts itself and does not accept a custom Vertex endpoint."
+                  : "This existing Gemini service-account configuration is retained for compatibility. New Vertex AI configurations belong in the Google Vertex AI provider row."}
+              </p>
+              {isFirstClassVertex ? (
+                <p className="text-xs text-muted-foreground">
+                  This provider uses the <code>global</code> Vertex location for
+                  every curated model. Regional locations, multi-region aliases,
+                  and ambient application-default credentials are not configured
+                  by this surface.
+                  {info.vertex_location != null &&
+                    info.vertex_location !== "global" && (
+                      <>
+                        {" "}This older configuration is unavailable until it is
+                        saved; saving updates its location to <code>global</code>.
+                      </>
+                    )}
+                </p>
+              ) : (
+                <>
+                  <Input
+                    type="text"
+                    aria-label="Vertex AI location"
+                    placeholder="Vertex AI location"
+                    value={vertexLocation}
+                    onChange={(event) => setVertexLocation(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    This legacy setting is retained for compatibility with older
+                    regional Gemini models. Curated Gemini 3 requests always use
+                    the <code>global</code> endpoint. Multi-region aliases and
+                    ambient application-default credentials are not configured by
+                    this surface.
+                  </p>
+                </>
+              )}
+              <Textarea
+                aria-label="Google service account JSON"
+                className="min-h-28 font-mono text-sm text-foreground"
+                placeholder="Paste the Google service-account JSON key file"
+                value={serviceAccountJson}
+                onChange={(event) => setServiceAccountJson(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              disabled={
+                saving ||
+                (!info.has_credential &&
+                  credentialType === "api_key" &&
+                  info.kind !== "openai_compatible" &&
+                  !key.trim()) ||
+                (!info.has_credential &&
+                  usesServiceAccount &&
+                  credentialType === "service_account" &&
+                  !serviceAccountJson.trim()) ||
+                (info.kind === "openai_compatible" &&
+                  models.some((model) => !model.id.trim())) ||
+                (info.kind === "xai" &&
+                  (models.length === 0 ||
+                    models.some((model) => !model.id.trim())))
+              }
+              onClick={() => void save(true)}
+            >
+              Save configuration
+            </Button>
+            {info.has_credential && (
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={saving}
+                onClick={() => void clearCredential()}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
         </>
       )}
       {error && <SettingsError>{error}</SettingsError>}
@@ -559,6 +561,9 @@ function credentialStatusLabel(info: ProviderInfo): string {
   }
   if (info.kind === "openai" && info.auth_mode === "api_key") {
     return "API key set";
+  }
+  if (info.auth_mode === "service_account") {
+    return "Google service account set";
   }
   return "Credential set";
 }

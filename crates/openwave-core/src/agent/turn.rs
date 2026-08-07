@@ -750,12 +750,14 @@ impl Agent {
             let mut blocks: Vec<ContentBlock> = Vec::new();
             if !text.is_empty() {
                 blocks.push(ContentBlock::Text { text: text.clone() });
-                if !calls.is_empty() {
-                    // A checkpoint returns from the loop and the resumed
-                    // attempt rebuilds its transcript from the store, so an
-                    // unpersisted preamble would be lost.
-                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
-                }
+            }
+            if !calls.is_empty() && (!text.is_empty() || !candidate.reasoning.is_empty()) {
+                // A checkpoint returns from the loop and the resumed attempt
+                // rebuilds its transcript from the store, so an unpersisted
+                // prose preamble or provider-native tool replay block would be
+                // lost. A tool-only Gemini step therefore writes an empty
+                // assistant message solely as the durable replay carrier.
+                self.persist_assistant(chat.id, turn_id, &candidate).await?;
             }
             // Searches the provider ran on its own infrastructure during this
             // step. They sit between the prose and the calls the loop is about

@@ -256,6 +256,8 @@ pub enum ProviderKind {
     Xai,
     /// Google Gemini Developer API (generativelanguage.googleapis.com).
     Gemini,
+    /// Google Vertex AI with native Gemini and Anthropic Claude protocols.
+    Vertex,
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
     OpenaiCompatible,
     /// A signed-in model-gateway deployment: entitled models synced from the
@@ -271,6 +273,7 @@ impl ProviderKind {
         ProviderKind::Openai,
         ProviderKind::Xai,
         ProviderKind::Gemini,
+        ProviderKind::Vertex,
         ProviderKind::OpenaiCompatible,
         ProviderKind::ModelGateway,
     ];
@@ -282,6 +285,7 @@ impl ProviderKind {
             ProviderKind::Openai => "openai",
             ProviderKind::Xai => "xai",
             ProviderKind::Gemini => "gemini",
+            ProviderKind::Vertex => "vertex",
             ProviderKind::OpenaiCompatible => "openai_compatible",
             ProviderKind::ModelGateway => "model_gateway",
         }
@@ -294,6 +298,7 @@ impl ProviderKind {
             "openai" => Some(Self::Openai),
             "xai" => Some(Self::Xai),
             "gemini" => Some(Self::Gemini),
+            "vertex" => Some(Self::Vertex),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
@@ -316,9 +321,18 @@ impl ProviderKind {
     /// Whether this provider can use `credential` today.
     fn accepts_credential(self, credential: &ProviderCredential) -> bool {
         match credential {
-            ProviderCredential::ApiKey { .. } => true,
+            ProviderCredential::ApiKey { .. } => matches!(
+                self,
+                ProviderKind::Anthropic
+                    | ProviderKind::Openai
+                    | ProviderKind::Xai
+                    | ProviderKind::Gemini
+                    | ProviderKind::OpenaiCompatible
+            ),
             ProviderCredential::Oauth {} => self == ProviderKind::Openai,
-            ProviderCredential::ServiceAccount { .. } => self == ProviderKind::Gemini,
+            ProviderCredential::ServiceAccount { .. } => {
+                matches!(self, ProviderKind::Gemini | ProviderKind::Vertex)
+            }
         }
     }
 }
@@ -454,8 +468,9 @@ pub struct ProviderConfig {
     /// Optional base URL override (required for `openai_compatible`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Vertex AI location used only when Gemini has a service-account
-    /// credential. An absent value defaults to `global`.
+    /// Vertex AI location. The first-class Vertex provider accepts only
+    /// `global`; regional values are retained only for legacy Gemini
+    /// service-account configurations. An absent value defaults to `global`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertex_location: Option<String>,
     /// Explicit model rows served by a configurable endpoint.
@@ -587,7 +602,7 @@ impl ResolvedModelPolicy {
             id: spec.id.to_owned(),
             display_name: spec.display_name.to_owned(),
             provider: spec.provider,
-            vendor: None,
+            vendor: spec.vendor(),
             verification: spec.verification,
             context_window: spec.context_window,
             max_output_tokens: spec.max_output_tokens,
@@ -773,12 +788,7 @@ pub fn curated_model_policy(value: &str) -> Option<ResolvedModelPolicy> {
     if let Some((provider, id)) = model_registry::parse_selection_key(value) {
         return model_registry::find_for(provider, id).map(ResolvedModelPolicy::curated);
     }
-    let mut owners = model_registry::models_named(value);
-    let spec = owners.next()?;
-    owners
-        .next()
-        .is_none()
-        .then(|| ResolvedModelPolicy::curated(spec))
+    model_registry::find(value).map(ResolvedModelPolicy::curated)
 }
 
 /// Configure a turn whose selection did not resolve through the host registry.
@@ -822,7 +832,9 @@ pub struct ProviderInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub base_url: Option<String>,
-    /// Vertex AI location. Never includes the project id from the credential.
+    /// Vertex AI location. The first-class Vertex provider is global-only;
+    /// legacy Gemini service-account configurations may retain a region. Never
+    /// includes the project id from the credential.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub vertex_location: Option<String>,
@@ -844,6 +856,8 @@ pub enum ProviderAuthMode {
     ApiKey,
     /// ChatGPT subscription OAuth.
     Chatgpt,
+    /// Uploaded Google Cloud service-account key file.
+    ServiceAccount,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`;
@@ -972,7 +986,7 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
             if credential.as_api_key().is_some_and(|key| !key.is_empty()) {
                 return true;
             }
-            if kind == ProviderKind::Gemini
+            if matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex)
                 && credential.as_service_account().is_some_and(|json| {
                     openwave_router::GoogleServiceAccount::from_json(json).is_ok()
                 })
@@ -998,19 +1012,26 @@ async fn auth_mode_for(
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
 ) -> Option<ProviderAuthMode> {
-    if kind != ProviderKind::Openai {
-        return None;
-    }
     match read_credential(secrets, kind).await.ok().flatten() {
         Some(ProviderCredential::Oauth {})
             if openwave_connectors::has_stored_chatgpt_credentials(secrets).await =>
         {
             Some(ProviderAuthMode::Chatgpt)
         }
-        Some(ProviderCredential::ApiKey { key }) if !key.is_empty() => {
+        Some(ProviderCredential::ApiKey { key })
+            if kind == ProviderKind::Openai && !key.is_empty() =>
+        {
             Some(ProviderAuthMode::ApiKey)
         }
-        None if env_api_key(kind).is_some() => Some(ProviderAuthMode::ApiKey),
+        Some(ProviderCredential::ServiceAccount { json })
+            if matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex)
+                && openwave_router::GoogleServiceAccount::from_json(&json).is_ok() =>
+        {
+            Some(ProviderAuthMode::ServiceAccount)
+        }
+        None if kind == ProviderKind::Openai && env_api_key(kind).is_some() => {
+            Some(ProviderAuthMode::ApiKey)
+        }
         _ => None,
     }
 }
@@ -1113,6 +1134,11 @@ pub async fn update_provider(
                 "xai uses its fixed first-party API endpoint",
             ));
         }
+        Some(_) if kind == ProviderKind::Vertex => {
+            return Err(ServerError::bad_request(
+                "Vertex AI uses fixed Google endpoints and does not support base_url",
+            ));
+        }
         Some(None) => config.base_url = None,
         Some(Some(url)) => {
             if url.is_empty() {
@@ -1123,13 +1149,18 @@ pub async fn update_provider(
     }
     match update.vertex_location {
         None => {}
-        Some(_) if kind != ProviderKind::Gemini => {
+        Some(_) if !matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex) => {
             return Err(ServerError::bad_request(
-                "vertex_location is only supported by gemini",
+                "vertex_location is only supported by vertex and legacy gemini service accounts",
             ));
         }
         Some(None) => config.vertex_location = None,
         Some(Some(location)) => {
+            if kind == ProviderKind::Vertex && location != "global" {
+                return Err(ServerError::bad_request(
+                    "the first-class Vertex provider supports only vertex_location `global`",
+                ));
+            }
             if location.trim() != location || !openwave_router::valid_vertex_location(&location) {
                 return Err(ServerError::bad_request(
                     "vertex_location must be a valid Google Cloud location",
@@ -1137,6 +1168,14 @@ pub async fn update_provider(
             }
             config.vertex_location = Some(location);
         }
+    }
+    if kind == ProviderKind::Vertex
+        && config.enabled
+        && !configured_vertex_location_is_usable(kind, config.vertex_location.as_deref())
+    {
+        return Err(ServerError::bad_request(
+            "the first-class Vertex provider supports only vertex_location `global`; update the stored location before enabling it",
+        ));
     }
     if let Some(models) = update.models {
         if !matches!(kind, ProviderKind::OpenaiCompatible | ProviderKind::Xai) {
@@ -1343,6 +1382,9 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         ProviderKind::Gemini => std::env::var("GEMINI_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
+        // Vertex credentials are explicit service-account material in the
+        // keychain. Ambient ADC and API-key modes are not implied.
+        ProviderKind::Vertex => None,
         ProviderKind::OpenaiCompatible => None,
         // Gateway tokens rotate; they are supplied per request by the route's
         // token source, never resolved into a static key.
@@ -1363,8 +1405,25 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
         ProviderKind::Openai => openwave_router::RouteKind::Openai,
         ProviderKind::Xai => openwave_router::RouteKind::Xai,
         ProviderKind::Gemini => openwave_router::RouteKind::Gemini,
+        ProviderKind::Vertex => openwave_router::RouteKind::Vertex,
         ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
         ProviderKind::ModelGateway => openwave_router::RouteKind::ModelGateway,
+    }
+}
+
+/// Whether the configured Vertex location belongs to the provider surface.
+///
+/// First-class Vertex is global-only because every curated row on that surface
+/// is global-only today. Legacy Gemini service-account configurations keep
+/// accepting validated regions; their adapter continues to move Gemini 3
+/// requests to the global endpoint while preserving older regional behavior.
+fn configured_vertex_location_is_usable(kind: ProviderKind, vertex_location: Option<&str>) -> bool {
+    match kind {
+        ProviderKind::Vertex => vertex_location.unwrap_or("global") == "global",
+        ProviderKind::Gemini => vertex_location
+            .map(openwave_router::valid_vertex_location)
+            .unwrap_or(true),
+        _ => true,
     }
 }
 
@@ -1479,6 +1538,9 @@ pub async fn collect_routes(
         if !config.enabled {
             continue;
         }
+        if !configured_vertex_location_is_usable(kind, config.vertex_location.as_deref()) {
+            continue;
+        }
 
         let stored_credential = match read_credential(secrets, kind).await {
             Ok(credential) => credential,
@@ -1503,35 +1565,46 @@ pub async fn collect_routes(
             });
             continue;
         }
-        if kind == ProviderKind::Gemini {
+        if matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex) {
             if let Some(ProviderCredential::ServiceAccount { json }) = stored_credential.as_ref() {
                 let Ok(account) = openwave_router::GoogleServiceAccount::from_json(json) else {
                     continue;
                 };
                 let location = config.vertex_location.as_deref().unwrap_or("global");
-                if !openwave_router::valid_vertex_location(location) {
-                    continue;
-                }
                 let project_id = account.project_id().to_owned();
                 let credential_fingerprint: [u8; 32] = Sha256::digest(json.as_bytes()).into();
                 let source = std::sync::Arc::new(
                     openwave_router::GoogleServiceAccountTokenSource::new(account),
                 );
+                let curated_models = model_registry::models_for(kind).collect::<Vec<_>>();
+                let vertex =
+                    openwave_router::VertexRoute::new(project_id, location, credential_fingerprint);
+                let vertex = if kind == ProviderKind::Vertex {
+                    vertex.with_model_families(curated_models.iter().filter_map(|spec| {
+                        let family = match spec.vendor()? {
+                            ProviderKind::Gemini => openwave_router::VertexModelFamily::Gemini,
+                            ProviderKind::Anthropic => {
+                                openwave_router::VertexModelFamily::Anthropic
+                            }
+                            _ => return None,
+                        };
+                        Some((spec.id.to_string(), family))
+                    }))
+                } else {
+                    vertex
+                };
                 routes.push(openwave_router::Route {
                     kind: route_kind(kind),
                     api_key: String::new(),
                     // Production Vertex hosts are derived by the adapter.
                     // Never let stored config redirect a bearer token.
                     base_url: None,
-                    curated_models: model_registry::models_for(kind)
+                    curated_models: curated_models
+                        .into_iter()
                         .map(|spec| spec.id.to_string())
                         .collect(),
                     token_source: Some(source),
-                    vertex: Some(openwave_router::VertexRoute::new(
-                        project_id,
-                        location,
-                        credential_fingerprint,
-                    )),
+                    vertex: Some(vertex),
                     chatgpt_account_id: None,
                 });
                 continue;
@@ -1560,11 +1633,14 @@ pub async fn collect_routes(
         routes.push(openwave_router::Route {
             kind: route_kind(kind),
             api_key,
-            // Gemini and xAI use fixed first-party endpoints in production.
+            // Gemini, xAI, and Vertex use fixed first-party endpoints in production.
             // Never let a stale/directly written setting redirect their keys.
-            base_url: (!matches!(kind, ProviderKind::Gemini | ProviderKind::Xai))
-                .then_some(config.base_url)
-                .flatten(),
+            base_url: (!matches!(
+                kind,
+                ProviderKind::Gemini | ProviderKind::Xai | ProviderKind::Vertex
+            ))
+            .then_some(config.base_url)
+            .flatten(),
             curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
                 .chain(config.models.into_iter().map(|model| model.id))
@@ -1647,8 +1723,9 @@ pub async fn resolve_model_policy(
             }));
     }
 
-    let mut owners = model_registry::models_named(value)
+    let mut owners = model_registry::find(value)
         .map(ResolvedModelPolicy::curated)
+        .into_iter()
         .collect::<Vec<_>>();
     for provider in [ProviderKind::Xai, ProviderKind::OpenaiCompatible] {
         let config = read_config(store, provider).await?;
@@ -1696,15 +1773,12 @@ pub async fn provider_is_usable(
         return Ok(false);
     }
     let config = read_config(store, kind).await?;
-    if !config.enabled || !has_credential(secrets, kind).await {
+    if !config.enabled
+        || !configured_vertex_location_is_usable(kind, config.vertex_location.as_deref())
+    {
         return Ok(false);
     }
-    if kind == ProviderKind::Gemini
-        && config
-            .vertex_location
-            .as_deref()
-            .is_some_and(|location| !openwave_router::valid_vertex_location(location))
-    {
+    if !has_credential(secrets, kind).await {
         return Ok(false);
     }
     if kind == ProviderKind::OpenaiCompatible {
@@ -1719,6 +1793,17 @@ pub async fn provider_is_usable(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Whether this exact resolved model can run under the provider's current
+/// credential and non-secret configuration.
+pub async fn model_is_usable(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    model: &ResolvedModelPolicy,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<bool> {
+    provider_is_usable(store, secrets, model.provider, policy).await
 }
 
 /// Full typed catalog. Unavailable rows remain visible for provider-scoped
@@ -1864,6 +1949,12 @@ mod tests {
                     json: r#"{"type":"service_account","client_email":"service-account@example.test","private_key":"test-private-key","project_id":"test-project"}"#.to_owned(),
                 },
             ),
+            (
+                ProviderKind::Vertex,
+                ProviderCredential::ServiceAccount {
+                    json: r#"{"type":"service_account","client_email":"service-account@example.test","private_key":"test-private-key","project_id":"test-project"}"#.to_owned(),
+                },
+            ),
         ];
 
         for (kind, credential) in credentials {
@@ -1909,6 +2000,7 @@ mod tests {
             ProviderKind::parse("openai_compatible"),
             Some(ProviderKind::OpenaiCompatible)
         );
+        assert_eq!(ProviderKind::parse("vertex"), Some(ProviderKind::Vertex));
         assert_eq!(
             ProviderKind::Anthropic.credential_key(),
             "provider.anthropic.credential"
@@ -2098,15 +2190,28 @@ mod tests {
         assert_eq!(config.temperature, None);
         assert!(config.image_input);
 
-        // Haiku 4.5 reasons but rejects the effort control, so the request is
-        // shaped without it rather than with something the model would refuse.
-        let mut config = AgentConfig::default();
+        let vertex = ResolvedModelPolicy::curated(
+            model_registry::find_for(ProviderKind::Vertex, "claude-opus-5").unwrap(),
+        );
+        assert_eq!(vertex.provider, ProviderKind::Vertex);
+        assert_eq!(vertex.vendor, Some(ProviderKind::Anthropic));
+        assert_eq!(vertex.verification, VerificationTier::Unverified);
+        assert!(!vertex.supports_vendor_web_search);
+
+        // Haiku 4.5 needs a classic token-budget thinking request that the
+        // adapter cannot send yet, so policy keeps both reasoning and effort
+        // off rather than promising reasoning that disappears on the wire.
+        let mut config = AgentConfig {
+            temperature: Some(0.7),
+            ..AgentConfig::default()
+        };
         let haiku = ResolvedModelPolicy::curated(
             model_registry::find_for(ProviderKind::Anthropic, "claude-haiku-4-5-20251001").unwrap(),
         );
         apply_model_policy(&mut config, &haiku, Some(ReasoningEffort::High)).unwrap();
-        assert!(config.reasoning_model);
+        assert!(!config.reasoning_model);
         assert_eq!(config.reasoning_effort, None);
+        assert_eq!(config.temperature, Some(0.7));
 
         let mut config = AgentConfig::default();
         let gpt = ResolvedModelPolicy::curated(
@@ -2146,6 +2251,30 @@ mod tests {
     }
 
     #[test]
+    fn first_class_vertex_is_global_only_while_legacy_gemini_keeps_regions() {
+        assert!(configured_vertex_location_is_usable(
+            ProviderKind::Vertex,
+            None
+        ));
+        assert!(configured_vertex_location_is_usable(
+            ProviderKind::Vertex,
+            Some("global")
+        ));
+        assert!(!configured_vertex_location_is_usable(
+            ProviderKind::Vertex,
+            Some("us-east5")
+        ));
+        assert!(configured_vertex_location_is_usable(
+            ProviderKind::Gemini,
+            Some("us-east5")
+        ));
+        assert!(!configured_vertex_location_is_usable(
+            ProviderKind::Gemini,
+            Some("../global")
+        ));
+    }
+
+    #[test]
     fn a_level_a_model_does_not_accept_never_survives_policy_application() {
         let apply = |id: &str, provider: ProviderKind, effort: ReasoningEffort| {
             let mut config = AgentConfig::default();
@@ -2182,16 +2311,67 @@ mod tests {
             ),
             Some(ReasoningEffort::XHigh)
         );
-        // Haiku 4.5 errors on the parameter, so it is dropped outright.
-        for effort in ReasoningEffort::ALL {
-            assert_eq!(
-                apply(
-                    "claude-haiku-4-5-20251001",
-                    ProviderKind::Anthropic,
-                    *effort
-                ),
-                None
+    }
+
+    #[test]
+    fn claude_policy_clamps_4_6_xhigh_and_disables_haiku_4_5_before_requests() {
+        for provider in [ProviderKind::Anthropic, ProviderKind::Vertex] {
+            for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+                let policy =
+                    ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
+
+                let mut config = AgentConfig::default();
+                apply_model_policy(&mut config, &policy, Some(ReasoningEffort::XHigh)).unwrap();
+                assert!(config.reasoning_model, "{}::{id}", provider.as_str());
+                assert_eq!(
+                    config.reasoning_effort,
+                    Some(ReasoningEffort::High),
+                    "{}::{id} let xhigh survive policy",
+                    provider.as_str()
+                );
+
+                let mut config = AgentConfig::default();
+                apply_model_policy(&mut config, &policy, Some(ReasoningEffort::Max)).unwrap();
+                assert_eq!(
+                    config.reasoning_effort,
+                    Some(ReasoningEffort::Max),
+                    "{}::{id} lost its supported max level",
+                    provider.as_str()
+                );
+            }
+        }
+
+        for (provider, id) in [
+            (ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
+            (ProviderKind::Vertex, "claude-haiku-4-5"),
+        ] {
+            let policy =
+                ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
+            for effort in ReasoningEffort::ALL {
+                let mut config = AgentConfig {
+                    temperature: Some(0.7),
+                    ..AgentConfig::default()
+                };
+                apply_model_policy(&mut config, &policy, Some(*effort)).unwrap();
+                assert!(!config.reasoning_model, "{}::{id}", provider.as_str());
+                assert_eq!(config.reasoning_effort, None, "{}::{id}", provider.as_str());
+                assert_eq!(config.temperature, Some(0.7), "{}::{id}", provider.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_3_1_pro_none_clamps_to_low_for_direct_and_vertex() {
+        for provider in [ProviderKind::Gemini, ProviderKind::Vertex] {
+            let mut config = AgentConfig::default();
+            let policy = ResolvedModelPolicy::curated(
+                model_registry::find_for(provider, "gemini-3.1-pro-preview").unwrap(),
             );
+
+            apply_model_policy(&mut config, &policy, Some(ReasoningEffort::None)).unwrap();
+
+            assert_eq!(config.provider, Some(ProviderId::new(provider.as_str())));
+            assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
         }
     }
 

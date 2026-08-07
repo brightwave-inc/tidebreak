@@ -1218,6 +1218,90 @@ async fn gemini_vertex_location_is_validated_and_public_info_never_grows_a_proje
 }
 
 #[tokio::test]
+async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_account_auth() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let configured = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/vertex")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": false,
+                        "vertex_location": "global"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(configured.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(configured).await;
+    assert_eq!(body["kind"], "vertex");
+    assert_eq!(body["vertex_location"], "global");
+    assert_eq!(body["has_credential"], false);
+    assert!(body.get("project_id").is_none());
+
+    for update in [
+        serde_json::json!({"base_url": "https://example.test"}),
+        serde_json::json!({"credential": {"type": "api_key", "key": "not-supported"}}),
+        serde_json::json!({"vertex_location": "us-east5"}),
+        serde_json::json!({"vertex_location": "us"}),
+    ] {
+        let rejected = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/vertex")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(update.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = json_body(rejected).await;
+        assert!(!body.to_string().contains("not-supported"));
+    }
+
+    // A regional row written by an older build remains inert. The API refuses
+    // to re-enable it until the caller explicitly moves it to global.
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Vertex,
+        &providers::ProviderConfig {
+            enabled: false,
+            base_url: None,
+            vertex_location: Some("us-east5".into()),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let rejected = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/vertex")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn openai_compatible_requires_base_url_when_enabled() {
     let (router, token, _store, _dir) = test_app().await;
     let response = router
@@ -1462,6 +1546,17 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes[0].kind, openwave_router::RouteKind::Xai);
     assert_eq!(routes[0].base_url, None);
     assert_eq!(routes[0].curated_models, ["grok-account-model"]);
+
+    let configured = providers::resolve_model_policy(&*store, "grok-account-model", false)
+        .await
+        .unwrap()
+        .expect("a bare configured xAI id resolves to its sole owner");
+    assert_eq!(configured.provider, providers::ProviderKind::Xai);
+    let curated = providers::resolve_model_policy(&*store, "gpt-5.6-sol", false)
+        .await
+        .unwrap()
+        .expect("a bare curated id keeps the registry's direct owner");
+    assert_eq!(curated.provider, providers::ProviderKind::Openai);
 
     let router = openwave_router::Router::build(routes);
     assert_eq!(
@@ -2173,6 +2268,87 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         assert_eq!(router.select(model), Some(route_kind));
         assert_eq!(router.select("claude-opus-4-8"), None);
     }
+}
+
+struct NoSecretReads;
+
+#[async_trait]
+impl SecretProvider for NoSecretReads {
+    async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        panic!("regional Vertex configuration must be rejected before reading secret `{key}`")
+    }
+
+    async fn set_secret(&self, key: &str, _value: &str) -> Result<()> {
+        panic!("test must not write secret `{key}`")
+    }
+
+    async fn delete_secret(&self, key: &str) -> Result<()> {
+        panic!("test must not delete secret `{key}`")
+    }
+}
+
+#[tokio::test]
+async fn stored_regional_vertex_is_unavailable_and_claims_no_models_or_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(NoSecretReads);
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Vertex,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: Some("us-east5".into()),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    assert!(!providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::Vertex,
+        &policy
+    )
+    .await
+    .unwrap());
+
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let router = openwave_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("vertex")),
+            "gemini-3.5-flash-lite",
+        ),
+        None
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("vertex")),
+            "claude-opus-5",
+        ),
+        None
+    );
+
+    let vertex_models = providers::catalog_models(&*store, &*secrets, &policy)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|model| model.policy.provider == providers::ProviderKind::Vertex)
+        .collect::<Vec<_>>();
+    assert!(!vertex_models.is_empty());
+    assert!(vertex_models.iter().all(|model| !model.available));
 }
 
 #[tokio::test]

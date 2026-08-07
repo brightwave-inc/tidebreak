@@ -69,10 +69,16 @@ const EFFORT_NONE_TO_XHIGH: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
 ];
-/// Gemini 3 maps OpenWave's `none` to its `minimal` thinking level and has no
-/// separate levels above `high`.
+/// Gemini 3 Flash maps OpenWave's `none` to its `minimal` thinking level and
+/// has no separate levels above `high`.
 const EFFORT_NONE_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+];
+/// Gemini 3.1 Pro Preview starts at `low`; it does not accept `minimal`.
+const EFFORT_LOW_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
@@ -82,6 +88,13 @@ const EFFORT_LOW_TO_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Medium,
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+];
+/// Claude Opus and Sonnet 4.6 accept `max`, but not the newer `xhigh` level.
+const EFFORT_LOW_TO_HIGH_AND_MAX: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
 /// For a model that takes no effort parameter at all. Not the same as a model
@@ -129,6 +142,21 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
+    /// Upstream vendor for a model hosted through a provider that serves more
+    /// than one native protocol family.
+    pub fn vendor(&self) -> Option<ProviderKind> {
+        if self.provider != ProviderKind::Vertex {
+            return None;
+        }
+        if self.id.starts_with("gemini-") {
+            Some(ProviderKind::Gemini)
+        } else if self.id.starts_with("claude-") {
+            Some(ProviderKind::Anthropic)
+        } else {
+            None
+        }
+    }
+
     /// Whether this model accepts `modality`.
     #[cfg(test)]
     pub fn accepts(&self, modality: InputModality) -> bool {
@@ -160,9 +188,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         supports_vendor_web_search: true,
         // Claude 4.6 and later reason on an adaptive thinking block, and the
-        // Anthropic adapter sends one along with the chat's chosen effort. That
-        // generation onward takes `low` through `max`; there is no `none`,
-        // because a model on the adaptive block always reasons.
+        // Anthropic adapter sends one along with the chat's chosen effort. The
+        // newest generation takes this full scale; 4.6 has the narrower scale
+        // declared on its own rows below. There is no `none`, because a model
+        // on the adaptive block always reasons.
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     // Second, not first: the built-in default is this provider's first curated
@@ -200,10 +229,11 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         context_window: 200_000,
         max_output_tokens: 64_000,
         input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: true,
+        // Haiku 4.5 uses classic extended thinking with a token budget. Until
+        // the adapter can send that request shape, keep the runtime honest and
+        // do not advertise reasoning that every request would silently omit.
+        supports_reasoning: false,
         supports_vendor_web_search: true,
-        // Haiku 4.5 predates the adaptive switch: it rejects the effort
-        // control, so the adapter leaves both off and the picker hides it.
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
     ModelSpec {
@@ -240,7 +270,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: true,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
     ModelSpec {
         id: "claude-sonnet-4-6",
@@ -252,7 +282,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: true,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
     ModelSpec {
         id: "gpt-5.6-sol",
@@ -335,8 +365,9 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
     },
     // Gemini rows are intentionally limited to ids currently published by
     // Google. All four accept images, expose thinking levels through `high`,
-    // and have 1,048,576 input / 65,536 output token limits; the native
-    // adapter owns the corresponding GenerateContent wire shape.
+    // and have 1,048,576 input / 65,536 output token limits; the Flash rows
+    // start at `minimal`, while Pro Preview starts at `low`. The native adapter
+    // owns the corresponding GenerateContent wire shape.
     ModelSpec {
         id: "gemini-3.6-flash",
         display_name: "Gemini 3.6 Flash",
@@ -383,7 +414,159 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
+    },
+    // Vertex is one explicit serving provider with two native protocol
+    // families. These rows intentionally mirror only models in the current
+    // direct catalogs above: provider-qualified keys keep routing unambiguous,
+    // while the vendor projection keeps icons and legacy bare-id migration on
+    // the original direct provider. Request-shape fixtures cover both Vertex
+    // protocols, but the live provider/model combinations remain unverified.
+    ModelSpec {
+        id: "gemini-3.6-flash",
+        display_name: "Gemini 3.6 Flash",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.5-flash",
+        display_name: "Gemini 3.5 Flash",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.5-flash-lite",
+        display_name: "Gemini 3.5 Flash-Lite",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.1-pro-preview",
+        display_name: "Gemini 3.1 Pro Preview",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
+    },
+    ModelSpec {
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "claude-fable-5",
+        display_name: "Claude Fable 5",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "claude-sonnet-5",
+        display_name: "Claude Sonnet 5",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "claude-opus-4-7",
+        display_name: "Claude Opus 4.7",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "claude-opus-4-6",
+        display_name: "Claude Opus 4.6",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
+    },
+    ModelSpec {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
+    },
+    ModelSpec {
+        id: "claude-haiku-4-5",
+        display_name: "Claude Haiku 4.5",
+        provider: ProviderKind::Vertex,
+        verification: VerificationTier::Unverified,
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        input_modalities: TEXT_AND_IMAGE,
+        // The Vertex route speaks the same adapter request shape as direct
+        // Anthropic, so it cannot claim classic extended thinking either.
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
     },
 ];
 
@@ -394,9 +577,13 @@ pub fn models_for(provider: ProviderKind) -> impl Iterator<Item = &'static Model
         .filter(move |spec| spec.provider == provider)
 }
 
-/// Find a bare curated model id only when exactly one provider owns it.
+/// Find the canonical direct-vendor owner of a bare curated model id.
+///
+/// First-class hosted providers may mirror an upstream id under their own
+/// provider-qualified key. They do not make an old bare selection change
+/// providers or become unresolvable: only the direct row participates here.
 pub fn find(id: &str) -> Option<&'static ModelSpec> {
-    let mut matches = models_named(id);
+    let mut matches = models_named(id).filter(|spec| spec.vendor().is_none());
     let first = matches.next()?;
     matches.next().is_none().then_some(first)
 }
@@ -515,6 +702,7 @@ mod tests {
             ProviderKind::Openai => true,
             ProviderKind::Xai => true,
             ProviderKind::Gemini => true,
+            ProviderKind::Vertex => true,
             ProviderKind::OpenaiCompatible => false,
             ProviderKind::ModelGateway => true,
         }
@@ -590,30 +778,72 @@ mod tests {
         assert!(sonnet.supports_reasoning);
         assert_eq!(sonnet.reasoning_efforts, EFFORT_LOW_TO_MAX);
 
-        // Haiku 4.5 predates the adaptive thinking switch and rejects the
-        // effort control, so it is the one Anthropic row without it.
+        // Haiku 4.5 needs the classic token-budget thinking request that the
+        // adapter does not implement yet, so the catalog must not promise a
+        // reasoning stream or an effort control.
         let haiku = find("claude-haiku-4-5-20251001").unwrap();
         assert_eq!(haiku.context_window, 200_000);
         assert_eq!(haiku.max_output_tokens, 64_000);
-        assert!(haiku.supports_reasoning);
+        assert!(!haiku.supports_reasoning);
         assert!(!haiku.supports_reasoning_effort());
         assert!(haiku.reasoning_efforts.is_empty());
     }
 
     #[test]
-    fn every_anthropic_entry_that_takes_an_effort_takes_xhigh_and_refuses_none() {
+    fn anthropic_effort_catalogs_refuse_none() {
         for spec in
             models_for(ProviderKind::Anthropic).filter(|spec| spec.supports_reasoning_effort())
         {
             assert!(
-                spec.reasoning_efforts.contains(&ReasoningEffort::XHigh),
-                "{} omits the level recommended for coding and agentic work",
-                spec.id
-            );
-            assert!(
                 !spec.reasoning_efforts.contains(&ReasoningEffort::None),
                 "{} offers an OpenAI-only level the Anthropic route rejects",
                 spec.id
+            );
+        }
+    }
+
+    #[test]
+    fn claude_4_6_effort_catalogs_match_on_direct_and_vertex() {
+        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            let direct = find_for(ProviderKind::Anthropic, id).unwrap();
+            let vertex = find_for(ProviderKind::Vertex, id).unwrap();
+
+            assert_eq!(direct.reasoning_efforts, EFFORT_LOW_TO_HIGH_AND_MAX);
+            assert_eq!(vertex.reasoning_efforts, direct.reasoning_efforts);
+            assert!(!direct.reasoning_efforts.contains(&ReasoningEffort::XHigh));
+            assert!(direct.reasoning_efforts.contains(&ReasoningEffort::Max));
+        }
+
+        // The generations that do accept `xhigh` keep advertising it.
+        for id in [
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            assert!(
+                find_for(ProviderKind::Anthropic, id)
+                    .unwrap()
+                    .reasoning_efforts
+                    .contains(&ReasoningEffort::XHigh),
+                "{id} lost xhigh while narrowing only Claude 4.6"
+            );
+        }
+    }
+
+    #[test]
+    fn haiku_4_5_is_non_reasoning_on_direct_and_vertex() {
+        for (provider, id) in [
+            (ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
+            (ProviderKind::Vertex, "claude-haiku-4-5"),
+        ] {
+            let spec = find_for(provider, id).unwrap();
+            assert!(!spec.supports_reasoning, "{}::{id}", provider.as_str());
+            assert!(
+                spec.reasoning_efforts.is_empty(),
+                "{}::{id}",
+                provider.as_str()
             );
         }
     }
@@ -683,8 +913,54 @@ mod tests {
             assert_eq!(spec.context_window, 1_048_576, "{}", spec.id);
             assert_eq!(spec.max_output_tokens, 65_536, "{}", spec.id);
             assert!(spec.supports_reasoning, "{}", spec.id);
-            assert_eq!(spec.reasoning_efforts, EFFORT_NONE_TO_HIGH, "{}", spec.id);
+            if spec.id != "gemini-3.1-pro-preview" {
+                assert_eq!(spec.reasoning_efforts, EFFORT_NONE_TO_HIGH, "{}", spec.id);
+            }
         }
+    }
+
+    #[test]
+    fn gemini_3_1_pro_excludes_minimal_on_direct_and_vertex() {
+        let direct = find_for(ProviderKind::Gemini, "gemini-3.1-pro-preview").unwrap();
+        let vertex = find_for(ProviderKind::Vertex, "gemini-3.1-pro-preview").unwrap();
+
+        assert_eq!(direct.reasoning_efforts, EFFORT_LOW_TO_HIGH);
+        assert_eq!(vertex.reasoning_efforts, direct.reasoning_efforts);
+        assert!(!direct.reasoning_efforts.contains(&ReasoningEffort::None));
+    }
+
+    #[test]
+    fn vertex_rows_are_curated_as_two_native_unverified_families() {
+        let vertex: Vec<_> = models_for(ProviderKind::Vertex).collect();
+        assert_eq!(vertex.len(), 12);
+        assert_eq!(
+            vertex
+                .iter()
+                .filter(|spec| spec.vendor() == Some(ProviderKind::Gemini))
+                .count(),
+            4
+        );
+        assert_eq!(
+            vertex
+                .iter()
+                .filter(|spec| spec.vendor() == Some(ProviderKind::Anthropic))
+                .count(),
+            8
+        );
+        for spec in vertex {
+            assert_eq!(spec.verification, VerificationTier::Unverified);
+            assert!(!spec.supports_vendor_web_search);
+            assert!(spec.vendor().is_some(), "{} has no Vertex family", spec.id);
+        }
+        assert_eq!(
+            find("claude-opus-5").map(|spec| spec.provider),
+            Some(ProviderKind::Anthropic),
+            "legacy bare ids stay on their direct provider"
+        );
+        assert_eq!(
+            find("gemini-3.6-flash").map(|spec| spec.provider),
+            Some(ProviderKind::Gemini)
+        );
     }
 
     #[test]

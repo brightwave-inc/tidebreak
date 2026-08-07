@@ -76,13 +76,11 @@ pub(super) async fn validate_model_selection(
         ));
     };
     let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
-    if !providers::provider_is_usable(&*state.store, &*state.secrets, policy.provider, &managed)
-        .await?
-    {
+    if !providers::model_is_usable(&*state.store, &*state.secrets, &policy, &managed).await? {
         return Err(ServerError::conflict_kind(
             "model_provider_unavailable",
             format!(
-                "provider `{}` for model `{}` is disabled, unconfigured, or missing a credential",
+                "provider `{}` cannot serve model `{}` with its current configuration or credential",
                 policy.provider, policy.id
             ),
         ));
@@ -366,7 +364,8 @@ pub struct ModelInfo {
     pub vendor: Option<ProviderKind>,
     /// How thoroughly OpenWave has exercised this provider/model combination.
     pub verification: crate::model_registry::VerificationTier,
-    /// Whether the provider is enabled, configured, and credentialed.
+    /// Whether the provider is enabled, configured, credentialed, and able to
+    /// serve this model at its configured endpoint/location.
     pub available: bool,
     /// Approximate context window in tokens.
     pub context_window: u32,

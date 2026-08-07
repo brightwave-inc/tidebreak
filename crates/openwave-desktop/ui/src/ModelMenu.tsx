@@ -34,6 +34,7 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "openai",
   "xai",
   "gemini",
+  "vertex",
 ];
 
 const UNVERIFIED_TOOLTIP =

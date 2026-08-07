@@ -44,6 +44,15 @@ const models: ModelInfo[] = [
     vendor: null,
     input_modalities: ["text"],
   },
+  {
+    ...base,
+    key: "vertex::unique",
+    id: "unique",
+    provider: "vertex",
+    vendor: "anthropic",
+    verification: "unverified",
+    input_modalities: ["text"],
+  },
 ];
 
 describe("typed model selection", () => {
@@ -63,6 +72,7 @@ describe("typed model selection", () => {
     expect(providerLabel("openai")).toBe("OpenAI");
     expect(providerLabel("xai")).toBe("xAI");
     expect(providerLabel("gemini")).toBe("Google Gemini");
+    expect(providerLabel("vertex")).toBe("Google Vertex AI");
     expect(providerLabel("openai_compatible")).toBe("OpenAI-compatible");
   });
 });
