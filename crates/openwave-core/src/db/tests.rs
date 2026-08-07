@@ -700,6 +700,83 @@ async fn project_deletion_requires_an_empty_project_and_reports_missing_identity
     );
 }
 
+/// Moving a conversation rewrites which identity holds its folder authority,
+/// so the move has to snapshot the destination's defaults and has to refuse
+/// whenever grants exist that the new identity would not carry.
+#[tokio::test]
+async fn moving_a_chat_snapshots_project_defaults_and_refuses_over_connected_folders() {
+    let (_dir, store) = temp_store().await;
+    let root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let mut project = sample_project();
+    project.attachment_revision = 3;
+    project.root_attachments = vec![root];
+    store.create_project(&project).await.unwrap();
+
+    let loose = sample_chat();
+    store.create_chat(&loose).await.unwrap();
+    assert_eq!(
+        store
+            .move_chat_to_project(loose.id, Some(project.id))
+            .await
+            .unwrap(),
+        MoveChatOutcome::Moved
+    );
+    let filed = store.get_chat(loose.id).await.unwrap().unwrap();
+    assert_eq!(filed.project_id, Some(project.id));
+    // The destination's defaults arrive as the conversation's own ordered
+    // snapshot, exactly as creating a chat inside the project would seed it.
+    assert_eq!(
+        filed.root_attachments,
+        vec![ChatRootAttachment {
+            root_id: root,
+            origin: RootAttachmentOrigin::ProjectDefault,
+        }]
+    );
+    assert_eq!(filed.attachment_revision, 1);
+
+    // Now that it holds a folder, it cannot leave: the grants the broker issued
+    // are keyed to the project it would stop being part of.
+    assert_eq!(
+        store.move_chat_to_project(loose.id, None).await.unwrap(),
+        MoveChatOutcome::HasConnectedFolders
+    );
+    assert_eq!(
+        store.get_chat(loose.id).await.unwrap().unwrap().project_id,
+        Some(project.id)
+    );
+
+    // A conversation with nothing attached moves back out and keeps its
+    // revision, there being no projection change to count.
+    let empty_project = sample_project();
+    store.create_project(&empty_project).await.unwrap();
+    let mut second = sample_chat();
+    second.id = ChatId::new();
+    second.project_id = Some(empty_project.id);
+    store.create_chat(&second).await.unwrap();
+    assert_eq!(
+        store.move_chat_to_project(second.id, None).await.unwrap(),
+        MoveChatOutcome::Moved
+    );
+    let unfiled = store.get_chat(second.id).await.unwrap().unwrap();
+    assert_eq!(unfiled.project_id, None);
+    assert_eq!(unfiled.attachment_revision, second.attachment_revision);
+
+    assert_eq!(
+        store
+            .move_chat_to_project(second.id, Some(ProjectId::new()))
+            .await
+            .unwrap(),
+        MoveChatOutcome::ProjectNotFound
+    );
+    assert_eq!(
+        store
+            .move_chat_to_project(ChatId::new(), Some(project.id))
+            .await
+            .unwrap(),
+        MoveChatOutcome::ChatNotFound
+    );
+}
+
 #[tokio::test]
 async fn project_deletion_serializes_with_synchronous_source_ingestion() {
     let (_dir, store) = temp_store().await;

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { Chat } from "@/api";
-import { matchesChatSearch } from "./ChatsSection";
+import { listedChats, matchesChatSearch } from "./ChatsSection";
 
-function chat(title: string | null): Chat {
-  return { id: "chat-1", title } as unknown as Chat;
+function chat(title: string | null, projectId: string | null = null): Chat {
+  return { id: "chat-1", title, project_id: projectId } as unknown as Chat;
 }
 
 describe("matchesChatSearch", () => {
@@ -29,5 +29,23 @@ describe("matchesChatSearch", () => {
 
   it("ignores surrounding whitespace in the query", () => {
     expect(matchesChatSearch(chat("Roadmap"), "  road  ")).toBe(true);
+  });
+});
+
+describe("listedChats", () => {
+  it("leaves chats filed under a project to that project's row", () => {
+    // The rail shows every conversation exactly once: a chat with a project
+    // hangs under the folder above, so listing it here too would duplicate it.
+    const loose = chat("Roadmap");
+    const filed = chat("Budget", "project-1");
+    expect(listedChats([loose, filed], "")).toEqual([loose]);
+  });
+
+  it("still applies the filter to the chats it keeps", () => {
+    const loose = chat("Roadmap");
+    expect(listedChats([loose, chat("Roadmap", "project-1")], "road")).toEqual([
+      loose,
+    ]);
+    expect(listedChats([loose], "budget")).toEqual([]);
   });
 });

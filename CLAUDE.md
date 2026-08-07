@@ -16,8 +16,10 @@ React/TypeScript under `crates/openwave-desktop/ui`.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
 - **Issues are for active or cross-agent work, not for narrating the current
   task or keeping a someday backlog.** Use an issue when work needs a concrete
-  owner, dependency, or reviewable delivery. Keep deliberately parked product
-  scope in [`docs/deferred.md`](docs/deferred.md), which is the canonical
+  owner, dependency, or reviewable delivery. Record design decisions in
+  [`docs/decisions/`](docs/decisions) rather than in an issue thread — see
+  below. Keep deliberately parked product scope in
+  [`docs/deferred.md`](docs/deferred.md), which is the canonical
   account of what OpenWave does not yet implement and why. Work the user is
   directing interactively in this session doesn't need an issue; filing one
   adds tracking overhead without coordinating anyone. If you do pick up
@@ -26,13 +28,43 @@ React/TypeScript under `crates/openwave-desktop/ui`.
 - **Only commit or push when asked.** Don't merge your own PRs unless the request
   was explicitly to merge; default to opening the PR for review.
 
+## Decision records
+
+Design decisions live in [`docs/decisions/`](docs/decisions) as numbered
+records. An issue tracks *work*; a decision record states what was chosen and
+why, and stays readable long after the work is done and the issue is closed.
+Reasoning that survives only in a PR description is reasoning nobody will find.
+
+Write one **before building** when a change fixes something later work has to
+live with: a data-model or ownership boundary, a wire or persisted contract, a
+vocabulary that will spread through the codebase, or a rule two subsystems will
+both be held to.
+
+- Copy [`0000-template.md`](docs/decisions/0000-template.md), take the next
+  number, and open it as a PR like any other change. Merging is the acceptance;
+  a record still under discussion says `Proposed`.
+- **Record the alternatives you rejected, and why.** A record that states only
+  the chosen design cannot stop the same argument being reopened.
+- **Say what would make you revisit it.** A decision that cannot be revisited
+  is not a decision, it is an assumption.
+- **Supersede rather than rewrite.** When a decision changes, the old record
+  gets `Status: Superseded` and a pointer to its replacement, and otherwise
+  stays as written — the value is the reasoning at the time.
+
+The directory listing is the index. Don't enumerate records anywhere else; a
+hand-maintained list of them goes stale the first time someone forgets it.
+
+Not everything needs one. Ordinary implementation, bug fixes, and work whose
+shape an existing record already settles go straight to an issue or a PR.
+
 ## Issue tracking
 
-Work is tracked with plain GitHub **issues** — no project board. Issue state
-(open/closed), assignee, and a small set of workflow labels carry everything the
-team and separate agent sessions need to see where things stand without reading
-commit logs. This matters where sessions can collide or work outlives a session;
-it is not a ledger of everything an agent happens to be doing right now.
+Work is tracked with plain GitHub **issues** — no project board. Issues carry
+work; decision records carry decisions. Issue state (open/closed), assignee,
+and a small set of workflow labels carry everything the team and separate agent
+sessions need to see where things stand without reading commit logs. This
+matters where sessions can collide or work outlives a session; it is not a
+ledger of everything an agent happens to be doing right now.
 
 The workflow labels:
 

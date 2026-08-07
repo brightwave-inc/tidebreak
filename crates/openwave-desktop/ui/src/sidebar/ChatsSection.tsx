@@ -13,6 +13,7 @@ import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatAttention } from "@/ChatAttention";
 import { useChatListStore } from "@/ChatListStore";
+import { useProjectListStore } from "@/ProjectListStore";
 import { SearchInput } from "@/components/SearchInput";
 import {
   DropdownMenu,
@@ -30,6 +31,18 @@ export function matchesChatSearch(chat: Chat, query: string): boolean {
   if (!trimmed) return true;
   const title = chat.title?.trim() || "New chat";
   return title.toLowerCase().includes(trimmed);
+}
+
+/**
+ * The conversations this section shows: the loose ones, narrowed by the filter.
+ *
+ * A chat filed under a project appears under that project and nowhere else, so
+ * the rail never shows one conversation in two places.
+ */
+export function listedChats(chats: Chat[], query: string): Chat[] {
+  return chats.filter(
+    (chat) => chat.project_id === null && matchesChatSearch(chat, query),
+  );
 }
 
 const CHATS_COLLAPSED_KEY = "openwave.chats-collapsed";
@@ -86,8 +99,16 @@ export const useChatsSectionState = create<{
  */
 export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
   const navigate = useNavigate();
-  const { newChat, deleteChat, startRename, commitRename, cancelRename } = useApp();
+  const {
+    newChat,
+    deleteChat,
+    startRename,
+    commitRename,
+    cancelRename,
+    moveChatToProject,
+  } = useApp();
   const chats = useChatListStore((state) => state.chats);
+  const projects = useProjectListStore((state) => state.projects);
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const renamingChatId = useChatListStore((state) => state.renamingChatId);
@@ -113,7 +134,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
   // nothing — the list stands down and the rail's rows carry the narrow width.
   if (isCompact) return null;
 
-  const listed = chats.filter((chat) => matchesChatSearch(chat, query));
+  const listed = listedChats(chats, query);
   // A collapsed list hides the per-row markers, so the header has to say when
   // something in it is waiting.
   const hiddenAttention =
@@ -199,11 +220,13 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
               renameDraft={renameChatDraft}
               savingTitle={savingTitle}
               mutating={deletingChatId !== null || creatingChat}
+              projects={projects}
               onRenameDraftChange={setRenameDraft}
               onOpen={() => void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })}
               onStartRename={() => startRename(chat)}
               onCommitRename={() => commitRename(chat)}
               onCancelRename={cancelRename}
+              onMoveToProject={(projectId) => moveChatToProject(chat, projectId)}
               onDelete={() => deleteChat(chat)}
             />
           ))}

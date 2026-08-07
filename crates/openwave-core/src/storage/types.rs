@@ -203,6 +203,27 @@ pub enum DeleteProjectOutcome {
     NotEmpty,
 }
 
+/// Result of filing a conversation under a project, or taking it back out.
+///
+/// A move rewrites which product identity holds the conversation's folder
+/// authority: a chat in a project grants across that project, a loose chat
+/// only across itself. Broker grants are keyed to that identity, so a chat
+/// carrying connected folders cannot be moved without silently stranding
+/// them — it is refused instead, and the caller disconnects them first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveChatOutcome {
+    /// The conversation now belongs where the request asked.
+    Moved,
+    /// No conversation owns this id.
+    ChatNotFound,
+    /// The destination project does not exist.
+    ProjectNotFound,
+    /// The conversation still has connected folders. Disconnect them first.
+    HasConnectedFolders,
+    /// A folder change for this conversation has not settled with the broker.
+    FolderChangePending,
+}
+
 /// Counts of in-flight work the embedding host process must stay alive to
 /// supervise.
 ///

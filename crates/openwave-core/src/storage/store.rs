@@ -113,6 +113,22 @@ pub trait Store: Send + Sync {
         ))
     }
 
+    /// File a conversation under `project_id`, or take it back out with `None`.
+    ///
+    /// The destination's ordered root defaults are snapshotted into the
+    /// conversation the same way [`Store::create_chat_with_project_defaults`]
+    /// seeds a new one. A conversation that still holds connected folders is
+    /// refused: its broker grants are keyed to the identity it is leaving.
+    async fn move_chat_to_project(
+        &self,
+        _id: ChatId,
+        _project_id: Option<ProjectId>,
+    ) -> Result<MoveChatOutcome> {
+        Err(AgentError::Store(
+            "conversation project moves are not implemented by this Store".into(),
+        ))
+    }
+
     /// Persist a new authoritative document record.
     ///
     /// At most one of `chat_id` and `project_id` may be present, and it must
@@ -517,6 +533,18 @@ pub trait Store: Send + Sync {
     ) -> Result<DeleteProjectOutcome> {
         let _ = owner;
         self.delete_project(id).await
+    }
+
+    /// [`Store::move_chat_to_project`] restricted to `owner`'s conversations
+    /// and projects; someone else's reports the matching `NotFound`.
+    async fn move_chat_to_project_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+        project_id: Option<ProjectId>,
+    ) -> Result<MoveChatOutcome> {
+        let _ = owner;
+        self.move_chat_to_project(id, project_id).await
     }
 
     /// Fetch `owner`'s document by id; `None` when it does not exist or
