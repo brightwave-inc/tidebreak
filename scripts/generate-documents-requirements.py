@@ -11,7 +11,7 @@ set every execution backend guarantees), resolves their transitive closure for
 the image's platform (linux cp311) with pip, and records every
 file hash PyPI publishes for each resolved version. It also resolves the skill
 pins and the baseline pins together for the local sandbox's fixed runtime
-(macOS arm64 cp39), so a pin the local backend could never install — the
+(macOS arm64 cp310), so a pin the local backend could never install — the
 baseline set's whole promise — fails regeneration instead of making every local
 cache-population pass retry it. The Dockerfile's documents stage installs the
 result with `pip install --require-hashes`, so the publish moment trusts these
@@ -34,8 +34,8 @@ BASELINE = pathlib.Path("crates/openwave-code-execution/baseline_python_deps.txt
 
 OUTPUT = pathlib.Path("crates/openwave-sandbox-agent/documents-requirements.txt")
 LOCAL_SANDBOX_PLATFORM = "macosx_11_0_arm64"
-LOCAL_SANDBOX_PYTHON = "3.9"
-LOCAL_SANDBOX_ABI = "cp39"
+LOCAL_SANDBOX_PYTHON = "3.10"
+LOCAL_SANDBOX_ABI = "cp310"
 
 HEADER = """\
 # Hash-checked closure for the documents image variant. Installed by the
