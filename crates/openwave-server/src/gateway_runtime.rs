@@ -1372,6 +1372,7 @@ mod tests {
                 enabled: true,
                 base_url: Some("http://127.0.0.1:9".to_string()),
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2089,6 +2090,7 @@ mod tests {
                 enabled: true,
                 base_url: Some(format!("{base}/")),
                 vertex_location: None,
+                aws_region: None,
                 models: vec![CustomModelConfig {
                     id: "legacy-model".to_string(),
                     upstream_id: None,
@@ -2205,6 +2207,7 @@ mod tests {
             enabled: true,
             base_url: Some("https://corp.gateway".to_string()),
             vertex_location: None,
+            aws_region: None,
             models: vec![CustomModelConfig {
                 id: id.to_string(),
                 upstream_id: None,
@@ -2283,6 +2286,7 @@ mod tests {
                 enabled: true,
                 base_url: Some("https://other.gateway".to_string()),
                 vertex_location: None,
+                aws_region: None,
                 models: vec![CustomModelConfig {
                     id: "foreign-model".to_string(),
                     upstream_id: None,
@@ -2336,6 +2340,7 @@ mod tests {
                 enabled: true,
                 base_url: Some("https://corp.gateway".to_string()),
                 vertex_location: None,
+                aws_region: None,
                 models: vec![CustomModelConfig {
                     id: "legacy-model".to_string(),
                     upstream_id: None,

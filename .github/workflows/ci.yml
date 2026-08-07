@@ -333,6 +333,10 @@ jobs:
           save-if: false
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check router feature boundaries
+        run: |
+          cargo check -p openwave-router --no-default-features --locked
+          cargo check -p openwave-router --no-default-features --features anthropic --locked
 
   desktop:
     name: desktop test

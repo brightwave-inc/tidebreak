@@ -105,6 +105,7 @@ async fn titling_app(
             enabled: true,
             base_url: Some(format!("http://{address}/v1")),
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )

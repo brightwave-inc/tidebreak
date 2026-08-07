@@ -29,9 +29,9 @@ formats, and behavior change frequently. Expect rough edges.
 - **Produce files, not just answers.** Anything the agent saves to its
   `output/` directory becomes a versioned output you can preview and export
   with a native save dialog.
-- **Use any model.** Anthropic, OpenAI, Google, xAI, and any
-  OpenAI-compatible endpoint, including a local one. You can switch models
-  mid-conversation without losing the thread.
+- **Use any model.** Anthropic, OpenAI, Google, xAI, Amazon Bedrock Mantle,
+  and any OpenAI-compatible endpoint, including a local one. You can switch
+  models mid-conversation without losing the thread.
 - **Decide how much rope to give it.** Every chat has a permission mode, from
   read-only planning up to full autonomy.
 
@@ -39,8 +39,8 @@ formats, and behavior change frequently. Expect rough edges.
 
 People who want an agent that can touch real data and produce real artifacts,
 and who would rather that happen on their own machine than in someone else's
-cloud. It assumes you are comfortable getting an API key from a model provider
-and pasting it into a settings field.
+cloud. It assumes you are comfortable obtaining a model-provider credential
+and entering it in settings.
 
 ## What it is not
 
@@ -56,7 +56,7 @@ subsystems exist in the runtime before they have any UI.
     Download the app, or build it from source.
   </Card>
   <Card title="Quickstart" href="/quickstart">
-    Add a model key and run your first real task.
+    Add a model credential and run your first real task.
   </Card>
   <Card title="Models and providers" href="/models-and-providers">
     Configure credentials and pick a model per chat.

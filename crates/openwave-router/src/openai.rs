@@ -90,6 +90,8 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
+    request_auth: Option<Arc<dyn crate::http::RequestAuthenticator>>,
+    provider_label: &'static str,
     /// Per-request credential supplier for ChatGPT OAuth (and similar)
     /// short-lived tokens. Takes precedence over `api_key` when present.
     token_source: Option<Arc<dyn BearerTokenSource>>,
@@ -107,6 +109,8 @@ impl OpenAiProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            request_auth: None,
+            provider_label: "openai",
             token_source: None,
             chatgpt_account_id: None,
             chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
@@ -123,6 +127,8 @@ impl OpenAiProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: base_url.into(),
+            request_auth: None,
+            provider_label: profile.provider(),
             token_source: None,
             chatgpt_account_id: None,
             chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
@@ -139,6 +145,18 @@ impl OpenAiProvider {
     #[cfg(test)]
     pub(crate) fn base_url_for_test(&self) -> &str {
         &self.base_url
+    }
+
+    /// Authenticate the exact serialized request through a shared transport.
+    #[must_use]
+    pub(crate) fn with_request_auth(
+        mut self,
+        auth: Arc<dyn crate::http::RequestAuthenticator>,
+        provider_label: &'static str,
+    ) -> Self {
+        self.request_auth = Some(auth);
+        self.provider_label = provider_label;
+        self
     }
 
     /// Fetch the credential from `source` at each request instead of using a
@@ -169,22 +187,30 @@ impl OpenAiProvider {
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
     fn id(&self) -> ProviderId {
-        ProviderId::new(self.profile.provider())
+        ProviderId::new(self.provider_label)
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let body = build_request_json_for(&req, self.profile)?;
-        let provider = self.profile.provider();
+        let wire_provider = self.profile.provider();
+        let provider_label = self.provider_label;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
+        let url = reqwest::Url::parse(&url)
+            .map_err(|_| AgentError::config("invalid Responses API endpoint"))?;
+        let body = serde_json::to_vec(&body)?;
+        let api_key = match (&self.request_auth, &self.token_source) {
+            (Some(_), _) => String::new(),
+            (None, Some(source)) => source.bearer_token_for(req.conversation).await?,
+            (None, None) => self.api_key.clone(),
         };
         let mut request = self
             .client
-            .post(url)
-            .bearer_auth(&api_key)
+            .post(url.clone())
             .header("content-type", "application/json");
+        request = match &self.request_auth {
+            Some(auth) => auth.authenticate(request, &url, &body)?,
+            None => request.bearer_auth(&api_key),
+        };
         if let Some(account_id) = &self.chatgpt_account_id {
             request = request
                 .header("ChatGPT-Account-ID", account_id)
@@ -192,18 +218,21 @@ impl ModelProvider for OpenAiProvider {
                 .header("originator", &self.chatgpt_originator);
         }
         let response = request
-            .json(&body)
+            .body(body)
             .send()
             .await
-            .map_err(|_| AgentError::Provider(format!("{provider} request failed")))?;
+            .map_err(|_| AgentError::Provider(format!("{provider_label} request failed")))?;
 
         let status = response.status();
         if !status.is_success() {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(self
-                .profile
-                .classify_http_error(status.as_u16(), &body, retry_after));
+            return Err(if provider_label == wire_provider {
+                self.profile
+                    .classify_http_error(status.as_u16(), &body, retry_after)
+            } else {
+                classify_provider_error(provider_label, status.as_u16(), &body, retry_after)
+            });
         }
 
         let ceiling = crate::http::timeouts().total_stream;
@@ -211,13 +240,16 @@ impl ModelProvider for OpenAiProvider {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
             let mut buffer = Vec::new();
-            let mut state = StreamState::default();
+            let mut state = StreamState {
+                provider_label,
+                ..StreamState::default()
+            };
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(error.client_message(provider)),
+                            error: ProviderErrorInfo::provider(error.client_message(provider_label)),
                         };
                         return;
                     }
@@ -225,7 +257,7 @@ impl ModelProvider for OpenAiProvider {
                 buffer.extend_from_slice(&chunk);
                 for frame in drain_frames(&mut buffer) {
                     if let Some(data) = frame_data(&frame) {
-                        for event in normalize_for(&data, &mut state, provider) {
+                        for event in normalize_for(&data, &mut state, wire_provider) {
                             yield event;
                         }
                     }
@@ -234,7 +266,7 @@ impl ModelProvider for OpenAiProvider {
             if !buffer.is_empty() {
                 let frame = String::from_utf8_lossy(&buffer).into_owned();
                 if let Some(data) = frame_data(&frame) {
-                    for event in normalize_for(&data, &mut state, provider) {
+                    for event in normalize_for(&data, &mut state, wire_provider) {
                         yield event;
                     }
                 }
@@ -242,7 +274,7 @@ impl ModelProvider for OpenAiProvider {
             if !state.terminal {
                 yield ProviderEvent::Failed {
                     error: ProviderErrorInfo::provider(format!(
-                        "{provider} stream ended before completion"
+                        "{provider_label} stream ended before completion"
                     )),
                 };
             }
@@ -607,6 +639,7 @@ fn openai_tool_choice(choice: &ToolChoice) -> Result<Value> {
 
 #[derive(Default)]
 struct StreamState {
+    provider_label: &'static str,
     calls: BTreeMap<String, CallState>,
     next_index: u32,
     terminal: bool,
@@ -666,7 +699,7 @@ fn normalize_for(
             let mut events = flush_search(state, provider);
             events.push(ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&classify_in_band_error(
-                    provider,
+                    stream_provider_label(state),
                     data.get("error").unwrap_or(data),
                 )),
             });
@@ -761,7 +794,8 @@ fn normalize_for(
                 }),
                 _ => events.push(ProviderEvent::Failed {
                     error: ProviderErrorInfo::provider(format!(
-                        "{provider} response ended incomplete without a supported reason"
+                        "{} response ended incomplete without a supported reason",
+                        stream_provider_label(state)
                     )),
                 }),
             }
@@ -772,11 +806,22 @@ fn normalize_for(
             let error = data["response"].get("error").unwrap_or(&data["response"]);
             let mut events = flush_search(state, provider);
             events.push(ProviderEvent::Failed {
-                error: ProviderErrorInfo::from_error(&classify_in_band_error(provider, error)),
+                error: ProviderErrorInfo::from_error(&classify_in_band_error(
+                    stream_provider_label(state),
+                    error,
+                )),
             });
             events
         }
         _ => Vec::new(),
+    }
+}
+
+fn stream_provider_label(state: &StreamState) -> &'static str {
+    if state.provider_label.is_empty() {
+        "openai"
+    } else {
+        state.provider_label
     }
 }
 

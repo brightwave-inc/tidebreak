@@ -233,9 +233,10 @@ fn contains_sensitive_value(text: &str, sensitive_values: &[&str]) -> bool {
 
 fn contains_secret_marker(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    [
+    if [
         "sk-",
         "aiza",
+        "absk",
         "bearer ",
         "api_key",
         "api-key",
@@ -245,9 +246,65 @@ fn contains_secret_marker(message: &str) -> bool {
         "x-goog-api-key",
         "private_key",
         "private key",
+        "access_key_id",
+        "access key id",
+        "secret_access_key",
+        "secret access key",
+        "session_token",
+        "session token",
+        "x-amz-security-token",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    // AWS credential fields are emitted in several naming styles: process
+    // credentials use PascalCase, SDKs commonly use camelCase, and environment
+    // variables and shared config use separators. Compare a compact form so
+    // every spelling fails closed, including harmless punctuation or spacing
+    // inserted around a field name.
+    let compact = lower
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>();
+    if [
+        "accesskeyid",
+        "secretaccesskey",
+        "sessiontoken",
+        "xamzsecuritytoken",
+        "aws4hmacsha256credential",
+        "xamzcredential",
+    ]
+    .iter()
+    .any(|marker| compact.contains(marker))
+    {
+        return true;
+    }
+
+    contains_aws_access_key_id(message)
+}
+
+/// Recognize a bare 20-character AWS access key ID without treating ordinary
+/// words containing `asia` as credentials. Long-term keys use `AKIA`; temporary
+/// STS credentials use `ASIA`.
+fn contains_aws_access_key_id(message: &str) -> bool {
+    const ACCESS_KEY_ID_LEN: usize = 20;
+    let bytes = message.as_bytes();
+    bytes
+        .windows(ACCESS_KEY_ID_LEN)
+        .enumerate()
+        .any(|(start, candidate)| {
+            let has_prefix = candidate[..4].eq_ignore_ascii_case(b"AKIA")
+                || candidate[..4].eq_ignore_ascii_case(b"ASIA");
+            let has_valid_body = candidate[4..].iter().all(u8::is_ascii_alphanumeric);
+            let starts_at_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let end = start + ACCESS_KEY_ID_LEN;
+            let ends_at_boundary = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            has_prefix && has_valid_body && starts_at_boundary && ends_at_boundary
+        })
 }
 
 /// Longest provider-requested wait taken at face value.
@@ -541,6 +598,54 @@ mod tests {
             safe_http_error("gemini", 400, secret),
             "gemini returned 400"
         );
+    }
+
+    #[test]
+    fn bedrock_http_and_in_band_errors_redact_credential_material() {
+        let markers = [
+            "ABSKDISTINCTIVEBEDROCKKEY",
+            "access_key_id=AKIAEXAMPLE",
+            "secret_access_key=distinctive-secret",
+            "session_token=distinctive-session",
+            "x-amz-security-token: distinctive-token",
+            "AccessKeyId=AKIAEXAMPLE",
+            "SecretAccessKey=distinctive-compact-secret",
+            "secretAccessKey: distinctive-camel-secret",
+            "SessionToken=distinctive-compact-session",
+            "sessionToken: distinctive-camel-session",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ASIAIOSFODNN7EXAMPLE",
+            concat!(
+                "AWS4-HMAC-SHA256 Credential=EXAMPLEKEY/20260807/us-east-1/",
+                "bedrock-mantle/aws4_request, SignedHeaders=host;x-amz-date, ",
+                "Signature=distinctive-signature"
+            ),
+            concat!(
+                "X-Amz-Credential=EXAMPLEKEY%2F20260807%2Fus-east-1%2F",
+                "bedrock-mantle%2Faws4_request"
+            ),
+        ];
+
+        for marker in markers {
+            let body = serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": format!("provider echoed {marker}")
+                }
+            })
+            .to_string();
+            let http = safe_http_error("bedrock", 400, &body);
+            assert_eq!(http, "bedrock returned 400 (invalid_request_error)");
+            assert!(!http.contains(marker));
+
+            let frame = serde_json::json!({
+                "code": 400,
+                "message": format!("provider echoed {marker}")
+            });
+            let in_band = classify_in_band_error("bedrock", &frame).to_string();
+            assert!(!in_band.contains(marker));
+            assert!(!in_band.contains("provider echoed"));
+        }
     }
 
     #[test]

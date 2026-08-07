@@ -303,11 +303,12 @@ independently reauthorizes its live grant. Resolve checks attachment authority
 again, which discards content if a detach won while the read was in flight. A
 crash after possible broker dispatch becomes a safe unavailable result instead
 of another read.
-The model router supports Anthropic, OpenAI, xAI, Gemini, Google Vertex AI, and
-OpenAI-compatible endpoints. Vertex routes curated Gemini and Claude models
-through their native Google publisher surfaces using a fixed-endpoint,
-short-lived Google bearer. It fails closed: if no enabled provider with a
-usable credential can serve the selected model, no model request is sent.
+The model router supports Anthropic, OpenAI, xAI, Gemini, Google Vertex AI,
+Amazon Bedrock Mantle, and OpenAI-compatible endpoints. Vertex routes curated
+Gemini and Claude models through their native Google publisher surfaces using
+a fixed-endpoint, short-lived Google bearer. It fails closed: if no enabled
+provider with a usable credential can serve the selected model, no model
+request is sent.
 
 ### Tool calls are small state machines too
 

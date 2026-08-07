@@ -1287,6 +1287,7 @@ async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_accou
             enabled: false,
             base_url: None,
             vertex_location: Some("us-east5".into()),
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -1305,6 +1306,187 @@ async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_accou
         .await
         .unwrap();
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bedrock_settings_keep_aws_secrets_out_of_api_and_publish_configured_models() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "aws_region": "us-east-1",
+                        "credential": {
+                            "type": "aws_credentials",
+                            "access_key_id": "AKIAEXAMPLE",
+                            "secret_access_key": "bedrock-secret",
+                            "session_token": "bedrock-session"
+                        },
+                        "models": [{
+                            "id": "openai.gpt-oss-120b",
+                            "display_name": "GPT OSS 120B",
+                            "context_window": 131072,
+                            "max_output_tokens": 32768
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(response).await;
+    assert_eq!(info["kind"], "bedrock");
+    assert_eq!(info["aws_region"], "us-east-1");
+    assert_eq!(info["auth_mode"], "aws_credentials");
+    assert_eq!(info["has_credential"], true);
+    assert!(info.get("credential").is_none());
+    assert!(!info.to_string().contains("AKIAEXAMPLE"));
+    assert!(!info.to_string().contains("bedrock-secret"));
+    assert!(!info.to_string().contains("bedrock-session"));
+
+    let models = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/models")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalog: serde_json::Value = json_body(models).await;
+    let rows = catalog["models"].as_array().unwrap();
+    let custom = rows
+        .iter()
+        .find(|model| model["key"] == "bedrock::openai.gpt-oss-120b")
+        .unwrap();
+    assert_eq!(custom["input_modalities"], serde_json::json!(["text"]));
+    assert_eq!(custom["verification"], "unverified");
+    assert_eq!(custom["available"], true);
+    let claude = rows
+        .iter()
+        .find(|model| model["key"] == "bedrock::anthropic.claude-fable-5")
+        .unwrap();
+    assert_eq!(
+        claude["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert_eq!(claude["supports_reasoning"], true);
+    assert_eq!(claude["verification"], "unverified");
+    assert_eq!(claude["available"], true);
+
+    let rejected = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"aws_region": "../us-east-1"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bedrock_enable_preserves_an_environment_resolved_region() {
+    let _env = ENV_LOCK.lock().await;
+    let _aws_region = ScopedEnv::set("AWS_REGION", "eu-west-1");
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/providers")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(response).await;
+    let bedrock = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["kind"] == "bedrock")
+        .unwrap();
+    assert_eq!(bedrock["aws_region"], "eu-west-1");
+
+    let enabled = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(enabled).await;
+    assert_eq!(info["aws_region"], "eu-west-1");
+
+    let stored = providers::read_config(&*store, providers::ProviderKind::Bedrock)
+        .await
+        .unwrap();
+    assert!(stored.enabled);
+    assert_eq!(stored.aws_region, None);
+}
+
+#[tokio::test]
+async fn bedrock_rejects_application_inference_profile_custom_models() {
+    let (router, token, store, _dir) = test_app().await;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "models": [{
+                            "id": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/my-claude-profile",
+                            "context_window": 200000,
+                            "max_output_tokens": 64000
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "bad_request");
+    assert!(error.message.contains("application-inference-profile"));
+
+    let stored = providers::read_config(&*store, providers::ProviderKind::Bedrock)
+        .await
+        .unwrap();
+    assert!(stored.models.is_empty());
 }
 
 #[tokio::test]
@@ -1541,6 +1723,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
             // must not let it redirect the credential.
             base_url: Some("https://attacker.invalid/v1".into()),
             vertex_location: None,
+            aws_region: None,
             models: vec![providers::CustomModelConfig {
                 id: "grok-account-model".into(),
                 context_window: 500_000,
@@ -1620,6 +1803,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2269,6 +2453,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2316,6 +2501,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             enabled: false,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2362,6 +2548,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
                 enabled: true,
                 base_url: None,
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2436,6 +2623,7 @@ async fn stored_regional_vertex_is_unavailable_and_claims_no_models_or_route() {
             enabled: true,
             base_url: None,
             vertex_location: Some("us-east5".into()),
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2509,6 +2697,7 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
             enabled: true,
             base_url: None,
             vertex_location: Some("global".into()),
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2540,6 +2729,154 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
 }
 
 #[tokio::test]
+async fn bedrock_aws_credentials_build_an_explicit_non_fallback_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Bedrock,
+        &providers::ProviderCredential::AwsCredentials {
+            access_key_id: "AKIAEXAMPLE".into(),
+            secret_access_key: "bedrock-secret".into(),
+            session_token: Some("bedrock-session".into()),
+        },
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Bedrock,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            aws_region: Some("us-east-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "openai.gpt-oss-120b".into(),
+                display_name: Some("GPT OSS 120B".into()),
+                upstream_id: None,
+                context_window: 300_000,
+                max_output_tokens: 10_000,
+                input_modalities: vec![crate::model_registry::InputModality::Text],
+                supports_reasoning: false,
+                reasoning_efforts: Vec::new(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].kind, openwave_router::RouteKind::Bedrock);
+    assert!(routes[0].api_key.is_empty());
+    assert_eq!(routes[0].bedrock.as_ref().unwrap().region(), "us-east-1");
+    let debug = format!("{:?}", routes[0]);
+    assert!(!debug.contains("AKIAEXAMPLE"));
+    assert!(!debug.contains("bedrock-secret"));
+    assert!(!debug.contains("bedrock-session"));
+
+    let router = openwave_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("bedrock")),
+            "anthropic.claude-fable-5"
+        ),
+        Some(openwave_router::RouteKind::Bedrock)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("bedrock")),
+            "openai.gpt-oss-120b"
+        ),
+        Some(openwave_router::RouteKind::Bedrock)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("bedrock")),
+            "unknown-model"
+        ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn unreadable_bedrock_credential_never_advertises_or_builds_a_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Bedrock,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            aws_region: Some("us-east-1".into()),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let secret = "distinctive-bedrock-secret";
+
+    for raw in [
+        format!(r#"{{"type":"future_aws_credentials","secret_access_key":"{secret}"}}"#),
+        format!(r#"{{"type":"aws_credentials","secret_access_key":"{secret}""#),
+    ] {
+        secrets
+            .set_secret(&providers::ProviderKind::Bedrock.credential_key(), &raw)
+            .await
+            .unwrap();
+
+        let error = providers::read_credential(&*secrets, providers::ProviderKind::Bedrock)
+            .await
+            .expect_err("unreadable structured credentials must fail closed");
+        assert!(!error.to_string().contains(secret));
+        assert!(!providers::provider_is_usable(
+            &*store,
+            &*secrets,
+            providers::ProviderKind::Bedrock,
+            &policy
+        )
+        .await
+        .unwrap());
+        assert!(
+            providers::collect_routes(&*store, &*secrets, None, None, &policy)
+                .await
+                .is_empty()
+        );
+        assert!(providers::catalog_models(&*store, &*secrets, &policy)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|model| model.policy.provider == providers::ProviderKind::Bedrock)
+            .all(|model| !model.available));
+    }
+}
+
+#[tokio::test]
 async fn openai_compatible_route_is_free_form_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -2565,6 +2902,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
             enabled: true,
             base_url: Some("http://127.0.0.1:1234/v1".into()),
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2613,6 +2951,7 @@ async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
                 enabled: true,
                 base_url: None,
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2743,6 +3082,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
                 enabled: true,
                 base_url,
                 vertex_location: None,
+                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2836,6 +3176,7 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )
@@ -2896,6 +3237,7 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
             enabled: true,
             base_url: None,
             vertex_location: None,
+            aws_region: None,
             models: Vec::new(),
         },
     )

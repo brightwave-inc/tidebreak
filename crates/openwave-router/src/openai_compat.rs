@@ -1734,6 +1734,7 @@ mod tests {
             curated_models: vec!["gpt-fable-5".to_string()],
             token_source: Some(source.clone()),
             vertex: None,
+            bedrock: None,
             chatgpt_account_id: None,
         }]);
         let conversation = openwave_core::id::ChatId::new();

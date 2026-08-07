@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Add a provider key, run your first task, and get a file out of it.
+description: Add a provider credential, run your first task, and get a file out of it.
 ---
 
 This walks through a first real task: attach a file, let the agent run code
@@ -12,8 +12,10 @@ over it, and export what it produces.
 
 ## Add a model credential
 
-Open **Settings → Providers**, turn on the provider you have a key for, paste
-the key, and press **Save configuration**.
+Open **Settings → Providers**, turn on the provider you want, enter its
+credential, and press **Save configuration**. Most providers take an API key;
+Vertex AI takes a Google service-account key, and Amazon Bedrock Mantle takes
+either a Bedrock API key or AWS access keys plus an AWS region.
 
 If you have a ChatGPT Plus or Pro subscription, the OpenAI section offers
 **Sign in with ChatGPT** instead of a key.

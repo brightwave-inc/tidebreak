@@ -61,11 +61,16 @@ a provider-coupled artifact:
 | Provider-executed web search native blocks (e.g. Anthropic `encrypted_content`) | Replay verbatim | Flatten to cleartext titles/URLs (or equivalent host-shaped prose) — never invent a simulated native call |
 | Vendor tool-call ids and cache prefixes | Keep as the adapter requires | Do not translate; the neutral journal already has the durable fact |
 
+Sharing a wire protocol does not merge origins. Amazon Bedrock Mantle can reuse
+the Messages and Responses adapters, but Bedrock-native artifacts still replay
+only for the exact Bedrock provider and model that minted them. Anthropic,
+OpenAI, Gemini, and every other route receive the flattened or empty fallback.
+
 Consequences:
 
-- **No per-pair translation matrix.** Do not build Anthropic↔OpenAI↔Gemini
-  converters for each new feature. Origin-gate native replay; everyone else
-  gets the flattened form.
+- **No per-pair translation matrix.** Do not build
+  Anthropic↔OpenAI↔Gemini↔Amazon Bedrock Mantle converters for each new feature.
+  Origin-gate native replay; everyone else gets the flattened form.
 - **Quality asymmetry is accepted.** A switched-into model may see a slightly
   flatter history. That must not be hidden with fake native shapes, and it
   must never silently break (same refuse-don't-strip posture as unsupported

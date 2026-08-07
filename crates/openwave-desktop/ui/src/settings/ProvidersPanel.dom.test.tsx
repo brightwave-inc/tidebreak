@@ -406,6 +406,108 @@ describe("ProvidersPanel", () => {
     );
   });
 
+  it("configures Bedrock SigV4 credentials, region, and explicit models", async () => {
+    const bedrock: ProviderInfo = {
+      kind: "bedrock",
+      enabled: false,
+      has_credential: false,
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue(bedrock);
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[bedrock]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByLabelText("Amazon Bedrock credential type"),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: "AWS access keys (SigV4)" }),
+    );
+    fireEvent.change(screen.getByLabelText("AWS region"), {
+      target: { value: "us-west-2" },
+    });
+    fireEvent.change(screen.getByLabelText("AWS access key ID"), {
+      target: { value: " AKIAEXAMPLE " },
+    });
+    fireEvent.change(screen.getByLabelText("AWS secret access key"), {
+      target: { value: " secret-access-key " },
+    });
+    fireEvent.change(screen.getByLabelText("AWS session token"), {
+      target: { value: " session-token " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
+      target: { value: " openai.gpt-oss-120b " },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("bedrock", {
+        enabled: true,
+        aws_region: "us-west-2",
+        credential: {
+          type: "aws_credentials",
+          access_key_id: "AKIAEXAMPLE",
+          secret_access_key: "secret-access-key",
+          session_token: "session-token",
+        },
+        models: [
+          {
+            id: "openai.gpt-oss-120b",
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            reasoning_efforts: [],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("does not persist an untouched environment-resolved Bedrock region", async () => {
+    const bedrock: ProviderInfo = {
+      kind: "bedrock",
+      enabled: false,
+      has_credential: true,
+      aws_region: "eu-west-1",
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue({
+      ...bedrock,
+      enabled: true,
+    });
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[bedrock]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("AWS region")).toHaveValue("eu-west-1");
+    fireEvent.click(screen.getByRole("switch", { name: "Enabled" }));
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("bedrock", {
+        enabled: true,
+        models: [],
+      }),
+    );
+  });
+
   it("offers no credential editing on a managed profile", () => {
     const putProvider = vi.fn();
     const client = { putProvider } as unknown as ApiClient;

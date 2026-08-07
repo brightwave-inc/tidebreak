@@ -53,6 +53,8 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     vertex: Option<VertexEndpoint>,
+    request_auth: Option<std::sync::Arc<dyn crate::http::RequestAuthenticator>>,
+    provider_label: &'static str,
     /// Per-request credential supplier for gateways that mint short-lived
     /// tokens. Takes precedence over `api_key` when present.
     token_source: Option<std::sync::Arc<dyn crate::BearerTokenSource>>,
@@ -70,6 +72,8 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             vertex: None,
+            request_auth: None,
+            provider_label: "anthropic",
             token_source: None,
             conversation_attribution: false,
         }
@@ -106,6 +110,8 @@ impl AnthropicProvider {
                 project_id,
                 location,
             }),
+            request_auth: None,
+            provider_label: "vertex",
             token_source: Some(token_source),
             conversation_attribution: false,
         })
@@ -116,6 +122,18 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Authenticate the exact serialized request through a shared transport.
+    #[must_use]
+    pub(crate) fn with_request_auth(
+        mut self,
+        auth: std::sync::Arc<dyn crate::http::RequestAuthenticator>,
+        provider_label: &'static str,
+    ) -> Self {
+        self.request_auth = Some(auth);
+        self.provider_label = provider_label;
         self
     }
 
@@ -146,11 +164,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     fn id(&self) -> ProviderId {
-        ProviderId::new(if self.vertex.is_some() {
-            "vertex"
-        } else {
-            "anthropic"
-        })
+        ProviderId::new(self.provider_label)
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
@@ -171,9 +185,10 @@ impl ModelProvider for AnthropicProvider {
             Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
             _ => None,
         };
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
+        let api_key = match (&self.request_auth, &self.token_source) {
+            (Some(_), _) => String::new(),
+            (None, Some(source)) => source.bearer_token_for(req.conversation).await?,
+            (None, None) => self.api_key.clone(),
         };
 
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
@@ -199,6 +214,7 @@ impl ModelProvider for AnthropicProvider {
         let stream = async_stream::stream! {
             let mut response = response;
             let mut state = StreamState {
+                provider_label: provider.provider_label,
                 output_tool,
                 raw_blocks: continuations_allowed.then(RawAssistantBlocks::default),
                 replay_origin: Some(replay_origin),
@@ -309,6 +325,7 @@ impl AnthropicProvider {
         conversation: Option<openwave_core::id::ChatId>,
         model: &str,
     ) -> Result<reqwest::Response> {
+        let body = serde_json::to_vec(body)?;
         let mut request = if let Some(vertex) = &self.vertex {
             if !valid_anthropic_model_id(model) {
                 return Err(AgentError::config("invalid Vertex AI Claude model id"));
@@ -321,11 +338,18 @@ impl AnthropicProvider {
                 .bearer_auth(api_key)
                 .header("content-type", "application/json")
         } else {
-            self.client
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", api_key)
+            let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+            let url = reqwest::Url::parse(&url)
+                .map_err(|_| AgentError::config("invalid Messages API endpoint"))?;
+            let request = self
+                .client
+                .post(url.clone())
                 .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
+                .header("content-type", "application/json");
+            match &self.request_auth {
+                Some(auth) => auth.authenticate(request, &url, &body)?,
+                None => request.header("x-api-key", api_key),
+            }
         };
         // A conversation is declared only where one is configured to be read.
         // The id is a UUID, so it satisfies the gateway's bound on the value
@@ -337,15 +361,13 @@ impl AnthropicProvider {
             );
         }
         let response = request
-            .json(body)
+            .body(body)
             .send()
             .await
             // reqwest's display includes the URL, and a gateway URL can carry
             // tenant-identifying parts; `AgentError` strings reach the client
             // via TurnFailed. Only the fact of a failed request surfaces.
-            .map_err(|_| {
-                AgentError::Provider(format!("{} request failed", self.provider_name()))
-            })?;
+            .map_err(|_| AgentError::Provider(format!("{} request failed", self.provider_label)))?;
 
         // Surface non-2xx without the raw body — it can echo key material, and
         // `AgentError` strings reach the client via TurnFailed. Status (+ a
@@ -356,14 +378,14 @@ impl AnthropicProvider {
             let body = read_bounded_error_body(response.bytes_stream()).await;
             return Err(match &self.vertex {
                 Some(vertex) => classify_provider_error_redacting(
-                    self.provider_name(),
+                    self.provider_label,
                     status.as_u16(),
                     &body,
                     retry_after,
                     &[vertex.project_id.as_str()],
                 ),
                 None => classify_provider_error(
-                    self.provider_name(),
+                    self.provider_label,
                     status.as_u16(),
                     &body,
                     retry_after,
@@ -374,11 +396,7 @@ impl AnthropicProvider {
     }
 
     fn provider_name(&self) -> &'static str {
-        if self.vertex.is_some() {
-            "vertex"
-        } else {
-            "anthropic"
-        }
+        self.provider_label
     }
 }
 
@@ -810,6 +828,12 @@ fn web_search_tool_type(model: &str) -> &'static str {
 /// anything longer than two digits does not count as one.
 fn claude_generation(model: &str) -> Option<(u32, u32)> {
     let starts_with_digit = |token: &&str| token.starts_with(|c: char| c.is_ascii_digit());
+    let leaf = model.rsplit('/').next().unwrap_or(model);
+    let model = ["us.", "eu.", "apac.", "jp.", "au.", "global."]
+        .iter()
+        .find_map(|prefix| leaf.strip_prefix(prefix))
+        .unwrap_or(leaf);
+    let model = model.strip_prefix("anthropic.").unwrap_or(model);
     let mut tokens = model
         .strip_prefix("claude-")?
         .split('-')
@@ -951,6 +975,7 @@ fn anthropic_role(role: Role) -> &'static str {
 /// Prompt-cache-aware token counts accumulated across a stream.
 #[derive(Default)]
 struct StreamState {
+    provider_label: &'static str,
     input_tokens: u32,
     cache_read_input_tokens: u32,
     cache_creation_input_tokens: u32,
@@ -1119,7 +1144,10 @@ fn end_of_stream(state: &StreamState) -> Option<ProviderEvent> {
         return None;
     }
     Some(ProviderEvent::Failed {
-        error: ProviderErrorInfo::provider("anthropic stream ended mid-tool-call"),
+        error: ProviderErrorInfo::provider(format!(
+            "{} stream ended mid-tool-call",
+            stream_provider_label(state)
+        )),
     })
 }
 
@@ -1144,7 +1172,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 Some(project_id) => {
                     classify_in_band_error_redacting("vertex", error, &[project_id])
                 }
-                None => classify_in_band_error("anthropic", error),
+                None => classify_in_band_error(stream_provider_label(state), error),
             };
             vec![ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&error),
@@ -1373,7 +1401,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         return events;
                     }
                 }
-                let mut reason = match map_stop_reason(reason) {
+                let mut reason = match map_stop_reason(stream_provider_label(state), reason) {
                     StopOutcome::Reason(reason) => reason,
                     // Whatever streamed before this stop is a fragment, so no
                     // clean stop may follow it. Failing the stream is what the
@@ -1410,6 +1438,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             events
         }
         _ => Vec::new(),
+    }
+}
+
+fn stream_provider_label(state: &StreamState) -> &'static str {
+    if state.provider_label.is_empty() {
+        "anthropic"
+    } else {
+        state.provider_label
     }
 }
 
@@ -1497,7 +1533,7 @@ enum StopOutcome {
     Interrupted(ProviderErrorInfo),
 }
 
-fn map_stop_reason(reason: &str) -> StopOutcome {
+fn map_stop_reason(provider_label: &str, reason: &str) -> StopOutcome {
     match reason {
         "max_tokens" => StopOutcome::Reason(StopReason::MaxTokens),
         "tool_use" => StopOutcome::Reason(StopReason::ToolUse),
@@ -1512,16 +1548,16 @@ fn map_stop_reason(reason: &str) -> StopOutcome {
         // same oversized request.
         "model_context_window_exceeded" => {
             StopOutcome::Interrupted(ProviderErrorInfo::from_error(&AgentError::PromptTooLong(
-                "anthropic: the model's context window was exceeded mid-response".into(),
+                format!("{provider_label}: the model's context window was exceeded mid-response"),
             )))
         }
         // The provider suspended the turn for a long-running server-side tool
         // and expects the paused response replayed back to resume it. Nothing
         // here drives that continuation, so the paused fragment is incomplete
         // by construction and must not read as a finished answer.
-        "pause_turn" => StopOutcome::Interrupted(ProviderErrorInfo::provider(
-            "anthropic: the provider paused the turn",
-        )),
+        "pause_turn" => StopOutcome::Interrupted(ProviderErrorInfo::provider(format!(
+            "{provider_label}: the provider paused the turn"
+        ))),
         // "end_turn" and anything we don't yet model fall back to a clean end.
         _ => StopOutcome::Reason(StopReason::EndTurn),
     }
@@ -2255,17 +2291,32 @@ mod tests {
     #[test]
     fn maps_stop_reasons() {
         use StopOutcome::{Interrupted, Reason};
-        assert_eq!(map_stop_reason("tool_use"), Reason(StopReason::ToolUse));
-        assert_eq!(map_stop_reason("max_tokens"), Reason(StopReason::MaxTokens));
-        assert_eq!(map_stop_reason("refusal"), Reason(StopReason::Refusal));
         assert_eq!(
-            map_stop_reason("future_reason"),
+            map_stop_reason("anthropic", "tool_use"),
+            Reason(StopReason::ToolUse)
+        );
+        assert_eq!(
+            map_stop_reason("anthropic", "max_tokens"),
+            Reason(StopReason::MaxTokens)
+        );
+        assert_eq!(
+            map_stop_reason("anthropic", "refusal"),
+            Reason(StopReason::Refusal)
+        );
+        assert_eq!(
+            map_stop_reason("anthropic", "future_reason"),
             Reason(StopReason::EndTurn)
         );
-        assert!(matches!(map_stop_reason("pause_turn"), Interrupted(_)));
         assert!(matches!(
-            map_stop_reason("model_context_window_exceeded"),
-            Interrupted(_)
+            map_stop_reason("bedrock", "pause_turn"),
+            Interrupted(error) if error.message == "bedrock: the provider paused the turn"
+        ));
+        assert!(matches!(
+            map_stop_reason("bedrock", "model_context_window_exceeded"),
+            Interrupted(error)
+                if error.kind == "prompt_too_long"
+                    && error.message
+                        == "bedrock: the model's context window was exceeded mid-response"
         ));
     }
 

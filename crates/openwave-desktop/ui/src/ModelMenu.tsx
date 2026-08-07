@@ -35,6 +35,7 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "xai",
   "gemini",
   "vertex",
+  "bedrock",
   "fireworks",
   "together",
 ];

@@ -46,7 +46,10 @@ use openwave_core::{
     ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
     ProviderId, ReasoningOrigin, ResponseFormat, Role, ToolChoice, ToolSpec,
 };
-use openwave_router::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiProvider};
+use openwave_router::{
+    AnthropicProvider, BedrockAuth, BedrockProvider, GeminiProvider, OpenAiCompatProvider,
+    OpenAiProvider,
+};
 use openwave_router::{BearerTokenSource, VertexModelFamily, VertexProvider};
 use serde_json::{json, Value};
 
@@ -433,6 +436,43 @@ async fn gemini_request_contracts() {
     .await;
 }
 
+#[tokio::test]
+async fn bedrock_messages_request_and_stream_contract() {
+    check_one_contract(
+        "bedrock/messages",
+        "tool_loop_closure",
+        tool_loop_closure("anthropic.claude-sonnet-5"),
+        |base_url| {
+            Arc::new(
+                BedrockProvider::new("us-east-1", BedrockAuth::ApiKey(TEST_API_KEY.into()))
+                    .unwrap()
+                    .with_base_url(base_url),
+            )
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bedrock_responses_request_and_stream_contract() {
+    let mut request = tool_loop_closure("openai.gpt-oss-120b");
+    request.reasoning_model = false;
+    request.reasoning_effort = None;
+    check_one_contract(
+        "bedrock/responses",
+        "tool_loop_closure",
+        request,
+        |base_url| {
+            Arc::new(
+                BedrockProvider::new("us-east-1", BedrockAuth::ApiKey(TEST_API_KEY.into()))
+                    .unwrap()
+                    .with_base_url(base_url),
+            )
+        },
+    )
+    .await;
+}
+
 struct StaticVertexToken;
 
 #[async_trait::async_trait]
@@ -529,6 +569,22 @@ async fn check_scenario(
     let response_body = terminal_frame(provider).to_string();
     let (captured, _) = round_trip(build, request, response_body).await;
     assert_matches_fixture(&format!("{provider}/{scenario}.request.json"), &captured);
+}
+
+async fn check_one_contract(
+    provider: &str,
+    scenario: &str,
+    request: ChatRequest,
+    build: impl Fn(&str) -> Arc<dyn ModelProvider>,
+) {
+    let response_body = recorded_response(provider, scenario)
+        .unwrap_or_else(|| panic!("{provider}/{scenario} has no recorded response fixture"));
+    let (captured, events) = round_trip(build, request, response_body).await;
+    assert_matches_fixture(&format!("{provider}/{scenario}.request.json"), &captured);
+    assert_matches_fixture(
+        &format!("{provider}/{scenario}.events.json"),
+        &serde_json::to_value(&events).expect("provider events serialize"),
+    );
 }
 
 // ---------------------------------------------------------------------------
