@@ -52,8 +52,12 @@ function play(
   return transition;
 }
 
-function framed(seq: number, event: AgentEvent): SequencedEvent {
-  return { seq, event };
+function framed(
+  seq: number,
+  event: AgentEvent,
+  replayed = false,
+): SequencedEvent {
+  return replayed ? { seq, event, replayed: true } : { seq, event };
 }
 
 const TURN: AgentEvent = { type: "turn_started", turn_id: "turn-1" };
@@ -80,6 +84,29 @@ describe("seq cursor", () => {
     expect(state.lastSeq).toBe(7);
     expect(state.messages).toEqual([]);
     expect(effects).toEqual([]);
+  });
+
+  it("suppresses animation during replay and resumes on the next live frame", () => {
+    const replayedStart = reduceChatSessionEvent(
+      initialChatSessionState(),
+      framed(1, TURN, true),
+      makeDeps(),
+    );
+    expect(replayedStart.state.animateStreaming).toBe(false);
+
+    const replayedText = reduceChatSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "text_delta", text: "Already seen" }, true),
+      makeDeps(),
+    );
+    expect(replayedText.state.animateStreaming).toBe(false);
+
+    const liveText = reduceChatSessionEvent(
+      replayedText.state,
+      framed(3, { type: "text_delta", text: " and new" }),
+      makeDeps(),
+    );
+    expect(liveText.state.animateStreaming).toBe(true);
   });
 });
 

@@ -10023,6 +10023,116 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
     );
 }
 
+/// Regression for #1714: cancelling during a tool call can leave a committed
+/// assistant step even though the turn itself has no output message. Associate
+/// the cancellation with the last committed step so its journaled prose is not
+/// rendered again as a message-less terminal partial.
+#[tokio::test]
+async fn cancellation_after_committed_step_does_not_rebuild_its_prose() {
+    use crate::event::AgentEvent;
+    use crate::provider::Usage;
+
+    let (_dir, store) = temp_store().await;
+
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "claude", "start then stop")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            lease,
+            accepted.available_at,
+            accepted.available_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .expect("accepted turn is claimable");
+    store
+        .append_turn_event(
+            chat.id,
+            turn_id,
+            lease,
+            1,
+            accepted.available_at,
+            &AgentEvent::TextDelta {
+                text: "I will check that now.".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("a live attempt may journal its visible stream");
+
+    let committed = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        reasoning: Default::default(),
+        content: "I will check that now.".into(),
+        llm_content: None,
+        created_at: accepted.available_at,
+    };
+    assert_eq!(
+        store
+            .append_claimed_assistant_message_with_citations(
+                &committed,
+                &[],
+                lease,
+                accepted.available_at,
+            )
+            .await
+            .unwrap(),
+        AppendClaimedMessageOutcome::Appended
+    );
+
+    let requested_at = accepted.available_at + chrono::Duration::seconds(1);
+    store
+        .request_turn_cancellation(turn_id, requested_at)
+        .await
+        .unwrap()
+        .expect("running cancellation is accepted");
+    store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            requested_at + chrono::Duration::seconds(1),
+            Usage::default(),
+            None,
+            &[],
+        )
+        .await
+        .unwrap()
+        .expect("worker acknowledges cancellation during the tool call");
+
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    let snapshot = transcript
+        .terminal_turns
+        .last()
+        .expect("cancelled turn remains in the transcript");
+    assert_eq!(
+        (
+            snapshot.status.clone(),
+            snapshot.message_id,
+            snapshot.partial_content.as_str(),
+        ),
+        (
+            crate::storage::ChatTerminalTurnStatus::Cancelled,
+            Some(committed.id),
+            "",
+        ),
+        "the committed step owns the cancellation instead of being duplicated from journal deltas"
+    );
+}
+
 /// The #853 scoping contract: two principals' root aggregates are disjoint
 /// under the owner-scoped surface — reads, lists, mutations, and creation
 /// against another owner's parent all behave as if the other owner's rows do

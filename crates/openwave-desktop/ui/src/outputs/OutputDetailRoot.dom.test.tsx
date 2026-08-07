@@ -71,7 +71,7 @@ function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis
     listRevisions: vi.fn().mockResolvedValue({
       outputId,
       revisions: [
-        revisionRow(),
+        revisionRow({ producedBy: "backgroundAgent" }),
         revisionRow({
           revisionId: olderRevisionId,
           ordinal: 1,
@@ -187,6 +187,11 @@ describe("OutputDetailRoot", () => {
     );
     // The current version is labeled and offers no restore of its own.
     expect(await screen.findByText("Current version")).toBeVisible();
+    // A shared filename can carry versions from different producers; the
+    // history keeps that merge visible rather than presenting one anonymous
+    // stream of revisions.
+    expect(screen.getByText(/^Background agent ·/)).toBeVisible();
+    expect(screen.getByText(/^Agent ·/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: /v1/ }));
     await waitFor(() =>

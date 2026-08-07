@@ -1723,35 +1723,39 @@ async fn immediate_failures_release_capacity_then_deliver_a_terminal_parent_rece
         }
     };
     let first = child("first".into()).await;
-    let worker = SandboxAgentRunWorker::new(
-        store.clone(),
-        test_secrets(),
-        Arc::new(FixedResolver(Arc::new(FailingProvider))),
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
-        Arc::new(EventBus::default()),
-        AgentConfig {
-            model: "m".into(),
-            ..AgentConfig::default()
-        },
-        None,
-        SandboxAgentRunWorkerConfig {
-            failure_delay: Duration::from_secs(1),
-            // Shrink the production backoff so the test observes each
-            // retry becoming claimable without waiting seconds for it.
-            retry: RetrySchedule::new(
-                Duration::from_millis(100),
-                Duration::from_millis(200),
-                Duration::from_secs(60),
-            ),
-            max_concurrency: 1,
-            max_running_global: 1,
-            max_running_per_chat: 1,
-            ..SandboxAgentRunWorkerConfig::default()
-        },
-    );
+    let worker = |retry| {
+        SandboxAgentRunWorker::new(
+            store.clone(),
+            test_secrets(),
+            Arc::new(FixedResolver(Arc::new(FailingProvider))),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            AgentConfig {
+                model: "m".into(),
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig {
+                failure_delay: Duration::from_secs(1),
+                retry,
+                max_concurrency: 1,
+                max_running_global: 1,
+                max_running_per_chat: 1,
+                ..SandboxAgentRunWorkerConfig::default()
+            },
+        )
+    };
+    // Keep the capacity probe's retry outside the test's runtime. The claim
+    // below scans every eligible run, so a short retry would let this first
+    // run legitimately win again before the assertion on the second run.
+    let capacity_worker = worker(RetrySchedule::new(
+        Duration::from_secs(60 * 60),
+        Duration::from_secs(60 * 60),
+        Duration::from_secs(2 * 60 * 60),
+    ));
     assert_eq!(
-        worker.run_once().await.unwrap(),
+        capacity_worker.run_once().await.unwrap(),
         SandboxAgentRunWorkerOutcome::RetryScheduled(first)
     );
     let first_state = store.get_agent_run(first).await.unwrap().unwrap();
@@ -1771,21 +1775,32 @@ async fn immediate_failures_release_capacity_then_deliver_a_terminal_parent_rece
         .finish_agent_run_cancellation(second, claimed.lease_token.unwrap())
         .await
         .unwrap();
+
+    let terminal = child("terminal".into()).await;
+    let terminal_worker = worker(RetrySchedule::new(
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+        Duration::from_secs(60),
+    ));
+    assert_eq!(
+        terminal_worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::RetryScheduled(terminal)
+    );
     // Each remaining attempt parks in retry-wait until the durable
     // budget is spent and the run fails terminally.
-    let mut outcome = SandboxAgentRunWorkerOutcome::RetryScheduled(first);
+    let mut outcome = SandboxAgentRunWorkerOutcome::RetryScheduled(terminal);
     for _ in 1..openwave_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        outcome = worker.run_once().await.unwrap();
+        outcome = terminal_worker.run_once().await.unwrap();
     }
-    assert_eq!(outcome, SandboxAgentRunWorkerOutcome::Failed(first));
-    let terminal = store.get_agent_run(first).await.unwrap().unwrap();
-    assert_eq!(terminal.status, AgentRunStatus::Failed);
+    assert_eq!(outcome, SandboxAgentRunWorkerOutcome::Failed(terminal));
+    let terminal_state = store.get_agent_run(terminal).await.unwrap().unwrap();
+    assert_eq!(terminal_state.status, AgentRunStatus::Failed);
     let inbox = store
         .list_agent_run_inbox(openwave_core::AgentRunId::foreground_for_chat(chat.id))
         .await
         .unwrap();
-    assert!(inbox.iter().any(|entry| entry.child_run_id == first
+    assert!(inbox.iter().any(|entry| entry.child_run_id == terminal
         && entry.result.text.contains("sandbox_execution_failed")));
 }
 

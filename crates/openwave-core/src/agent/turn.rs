@@ -296,21 +296,35 @@ impl Agent {
                 .await?;
         }
         if !self.pending_sandbox_spawns.is_empty() {
-            let Some(steer_revision) = self.pending_sandbox_spawn_steer_revision else {
+            let Some(mut steer_revision) = self.pending_sandbox_spawn_steer_revision else {
                 return Err(AgentError::Store(
                     "pending sandbox spawns require a durably claimed turn".into(),
                 ));
             };
-            // Every spawn from the batch passes the gate, not just the first
-            // one the step yielded: the model can name several delegations in
-            // one step, and a card for one of them is not consent for the rest.
-            // A refused spawn is answered in place and the batch moves on.
+            // A steer can land after one sibling's approval commits but before
+            // its spawn checkpoint. Apply it before replaying that admitted
+            // request, then fence the checkpoint with the resulting durable
+            // revision. If the whole carried queue is refused below, the
+            // transcript reload that follows picks these persisted steers up.
+            let mut applied_steers = Vec::new();
+            self.apply_steers(chat, turn_id, &mut applied_steers, None, events)
+                .await?;
+            if let Some(revision) = self.durable_generation_revision(turn_id).await? {
+                steer_revision = revision;
+            }
+            // An already-gated head keeps the approval the reader committed;
+            // every still-ungated sibling passes the gate independently. A
+            // card for one delegation is not consent for the rest, and a
+            // refused sibling is answered in place before the batch moves on.
             for index in 0..self.pending_sandbox_spawns.len() {
                 let request = self.pending_sandbox_spawns[index].clone();
-                match self
-                    .gate_sandbox_spawn(chat, turn_id, &request, events)
-                    .await?
-                {
+                let gate = if request.approval_gated {
+                    SandboxSpawnGate::Admit(request)
+                } else {
+                    self.gate_sandbox_spawn(chat, turn_id, &request, events)
+                        .await?
+                };
+                match gate {
                     SandboxSpawnGate::Admit(request) => {
                         return Ok(AgentTurnOutcome::SandboxAgentSpawn {
                             request,

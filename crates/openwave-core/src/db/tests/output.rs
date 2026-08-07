@@ -695,13 +695,18 @@ mod output_scan {
         let conversation = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(store);
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let turn_id = TurnId::new();
+        let run_id = crate::AgentRunId::new();
 
         // A foreground turn and a background run, each writing `report.md` in
         // its own workspace and publishing into the same conversation.
         let mut tasks = Vec::new();
-        for (index, bytes) in [b"# Foreground".as_slice(), b"# Background".as_slice()]
-            .into_iter()
-            .enumerate()
+        for (index, (bytes, producer)) in [
+            (b"# Foreground".as_slice(), RevisionProducer::Turn(turn_id)),
+            (b"# Background".as_slice(), RevisionProducer::Run(run_id)),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let workspace = tempfile::tempdir().unwrap();
             write_output_file(workspace.path(), "report.md", bytes);
@@ -718,7 +723,7 @@ mod output_scan {
                     &publication,
                     chat.id,
                     CallId::new(),
-                    RevisionProducer::Turn(TurnId::new()),
+                    producer,
                     at(index as i64),
                 )
                 .await
@@ -753,8 +758,17 @@ mod output_scan {
             vec![OutputSyncStatus::Created, OutputSyncStatus::Updated]
         );
 
-        // Both revisions' bytes are readable where the record says they are.
-        for revision in store.list_output_revisions(output.id).await.unwrap() {
+        // Cross-producer merging preserves who wrote each version, and both
+        // revisions' bytes remain readable where the record says they are.
+        let revisions = store.list_output_revisions(output.id).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert!(revisions.iter().any(|revision| {
+            revision.turn_id == Some(turn_id) && revision.producing_run_id.is_none()
+        }));
+        assert!(revisions.iter().any(|revision| {
+            revision.turn_id.is_none() && revision.producing_run_id == Some(run_id)
+        }));
+        for revision in revisions {
             let relative = output_revision_relative_path(output.id, revision.id);
             assert_eq!(
                 std::fs::read(conversation.path().join(&relative))

@@ -2427,6 +2427,13 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
     let completed_progress = test_client_checkpoint_progress(1);
     let (_, completed_call) =
         park_client_wait_for_route_test(&*store, completed_chat.id, completed_progress).await;
+    // This helper claims from the whole turn queue. Park both cases before the
+    // worker starts so it cannot race the helper for the exhausted turn.
+    let exhausted_chat = make_chat(&router, &bearer).await;
+    let exhausted_progress = test_client_checkpoint_progress(2);
+    let (_, exhausted_call) =
+        park_client_wait_for_route_test(&*store, exhausted_chat.id, exhausted_progress).await;
+
     resolve_parked_client_call(&*store, completed_chat.id, &completed_call).await;
     spawn_turn_worker(&state);
     state.turn_job_wake.notify_one();
@@ -2443,10 +2450,6 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let exhausted_chat = make_chat(&router, &bearer).await;
-    let exhausted_progress = test_client_checkpoint_progress(2);
-    let (_, exhausted_call) =
-        park_client_wait_for_route_test(&*store, exhausted_chat.id, exhausted_progress).await;
     resolve_parked_client_call(&*store, exhausted_chat.id, &exhausted_call).await;
     state.turn_job_wake.notify_one();
     let exhausted_events = wait_for_turn(&store, exhausted_chat.id).await;

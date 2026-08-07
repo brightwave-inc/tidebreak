@@ -247,9 +247,12 @@ delegated siblings never share scratch. It carries no folder authority and
 stages no host paths: delegation already runs outside the conversation's
 approval gate, and the sandbox filesystem is the whole of what a delegated run
 can reach. Files the run leaves under `output/` are published to the parent
-conversation as outputs named by their own filenames — writing the same filename
-again produces the next version of that output rather than a second one. The run
-never names an output identity, and neither does the host.
+conversation as outputs named by their own filenames. A filename is scoped to
+the conversation, not to its producer: a foreground turn or any background run
+that publishes an already-live name appends the next version to that one output
+rather than creating a producer-namespaced copy. Version history identifies
+whether each revision came from the foreground agent, a background agent, or the
+user. The run never names an output identity, and neither does the host.
 
 The delegated read is available only when the foreground
 spawn named one exact `{root_id, relative_path}` that was attached to the chat

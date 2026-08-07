@@ -15,6 +15,72 @@ async fn allow_delegation(store: &dyn Store, chat: ChatId) {
         .unwrap();
 }
 
+async fn approval_call_ids(store: &Arc<dyn Store>, chat: ChatId) -> Vec<CallId> {
+    store
+        .list_events(chat, 0)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.event {
+            AgentEvent::ApprovalRequired { call_id, .. } => Some(*call_id),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn wait_for_approvals(store: &Arc<dyn Store>, chat: ChatId, count: usize) -> Vec<CallId> {
+    for _ in 0..500 {
+        let ids = approval_call_ids(store, chat).await;
+        if ids.len() >= count {
+            return ids;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("turn should park on {count} approval cards");
+}
+
+async fn approve_delegation(router: &axum::Router, bearer: &str, chat: ChatId, call_id: CallId) {
+    let decide = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{chat}/approvals/{call_id}"))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"decision": "approve"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decide.status(), StatusCode::NO_CONTENT);
+}
+
+async fn wait_for_completed_spawn_call_ids(
+    store: &Arc<dyn Store>,
+    chat: ChatId,
+    count: usize,
+) -> Vec<CallId> {
+    for _ in 0..500 {
+        let calls = store.list_tool_calls(chat).await.unwrap();
+        let spawns = calls
+            .iter()
+            .filter(|call| call.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL)
+            .collect::<Vec<_>>();
+        if spawns.len() == count
+            && spawns
+                .iter()
+                .all(|call| call.status == openwave_core::ToolCallStatus::Completed)
+        {
+            return spawns.iter().map(|call| call.id).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{count} spawn calls should complete under their original call ids");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_model_is_used_for_the_turn() {
     let recorder = RecordingProvider::default();
@@ -412,51 +478,8 @@ async fn a_gated_spawn_batch_is_carried_across_the_approval_park() {
         StatusCode::ACCEPTED
     );
 
-    async fn approval_call_ids(store: &Arc<dyn Store>, chat: ChatId) -> Vec<CallId> {
-        store
-            .list_events(chat, 0)
-            .await
-            .unwrap()
-            .iter()
-            .filter_map(|event| match &event.event {
-                AgentEvent::ApprovalRequired { call_id, .. } => Some(*call_id),
-                _ => None,
-            })
-            .collect()
-    }
-
-    async fn wait_for_approvals(store: &Arc<dyn Store>, chat: ChatId, count: usize) -> Vec<CallId> {
-        for _ in 0..500 {
-            let ids = approval_call_ids(store, chat).await;
-            if ids.len() >= count {
-                return ids;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("turn should park on {count} approval cards");
-    }
-
-    async fn approve(router: &axum::Router, bearer: &str, chat: ChatId, call_id: CallId) {
-        let decide = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/chats/{chat}/approvals/{call_id}"))
-                    .header(header::AUTHORIZATION, bearer)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"decision": "approve"}).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(decide.status(), StatusCode::NO_CONTENT);
-    }
-
     let first = wait_for_approvals(&store, chat.id, 1).await[0];
-    approve(&router, &bearer, chat.id, first).await;
+    approve_delegation(&router, &bearer, chat.id, first).await;
 
     let both = wait_for_approvals(&store, chat.id, 2).await;
     assert_eq!(both[0], first);
@@ -471,35 +494,138 @@ async fn a_gated_spawn_batch_is_carried_across_the_approval_park() {
         1,
         "the carried batch must reach the gate without another model call"
     );
-    approve(&router, &bearer, chat.id, both[1]).await;
+    approve_delegation(&router, &bearer, chat.id, both[1]).await;
 
-    for _ in 0..500 {
-        let calls = store.list_tool_calls(chat.id).await.unwrap();
-        let spawns = calls
-            .iter()
-            .filter(|call| call.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL)
-            .collect::<Vec<_>>();
-        if spawns.len() == 2
-            && spawns
-                .iter()
-                .all(|call| call.status == openwave_core::ToolCallStatus::Completed)
-        {
-            // Both delegations were answered under the call ids the model
-            // streamed, so nothing is left dangling in the transcript.
-            assert_eq!(
-                spawns
-                    .iter()
-                    .map(|call| call.id)
-                    .collect::<std::collections::HashSet<_>>(),
-                both.iter()
-                    .copied()
-                    .collect::<std::collections::HashSet<_>>()
-            );
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("both spawns in the batch should complete under their original call ids");
+    // Both delegations were answered under the call ids the model streamed,
+    // so nothing is left dangling in the transcript.
+    assert_eq!(
+        wait_for_completed_spawn_call_ids(&store, chat.id, 2)
+            .await
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        both.iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    );
+}
+
+/// An approval that commits before a spawn checkpoint is superseded remains
+/// admitted. The worker applies the steer, replays that exact call without a
+/// second card, then resumes gating the still-ungated siblings in model order.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_spawn_is_replayed_after_checkpoint_steer() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let checkpoint_entered = Arc::new(Notify::new());
+    let release_checkpoint = Arc::new(Notify::new());
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        checkpoint_entered.clone(),
+        release_checkpoint.clone(),
+    ));
+    injected.do_not_pause_terminal();
+    injected.pause_before_next_spawn_checkpoint();
+    let store: Arc<dyn Store> = injected;
+    let provider = Arc::new(GatedSpawnBatchProvider::default());
+    let mut tools = ToolRegistry::new();
+    tools.register_foreground_agent_orchestration();
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 4,
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "delegate both questions",
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+
+    let first = wait_for_approvals(&store, chat.id, 1).await[0];
+    approve_delegation(&router, &bearer, chat.id, first).await;
+    tokio::time::timeout(Duration::from_secs(2), checkpoint_entered.notified())
+        .await
+        .expect("approved spawn reached its checkpoint");
+
+    assert_eq!(
+        steer_turn(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "incorporate this new constraint",
+            false,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    release_checkpoint.notify_one();
+
+    let both = wait_for_approvals(&store, chat.id, 2).await;
+    assert_eq!(both.len(), 2, "the admitted head must not ask twice");
+    assert_eq!(both[0], first);
+    assert_ne!(both[1], first, "the tail keeps its own approval card");
+    assert_eq!(
+        provider.foreground_calls.load(Ordering::SeqCst),
+        1,
+        "the admitted request and tail must replay without another model call"
+    );
+    let first_call = store
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == first)
+        .expect("the approved spawn keeps its original call id");
+    assert_eq!(first_call.status, openwave_core::ToolCallStatus::Completed);
+    assert!(store
+        .list_events(chat.id, 0)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| matches!(
+            &event.event,
+            AgentEvent::UserSteered { content, .. }
+                if content == "incorporate this new constraint"
+        )));
+
+    approve_delegation(&router, &bearer, chat.id, both[1]).await;
+    assert_eq!(
+        wait_for_completed_spawn_call_ids(&store, chat.id, 2)
+            .await
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        both.iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    );
+    assert_eq!(approval_call_ids(&store, chat.id).await, both);
 }
 
 #[tokio::test(flavor = "multi_thread")]
