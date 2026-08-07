@@ -16,9 +16,24 @@ Open **Settings → Providers**. Each provider is its own section: turn on
 | --- | --- |
 | Anthropic | API key |
 | OpenAI | A ChatGPT subscription (**Sign in with ChatGPT**) or a platform API key |
-| Google Gemini | A Gemini API key, or a Google Cloud service-account JSON plus a Vertex AI location |
+| Google Gemini | Gemini Developer API key |
+| Google Vertex AI | Google Cloud service-account JSON containing its project ID; curated routes use the `global` location |
 | xAI | API key, plus the model IDs you want to use |
 | OpenAI-compatible | Base URL, optional key, plus the model IDs you want to use |
+
+For new Google Cloud service-account setups, use the **Google Vertex AI**
+provider row. Paste the JSON key file; OpenWave reads the project ID from that
+credential and uses the `global` Vertex location for its curated native Gemini
+and Claude models. It derives the Google hosts itself: this setup does not
+accept a custom endpoint, a regional or multi-region location, or ambient
+Application Default Credentials.
+
+**Google Gemini** is the direct Gemini Developer API path and accepts a Gemini
+API key. If an older OpenWave installation already stored a service account
+under Gemini, the panel keeps that credential and its validated location
+available for compatibility with older regional models. New service-account
+configurations belong under Google Vertex AI, and curated Gemini 3 requests use
+the global endpoint in either case.
 
 The panel never shows a saved key back to you. It shows a status —
 **API key set**, **Signed in with ChatGPT**, **Credential set**, or
@@ -36,10 +51,11 @@ from the environment as a fallback when no credential is saved.
 
 ## Curated models
 
-Anthropic, OpenAI, and Gemini ship with a curated list of models. Nothing to
-configure — once the provider has a credential, its models appear in the
-picker. The list is versioned with the app and refreshed as providers ship new
-models.
+Anthropic, OpenAI, Gemini, and Google Vertex AI ship with a curated list of
+models. Vertex includes provider-qualified native Gemini and Claude rows.
+Nothing to configure — once the provider has a credential, its models appear
+in the picker. The list is versioned with the app and refreshed as providers
+ship new models.
 
 Each entry carries what the app actually knows about it: context window,
 maximum output, whether it accepts images, whether it produces a reasoning
