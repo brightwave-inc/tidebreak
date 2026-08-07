@@ -454,11 +454,12 @@ pub(crate) enum ContextCheckpoint {
 }
 
 #[derive(DeriveIden)]
-pub(crate) enum ExecFileSnapshot {
+pub(crate) enum ExecFileChange {
     Table,
     Id,
     ChatId,
     TurnId,
+    Classification,
     FolderPath,
     RelativePath,
     ChangeKind,
@@ -466,17 +467,6 @@ pub(crate) enum ExecFileSnapshot {
     PriorByteLen,
     NewSha256,
     UndoState,
-    RecordedAt,
-}
-
-#[derive(DeriveIden)]
-pub(crate) enum ExecFileRejection {
-    Table,
-    Id,
-    ChatId,
-    TurnId,
-    FolderPath,
-    RelativePath,
     Reason,
     RecordedAt,
 }

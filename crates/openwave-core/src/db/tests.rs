@@ -1481,6 +1481,81 @@ async fn the_file_change_journal_keeps_only_the_newest_retained_turns() {
     assert_eq!(store.get_blob_retirement(newest_blob).await.unwrap(), None);
 }
 
+/// Applied and rejected changes share one journal but not one write: a turn
+/// records each in its own transaction, so its rows carry different timestamps.
+/// Retention is a window over turns, and a turn inside it keeps both halves —
+/// pruning that cut on a timestamp instead would retract the earlier half of a
+/// turn it was supposed to be retaining.
+#[tokio::test]
+async fn retention_keeps_both_halves_of_a_turn_recorded_in_two_writes() {
+    use crate::model::{
+        ExecFileChange, ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshotRecord,
+        ExecUndoState, EXEC_SNAPSHOT_RETAINED_TURNS,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    // The straddling turn: its rejection is journaled before its applied
+    // change, so the turn's own rows bracket every later cutoff candidate.
+    let straddling_turn = TurnId::new();
+    store
+        .record_exec_file_rejections(
+            chat.id,
+            straddling_turn,
+            &[ExecFileRejectionRecord {
+                folder_path: "/Users/someone/Documents".into(),
+                relative_path: "locked.md".into(),
+                reason: ExecFileRejectionReason::Stale,
+            }],
+        )
+        .await
+        .unwrap();
+    store
+        .record_exec_file_snapshots(
+            chat.id,
+            straddling_turn,
+            &[ExecFileSnapshotRecord {
+                folder_path: "/Users/someone/Documents".into(),
+                relative_path: "notes.md".into(),
+                change: ExecFileChange::Overwritten,
+                prior_blob_id: None,
+                prior_byte_len: None,
+                new_sha256: None,
+                undo: ExecUndoState::Available,
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Fill the window exactly, so pruning runs with that turn still inside it.
+    for index in 1..EXEC_SNAPSHOT_RETAINED_TURNS {
+        store
+            .record_exec_file_snapshots(
+                chat.id,
+                TurnId::new(),
+                &[ExecFileSnapshotRecord {
+                    folder_path: "/Users/someone/Documents".into(),
+                    relative_path: format!("later-{index}.md"),
+                    change: ExecFileChange::Created,
+                    prior_blob_id: None,
+                    prior_byte_len: None,
+                    new_sha256: None,
+                    undo: ExecUndoState::Available,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+
+    let rejections = store.list_exec_file_rejections(chat.id).await.unwrap();
+    assert!(
+        rejections.iter().any(|row| row.turn_id == straddling_turn),
+        "a retained turn lost the half it journaled first"
+    );
+}
+
 #[tokio::test]
 async fn orphan_blob_retirement_only_queues_missing_or_completed_episodes() {
     let (_dir, store) = temp_store().await;

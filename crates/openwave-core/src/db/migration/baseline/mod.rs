@@ -168,12 +168,8 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             sandbox::agent_run_task_plan_indexes(),
         ),
         entry(
-            sandbox::exec_file_snapshot_table(),
-            sandbox::exec_file_snapshot_indexes(),
-        ),
-        entry(
-            sandbox::exec_file_rejection_table(),
-            sandbox::exec_file_rejection_indexes(),
+            sandbox::exec_file_change_table(),
+            sandbox::exec_file_change_indexes(),
         ),
         // Multi-agent wait sets, which reference sandbox admissions.
         entry(

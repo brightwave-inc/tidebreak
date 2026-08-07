@@ -360,6 +360,31 @@ pub const MAX_EXEC_SNAPSHOT_BYTES: u64 = 32 * 1_024 * 1_024;
 /// by the ordinary retirement path.
 pub const EXEC_SNAPSHOT_RETAINED_TURNS: usize = 20;
 
+/// Which outcome a journaled file-change row records.
+///
+/// Applied changes and rejected ones share an identity, a turn, a path, and a
+/// retention window, and readers merge them back into one per-turn report. The
+/// discriminator is what tells the two column sets apart on a single row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecFileChangeClassification {
+    /// The write reached the user's folder; the row carries its undo state.
+    Applied,
+    /// The write was deliberately left out; the row carries its reason.
+    Rejected,
+}
+
+impl ExecFileChangeClassification {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// One journaled file change from a turn's staged write-back.
 ///
 /// `prior_blob_id` doubles as the prior digest: blob ids are content-derived, so

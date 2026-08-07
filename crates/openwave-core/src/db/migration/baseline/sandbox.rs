@@ -3,8 +3,11 @@
 use sea_orm_migration::prelude::*;
 
 use crate::db::migration::idens::*;
+// The iden enum for the journal table is `ExecFileChange`; the model enum of
+// the same name is what its `change_kind` column holds.
 use crate::model::{
-    ExecFileChange, ExecFileRejectionReason, ExecUndoState, SandboxToolCallStatus, ToolCallRecord,
+    ExecFileChange as ExecFileChangeKind, ExecFileChangeClassification, ExecFileRejectionReason,
+    ExecUndoState, SandboxToolCallStatus, ToolCallRecord,
 };
 
 /// The durable sandbox provisioning record: the intent a container run commits
@@ -610,138 +613,110 @@ pub(super) fn sandbox_spawn_checkpoint_indexes() -> Vec<IndexCreateStatement> {
     ]
 }
 
-/// One file an exec turn changed in a user folder, with the blob holding its
-/// prior contents. This is what undo replays from.
-pub(super) fn exec_file_snapshot_table() -> TableCreateStatement {
+/// One file an exec turn tried to change in a user folder.
+///
+/// Applied and rejected writes share one table because they are one journal:
+/// the same identity, turn, folder, path, and retention window, differing only
+/// in outcome. `classification` names that outcome and decides which columns
+/// carry it — the applied side holds the blob with the file's prior contents,
+/// which is what undo replays from; the rejected side holds only why the write
+/// was left out. The per-classification CHECKs are what keep a row from
+/// claiming both.
+pub(super) fn exec_file_change_table() -> TableCreateStatement {
     Table::create()
-        .table(ExecFileSnapshot::Table)
+        .table(ExecFileChange::Table)
         .col(
-            ColumnDef::new(ExecFileSnapshot::Id)
+            ColumnDef::new(ExecFileChange::Id)
                 .uuid()
                 .not_null()
                 .primary_key(),
         )
-        .col(ColumnDef::new(ExecFileSnapshot::ChatId).uuid().not_null())
-        .col(ColumnDef::new(ExecFileSnapshot::TurnId).uuid().not_null())
+        .col(ColumnDef::new(ExecFileChange::ChatId).uuid().not_null())
+        .col(ColumnDef::new(ExecFileChange::TurnId).uuid().not_null())
         .col(
-            ColumnDef::new(ExecFileSnapshot::FolderPath)
+            ColumnDef::new(ExecFileChange::Classification)
+                .string_len(16)
+                .not_null(),
+        )
+        .col(ColumnDef::new(ExecFileChange::FolderPath).text().not_null())
+        .col(
+            ColumnDef::new(ExecFileChange::RelativePath)
                 .text()
                 .not_null(),
         )
         .col(
-            ColumnDef::new(ExecFileSnapshot::RelativePath)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(ExecFileSnapshot::ChangeKind)
+            ColumnDef::new(ExecFileChange::ChangeKind)
                 .string_len(32)
-                .not_null(),
+                .null(),
         )
-        .col(ColumnDef::new(ExecFileSnapshot::PriorBlobId).uuid().null())
+        .col(ColumnDef::new(ExecFileChange::PriorBlobId).uuid().null())
         .col(
-            ColumnDef::new(ExecFileSnapshot::PriorByteLen)
+            ColumnDef::new(ExecFileChange::PriorByteLen)
                 .big_integer()
                 .null(),
         )
         .col(
-            ColumnDef::new(ExecFileSnapshot::NewSha256)
+            ColumnDef::new(ExecFileChange::NewSha256)
                 .string_len(64)
                 .null(),
         )
         .col(
-            ColumnDef::new(ExecFileSnapshot::UndoState)
+            ColumnDef::new(ExecFileChange::UndoState)
                 .string_len(32)
-                .not_null(),
+                .null(),
         )
+        .col(ColumnDef::new(ExecFileChange::Reason).string_len(32).null())
         .col(
-            ColumnDef::new(ExecFileSnapshot::RecordedAt)
+            ColumnDef::new(ExecFileChange::RecordedAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
+        // `Restrict`, not `Cascade`: a chat's prior-content blobs are live
+        // references, so deleting the chat has to clear this journal
+        // explicitly and retire what it freed rather than dropping the rows
+        // out from under the blob store.
         .foreign_key(
             ForeignKey::create()
-                .name("fk_exec_file_snapshot_chat")
-                .from(ExecFileSnapshot::Table, ExecFileSnapshot::ChatId)
+                .name("fk_exec_file_change_chat")
+                .from(ExecFileChange::Table, ExecFileChange::ChatId)
                 .to(Chat::Table, Chat::Id)
                 .on_delete(ForeignKeyAction::Restrict),
         )
-        .check(Expr::col(ExecFileSnapshot::PriorBlobId).ne(uuid::Uuid::nil()))
-        .check(Expr::col(ExecFileSnapshot::PriorByteLen).gte(0))
-        .check(Expr::col(ExecFileSnapshot::ChangeKind).is_in([
-            ExecFileChange::Created.as_str(),
-            ExecFileChange::Overwritten.as_str(),
-            ExecFileChange::Deleted.as_str(),
+        .check(Expr::col(ExecFileChange::Classification).is_in([
+            ExecFileChangeClassification::Applied.as_str(),
+            ExecFileChangeClassification::Rejected.as_str(),
         ]))
-        .check(Expr::col(ExecFileSnapshot::UndoState).is_in([
+        // Each classification carries its own outcome and nothing from the
+        // other's: an applied change records what it did and whether it can be
+        // undone, a rejected one records only why it was not applied.
+        .check(
+            Expr::col(ExecFileChange::Classification)
+                .eq(ExecFileChangeClassification::Applied.as_str())
+                .and(Expr::col(ExecFileChange::ChangeKind).is_not_null())
+                .and(Expr::col(ExecFileChange::UndoState).is_not_null())
+                .and(Expr::col(ExecFileChange::Reason).is_null())
+                .or(Expr::col(ExecFileChange::Classification)
+                    .eq(ExecFileChangeClassification::Rejected.as_str())
+                    .and(Expr::col(ExecFileChange::Reason).is_not_null())
+                    .and(Expr::col(ExecFileChange::ChangeKind).is_null())
+                    .and(Expr::col(ExecFileChange::UndoState).is_null())
+                    .and(Expr::col(ExecFileChange::PriorBlobId).is_null())
+                    .and(Expr::col(ExecFileChange::PriorByteLen).is_null())
+                    .and(Expr::col(ExecFileChange::NewSha256).is_null())),
+        )
+        .check(Expr::col(ExecFileChange::PriorBlobId).ne(uuid::Uuid::nil()))
+        .check(Expr::col(ExecFileChange::PriorByteLen).gte(0))
+        .check(Expr::col(ExecFileChange::ChangeKind).is_in([
+            ExecFileChangeKind::Created.as_str(),
+            ExecFileChangeKind::Overwritten.as_str(),
+            ExecFileChangeKind::Deleted.as_str(),
+        ]))
+        .check(Expr::col(ExecFileChange::UndoState).is_in([
             ExecUndoState::Available.as_str(),
             ExecUndoState::PriorTooLarge.as_str(),
             ExecUndoState::PriorUnreadable.as_str(),
         ]))
-        .to_owned()
-}
-
-pub(super) fn exec_file_snapshot_indexes() -> Vec<IndexCreateStatement> {
-    vec![
-        Index::create()
-            .name("idx_exec_file_snapshot_blob")
-            .table(ExecFileSnapshot::Table)
-            .col(ExecFileSnapshot::PriorBlobId)
-            .to_owned(),
-        // Retention prunes the oldest turns of one chat, and undo reads the
-        // newest; both walk this index rather than the whole journal.
-        Index::create()
-            .name("idx_exec_file_snapshot_chat_turn")
-            .table(ExecFileSnapshot::Table)
-            .col(ExecFileSnapshot::ChatId)
-            .col(ExecFileSnapshot::RecordedAt)
-            .col(ExecFileSnapshot::TurnId)
-            .to_owned(),
-    ]
-}
-
-/// Staged writes that were deliberately left out of the user's folder. These
-/// rows carry report metadata only; successful writes go to
-/// `exec_file_snapshot`, whose blob references power undo.
-pub(super) fn exec_file_rejection_table() -> TableCreateStatement {
-    Table::create()
-        .table(ExecFileRejection::Table)
-        .col(
-            ColumnDef::new(ExecFileRejection::Id)
-                .uuid()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(ExecFileRejection::ChatId).uuid().not_null())
-        .col(ColumnDef::new(ExecFileRejection::TurnId).uuid().not_null())
-        .col(
-            ColumnDef::new(ExecFileRejection::FolderPath)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(ExecFileRejection::RelativePath)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(ExecFileRejection::Reason)
-                .string_len(32)
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(ExecFileRejection::RecordedAt)
-                .timestamp_with_time_zone()
-                .not_null(),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_exec_file_rejection_chat")
-                .from(ExecFileRejection::Table, ExecFileRejection::ChatId)
-                .to(Chat::Table, Chat::Id)
-                .on_delete(ForeignKeyAction::Cascade),
-        )
-        .check(Expr::col(ExecFileRejection::Reason).is_in([
+        .check(Expr::col(ExecFileChange::Reason).is_in([
             ExecFileRejectionReason::Stale.as_str(),
             ExecFileRejectionReason::SnapshotUnavailable.as_str(),
             ExecFileRejectionReason::StagedFileTooLarge.as_str(),
@@ -751,14 +726,23 @@ pub(super) fn exec_file_rejection_table() -> TableCreateStatement {
         .to_owned()
 }
 
-pub(super) fn exec_file_rejection_indexes() -> Vec<IndexCreateStatement> {
-    vec![Index::create()
-        .name("idx_exec_file_rejection_chat_turn")
-        .table(ExecFileRejection::Table)
-        .col(ExecFileRejection::ChatId)
-        .col(ExecFileRejection::RecordedAt)
-        .col(ExecFileRejection::TurnId)
-        .to_owned()]
+pub(super) fn exec_file_change_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_exec_file_change_blob")
+            .table(ExecFileChange::Table)
+            .col(ExecFileChange::PriorBlobId)
+            .to_owned(),
+        // Retention prunes the oldest turns of one chat, and undo reads the
+        // newest; both walk this index rather than the whole journal.
+        Index::create()
+            .name("idx_exec_file_change_chat_turn")
+            .table(ExecFileChange::Table)
+            .col(ExecFileChange::ChatId)
+            .col(ExecFileChange::RecordedAt)
+            .col(ExecFileChange::TurnId)
+            .to_owned(),
+    ]
 }
 
 /// A background agent's durable task plan: one row per run, replaced whole by
