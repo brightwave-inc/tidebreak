@@ -5,6 +5,7 @@ import type {
   ApiClient,
   AgentRun,
   AgentActivityHistoryEntry,
+  AgentRunTaskPlan,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
   PendingPlanApproval,
@@ -214,6 +215,9 @@ type MessageListProps = {
   onLoadBackgroundAgentActivity?: (
     runId: string,
   ) => Promise<AgentActivityHistoryEntry[]>;
+  onLoadBackgroundAgentTaskPlan?: (
+    runId: string,
+  ) => Promise<AgentRunTaskPlan | null>;
   onOpenBackgroundAgent?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
   /** The connected client, so a background agent row can fetch debug info. */
@@ -294,6 +298,7 @@ export function MessageList({
   onRetryBackgroundAgentRuns = () => undefined,
   onCancelBackgroundAgentRun = async () => undefined,
   onLoadBackgroundAgentActivity = async () => [],
+  onLoadBackgroundAgentTaskPlan = async () => null,
   onOpenBackgroundAgent,
   onOpenOutput,
   busy,
@@ -351,6 +356,7 @@ export function MessageList({
       retry: onRetryBackgroundAgentRuns,
       cancel: onCancelBackgroundAgentRun,
       loadActivity: onLoadBackgroundAgentActivity,
+      loadTaskPlan: onLoadBackgroundAgentTaskPlan,
       open: onOpenBackgroundAgent,
       openOutput: onOpenOutput,
       client: backgroundAgentClient,
@@ -594,6 +600,7 @@ export function groupMessageItems(
     retry: () => void;
     cancel: (runId: string) => Promise<void>;
     loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+    loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
     open?: (runId: string) => void;
     openOutput?: (outputId: string) => void;
     /** The connected client, so a row's "Copy debug info" can fetch its run. */
@@ -605,6 +612,7 @@ export function groupMessageItems(
     retry: () => undefined,
     cancel: async () => undefined,
     loadActivity: async () => [],
+    loadTaskPlan: async () => null,
   },
   retry?: { failureId: string; onRetry: () => void },
 ) {
@@ -764,6 +772,7 @@ export function groupMessageItems(
             onRetry={backgroundAgents.retry}
             onCancel={backgroundAgents.cancel}
             onLoadActivity={backgroundAgents.loadActivity}
+            onLoadTaskPlan={backgroundAgents.loadTaskPlan}
             onOpen={backgroundAgents.open}
             onOpenOutput={backgroundAgents.openOutput}
             {...(backgroundAgents.client && chatId

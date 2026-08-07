@@ -408,6 +408,7 @@ export function ChatView({
           onRetryBackgroundAgentRuns={agentRuns.refresh}
           onCancelBackgroundAgentRun={agentRuns.cancel}
           onLoadBackgroundAgentActivity={agentRuns.loadActivity}
+          onLoadBackgroundAgentTaskPlan={agentRuns.loadTaskPlan}
           onOpenBackgroundAgent={onOpenAgentPanel}
           onOpenOutput={onOpenOutput}
           backgroundAgentClient={client}

@@ -30,6 +30,7 @@ function run(
 
 const noop = async () => undefined;
 const noActivity = async () => [];
+const noTaskPlan = async () => null;
 
 describe("BackgroundAgentList", () => {
   it("groups only the durable children of its own spawn step", () => {
@@ -49,6 +50,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -75,6 +77,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -98,6 +101,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -115,6 +119,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -131,6 +136,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -147,6 +153,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -170,6 +177,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 
@@ -186,6 +194,7 @@ describe("BackgroundAgentList", () => {
         onRetry={() => undefined}
         onCancel={noop}
         onLoadActivity={noActivity}
+        onLoadTaskPlan={noTaskPlan}
       />,
     );
 

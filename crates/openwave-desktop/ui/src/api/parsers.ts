@@ -9,6 +9,7 @@ import {
   type PendingOutputWritebackRequest as WirePendingOutputWritebackRequest,
   type PendingPlanApproval as WirePendingPlanApproval,
   type PendingUserQuestions as WirePendingUserQuestions,
+  type AgentRunTaskPlan as WireAgentRunTaskPlan,
   type TaskPlan as WireTaskPlan,
   type TaskPlanStep as WireTaskPlanStep,
   type TaskPlanStepStatus,
@@ -39,6 +40,7 @@ import {
   type ResultEntryKind,
   type ResultFailure,
   type SandboxAgentCancellation,
+  type AgentRunTaskPlan,
   type TaskPlan,
   type TaskPlanStep,
   type ToolActionPreview,
@@ -292,26 +294,69 @@ const MAX_TASK_PLAN_STEP_CHARS = 500;
 /**
  * The chat's current plan, or `null` when it has none or the payload is not
  * one the renderer will draw.
- *
- * All or nothing, because a plan is written as one replacement and read as one
- * checklist: dropping a step that failed validation would leave a list that
- * silently disagrees with the work the agent thinks it is doing, which is a
- * worse answer than showing no plan at all.
  */
 export function parseTaskPlan(value: unknown): TaskPlan | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireTaskPlan>(value, ["turn_id", "steps", "updated_at"]) ||
     !nonEmptyBounded(value.turn_id, 128) ||
-    !nonEmptyBounded(value.updated_at, 64) ||
-    !Array.isArray(value.steps) ||
-    value.steps.length === 0 ||
-    value.steps.length > MAX_TASK_PLAN_STEPS
+    !nonEmptyBounded(value.updated_at, 64)
+  ) {
+    return null;
+  }
+  const steps = parseTaskPlanSteps(value.steps);
+  if (steps === null) return null;
+  return {
+    turn_id: value.turn_id,
+    steps,
+    updated_at: value.updated_at,
+  };
+}
+
+/**
+ * One background run's plan, or `null` when it has none or the payload is not
+ * one the renderer will draw.
+ *
+ * The run-scoped twin of {@link parseTaskPlan}, holding the steps to the same
+ * rules — they are the same model-authored text written through the same tool,
+ * and the only difference is what owns the list.
+ */
+export function parseAgentRunTaskPlan(value: unknown): AgentRunTaskPlan | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireAgentRunTaskPlan>(value, ["run_id", "steps", "updated_at"]) ||
+    !nonEmptyBounded(value.run_id, 128) ||
+    !nonEmptyBounded(value.updated_at, 64)
+  ) {
+    return null;
+  }
+  const steps = parseTaskPlanSteps(value.steps);
+  if (steps === null) return null;
+  return {
+    run_id: value.run_id,
+    steps,
+    updated_at: value.updated_at,
+  };
+}
+
+/**
+ * The steps of a plan, or `null` when any one of them fails.
+ *
+ * All or nothing, because a plan is written as one replacement and read as one
+ * checklist: dropping a step that failed validation would leave a list that
+ * silently disagrees with the work the agent thinks it is doing, which is a
+ * worse answer than showing no plan at all.
+ */
+function parseTaskPlanSteps(value: unknown): TaskPlanStep[] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_TASK_PLAN_STEPS
   ) {
     return null;
   }
   const steps: TaskPlanStep[] = [];
-  for (const step of value.steps) {
+  for (const step of value) {
     if (
       !isRecord(step) ||
       !onlyKeys<WireTaskPlanStep>(step, ["content", "status"]) ||
@@ -326,11 +371,7 @@ export function parseTaskPlan(value: unknown): TaskPlan | null {
       status: step.status as TaskPlanStepStatus,
     });
   }
-  return {
-    turn_id: value.turn_id,
-    steps,
-    updated_at: value.updated_at,
-  };
+  return steps;
 }
 
 export function parsePendingUserQuestions(
