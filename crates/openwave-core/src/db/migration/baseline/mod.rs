@@ -152,10 +152,6 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             sandbox::sandbox_provision_indexes(),
         ),
         entry(
-            sandbox::sandbox_agent_admission_table(),
-            sandbox::sandbox_agent_admission_indexes(),
-        ),
-        entry(
             sandbox::sandbox_tool_call_table(),
             sandbox::sandbox_tool_call_indexes(),
         ),
@@ -171,7 +167,7 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             sandbox::exec_file_change_table(),
             sandbox::exec_file_change_indexes(),
         ),
-        // Multi-agent wait sets, which reference sandbox admissions.
+        // Multi-agent wait sets, which reference the admitted child runs.
         entry(
             agent_run::turn_agent_run_wait_set_table(),
             agent_run::turn_agent_run_wait_set_indexes(),

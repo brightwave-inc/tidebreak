@@ -1417,25 +1417,27 @@ async fn delegated_file_resource_on<C>(
 where
     C: ConnectionTrait,
 {
-    let Some(admission) = entities::sandbox_agent_admission::Entity::find_by_id(agent_run_id.0)
+    let Some(run) = entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::Id.eq(agent_run_id.0))
         .one(conn)
         .await
         .map_err(store_err)?
     else {
         return Ok(None);
     };
-    if admission.child_run_id != agent_run_id.0
-        || admission.chat_id != chat_id.0
-        || admission.parent_run_id.is_nil()
-        || admission.origin_turn_id.is_nil()
-        || AgentRunId::sandbox_for_spawn_call(CallId(admission.spawn_call_id)) != agent_run_id
+    if run.admitted_at.is_none()
+        || run.chat_id != chat_id.0
+        || run.parent_id.is_none_or(|id| id.is_nil())
+        || run.origin_turn_id.is_none_or(|id| id.is_nil())
+        || run.spawn_call_id.is_none_or(|spawn_call_id| {
+            AgentRunId::sandbox_for_spawn_call(CallId(spawn_call_id)) != agent_run_id
+        })
     {
         return Ok(None);
     }
-    let (Some(root_uuid), Some(relative_path)) = (
-        admission.delegated_root_id,
-        admission.delegated_relative_path,
-    ) else {
+    let (Some(root_uuid), Some(relative_path)) =
+        (run.delegated_root_id, run.delegated_relative_path)
+    else {
         return Ok(None);
     };
     let Ok(root_id) = HostRootId::from_uuid(root_uuid) else {

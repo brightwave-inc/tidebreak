@@ -1117,28 +1117,14 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "INSERT INTO agent_run (id, chat_id, parent_id, parent_depth, spawn_call_id, tier, execution_location, depth, status, input, attempt_count, max_attempts, claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, finished_at, last_error_code, last_error_detail, created_at, updated_at) \
-                 SELECT '{}', '{}', '{}', 0, '{}', 'background', 'in_process', 1, 'queued', 'admitted while cancellation waited', 0, 3, 0, admitted_at, admitted_at + interval '30 minutes', NULL, NULL, NULL, NULL, NULL, NULL, admitted_at, admitted_at \
+                "INSERT INTO agent_run (id, chat_id, parent_id, parent_depth, spawn_call_id, tier, execution_location, depth, status, input, attempt_count, max_attempts, claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, finished_at, last_error_code, last_error_detail, origin_turn_id, delegated_root_id, delegated_relative_path, admitted_at, created_at, updated_at) \
+                 SELECT '{}', '{}', '{}', 0, '{}', 'background', 'in_process', 1, 'queued', 'admitted while cancellation waited', 0, 3, 0, admitted_at, admitted_at + interval '30 minutes', NULL, NULL, NULL, NULL, NULL, NULL, '{}', NULL, NULL, admitted_at, admitted_at, admitted_at \
                  FROM (SELECT clock_timestamp() AS admitted_at) AS admission_clock",
                 child_id.0,
                 chat.id.0,
                 AgentRunId::foreground_for_chat(chat.id).0,
                 call.0,
-            ),
-        ))
-        .await
-        .unwrap();
-    blocker
-        .execute_raw(Statement::from_string(
-            DatabaseBackend::Postgres,
-            format!(
-                "INSERT INTO sandbox_agent_admission (child_run_id, parent_run_id, origin_turn_id, chat_id, spawn_call_id, admitted_at) \
-                 VALUES ('{}', '{}', '{}', '{}', '{}', clock_timestamp())",
-                child_id.0,
-                AgentRunId::foreground_for_chat(chat.id).0,
                 origin.id.0,
-                chat.id.0,
-                call.0,
             ),
         ))
         .await

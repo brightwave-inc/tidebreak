@@ -100,107 +100,6 @@ pub(super) fn sandbox_provision_indexes() -> Vec<IndexCreateStatement> {
     vec![]
 }
 
-/// The admission record for a sandbox-hosted child agent run: the spawn call
-/// that admitted it, the parent run and origin turn it belongs to, and the
-/// optional delegated root the child may reach.
-pub(super) fn sandbox_agent_admission_table() -> TableCreateStatement {
-    Table::create()
-        .table(SandboxAgentAdmission::Table)
-        .col(
-            ColumnDef::new(SandboxAgentAdmission::ChildRunId)
-                .uuid()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(SandboxAgentAdmission::ParentRunId)
-                .uuid()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(SandboxAgentAdmission::OriginTurnId)
-                .uuid()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(SandboxAgentAdmission::ChatId)
-                .uuid()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(SandboxAgentAdmission::SpawnCallId)
-                .uuid()
-                .not_null()
-                .unique_key(),
-        )
-        .col(ColumnDef::new(SandboxAgentAdmission::DelegatedRootId).uuid())
-        .col(ColumnDef::new(SandboxAgentAdmission::DelegatedRelativePath).text())
-        .col(
-            ColumnDef::new(SandboxAgentAdmission::AdmittedAt)
-                .timestamp_with_time_zone()
-                .not_null(),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_sandbox_agent_admission_child")
-                .from_tbl(SandboxAgentAdmission::Table)
-                .from_col(SandboxAgentAdmission::ChildRunId)
-                .from_col(SandboxAgentAdmission::ParentRunId)
-                .from_col(SandboxAgentAdmission::ChatId)
-                .from_col(SandboxAgentAdmission::SpawnCallId)
-                .to_tbl(AgentRun::Table)
-                .to_col(AgentRun::Id)
-                .to_col(AgentRun::ParentId)
-                .to_col(AgentRun::ChatId)
-                .to_col(AgentRun::SpawnCallId)
-                .on_delete(ForeignKeyAction::Cascade),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_sandbox_agent_admission_origin_turn")
-                .from_tbl(SandboxAgentAdmission::Table)
-                .from_col(SandboxAgentAdmission::OriginTurnId)
-                .from_col(SandboxAgentAdmission::ChatId)
-                .from_col(SandboxAgentAdmission::ParentRunId)
-                .to_tbl(TurnRun::Table)
-                .to_col(TurnRun::Id)
-                .to_col(TurnRun::ChatId)
-                .to_col(TurnRun::AgentRunId)
-                .on_delete(ForeignKeyAction::Cascade),
-        )
-        // A delegated root is a pair or nothing at all.
-        .check(
-            Expr::col(SandboxAgentAdmission::DelegatedRootId)
-                .is_null()
-                .and(Expr::col(SandboxAgentAdmission::DelegatedRelativePath).is_null())
-                .or(Expr::col(SandboxAgentAdmission::DelegatedRootId)
-                    .is_not_null()
-                    .and(Expr::col(SandboxAgentAdmission::DelegatedRelativePath).is_not_null())),
-        )
-        .to_owned()
-}
-
-pub(super) fn sandbox_agent_admission_indexes() -> Vec<IndexCreateStatement> {
-    vec![
-        Index::create()
-            .name("idx_sandbox_agent_admission_outstanding")
-            .table(SandboxAgentAdmission::Table)
-            .col(SandboxAgentAdmission::OriginTurnId)
-            .col(SandboxAgentAdmission::AdmittedAt)
-            .col(SandboxAgentAdmission::ChildRunId)
-            .to_owned(),
-        Index::create()
-            .name("idx_sandbox_agent_admission_wait_owner")
-            .table(SandboxAgentAdmission::Table)
-            .col(SandboxAgentAdmission::ChildRunId)
-            .col(SandboxAgentAdmission::OriginTurnId)
-            .col(SandboxAgentAdmission::ParentRunId)
-            .col(SandboxAgentAdmission::ChatId)
-            .unique()
-            .to_owned(),
-    ]
-}
-
 /// A tool call a sandboxed agent run issued, parked against the claim that
 /// owns the run and leased out to whichever executor picks it up.
 /// `retry_wait` parks one classified-transient failure until its single
@@ -512,11 +411,11 @@ pub(super) fn sandbox_spawn_checkpoint_table() -> TableCreateStatement {
                 .from_col(SandboxSpawnCheckpoint::OriginTurnId)
                 .from_col(SandboxSpawnCheckpoint::ParentRunId)
                 .from_col(SandboxSpawnCheckpoint::ChatId)
-                .to_tbl(SandboxAgentAdmission::Table)
-                .to_col(SandboxAgentAdmission::ChildRunId)
-                .to_col(SandboxAgentAdmission::OriginTurnId)
-                .to_col(SandboxAgentAdmission::ParentRunId)
-                .to_col(SandboxAgentAdmission::ChatId)
+                .to_tbl(AgentRun::Table)
+                .to_col(AgentRun::Id)
+                .to_col(AgentRun::OriginTurnId)
+                .to_col(AgentRun::ParentId)
+                .to_col(AgentRun::ChatId)
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .foreign_key(

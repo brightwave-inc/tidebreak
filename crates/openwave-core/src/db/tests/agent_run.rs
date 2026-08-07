@@ -647,23 +647,21 @@ async fn sandbox_admission_rejects_cross_turn_identity_and_fk_corruption() {
     let (first_turn, first_lease) = live_turn_for_sandbox_test(&store, first_chat.id).await;
     let (second_turn, second_lease) = live_turn_for_sandbox_test(&store, second_chat.id).await;
     let call = CallId::new();
-    let child = match store
-        .admit_sandbox_agent_run(
-            first_turn.id,
-            call,
-            "owned by the first turn",
-            first_lease,
-            first_turn.steer_revision,
-            2,
-            Utc::now(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-    {
-        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
-        outcome => panic!("unexpected admission outcome: {outcome:?}"),
-    };
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                first_turn.id,
+                call,
+                "owned by the first turn",
+                first_lease,
+                first_turn.steer_revision,
+                2,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::Accepted { .. })
+    ));
     assert!(matches!(
         store
             .admit_sandbox_agent_run(
@@ -679,18 +677,6 @@ async fn sandbox_admission_rejects_cross_turn_identity_and_fk_corruption() {
             .unwrap(),
         Some(crate::AdmitSandboxAgentRunOutcome::IdentityConflict)
     ));
-
-    let malformed = crate::db::entities::sandbox_agent_admission::ActiveModel {
-        child_run_id: Set(child.id.0),
-        parent_run_id: Set(second_turn.agent_run_id.0),
-        origin_turn_id: Set(second_turn.id.0),
-        chat_id: Set(second_chat.id.0),
-        spawn_call_id: Set(CallId::new().0),
-        delegated_root_id: Set(None),
-        delegated_relative_path: Set(None),
-        admitted_at: Set(Utc::now()),
-    };
-    assert!(malformed.insert(&store.conn).await.is_err());
 }
 
 #[tokio::test]
@@ -953,6 +939,10 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        origin_turn_id: Set(None),
+        delegated_root_id: Set(None),
+        delegated_relative_path: Set(None),
+        admitted_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -1003,6 +993,10 @@ async fn scheduler_never_claims_a_sandbox_row_without_an_admission_receipt() {
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        origin_turn_id: Set(None),
+        delegated_root_id: Set(None),
+        delegated_relative_path: Set(None),
+        admitted_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -2663,6 +2657,10 @@ async fn active_work_counts_gate_host_quiescence() {
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        origin_turn_id: Set(None),
+        delegated_root_id: Set(None),
+        delegated_relative_path: Set(None),
+        admitted_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }
