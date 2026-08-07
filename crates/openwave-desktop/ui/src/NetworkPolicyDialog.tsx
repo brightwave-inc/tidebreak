@@ -82,8 +82,13 @@ export function NetworkPolicyDialog({
   // edit does not survive into the next visit.
   const [hosts, setHosts] = useState("");
   const [includePackages, setIncludePackages] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const controlsDisabled = disabled || saving;
 
   function openAndHydrate(next: boolean) {
+    if (!next && saving) return;
+    if (!next) setSaveError(null);
     if (next && value.mode === "allowed_hosts") {
       setHosts(value.allowed_hosts.join("\n"));
       setIncludePackages(value.package_managers);
@@ -91,9 +96,19 @@ export function NetworkPolicyDialog({
     onOpenChange(next);
   }
 
-  function select(policy: NetworkPolicy) {
-    void onChange(policy);
-    onOpenChange(false);
+  async function select(policy: NetworkPolicy) {
+    if (controlsDisabled) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onChange(policy);
+      onOpenChange(false);
+    } catch (caught) {
+      const message = String(caught).replace(/^Error:\s*/, "").trim();
+      setSaveError(message || "Could not update the network policy.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   function saveCustom() {
@@ -105,7 +120,7 @@ export function NetworkPolicyDialog({
           .filter(Boolean),
       ),
     ];
-    select({
+    void select({
       mode: "allowed_hosts",
       allowed_hosts: allowedHosts,
       package_managers: includePackages,
@@ -114,7 +129,7 @@ export function NetworkPolicyDialog({
 
   return (
     <Dialog open={open} onOpenChange={openAndHydrate}>
-      <DialogContent className="max-w-md space-y-3">
+      <DialogContent className="max-w-md space-y-3" aria-busy={saving}>
         <DialogHeader>
           <DialogTitle>Code execution network</DialogTitle>
           <DialogDescription>
@@ -132,8 +147,8 @@ export function NetworkPolicyDialog({
                   key={option.mode}
                   type="button"
                   className="flex w-full items-start gap-2 rounded-md p-2 text-left hover:bg-muted"
-                  disabled={disabled}
-                  onClick={() => select({ mode: option.mode })}
+                  disabled={controlsDisabled}
+                  onClick={() => void select({ mode: option.mode })}
                 >
                   <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1">
@@ -160,7 +175,7 @@ export function NetworkPolicyDialog({
           <Textarea
             aria-label="Allowed network hosts"
             value={hosts}
-            disabled={disabled}
+            disabled={controlsDisabled}
             onChange={(event) => setHosts(event.target.value)}
             placeholder={"api.example.com\nfiles.example.com"}
             className="min-h-20 font-mono text-xs"
@@ -168,7 +183,7 @@ export function NetworkPolicyDialog({
           <label className="flex items-center gap-2 text-xs">
             <Checkbox
               checked={includePackages}
-              disabled={disabled}
+              disabled={controlsDisabled}
               onCheckedChange={(checked) => setIncludePackages(checked === true)}
             />
             Also allow package registries
@@ -177,12 +192,22 @@ export function NetworkPolicyDialog({
             type="button"
             size="sm"
             className="w-full"
-            disabled={disabled || (!hosts.trim() && !includePackages)}
+            disabled={controlsDisabled || (!hosts.trim() && !includePackages)}
             onClick={saveCustom}
           >
             Use custom policy
           </Button>
         </div>
+        {saving && (
+          <p className="text-muted-foreground text-sm" role="status">
+            Saving network policy…
+          </p>
+        )}
+        {saveError && (
+          <p className="text-destructive text-sm" role="alert">
+            {saveError}
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   );
