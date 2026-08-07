@@ -485,9 +485,15 @@ function OpenAiCredentialSection({
     (authorizationUrl: string | null) => {
       stopPolling();
       setPendingUrl(authorizationUrl);
-      const settle = (signedIn: boolean, failure?: string) => {
+      // The server dropped the attempt — an API key saved, credentials
+      // cleared, or a newer sign-in started. Nothing failed, so stop without
+      // reporting anything.
+      const stopQuietly = () => {
         stopPolling();
         setPendingUrl(null);
+      };
+      const settle = (signedIn: boolean, failure?: string) => {
+        stopQuietly();
         if (signedIn) {
           onChanged();
           toast.success("Signed in with ChatGPT");
@@ -500,8 +506,9 @@ function OpenAiCredentialSection({
         void client
           .getOpenaiChatgptStatus()
           .then((status) => {
-            if (status.error) settle(false, status.error);
-            else if (status.signed_in) settle(true);
+            if (status.signed_in) settle(true);
+            else if (status.error) settle(false, status.error);
+            else if (!status.pending_authorization_url) stopQuietly();
           })
           .catch(() => {
             /* transient; keep polling until the deadline below */
