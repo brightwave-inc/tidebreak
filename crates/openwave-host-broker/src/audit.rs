@@ -754,19 +754,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let first = event(AuditTarget::Subject);
         let second = event(AuditTarget::Subject);
-        let first_len = serde_json::to_vec(&first).unwrap().len();
-        let second_len = serde_json::to_vec(&second).unwrap().len();
-        // Rotation triggers on a strict `>` bound. Follow-up events pick up new
-        // UUID/timestamp bytes, so cap the file from the first line and require
-        // later lines to stay within it — otherwise recovery can append into a
-        // fresh active file and spuriously rotate, wiping the archive on Windows.
-        assert!(second_len <= first_len);
-        let line_bytes = first_len as u64 + 1;
+        let first_line_bytes = serde_json::to_vec(&first).unwrap().len() as u64 + 1;
+        let second_line_bytes = serde_json::to_vec(&second).unwrap().len() as u64 + 1;
+        // Either line fits by itself, while the two together must rotate. Using
+        // the same follow-up event across the interrupted append and recovery
+        // keeps variable timestamp precision out of the boundary under test.
+        let line_bytes = first_line_bytes.max(second_line_bytes);
         let sink = JsonlAuditSink::open(temp.path()).with_max_file_bytes(line_bytes);
         sink.record(&first).unwrap();
         sink.writer.lock().unwrap().fail_rotation_after_archive_once = true;
         assert!(matches!(
-            sink.record(&event(AuditTarget::Subject)),
+            sink.record(&second),
             Err(AuditError::PublicationAmbiguous)
         ));
 
