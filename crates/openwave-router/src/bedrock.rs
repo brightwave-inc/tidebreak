@@ -23,57 +23,9 @@ use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{ChatRequest, ModelProvider, ProviderEvent, ProviderId};
 
 use crate::http::RequestAuthenticator;
-use crate::{AnthropicProvider, OpenAiProvider};
+use crate::{AnthropicProvider, AwsCredentials, OpenAiProvider};
 
 const BEDROCK_MANTLE_SERVICE: &str = "bedrock-mantle";
-
-/// Long-lived AWS credentials used to sign Bedrock requests.
-///
-/// Every field is secret material. The type's `Debug` implementation never
-/// renders values, and the server keeps the serialized credential in the
-/// profile secret store rather than the operational database.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AwsCredentials {
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: Option<String>,
-}
-
-impl AwsCredentials {
-    pub fn new(
-        access_key_id: impl Into<String>,
-        secret_access_key: impl Into<String>,
-        session_token: Option<String>,
-    ) -> Self {
-        Self {
-            access_key_id: access_key_id.into(),
-            secret_access_key: secret_access_key.into(),
-            session_token,
-        }
-    }
-
-    pub fn access_key_id(&self) -> &str {
-        &self.access_key_id
-    }
-
-    pub fn secret_access_key(&self) -> &str {
-        &self.secret_access_key
-    }
-
-    pub fn session_token(&self) -> Option<&str> {
-        self.session_token.as_deref()
-    }
-}
-
-impl std::fmt::Debug for AwsCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsCredentials")
-            .field("access_key_id", &"***")
-            .field("secret_access_key", &"***")
-            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
-            .finish()
-    }
-}
 
 /// Authentication accepted by direct Bedrock Mantle endpoints.
 #[derive(Clone)]
@@ -330,6 +282,11 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router as AxumRouter;
+    use futures::StreamExt as _;
     use openwave_core::provider::ChatMessage;
     use openwave_core::Role;
 
@@ -422,6 +379,44 @@ mod tests {
         assert!(matches!(
             error,
             AgentError::Provider(message) if message == "bedrock request failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn messages_context_window_stops_are_attributed_to_bedrock() {
+        async fn context_overflow() -> impl IntoResponse {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"model_context_window_exceeded\"}}\n\n",
+            )
+        }
+
+        let app = AxumRouter::new().fallback(post(context_overflow));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = BedrockProvider::new("us-east-1", BedrockAuth::ApiKey("secret".into()))
+            .unwrap()
+            .with_base_url(format!("http://{address}"));
+        let events: Vec<ProviderEvent> = provider
+            .stream(ChatRequest {
+                model: "anthropic.claude-sonnet-5".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        server.abort();
+
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::Failed { error }]
+                if error.kind == "prompt_too_long"
+                    && error.message
+                        == "bedrock: the model's context window was exceeded mid-response"
         ));
     }
 }

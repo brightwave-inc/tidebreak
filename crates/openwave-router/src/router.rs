@@ -82,6 +82,54 @@ pub struct VertexRoute {
     model_families: Vec<(String, VertexModelFamily)>,
 }
 
+/// Long-lived AWS credentials used to sign Bedrock requests.
+///
+/// This carrier remains available without the `bedrock` transport feature so
+/// the public route configuration types keep compiling in narrower feature
+/// builds. Every field is secret material, and `Debug` never renders values.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AwsCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+impl AwsCredentials {
+    pub fn new(
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+        session_token: Option<String>,
+    ) -> Self {
+        Self {
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            session_token,
+        }
+    }
+
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
+    pub fn secret_access_key(&self) -> &str {
+        &self.secret_access_key
+    }
+
+    pub fn session_token(&self) -> Option<&str> {
+        self.session_token.as_deref()
+    }
+}
+
+impl std::fmt::Debug for AwsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsCredentials")
+            .field("access_key_id", &"***")
+            .field("secret_access_key", &"***")
+            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
 /// Bedrock-specific endpoint and SigV4 metadata.
 ///
 /// The region is non-secret. AWS credentials stay redacted through their own
@@ -90,11 +138,11 @@ pub struct VertexRoute {
 #[derive(Clone)]
 pub struct BedrockRoute {
     region: String,
-    credentials: Option<crate::AwsCredentials>,
+    credentials: Option<AwsCredentials>,
 }
 
 impl BedrockRoute {
-    pub fn new(region: impl Into<String>, credentials: Option<crate::AwsCredentials>) -> Self {
+    pub fn new(region: impl Into<String>, credentials: Option<AwsCredentials>) -> Self {
         Self {
             region: region.into(),
             credentials,

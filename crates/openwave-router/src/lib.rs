@@ -41,7 +41,7 @@ pub mod vertex;
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicProvider;
 #[cfg(feature = "bedrock")]
-pub use bedrock::{valid_aws_region, AwsCredentials, BedrockAuth, BedrockProvider};
+pub use bedrock::{valid_aws_region, BedrockAuth, BedrockProvider};
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiProvider;
 #[cfg(feature = "_http")]

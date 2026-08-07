@@ -1397,7 +1397,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         return events;
                     }
                 }
-                let mut reason = match map_stop_reason(reason) {
+                let mut reason = match map_stop_reason(stream_provider_label(state), reason) {
                     StopOutcome::Reason(reason) => reason,
                     // Whatever streamed before this stop is a fragment, so no
                     // clean stop may follow it. Failing the stream is what the
@@ -1529,7 +1529,7 @@ enum StopOutcome {
     Interrupted(ProviderErrorInfo),
 }
 
-fn map_stop_reason(reason: &str) -> StopOutcome {
+fn map_stop_reason(provider_label: &str, reason: &str) -> StopOutcome {
     match reason {
         "max_tokens" => StopOutcome::Reason(StopReason::MaxTokens),
         "tool_use" => StopOutcome::Reason(StopReason::ToolUse),
@@ -1544,16 +1544,16 @@ fn map_stop_reason(reason: &str) -> StopOutcome {
         // same oversized request.
         "model_context_window_exceeded" => {
             StopOutcome::Interrupted(ProviderErrorInfo::from_error(&AgentError::PromptTooLong(
-                "anthropic: the model's context window was exceeded mid-response".into(),
+                format!("{provider_label}: the model's context window was exceeded mid-response"),
             )))
         }
         // The provider suspended the turn for a long-running server-side tool
         // and expects the paused response replayed back to resume it. Nothing
         // here drives that continuation, so the paused fragment is incomplete
         // by construction and must not read as a finished answer.
-        "pause_turn" => StopOutcome::Interrupted(ProviderErrorInfo::provider(
-            "anthropic: the provider paused the turn",
-        )),
+        "pause_turn" => StopOutcome::Interrupted(ProviderErrorInfo::provider(format!(
+            "{provider_label}: the provider paused the turn"
+        ))),
         // "end_turn" and anything we don't yet model fall back to a clean end.
         _ => StopOutcome::Reason(StopReason::EndTurn),
     }
@@ -2287,17 +2287,32 @@ mod tests {
     #[test]
     fn maps_stop_reasons() {
         use StopOutcome::{Interrupted, Reason};
-        assert_eq!(map_stop_reason("tool_use"), Reason(StopReason::ToolUse));
-        assert_eq!(map_stop_reason("max_tokens"), Reason(StopReason::MaxTokens));
-        assert_eq!(map_stop_reason("refusal"), Reason(StopReason::Refusal));
         assert_eq!(
-            map_stop_reason("future_reason"),
+            map_stop_reason("anthropic", "tool_use"),
+            Reason(StopReason::ToolUse)
+        );
+        assert_eq!(
+            map_stop_reason("anthropic", "max_tokens"),
+            Reason(StopReason::MaxTokens)
+        );
+        assert_eq!(
+            map_stop_reason("anthropic", "refusal"),
+            Reason(StopReason::Refusal)
+        );
+        assert_eq!(
+            map_stop_reason("anthropic", "future_reason"),
             Reason(StopReason::EndTurn)
         );
-        assert!(matches!(map_stop_reason("pause_turn"), Interrupted(_)));
         assert!(matches!(
-            map_stop_reason("model_context_window_exceeded"),
-            Interrupted(_)
+            map_stop_reason("bedrock", "pause_turn"),
+            Interrupted(error) if error.message == "bedrock: the provider paused the turn"
+        ));
+        assert!(matches!(
+            map_stop_reason("bedrock", "model_context_window_exceeded"),
+            Interrupted(error)
+                if error.kind == "prompt_too_long"
+                    && error.message
+                        == "bedrock: the model's context window was exceeded mid-response"
         ));
     }
 
