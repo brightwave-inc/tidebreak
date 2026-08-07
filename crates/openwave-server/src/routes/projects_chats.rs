@@ -207,6 +207,7 @@ pub async fn create_chat(
     if let Some(policy) = body.network_policy.as_mut() {
         crate::code_execution::normalize_network_policy(policy)?;
     }
+    let title = normalize_chat_title(body.title)?;
     // An explicit choice at creation is as much "the last-chosen mode" as one
     // made mid-chat — the home composer's pickers land here, never at PATCH —
     // so record it the same way. Absent fields never clear a sticky default;
@@ -267,7 +268,7 @@ pub async fn create_chat(
     let chat = Chat {
         id: ChatId::new(),
         project_id: body.project_id,
-        title: normalize_chat_title(body.title)?,
+        title,
         model,
         reasoning_effort,
         permission_mode,

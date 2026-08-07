@@ -630,6 +630,42 @@ async fn chat_settings_stick_to_the_next_chat() {
 }
 
 #[tokio::test]
+async fn rejected_chat_creation_does_not_change_sticky_defaults() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let rejected = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "title": "t".repeat(routes::MAX_CHAT_TITLE_CHARS + 1),
+                        "model": "m-rejected",
+                        "reasoning_effort": "high",
+                        "permission_mode": "allow",
+                        "network_policy": {"mode": "off"},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let next = make_chat(&router, &bearer).await;
+    assert_eq!(next.model, None);
+    assert_eq!(next.reasoning_effort, None);
+    assert_eq!(next.permission_mode, None);
+    assert_eq!(next.network_policy, openwave_core::NetworkPolicy::Open);
+}
+
+#[tokio::test]
 async fn chat_network_policy_defaults_open_and_persists_normalized_exact_hosts() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
