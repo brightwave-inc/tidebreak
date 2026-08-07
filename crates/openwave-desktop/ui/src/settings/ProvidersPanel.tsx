@@ -506,8 +506,11 @@ function OpenAiCredentialSection({
         void client
           .getOpenaiChatgptStatus()
           .then((status) => {
-            if (status.signed_in) settle(true);
-            else if (status.error) settle(false, status.error);
+            // Prefer a recorded failure over vault-only tokens: `signed_in`
+            // requires the Oauth marker, but a half-finished persist can still
+            // leave tokens while progress is Failed.
+            if (status.error) settle(false, status.error);
+            else if (status.signed_in) settle(true);
             else if (!status.pending_authorization_url) stopQuietly();
           })
           .catch(() => {
@@ -520,7 +523,10 @@ function OpenAiCredentialSection({
         // recorded instead of leaving the row waiting on nothing.
         void client
           .getOpenaiChatgptStatus()
-          .then((status) => settle(status.signed_in, status.error))
+          .then((status) => {
+            if (status.error) settle(false, status.error);
+            else settle(status.signed_in);
+          })
           .catch(() => settle(false));
       }, CHATGPT_SIGN_IN_TIMEOUT_MS);
     },

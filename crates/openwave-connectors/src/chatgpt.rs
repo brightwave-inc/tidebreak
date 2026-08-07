@@ -237,10 +237,29 @@ impl ChatGptAuth {
                     ),
                 )
             })?;
-        // Hosts with IPv6 disabled simply have no `::1` to serve.
-        let v6 = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, CALLBACK_PORT))
-            .await
-            .ok();
+        // Prefer dual-stack: browsers that resolve `localhost` to `::1` never
+        // reach the IPv4 listener. Skip only when the host has no IPv6; a
+        // port conflict on `::1` is the same class of failure as on IPv4.
+        let v6 = match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, CALLBACK_PORT)).await {
+            Ok(listener) => Some(listener),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(chatgpt_error(
+                    "sign-in",
+                    format!(
+                        "could not bind [::1]:{CALLBACK_PORT} ({error}); \
+                         close any Codex login or free the port and try again"
+                    ),
+                ));
+            }
+        };
         let listeners = LoopbackListeners { v4, v6 };
         let verifier = random_token();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));

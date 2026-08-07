@@ -140,7 +140,17 @@ impl ChatGptRuntime {
             .store_session(session)
             .await
             .map_err(ServerError::from)?;
-        // Mutual exclusivity: OAuth marker replaces any API key.
+        // Mutual exclusivity: OAuth marker replaces any API key. If either
+        // follow-up write fails, clear the vault so `status` and routing never
+        // see tokens without the Oauth marker that makes them usable.
+        if let Err(error) = self.finish_persisted_session().await {
+            let _ = self.connection.sign_out().await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn finish_persisted_session(&self) -> Result<(), ServerError> {
         providers::write_credential(
             &*self.secrets,
             ProviderKind::Openai,
@@ -172,7 +182,15 @@ impl ChatGptRuntime {
     /// Pending / failed status for the OpenAI Providers row.
     pub async fn status(&self) -> ChatGptSignInStatus {
         let progress = self.sign_in.lock().await.progress.clone();
-        let signed_in = openwave_connectors::has_stored_chatgpt_credentials(&*self.secrets).await;
+        // Same bar as routing: vault tokens alone are not a usable session.
+        let signed_in = matches!(
+            providers::read_credential(&*self.secrets, ProviderKind::Openai)
+                .await
+                .ok()
+                .flatten(),
+            Some(ProviderCredential::Oauth {})
+        ) && openwave_connectors::has_stored_chatgpt_credentials(&*self.secrets)
+            .await;
         match progress {
             SignInProgress::Pending { authorization_url } => ChatGptSignInStatus {
                 signed_in,
