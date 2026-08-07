@@ -147,20 +147,23 @@ RUN apt-get update \
     && mkdir -p /opt/openwave/exec-scripts
 
 # Node.js, for the JavaScript deck path: pptxgenjs builds a PPTX from script
-# without the layout gymnastics the Python route needs for the same slide. Only
-# the interpreter and the bundled npm are taken from the pinned distribution
-# image — the `npm`/`npx` entry points are the symlinks that image ships,
-# recreated here explicitly so what lands on PATH is visible in this file.
+# without the layout gymnastics the Python route needs for the same slide. The
+# interpreter and npm bootstrap come from the pinned distribution image; npm is
+# replaced with an exact compatible pin below so its bundled dependency tree is
+# updated independently of Node releases. The `npm`/`npx` entry points are the
+# symlinks that image ships, recreated here explicitly so what lands on PATH is
+# visible in this file.
 COPY --from=nodedist /usr/local/bin/node /usr/local/bin/node
 COPY --from=nodedist /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
-# The deck library, pinned exactly like the Python closure and installed
-# globally at build time so a run needs no `npm install` and no registry
-# egress. npm verifies each package against the registry's integrity hash on
-# install, which is the equivalent of pip's `--require-hashes` here.
-RUN npm install --global --no-audit --no-fund --loglevel=error pptxgenjs@4.0.1 \
+# npm and the deck library are pinned exactly like the Python closure and
+# installed globally at build time so a run needs no package-manager egress.
+# npm verifies each package against the registry's integrity hash on install,
+# which is the equivalent of pip's `--require-hashes` here.
+RUN npm install --global --no-audit --no-fund --loglevel=error npm@10.9.9 \
+    && npm install --global --no-audit --no-fund --loglevel=error pptxgenjs@4.0.1 \
     && npm cache clean --force \
     && rm -rf /root/.npm
 
