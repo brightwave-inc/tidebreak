@@ -50,6 +50,7 @@ describe("BackgroundAgentList activity disclosure", () => {
         onRetry={() => undefined}
         onCancel={async () => undefined}
         onLoadActivity={loadActivity}
+        onLoadTaskPlan={async () => null}
       />
     );
 

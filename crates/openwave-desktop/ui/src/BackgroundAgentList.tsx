@@ -2,7 +2,17 @@ import { useEffect, useState } from "react";
 import { Bot, ChevronDown, ChevronRight, Square } from "lucide-react";
 import { toast } from "sonner";
 
-import type { AgentActivityHistoryEntry, AgentRun, ApiClient } from "./api";
+import type {
+  AgentActivityHistoryEntry,
+  AgentRun,
+  AgentRunTaskPlan,
+  ApiClient,
+} from "./api";
+import {
+  AgentRunTaskPlanChecklist,
+  AgentRunTaskPlanProgress,
+  useAgentRunTaskPlan,
+} from "./AgentRunTaskPlan";
 import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
 import {
   AGENT_RUN_STATUS_GROUPS,
@@ -37,6 +47,8 @@ type BackgroundAgentListProps = {
   onCancel: (runId: string) => Promise<void>;
   /** Fetch a run's ordered, renderer-safe activity history. */
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+  /** Fetch a run's full task plan, read only when a row is opened. */
+  onLoadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
   /** Open one run's dedicated panel beside the conversation. */
   onOpen?: (runId: string) => void;
   /** Open one file a run submitted, from its pill on the row. */
@@ -58,6 +70,7 @@ export function BackgroundAgentList({
   onRetry,
   onCancel,
   onLoadActivity,
+  onLoadTaskPlan,
   onOpen,
   onOpenOutput,
 }: BackgroundAgentListProps) {
@@ -175,6 +188,7 @@ export function BackgroundAgentList({
                         run={run}
                         onCancel={onCancel}
                         onLoadActivity={onLoadActivity}
+                        onLoadTaskPlan={onLoadTaskPlan}
                         onOpen={onOpen}
                         onOpenOutput={onOpenOutput}
                         expanded={expandedRunIds.has(run.id)}
@@ -239,6 +253,7 @@ function BackgroundAgentRow({
   run,
   onCancel,
   onLoadActivity,
+  onLoadTaskPlan,
   onOpen,
   onOpenOutput,
   expanded,
@@ -251,6 +266,7 @@ function BackgroundAgentRow({
   run: AgentRun;
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+  onLoadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
   onOpen?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
   expanded: boolean;
@@ -264,6 +280,15 @@ function BackgroundAgentRow({
     run.updated_at,
     expanded,
     onLoadActivity,
+  );
+  const live = RUNNING_AGENT_STATUSES.has(run.status);
+  // Keyed on the plan's own timestamp rather than the run's: the row re-reads
+  // the list when the plan moves on, not on every poll that touches the run.
+  const taskPlan = useAgentRunTaskPlan(
+    run.id,
+    run.task_plan?.updated_at,
+    expanded && run.task_plan !== undefined,
+    onLoadTaskPlan,
   );
 
   // The Stop control is offered only while a fresh cancel would still change
@@ -352,6 +377,11 @@ function BackgroundAgentRow({
           </Button>
         )}
       </div>
+      {run.task_plan && (
+        <div className="mt-1.5 pl-5">
+          <AgentRunTaskPlanProgress run={run} live={live} />
+        </div>
+      )}
       {run.submitted_outputs.length > 0 && (
         <div className="mt-2 pl-5">
           <SubmittedOutputPills
@@ -361,14 +391,15 @@ function BackgroundAgentRow({
         </div>
       )}
       {expanded && (
-        <div id={contentId} className="mt-2 pl-5">
+        <div id={contentId} className="mt-2 flex flex-col gap-2 pl-5">
+          {run.task_plan && (
+            <AgentRunTaskPlanChecklist state={taskPlan} live={live} />
+          )}
           <AgentActivityTimeline
             state={activity}
-            active={RUNNING_AGENT_STATUSES.has(run.status)}
+            active={live}
             activeLabel={agentRunStatusDetail(run)}
-            expanded={
-              activityExpanded ?? RUNNING_AGENT_STATUSES.has(run.status)
-            }
+            expanded={activityExpanded ?? live}
             onExpandedChange={onActivityExpandedChange}
           />
         </div>

@@ -67,6 +67,7 @@ import {
   type AgentRunProgress,
   type LocalVoiceInfo,
   type InboxItem,
+  type AgentRunTaskPlan,
   type PendingChatPrompt,
   type TaskPlan,
 } from "./types";
@@ -80,6 +81,7 @@ import {
   parsePendingPlanApproval,
   parsePendingToolApproval,
   parsePendingUserQuestions,
+  parseAgentRunTaskPlan,
   parseSandboxAgentCancellation,
   parseTaskPlan,
 } from "./parsers";
@@ -1053,6 +1055,25 @@ export class ApiClient {
       { headers: this.headers() },
     );
     return parseAgentActivityHistory(body);
+  }
+
+  /**
+   * The full ordered checklist one background run keeps, or `null`.
+   *
+   * The run snapshot already carries the count and the current step, which is
+   * all a status row needs; this is the list behind it, read when a reader
+   * opens the run. A wrong-chat, foreground, or missing run answers `404`,
+   * which surfaces as a thrown error.
+   */
+  async getAgentRunTaskPlan(
+    chatId: string,
+    runId: string,
+  ): Promise<AgentRunTaskPlan | null> {
+    const body = await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/agent-runs/${encodeURIComponent(runId)}/task-plan`,
+      { headers: this.headers() },
+    );
+    return parseAgentRunTaskPlan(body);
   }
 
   /**

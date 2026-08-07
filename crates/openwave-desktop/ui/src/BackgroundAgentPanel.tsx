@@ -13,6 +13,11 @@ import {
   fetchAgentRunProgress,
 } from "./AgentRunDebugReport";
 import { agentRunStatusDetail, RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
+import {
+  AgentRunTaskPlanChecklist,
+  AgentRunTaskPlanProgress,
+  useAgentRunTaskPlan,
+} from "./AgentRunTaskPlan";
 import type { AgentRun, ApiClient } from "./api";
 import { ClipboardCopyButton, copyPlainText } from "./ClipboardCopyButton";
 import { MessageMarkdown } from "./MessageMarkdown";
@@ -66,6 +71,14 @@ export function BackgroundAgentPanel({
     run !== null,
     agentRuns.loadActivity,
   );
+  // Opening the panel is the intent the row's chevron stands for, so the full
+  // checklist is read here rather than waiting on a second disclosure.
+  const taskPlan = useAgentRunTaskPlan(
+    runId,
+    run?.task_plan?.updated_at,
+    run?.task_plan !== undefined,
+    agentRuns.loadTaskPlan,
+  );
 
   const stopButton = stoppable ? (
     <Button
@@ -107,6 +120,7 @@ export function BackgroundAgentPanel({
         <BackgroundAgentDetail
           run={run}
           activity={activity}
+          taskPlan={taskPlan}
           chatId={chatId}
           onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
         />
@@ -139,11 +153,13 @@ export function BackgroundAgentPanel({
 function BackgroundAgentDetail({
   run,
   activity,
+  taskPlan,
   chatId,
   onOpenOutput,
 }: {
   run: AgentRun;
   activity: ReturnType<typeof useAgentRunActivity>;
+  taskPlan: ReturnType<typeof useAgentRunTaskPlan>;
   chatId: string;
   onOpenOutput?: (outputId: string) => void;
 }) {
@@ -190,6 +206,12 @@ function BackgroundAgentDetail({
         )}
       </div>
       <div className="mt-3 flex shrink-0 flex-col gap-2 border-b px-4 pb-3 empty:hidden">
+        {run.task_plan && (
+          <div className="flex flex-col gap-1.5">
+            <AgentRunTaskPlanProgress run={run} live={live} />
+            <AgentRunTaskPlanChecklist state={taskPlan} live={live} />
+          </div>
+        )}
         {run.submitted_outputs.length > 0 && (
           <SubmittedOutputPills
             outputs={run.submitted_outputs}

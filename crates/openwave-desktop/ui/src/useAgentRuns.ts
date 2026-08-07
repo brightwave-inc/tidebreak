@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AgentActivityHistoryEntry, AgentRun, ApiClient } from "./api";
+import type {
+  AgentActivityHistoryEntry,
+  AgentRun,
+  AgentRunTaskPlan,
+  ApiClient,
+} from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 import type { ChatMessage } from "./MessageList";
 
@@ -38,6 +43,14 @@ export type AgentRuns = {
   cancel: (runId: string) => Promise<void>;
   /** Fetch the ordered, renderer-safe activity history for one background run. */
   loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
+  /**
+   * Fetch the full checklist one background run keeps.
+   *
+   * The snapshot poll already carries the count and the current step, so this
+   * is read only when a reader opens the run — and again when the snapshot
+   * says the plan has moved on.
+   */
+  loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
 };
 
 /**
@@ -137,6 +150,13 @@ export function useAgentRuns(
     },
     [client, chatId],
   );
+  const loadTaskPlan = useCallback(
+    async (runId: string) => {
+      if (!client || !chatId) return null;
+      return client.getAgentRunTaskPlan(chatId, runId);
+    },
+    [client, chatId],
+  );
 
   return {
     runs,
@@ -145,5 +165,6 @@ export function useAgentRuns(
     refresh: () => refreshRef.current?.(),
     cancel,
     loadActivity,
+    loadTaskPlan,
   };
 }

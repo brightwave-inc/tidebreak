@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
   parseAgentActivityHistory,
+  parseAgentRunTaskPlan,
   parseFolderAccessRequest,
   parseInboxItem,
   parsePendingChatPrompt,
@@ -260,6 +261,35 @@ describe("parseTaskPlan", () => {
     ["no steps at all", { ...safe, steps: [] }],
   ])("rejects the whole plan over %s", (_case, payload) => {
     expect(parseTaskPlan(payload)).toBeNull();
+  });
+});
+
+describe("parseAgentRunTaskPlan", () => {
+  const safe = {
+    run_id: "run-1",
+    updated_at: "2026-08-07T12:00:00Z",
+    steps: [
+      { content: "Gather the figures", status: "completed" },
+      { content: "Write the summary", status: "in_progress" },
+    ],
+  };
+
+  it("accepts a well-formed run plan", () => {
+    expect(parseAgentRunTaskPlan(safe)).toEqual(safe);
+  });
+
+  // The steps go through the same validation the chat plan's do, so this
+  // covers the run-shaped envelope and one representative step failure rather
+  // than restating the step table already pinned above.
+  it.each([
+    ["a plan keyed by turn rather than run", { ...safe, turn_id: "turn-1" }],
+    [
+      "a step outside the closed status vocabulary",
+      { ...safe, steps: [{ content: "Write it", status: "skipped" }] },
+    ],
+    ["no steps at all", { ...safe, steps: [] }],
+  ])("rejects the whole plan over %s", (_case, payload) => {
+    expect(parseAgentRunTaskPlan(payload)).toBeNull();
   });
 });
 
