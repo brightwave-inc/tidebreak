@@ -671,10 +671,10 @@ async fn deleting_a_chat_retires_only_the_attachment_blobs_it_still_owns() {
     store.create_chat(&doomed).await.unwrap();
     accept_quiesced_turn_with_images(&store, doomed.id, "about to go", &[shared, private]).await;
 
-    assert_eq!(
+    assert!(matches!(
         store.delete_chat(doomed.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert!(store
         .list_message_attachments(doomed.id)
         .await
@@ -721,10 +721,10 @@ async fn deleting_a_chat_retires_only_the_attachment_blobs_it_still_owns() {
     );
 
     // Deleting the last conversation holding it finally frees the shared blob.
-    assert_eq!(
+    assert!(matches!(
         store.delete_chat(kept.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
+        DeleteChatOutcome::Deleted { .. }
+    ));
     let later = now + chrono::Duration::seconds(1);
     assert_eq!(
         drain_blob_retirement_claims(&store, later).await,
@@ -762,10 +762,10 @@ async fn an_attachment_blob_shared_with_a_document_survives_either_owner() {
         .is_none());
 
     // Dropping the attachment too finally releases it.
-    assert_eq!(
+    assert!(matches!(
         store.delete_chat(chat.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
+        DeleteChatOutcome::Deleted { .. }
+    ));
     let later = now + chrono::Duration::seconds(1);
     let claimed = store
         .claim_blob_retirement(later, later + chrono::Duration::minutes(5))

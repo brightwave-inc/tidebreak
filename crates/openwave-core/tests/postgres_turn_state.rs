@@ -409,10 +409,10 @@ async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
         }
     }
 
-    assert_eq!(
+    assert!(matches!(
         store.delete_chat(chat_id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
+        DeleteChatOutcome::Deleted { .. }
+    ));
 }
 
 fn postgres_spawn_checkpoint_request(
@@ -3789,12 +3789,12 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(
+    assert!(matches!(
         store.delete_chat(chat.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
-    assert_eq!(
+        DeleteChatOutcome::Deleted { .. }
+    ));
+    assert!(matches!(
         store.delete_chat(race_chat.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
+        DeleteChatOutcome::Deleted { .. }
+    ));
 }

@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path as FsPath;
 
 use openwave_core::{
-    Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome, DocumentId, Message as StoredMessage,
-    MessageId, PermissionMode, Project, ProjectId, ReasoningEffort, Role, TurnId,
-    CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
+    AgentRunId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
+    Message as StoredMessage, MessageId, PermissionMode, Project, ProjectId, ReasoningEffort, Role,
+    TurnId, CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
 };
 
 use crate::error::ServerError;
@@ -758,7 +758,7 @@ pub async fn delete_chat(
     Path(id): Path<ChatId>,
 ) -> Result<StatusCode, ServerError> {
     match store.delete_chat(id).await? {
-        DeleteChatOutcome::Deleted => {
+        DeleteChatOutcome::Deleted { background_run_ids } => {
             state.blob_retirement_wake.notify_one();
             let scratch_root = state.config.data_dir.join("scratch");
             let cleanup =
@@ -774,6 +774,13 @@ pub async fn delete_chat(
                         "openwave: private scratch cleanup task stopped for chat {id}: {error}"
                     );
                 }
+            }
+            // Background-run workspaces are independent of the chat's private
+            // scratch directory. Deletion already refused while any run was
+            // non-terminal, so these directories are quiescent; erase them now
+            // rather than waiting up to a reaper grace period for privacy.
+            if !background_run_ids.is_empty() {
+                erase_deleted_chat_agent_run_workspaces(&state, id, background_run_ids).await;
             }
             Ok(StatusCode::NO_CONTENT)
         }
@@ -834,5 +841,53 @@ fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()>
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+/// Destroy the former chat's background-run workspaces.
+///
+/// Failures are logged and ignored the same way private-chat scratch cleanup
+/// is: the durable delete has already committed, so a stuck host directory must
+/// not turn a successful response into an ambiguous HTTP failure. The periodic
+/// agent-run scratch reaper remains the backstop.
+async fn erase_deleted_chat_agent_run_workspaces(
+    state: &AppState,
+    chat_id: ChatId,
+    run_ids: Vec<AgentRunId>,
+) {
+    let scratch_root = state.config.data_dir.join("scratch");
+    if let Some(code_execution) = state.code_execution.clone() {
+        for run_id in run_ids {
+            if let Err(error) = crate::agent_run_scratch_reaper::destroy_agent_run_workspace(
+                &code_execution,
+                &scratch_root,
+                run_id,
+            )
+            .await
+            {
+                eprintln!(
+                    "openwave: could not destroy agent-run workspace for chat {chat_id} run {run_id}: {error}"
+                );
+            }
+        }
+        return;
+    }
+    // Route tests assemble AppState without a configured provider; still wipe
+    // the host directories so local cleanup is not gated on provider resolution.
+    let cleanup = tokio::task::spawn_blocking(move || {
+        for run_id in run_ids {
+            let path = scratch_root.join(format!("agent-run-{run_id}"));
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!(
+                    "openwave: could not remove agent-run scratch for chat {chat_id} run {run_id}: {error}"
+                ),
+            }
+        }
+    })
+    .await;
+    if let Err(error) = cleanup {
+        eprintln!("openwave: agent-run scratch cleanup task stopped for chat {chat_id}: {error}");
     }
 }

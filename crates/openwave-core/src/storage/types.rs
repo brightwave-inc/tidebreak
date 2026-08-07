@@ -165,10 +165,15 @@ pub struct InboxItem {
 /// root remains attached. Root detachment is a broker-backed operation, so the
 /// deletion path never tries to revoke native authority as an incidental side
 /// effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteChatOutcome {
     /// The conversation and its terminal product history were removed.
-    Deleted,
+    ///
+    /// `background_run_ids` are the chat's former background runs, collected
+    /// before their rows were erased. The deletion path uses them to destroy
+    /// each run's `agent-run-*` workspace immediately; the periodic reaper only
+    /// remains as a backstop for crashes and foreign leftovers.
+    Deleted { background_run_ids: Vec<AgentRunId> },
     /// No conversation owns this id.
     NotFound,
     /// A foreground turn or sandboxed run can still make progress.

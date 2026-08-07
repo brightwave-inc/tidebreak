@@ -977,6 +977,81 @@ async fn delete_chat_removes_a_quiesced_conversation_and_reports_safe_conflicts(
     assert!(store.get_chat(active.id).await.unwrap().is_some());
 }
 
+/// Deleting a chat must erase its background runs' workspaces in the same
+/// request, not leave them for the next agent-run scratch reaper pass.
+#[tokio::test]
+async fn delete_chat_erases_background_run_workspaces_immediately() {
+    // No turn worker: this test claims the turn itself to admit the run.
+    let (router, token, store, dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "write notes").await;
+    let lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(lease, chrono::Duration::minutes(5), 8, 8)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    store
+        .submit_agent_run_result(run.id, lease, "done")
+        .await
+        .unwrap();
+    // Deletion refuses while the spawning turn is still live. Cancel and
+    // finish it after the child is terminal: that retires the pending inbox
+    // delivery and leaves a quiesced conversation the delete path accepts.
+    let turn = store
+        .list_turn_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("sandbox admission creates a turn");
+    let turn_lease = turn.lease_token.expect("test claimed the turn");
+    store
+        .request_turn_cancellation(turn.id, chrono::Utc::now())
+        .await
+        .unwrap()
+        .expect("a running origin turn can be cancelled");
+    store
+        .finish_turn_cancellation(turn.id, turn_lease, chrono::Utc::now())
+        .await
+        .unwrap()
+        .expect("the claimed worker acknowledges cancellation");
+
+    let workspace = dir
+        .path()
+        .join("scratch")
+        .join(format!("agent-run-{}", run.id));
+    std::fs::create_dir_all(workspace.join("tmp")).unwrap();
+    std::fs::write(workspace.join("notes.txt"), b"run-private").unwrap();
+    let chat_scratch = dir.path().join("scratch").join(chat.id.to_string());
+    std::fs::create_dir_all(&chat_scratch).unwrap();
+    std::fs::write(chat_scratch.join("kept-only-until-delete.txt"), b"chat").unwrap();
+
+    let deleted = router
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/chats/{}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(store.get_chat(chat.id).await.unwrap().is_none());
+    assert!(
+        !workspace.exists(),
+        "background-run workspace must not outlive the deleted chat"
+    );
+    assert!(!chat_scratch.exists());
+}
+
 #[tokio::test]
 async fn chat_transcript_replays_only_visible_durable_messages() {
     let (router, token, store, _dir) = test_app().await;
