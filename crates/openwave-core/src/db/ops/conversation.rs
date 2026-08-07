@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, HostRootId, MessageId, ProjectId, TurnId};
+use crate::id::{AgentRunId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
     ChatRootAttachment, Message, OwnerId, PermissionMode, ReasoningEffort, Role,
@@ -676,6 +676,18 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    // Background runs own host workspaces named `agent-run-<id>`. Capture the
+    // ids here, before the rows go, so the deletion path can destroy those
+    // directories immediately instead of waiting on the orphan reaper.
+    let background_run_ids = entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::agent_run::Column::Tier.eq("background"))
+        .all(&transaction)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|run| AgentRunId::from(run.id))
+        .collect::<Vec<_>>();
     let agent_runs = entities::agent_run::Entity::find()
         .select_only()
         .column(entities::agent_run::Column::Id)
@@ -770,7 +782,9 @@ pub(in crate::db) async fn delete_chat(
         .map_err(store_err)?;
 
     transaction.commit().await.map_err(store_err)?;
-    Ok(DeleteChatOutcome::Deleted)
+    Ok(DeleteChatOutcome::Deleted {
+        background_run_ids,
+    })
 }
 
 /// Read the visible transcript and cursor for future journal replay under the

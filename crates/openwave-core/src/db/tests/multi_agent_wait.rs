@@ -882,10 +882,7 @@ async fn cancelling_a_multi_wait_fences_children_and_terminal_chat_deletes_clean
             AgentRunStatus::Cancelled
         );
     }
-    assert_eq!(
-        store.delete_chat(chat.id).await.unwrap(),
-        DeleteChatOutcome::Deleted
-    );
+    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
 }
 
 #[tokio::test]

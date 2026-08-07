@@ -26,6 +26,12 @@
 //! `Store::claim_agent_run`), and this sweep picks up the resulting terminal
 //! run on its next pass — no separate orphan detector is needed for that case.
 //!
+//! Chat deletion is the one intentional exception to "wait for the reaper":
+//! deleting a conversation already refuses while any of its runs is
+//! non-terminal, and the run rows are removed in the same transaction, so the
+//! deletion path destroys those workspaces immediately for privacy. This sweep
+//! remains the backstop when that best-effort erase does not finish.
+//!
 //! A run's *published outputs* live under `scratch_root/<chat_id>/outputs/…`,
 //! never under the run's own workspace — that split (and the bug it fixed) is
 //! in `ConfiguredCodeExecutionProvider::publish_output_directory`. Destroying
@@ -228,11 +234,14 @@ impl AgentRunScratchReaper {
                 }
             }
             // No matching run row. Every run row is created durably before its
-            // workspace ever exists, and rows are never deleted, so this can
-            // only be a directory this process does not recognize — most
-            // plausibly leftover from an older naming scheme or a foreign
-            // process. Still gate on the directory's own age so a workspace
-            // whose row insert has not yet become visible is never raced.
+            // workspace ever exists, so a missing row is either a directory this
+            // process does not recognize — leftover from an older naming scheme
+            // or a foreign process — or a workspace whose run was erased with
+            // its conversation and whose immediate cleanup did not finish (host
+            // crash, destroy failure). Still gate on the directory's own age so
+            // a workspace whose row insert has not yet become visible is never
+            // raced, and so a just-deleted chat's in-flight destroy is not
+            // double-driven by this sweep.
             None => {
                 if !self.directory_is_old_enough(run_id, cutoff).await? {
                     return Ok(false);
@@ -262,26 +271,38 @@ impl AgentRunScratchReaper {
     /// mirror directory every provider stages files through, which a remote
     /// provider's own `destroy_workspace` does not touch.
     async fn destroy(&self, run_id: AgentRunId) -> Result<()> {
-        let workspace = ExecutionWorkspaceId::parse(workspace_dir_name(run_id))
-            .map_err(|error| AgentError::msg(format!("invalid agent-run workspace id: {error}")))?;
-        if let Some(configured) = self
-            .code_execution
-            .workspace()
-            .await
-            .map_err(|error| AgentError::msg(error.to_string()))?
-        {
-            configured
-                .destroy_workspace(&workspace)
-                .await
-                .map_err(|error| AgentError::msg(error.to_string()))?;
-        }
-        let path = self.scratch_root.join(workspace.as_str());
-        tokio::task::spawn_blocking(move || remove_dir_all_if_present(&path))
-            .await
-            .map_err(|error| {
-                AgentError::Store(format!("agent-run scratch removal task failed: {error}"))
-            })?
+        destroy_agent_run_workspace(&self.code_execution, self.scratch_root.as_path(), run_id).await
     }
+}
+
+/// Destroy one background run's workspace and host scratch directory.
+///
+/// Shared by the periodic reaper and the chat-deletion path, which erases a
+/// deleted conversation's former runs immediately rather than waiting for the
+/// next sweep. Safe to call when the workspace is already gone.
+pub(crate) async fn destroy_agent_run_workspace(
+    code_execution: &ConfiguredCodeExecutionProvider,
+    scratch_root: &Path,
+    run_id: AgentRunId,
+) -> Result<()> {
+    let workspace = ExecutionWorkspaceId::parse(workspace_dir_name(run_id))
+        .map_err(|error| AgentError::msg(format!("invalid agent-run workspace id: {error}")))?;
+    if let Some(configured) = code_execution
+        .workspace()
+        .await
+        .map_err(|error| AgentError::msg(error.to_string()))?
+    {
+        configured
+            .destroy_workspace(&workspace)
+            .await
+            .map_err(|error| AgentError::msg(error.to_string()))?;
+    }
+    let path = scratch_root.join(workspace.as_str());
+    tokio::task::spawn_blocking(move || remove_dir_all_if_present(&path))
+        .await
+        .map_err(|error| {
+            AgentError::Store(format!("agent-run scratch removal task failed: {error}"))
+        })?
 }
 
 fn next_delay(config: AgentRunScratchReaperConfig, report: &AgentRunScratchReapReport) -> Duration {

@@ -913,10 +913,7 @@ async fn completed_spawn_graph_does_not_block_quiescent_chat_deletion() {
         .request_turn_cancellation(turn.id, Utc::now() + Duration::seconds(1))
         .await
         .unwrap();
-    assert_eq!(
-        store.delete_chat(chat.id).await.unwrap(),
-        crate::DeleteChatOutcome::Deleted
-    );
+    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), crate::DeleteChatOutcome::Deleted { .. }));
 }
 
 #[tokio::test]

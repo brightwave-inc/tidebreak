@@ -2942,10 +2942,19 @@ async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted()
     settled.lease_expires_at = Set(None);
     settled.finished_at = Set(Some(Utc::now()));
     settled.update(&store.conn).await.unwrap();
-    assert_eq!(
-        store.delete_chat(chat.id).await.unwrap(),
-        crate::DeleteChatOutcome::Deleted
-    );
+    let deleted = store.delete_chat(chat.id).await.unwrap();
+    match deleted {
+        crate::DeleteChatOutcome::Deleted {
+            background_run_ids,
+        } => {
+            let mut ids = background_run_ids;
+            ids.sort_by_key(|id| id.as_uuid().as_u128());
+            let mut expected = vec![sandbox.id, sibling.id];
+            expected.sort_by_key(|id| id.as_uuid().as_u128());
+            assert_eq!(ids, expected);
+        }
+        other => panic!("expected deleted chat, got {other:?}"),
+    }
     assert_eq!(
         store.get_agent_run_task_plan(sandbox.id).await.unwrap(),
         None
