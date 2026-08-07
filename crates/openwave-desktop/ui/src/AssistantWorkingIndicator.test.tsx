@@ -19,6 +19,17 @@ describe("AssistantWorkingIndicator", () => {
     expect(markup).toContain('aria-hidden="true"');
   });
 
+  it("shows a visible compacting label instead of the sr-only Working status", () => {
+    const markup = renderToStaticMarkup(
+      <AssistantWorkingIndicator compacting />,
+    );
+
+    expect(markup).toContain("Compacting conversation");
+    expect(markup).toContain("is-compacting");
+    expect(markup).not.toContain('class="sr-only"');
+    expect(markup).not.toContain(">Working<");
+  });
+
   it("shows while an open turn has no more specific live status", () => {
     const messages: ChatMessage[] = [
       { id: "user", role: "user", text: "Question" },

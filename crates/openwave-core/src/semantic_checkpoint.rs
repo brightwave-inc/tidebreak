@@ -2,7 +2,7 @@
 //!
 //! A semantic checkpoint is deliberately not a [`crate::Message`]: it is
 //! agent-maintained context, not user-visible conversation history. The
-//! The producer writes only a strict structured payload before model-specific
+//! producer writes only a strict structured payload before model-specific
 //! reduction drops its covered prefix; provider projection treats the payload
 //! as untrusted historical context.
 
@@ -15,12 +15,16 @@ use crate::id::{ChatId, MessageId};
 use crate::provider::{ResponseFormat, Usage};
 use crate::tool::input_schema_for;
 
-/// The only checkpoint payload format this build can read and write.
+/// Legacy checkpoint payload format. Still readable for projection; new writes
+/// use [`CONTEXT_CHECKPOINT_FORMAT_V2`].
+pub const CONTEXT_CHECKPOINT_FORMAT_V1: u16 = 1;
+
+/// Current checkpoint payload format (structured fields + original requests).
 ///
 /// Future formats must use a new value and add an explicit reader before they
 /// are accepted. Treating an unknown payload as current context could turn a
 /// failed migration into a misleading model prompt.
-pub const CONTEXT_CHECKPOINT_FORMAT_V1: u16 = 1;
+pub const CONTEXT_CHECKPOINT_FORMAT_V2: u16 = 2;
 
 /// Largest UTF-8 payload accepted for one checkpoint.
 ///
@@ -35,17 +39,20 @@ pub const MAX_CONTEXT_CHECKPOINT_ITEMS: usize = 16;
 /// Largest UTF-8 entry retained in a structured checkpoint category.
 pub const MAX_CONTEXT_CHECKPOINT_ITEM_BYTES: usize = 1_024;
 
-/// The model-produced payload projected for format v1 checkpoints.
+/// The model-produced payload projected for format v2 checkpoints.
 ///
 /// Every field is inert conversation state. In particular, the schema has no
 /// capability, instruction, or attachment-bytes field: source/output values
 /// are identities only, and projection wraps the whole payload as untrusted
-/// historical context.
+/// historical context. `original_requests` carries founding user asks across
+/// re-compacts; the host merges them so the model cannot erase earlier asks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ContextCheckpointPayloadV1 {
+pub struct ContextCheckpointPayloadV2 {
     /// Payload schema version, independently explicit inside the stored JSON.
     pub version: u16,
+    /// User asks from compacted prefixes, oldest first. Host-merged on write.
+    pub original_requests: Vec<String>,
     /// User choices that the covered prefix explicitly settled.
     pub confirmed_decisions: Vec<String>,
     /// Questions that remained open at the end of the covered prefix.
@@ -60,13 +67,41 @@ pub struct ContextCheckpointPayloadV1 {
     pub conclusions: Vec<String>,
 }
 
+/// Legacy v1 shape kept for reading older rows during projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCheckpointPayloadV1 {
+    pub version: u16,
+    pub confirmed_decisions: Vec<String>,
+    pub unresolved_questions: Vec<String>,
+    pub task_state: Vec<String>,
+    pub source_identities: Vec<String>,
+    pub output_identities: Vec<String>,
+    pub conclusions: Vec<String>,
+}
+
+impl From<ContextCheckpointPayloadV1> for ContextCheckpointPayloadV2 {
+    fn from(value: ContextCheckpointPayloadV1) -> Self {
+        Self {
+            version: CONTEXT_CHECKPOINT_FORMAT_V2,
+            original_requests: Vec::new(),
+            confirmed_decisions: value.confirmed_decisions,
+            unresolved_questions: value.unresolved_questions,
+            task_state: value.task_state,
+            source_identities: value.source_identities,
+            output_identities: value.output_identities,
+            conclusions: value.conclusions,
+        }
+    }
+}
+
 /// Name the checkpoint's output constraint carries on the wire.
 ///
 /// The Anthropic adapter turns it into a tool name, so it stays within
 /// `^[a-zA-Z0-9_-]{1,64}$`.
 const CONTEXT_CHECKPOINT_SCHEMA_NAME: &str = "context_checkpoint";
 
-impl ContextCheckpointPayloadV1 {
+impl ContextCheckpointPayloadV2 {
     /// The output constraint the checkpoint's maintenance call sends.
     ///
     /// The system prompt still spells the shape out in prose. That is not
@@ -113,13 +148,42 @@ impl ContextCheckpointPayloadV1 {
         Ok(canonical)
     }
 
+    /// Merge host-owned `original_requests` into a freshly parsed payload and
+    /// re-canonicalize. Keeps earliest asks; stops appending when full.
+    pub(crate) fn with_original_requests(
+        content: &str,
+        original_requests: Vec<String>,
+    ) -> Result<String> {
+        let content = strip_json_fence(content.trim());
+        let mut payload: Self = serde_json::from_str(content).map_err(|error| {
+            AgentError::msg(format!(
+                "context checkpoint summarizer returned invalid JSON: {error}"
+            ))
+        })?;
+        payload.version = CONTEXT_CHECKPOINT_FORMAT_V2;
+        payload.original_requests = original_requests;
+        payload.validate()?;
+        let canonical = serde_json::to_string(&payload).map_err(|error| {
+            AgentError::msg(format!(
+                "context checkpoint payload could not be serialized: {error}"
+            ))
+        })?;
+        if canonical.len() > MAX_CONTEXT_CHECKPOINT_BYTES {
+            return Err(AgentError::msg(format!(
+                "context checkpoint payload exceeds {MAX_CONTEXT_CHECKPOINT_BYTES} bytes"
+            )));
+        }
+        Ok(canonical)
+    }
+
     fn validate(&self) -> Result<()> {
-        if self.version != CONTEXT_CHECKPOINT_FORMAT_V1 {
+        if self.version != CONTEXT_CHECKPOINT_FORMAT_V2 {
             return Err(AgentError::msg(format!(
                 "context checkpoint payload version {} is unsupported",
                 self.version
             )));
         }
+        validate_items("original_requests", &self.original_requests)?;
         let fields = [
             ("confirmed_decisions", &self.confirmed_decisions),
             ("unresolved_questions", &self.unresolved_questions),
@@ -128,22 +192,10 @@ impl ContextCheckpointPayloadV1 {
             ("output_identities", &self.output_identities),
             ("conclusions", &self.conclusions),
         ];
-        let mut populated = false;
+        let mut populated = !self.original_requests.is_empty();
         for (name, items) in fields {
-            if items.len() > MAX_CONTEXT_CHECKPOINT_ITEMS {
-                return Err(AgentError::msg(format!(
-                    "context checkpoint field {name} exceeds {MAX_CONTEXT_CHECKPOINT_ITEMS} items"
-                )));
-            }
-            for item in items {
-                if item.trim().is_empty()
-                    || item.len() > MAX_CONTEXT_CHECKPOINT_ITEM_BYTES
-                    || item.contains('\0')
-                {
-                    return Err(AgentError::msg(format!(
-                        "context checkpoint field {name} contains an invalid item"
-                    )));
-                }
+            validate_items(name, items)?;
+            if !items.is_empty() {
                 populated = true;
             }
         }
@@ -154,6 +206,85 @@ impl ContextCheckpointPayloadV1 {
         }
         Ok(())
     }
+}
+
+fn validate_items(name: &str, items: &[String]) -> Result<()> {
+    if items.len() > MAX_CONTEXT_CHECKPOINT_ITEMS {
+        return Err(AgentError::msg(format!(
+            "context checkpoint field {name} exceeds {MAX_CONTEXT_CHECKPOINT_ITEMS} items"
+        )));
+    }
+    for item in items {
+        if item.trim().is_empty()
+            || item.len() > MAX_CONTEXT_CHECKPOINT_ITEM_BYTES
+            || item.contains('\0')
+        {
+            return Err(AgentError::msg(format!(
+                "context checkpoint field {name} contains an invalid item"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Carry prior originals forward and append newly compacted user asks without
+/// inventing replacements. When the list is full, keep the earliest asks.
+pub fn merge_original_requests(prior: &[String], newly_compacted_asks: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(MAX_CONTEXT_CHECKPOINT_ITEMS);
+    for item in prior {
+        if out.len() >= MAX_CONTEXT_CHECKPOINT_ITEMS {
+            break;
+        }
+        let trimmed = truncate_item(item);
+        if trimmed.is_empty() || out.iter().any(|existing| existing == &trimmed) {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    for item in newly_compacted_asks {
+        if out.len() >= MAX_CONTEXT_CHECKPOINT_ITEMS {
+            break;
+        }
+        let trimmed = truncate_item(item);
+        if trimmed.is_empty() || out.iter().any(|existing| existing == &trimmed) {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    out
+}
+
+fn truncate_item(item: &str) -> String {
+    let trimmed = item.trim();
+    if trimmed.len() <= MAX_CONTEXT_CHECKPOINT_ITEM_BYTES {
+        return trimmed.to_owned();
+    }
+    let mut end = MAX_CONTEXT_CHECKPOINT_ITEM_BYTES;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].trim().to_owned()
+}
+
+/// Read prior checkpoint JSON for fold-into-maintenance (payload only, never
+/// the projection envelope). V1 rows upgrade in memory without originals.
+pub fn prior_payload_json_for_fold(content: &str) -> Option<String> {
+    if let Ok(v2) = serde_json::from_str::<ContextCheckpointPayloadV2>(content) {
+        return serde_json::to_string(&v2).ok();
+    }
+    if let Ok(v1) = serde_json::from_str::<ContextCheckpointPayloadV1>(content) {
+        let v2 = ContextCheckpointPayloadV2::from(v1);
+        return serde_json::to_string(&v2).ok();
+    }
+    None
+}
+
+/// Extract `original_requests` from a stored checkpoint payload.
+pub fn original_requests_from_content(content: &str) -> Vec<String> {
+    if let Ok(v2) = serde_json::from_str::<ContextCheckpointPayloadV2>(content) {
+        return v2.original_requests;
+    }
+    Vec::new()
 }
 
 fn strip_json_fence(content: &str) -> &str {
@@ -197,7 +328,9 @@ pub struct ContextCheckpoint {
 impl ContextCheckpoint {
     /// Reject payloads this version cannot safely retain or later project.
     pub fn validate(&self) -> Result<()> {
-        if self.format_version != CONTEXT_CHECKPOINT_FORMAT_V1 {
+        if self.format_version != CONTEXT_CHECKPOINT_FORMAT_V1
+            && self.format_version != CONTEXT_CHECKPOINT_FORMAT_V2
+        {
             return Err(AgentError::Store(format!(
                 "unsupported context checkpoint format {}",
                 self.format_version
@@ -244,10 +377,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structured_payload_is_canonical_bounded_and_nonempty() {
+    fn structured_payload_v2_is_canonical_bounded_and_nonempty() {
         let content = r#"```json
         {
-          "version": 1,
+          "version": 2,
+          "original_requests": ["Choose SQLite locally."],
           "confirmed_decisions": ["Use SQLite locally."],
           "unresolved_questions": [],
           "task_state": ["Migration is pending."],
@@ -256,18 +390,32 @@ mod tests {
           "conclusions": ["The local path is sufficient."]
         }
         ```"#;
-        let canonical = ContextCheckpointPayloadV1::parse_and_canonicalize(content).unwrap();
+        let canonical = ContextCheckpointPayloadV2::parse_and_canonicalize(content).unwrap();
         assert_eq!(
-            serde_json::from_str::<ContextCheckpointPayloadV1>(&canonical)
+            serde_json::from_str::<ContextCheckpointPayloadV2>(&canonical)
                 .unwrap()
-                .confirmed_decisions,
-            ["Use SQLite locally."]
+                .original_requests,
+            ["Choose SQLite locally."]
         );
 
-        let empty = r#"{"version":1,"confirmed_decisions":[],"unresolved_questions":[],"task_state":[],"source_identities":[],"output_identities":[],"conclusions":[]}"#;
-        assert!(ContextCheckpointPayloadV1::parse_and_canonicalize(empty).is_err());
+        let empty = r#"{"version":2,"original_requests":[],"confirmed_decisions":[],"unresolved_questions":[],"task_state":[],"source_identities":[],"output_identities":[],"conclusions":[]}"#;
+        assert!(ContextCheckpointPayloadV2::parse_and_canonicalize(empty).is_err());
 
-        let unknown = r#"{"version":1,"confirmed_decisions":["x"],"unresolved_questions":[],"task_state":[],"source_identities":[],"output_identities":[],"conclusions":[],"capabilities":["write"]}"#;
-        assert!(ContextCheckpointPayloadV1::parse_and_canonicalize(unknown).is_err());
+        let unknown = r#"{"version":2,"original_requests":[],"confirmed_decisions":["x"],"unresolved_questions":[],"task_state":[],"source_identities":[],"output_identities":[],"conclusions":[],"capabilities":["write"]}"#;
+        assert!(ContextCheckpointPayloadV2::parse_and_canonicalize(unknown).is_err());
+    }
+
+    #[test]
+    fn merge_original_requests_keeps_earliest_asks() {
+        let prior = vec!["first".into(), "second".into()];
+        let mut newly = Vec::new();
+        for i in 0..20 {
+            newly.push(format!("ask-{i}"));
+        }
+        let merged = merge_original_requests(&prior, &newly);
+        assert_eq!(merged.len(), MAX_CONTEXT_CHECKPOINT_ITEMS);
+        assert_eq!(merged[0], "first");
+        assert_eq!(merged[1], "second");
+        assert_eq!(merged[2], "ask-0");
     }
 }

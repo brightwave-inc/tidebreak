@@ -4,23 +4,37 @@ use chrono::Utc;
 use futures::future::{self, Either};
 use futures::StreamExt;
 
+use crate::compaction::{
+    self, select_compaction_boundary, CompactionSelection, CompactionSourceBoundary,
+};
 use crate::context;
-use crate::error::Result;
+use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId};
 use crate::image::{ImageAttachments, ImageData};
 use crate::model::Role;
 use crate::provider::{ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage};
 use crate::semantic_checkpoint::{
-    ContextCheckpoint, ContextCheckpointPayloadV1, SaveContextCheckpointOutcome,
-    CONTEXT_CHECKPOINT_FORMAT_V1, MAX_CONTEXT_CHECKPOINT_BYTES,
+    merge_original_requests, original_requests_from_content, prior_payload_json_for_fold,
+    ContextCheckpoint, ContextCheckpointPayloadV2, SaveContextCheckpointOutcome,
+    CONTEXT_CHECKPOINT_FORMAT_V2, MAX_CONTEXT_CHECKPOINT_BYTES,
 };
 
 use super::transcript::{
-    checkpoint_is_projectable, covered_prefix_was_reduced, project_checkpoint,
-    rebuild_transcript_with_boundary,
+    checkpoint_is_projectable, project_checkpoint, rebuild_transcript_with_boundary,
 };
 use super::types::{CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS, CONTEXT_CHECKPOINT_SYSTEM_PROMPT};
 use super::{Agent, LoadedTranscript, TranscriptSourceBoundary, USER_INTERRUPTION_NOTE};
+
+/// Inputs for one semantic-compaction attempt.
+pub(crate) struct CreateContextCheckpoint<'a> {
+    pub chat_id: ChatId,
+    pub transcript: &'a [ChatMessage],
+    pub source_boundaries: &'a [TranscriptSourceBoundary],
+    pub user_texts: &'a [(MessageId, String)],
+    pub current: Option<&'a ContextCheckpoint>,
+    pub attempted_boundary: &'a mut Option<usize>,
+    pub events: &'a super::events::EventSink<'a>,
+}
 
 impl Agent {
     /// Load one checkpoint only when it is supported and owned by this chat.
@@ -61,87 +75,135 @@ impl Agent {
         }
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
-        let (messages, checkpoint_boundary, source_boundaries) = rebuild_transcript_with_boundary(
-            &messages,
-            &tool_calls,
-            &attachments,
-            self.config.max_tool_result_bytes,
-            self.config.image_input,
-            checkpoint_source,
-        );
+        let user_texts: Vec<(MessageId, String)> = messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .map(|message| (message.id, message.content_for_model().to_owned()))
+            .collect();
+        let (provider_messages, checkpoint_boundary, source_boundaries) =
+            rebuild_transcript_with_boundary(
+                &messages,
+                &tool_calls,
+                &attachments,
+                self.config.max_tool_result_bytes,
+                self.config.image_input,
+                checkpoint_source,
+            );
         Ok(LoadedTranscript {
-            messages,
+            messages: provider_messages,
             checkpoint_boundary,
             source_boundaries,
+            user_texts,
         })
     }
 
-    /// Create the next semantic checkpoint immediately before a model-specific
-    /// fit would discard its eligible raw prefix.
+    /// What this transcript costs the model right now: the projected
+    /// checkpoint plus the history after its boundary, or the whole transcript
+    /// when nothing is projectable.
+    ///
+    /// Every compaction number is measured here, on the messages that actually
+    /// go on the wire. Counting the covered prefix a checkpoint already stands
+    /// in for would leave the trigger permanently hot after the first
+    /// compaction — the opposite of the infrequent, hard cadence the policy
+    /// describes — and counting tool results at a size no request carries
+    /// would put the trigger and [`select_compaction_boundary`]'s target on
+    /// different scales.
+    pub(crate) fn model_view_tokens(
+        &self,
+        transcript: &[ChatMessage],
+        checkpoint: Option<&ContextCheckpoint>,
+        boundary: Option<usize>,
+    ) -> usize {
+        match (checkpoint, boundary) {
+            (Some(checkpoint), Some(boundary))
+                if boundary > 0
+                    && boundary <= transcript.len()
+                    && checkpoint_is_projectable(checkpoint, checkpoint.chat_id) =>
+            {
+                context::estimate_transcript_tokens(&transcript[boundary..]).saturating_add(
+                    context::estimate_message_tokens(&project_checkpoint(checkpoint)),
+                )
+            }
+            _ => context::estimate_transcript_tokens(transcript),
+        }
+    }
+
+    /// Create the next semantic checkpoint when compaction policy says the
+    /// model's view of this chat is over threshold.
     ///
     /// The call is maintenance work: it runs on the host's utility model rather
     /// than the conversation's, it receives no foreground tools or
     /// capabilities, its usage is stored on the checkpoint rather than added
-    /// to the turn, and every failure returns `None` so deterministic context
-    /// reduction remains available. With no utility model configured there is
-    /// nothing to compact with, and the turn proceeds on deterministic
-    /// reduction alone rather than spending the user's conversation model here.
+    /// to the turn, and structural / parse failures return `None` so
+    /// deterministic context reduction remains available. Provider rate-limit
+    /// and connection failures propagate so the host does not pretend the
+    /// transcript compacted. With no utility model configured there is nothing
+    /// to compact with, and the turn proceeds on deterministic reduction alone.
+    ///
+    /// Compacting status events fire only after a candidate boundary is fenced
+    /// and the utility call is about to begin — never as a speculative flash.
     pub(crate) async fn maybe_create_context_checkpoint(
         &self,
-        chat_id: ChatId,
-        transcript: &[ChatMessage],
-        source_boundaries: &[TranscriptSourceBoundary],
-        current: Option<&ContextCheckpoint>,
-        reduction_level: u32,
-        attempted_boundary: &mut Option<usize>,
-    ) -> Option<ContextCheckpoint> {
-        let utility = self.config.utility_model.clone()?;
-        let foreground_budget = context::compute_message_budget(
-            self.config.context_window,
-            reduction_level,
-            self.config.system_prompt.as_deref(),
-            &self
-                .tools
-                .specs_for_foreground(self.agent_orchestration_active()),
-        );
-        let floor = context::content_floor_for_level(reduction_level);
-        let (normal_fitted, reduced) = context::fit_to_budget(transcript, foreground_budget, floor);
-        if !reduced {
-            return None;
-        }
+        args: CreateContextCheckpoint<'_>,
+    ) -> Result<Option<ContextCheckpoint>> {
+        let CreateContextCheckpoint {
+            chat_id,
+            transcript,
+            source_boundaries,
+            user_texts,
+            current,
+            attempted_boundary,
+            events,
+        } = args;
+        let utility = match self.config.utility_model.clone() {
+            Some(utility) => utility,
+            None => return Ok(None),
+        };
+        let bounds = self
+            .config
+            .compaction
+            .resolve_token_bounds(self.config.context_window);
 
-        // Keep the newest complete user/assistant sequence in raw form. The
-        // current user input follows the newest assistant, so the second-newest
-        // durable assistant is the latest eligible inclusive boundary.
-        let candidate = source_boundaries
+        let sources: Vec<CompactionSourceBoundary> = source_boundaries
             .iter()
-            .rev()
-            .filter(|source| source.role == Role::Assistant)
-            .nth(1)?;
-        if candidate.provider_boundary == 0
-            || candidate.provider_boundary > transcript.len()
-            || !covered_prefix_was_reduced(transcript, &normal_fitted, candidate.provider_boundary)
-        {
-            return None;
-        }
-        if current.is_some_and(|checkpoint| {
+            .map(|source| CompactionSourceBoundary {
+                message_id: source.message_id,
+                role: source.role,
+                provider_boundary: source.provider_boundary,
+            })
+            .collect();
+        let current_provider_boundary = current.and_then(|checkpoint| {
             source_boundaries
                 .iter()
                 .find(|source| source.message_id == checkpoint.source_message_id)
-                .is_some_and(|source| source.provider_boundary >= candidate.provider_boundary)
-        }) {
-            return None;
+                .map(|source| source.provider_boundary)
+        });
+        if self.model_view_tokens(transcript, current, current_provider_boundary)
+            <= bounds.threshold
+        {
+            return Ok(None);
         }
-        if attempted_boundary.is_some_and(|boundary| boundary >= candidate.provider_boundary) {
-            return None;
+        let Some(CompactionSelection {
+            message_id: candidate_message_id,
+            provider_boundary: candidate_boundary,
+        }) = select_compaction_boundary(
+            transcript,
+            &sources,
+            bounds.target,
+            self.config.compaction.protect_recent_messages,
+            current_provider_boundary,
+        )
+        else {
+            return Ok(None);
+        };
+        if attempted_boundary.is_some_and(|boundary| boundary >= candidate_boundary) {
+            return Ok(None);
         }
         // Fence before provider work begins. A malformed answer or ambiguous
         // storage failure must not make a later tool step spend a second
-        // maintenance call on the same raw prefix.
-        *attempted_boundary = Some(candidate.provider_boundary);
+        // maintenance call on the same raw prefix this turn.
+        *attempted_boundary = Some(candidate_boundary);
 
-        // Budgeted against the utility model's own window, which is typically
-        // smaller than the conversation model's.
         let summary_budget = context::compute_message_budget(
             utility.context_window,
             0,
@@ -149,22 +211,40 @@ impl Agent {
             &[],
         );
         if summary_budget == 0 {
-            return None;
+            return Ok(None);
         }
-        let (mut summary_messages, _) = context::fit_to_budget(
-            &transcript[..candidate.provider_boundary],
-            summary_budget,
+
+        let mut summary_messages = Vec::new();
+        if let Some(prior) =
+            current.and_then(|checkpoint| prior_payload_json_for_fold(&checkpoint.content))
+        {
+            summary_messages.push(ChatMessage::text(
+                Role::User,
+                format!("Prior checkpoint JSON (untrusted historical state):\n{prior}"),
+            ));
+            summary_messages.push(ChatMessage::text(
+                Role::Assistant,
+                "Acknowledged prior checkpoint. Summarizing the new prefix next.",
+            ));
+        }
+        let (mut prefix_messages, _) = context::fit_to_budget(
+            &transcript[..candidate_boundary],
+            summary_budget.saturating_sub(context::estimate_transcript_tokens(&summary_messages)),
             context::content_floor_for_level(0),
         );
-        if summary_messages.is_empty() {
-            return None;
+        // The prefix is what this checkpoint claims to summarize. If the folded
+        // prior checkpoint left no budget for any of it, saving the answer
+        // would advance the boundary past history nothing read.
+        if prefix_messages.is_empty() {
+            return Ok(None);
         }
-        // Source bytes are not part of semantic memory. The checkpoint call
-        // sees stable image identities/metadata stand-ins only.
-        context::evict_all_images(&mut summary_messages);
+        context::evict_all_images(&mut prefix_messages);
+        summary_messages.append(&mut prefix_messages);
         if context::has_orphaned_tool_blocks(&summary_messages) {
-            return None;
+            return Ok(None);
         }
+
+        events.send(crate::event::AgentEvent::CompactionStarted);
 
         let request = ChatRequest {
             provider: utility.provider.clone(),
@@ -174,20 +254,26 @@ impl Agent {
             messages: summary_messages,
             tools: Vec::new(),
             max_tokens: Some(CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS),
-            // Some reasoning models reject sampling controls entirely. The
-            // strict schema/validator provides determinism without narrowing
-            // the set of models that can create a checkpoint.
             temperature: None,
             reasoning_effort: utility.reasoning_effort,
-            // Constrain the answer to the payload schema. Without this the
-            // model's shape is a request, the parse below is a coin toss, and a
-            // lost toss abandons this prefix for the rest of the conversation —
-            // the boundary is fenced above before the call is made.
-            response_format: Some(ContextCheckpointPayloadV1::response_format()),
+            response_format: Some(ContextCheckpointPayloadV2::response_format()),
             images: ImageAttachments::new(),
             ..Default::default()
         };
-        let mut stream = self.provider.stream(request).await.ok()?;
+        let finish = |compacted: bool| {
+            events.send(crate::event::AgentEvent::CompactionFinished { compacted });
+        };
+        let mut stream = match self.provider.stream(request).await {
+            Ok(stream) => stream,
+            Err(error) if is_compaction_provider_hard_failure(&error) => {
+                finish(false);
+                return Err(error);
+            }
+            Err(_) => {
+                finish(false);
+                return Ok(None);
+            }
+        };
         let mut content = String::new();
         let mut usage = Usage::default();
         let mut completed = false;
@@ -195,59 +281,106 @@ impl Agent {
             let event = match future::select(stream.next(), self.cancel.cancelled()).await {
                 Either::Left((Some(event), _)) => event,
                 Either::Left((None, _)) => break,
-                Either::Right(((), _)) => return None,
+                Either::Right(((), _)) => {
+                    finish(false);
+                    return Ok(None);
+                }
             };
             match event {
                 ProviderEvent::TextDelta { text } => {
                     content.push_str(&text);
                     if content.len() > MAX_CONTEXT_CHECKPOINT_BYTES {
-                        return None;
+                        finish(false);
+                        return Ok(None);
                     }
                 }
                 ProviderEvent::ReasoningDelta { .. } | ProviderEvent::ReasoningBlock { .. } => {}
                 ProviderEvent::Usage(reported) => {
-                    usage = usage.checked_add(reported)?;
+                    usage = match usage.checked_add(reported) {
+                        Some(usage) => usage,
+                        None => {
+                            finish(false);
+                            return Ok(None);
+                        }
+                    };
                 }
                 ProviderEvent::Stop {
                     reason: StopReason::EndTurn | StopReason::MaxTokens | StopReason::StopSequence,
                 } => {
                     completed = true;
                 }
+                ProviderEvent::Failed { error }
+                    if is_compaction_provider_hard_failure_info(&error) =>
+                {
+                    finish(false);
+                    return Err(error.into_agent_error());
+                }
                 ProviderEvent::Stop { .. }
                 | ProviderEvent::Refusal { .. }
                 | ProviderEvent::Failed { .. }
                 | ProviderEvent::ToolCallStarted { .. }
                 | ProviderEvent::ProviderExecutedToolCall { .. }
-                | ProviderEvent::ToolCallArgsDelta { .. } => return None,
+                | ProviderEvent::ToolCallArgsDelta { .. } => {
+                    finish(false);
+                    return Ok(None);
+                }
             }
         }
         if !completed {
-            return None;
+            finish(false);
+            return Ok(None);
         }
-        let content = ContextCheckpointPayloadV1::parse_and_canonicalize(&content).ok()?;
-        let usage = current.map_or(Some(usage), |checkpoint| {
+        let prior_originals = current
+            .map(|checkpoint| original_requests_from_content(&checkpoint.content))
+            .unwrap_or_default();
+        let new_asks = compaction::user_asks_in_prefix(&sources, candidate_boundary, user_texts);
+        let originals = merge_original_requests(&prior_originals, &new_asks);
+        let content =
+            match ContextCheckpointPayloadV2::parse_and_canonicalize(&content).and_then(|parsed| {
+                ContextCheckpointPayloadV2::with_original_requests(&parsed, originals)
+            }) {
+                Ok(content) => content,
+                Err(_) => {
+                    finish(false);
+                    return Ok(None);
+                }
+            };
+        let usage = match current.map_or(Some(usage), |checkpoint| {
             checkpoint.usage.checked_add(usage)
-        })?;
+        }) {
+            Some(usage) => usage,
+            None => {
+                finish(false);
+                return Ok(None);
+            }
+        };
         let proposed = ContextCheckpoint {
             chat_id,
-            source_message_id: candidate.message_id,
-            format_version: CONTEXT_CHECKPOINT_FORMAT_V1,
+            source_message_id: candidate_message_id,
+            format_version: CONTEXT_CHECKPOINT_FORMAT_V2,
             content,
             usage,
             created_at: Utc::now(),
         };
-        match self.store.save_context_checkpoint(&proposed).await.ok()? {
-            SaveContextCheckpointOutcome::Saved(checkpoint)
-            | SaveContextCheckpointOutcome::Existing(checkpoint)
-            | SaveContextCheckpointOutcome::Stale(checkpoint)
-            | SaveContextCheckpointOutcome::Conflict(checkpoint) => {
-                checkpoint_is_projectable(&checkpoint, chat_id).then_some(checkpoint)
-            }
-        }
+        let saved = match self.store.save_context_checkpoint(&proposed).await.ok() {
+            Some(
+                SaveContextCheckpointOutcome::Saved(checkpoint)
+                | SaveContextCheckpointOutcome::Existing(checkpoint)
+                | SaveContextCheckpointOutcome::Stale(checkpoint)
+                | SaveContextCheckpointOutcome::Conflict(checkpoint),
+            ) => checkpoint_is_projectable(&checkpoint, chat_id).then_some(checkpoint),
+            None => None,
+        };
+        finish(saved.is_some());
+        Ok(saved)
     }
 
     /// Fit the transcript to the context budget at the given reduction level.
-    /// Returns the fitted transcript and whether it was shortened.
+    ///
+    /// When a projectable checkpoint covers a provider boundary, the model sees
+    /// only the post-boundary tail plus the projected checkpoint (soft load
+    /// boundary). Missing or invalid boundaries fail open to the full
+    /// transcript. Deterministic floor+restore still runs on whatever remains.
     pub(crate) fn fit_transcript(
         &self,
         transcript: &[ChatMessage],
@@ -264,21 +397,26 @@ impl Agent {
                 .specs_for_foreground(self.agent_orchestration_active()),
         );
         let floor = context::content_floor_for_level(reduction_level);
-        let (normal_fitted, reduced) = context::fit_to_budget(transcript, budget, floor);
 
-        // Do not spend prompt budget on a summary while its covered raw
-        // history still survives intact. The comparison is against the first
-        // fit, before reserving checkpoint tokens, so a checkpoint never
-        // causes the very reduction that justifies projecting it.
+        let (history, use_checkpoint) = match (checkpoint, checkpoint_boundary) {
+            (Some(checkpoint), Some(boundary))
+                if boundary > 0
+                    && boundary <= transcript.len()
+                    && checkpoint_is_projectable(checkpoint, checkpoint.chat_id) =>
+            {
+                (&transcript[boundary..], true)
+            }
+            // Invalid / missing boundary → full history (fail open).
+            _ => (transcript, false),
+        };
+
+        let (normal_fitted, reduced) = context::fit_to_budget(history, budget, floor);
+        if !use_checkpoint {
+            return (normal_fitted, reduced);
+        }
         let Some(checkpoint) = checkpoint else {
             return (normal_fitted, reduced);
         };
-        let Some(boundary) = checkpoint_boundary else {
-            return (normal_fitted, reduced);
-        };
-        if !reduced || !covered_prefix_was_reduced(transcript, &normal_fitted, boundary) {
-            return (normal_fitted, reduced);
-        }
 
         let projected = project_checkpoint(checkpoint);
         let checkpoint_tokens = context::estimate_message_tokens(&projected);
@@ -290,7 +428,7 @@ impl Agent {
             // safe to project. Retain deterministic reduction instead.
             return (normal_fitted, reduced);
         };
-        let (mut fitted, _) = context::fit_to_budget(transcript, history_budget, floor);
+        let (mut fitted, history_reduced) = context::fit_to_budget(history, history_budget, floor);
         if fitted.is_empty() {
             // The normal fitting algorithm guarantees a user anchor when one
             // can be retained. Do not let a large checkpoint displace all
@@ -307,7 +445,11 @@ impl Agent {
         let mut projected_messages = Vec::with_capacity(fitted.len() + 1);
         projected_messages.push(projected);
         projected_messages.append(&mut fitted);
-        (projected_messages, true)
+        // Standing in a checkpoint for its own covered prefix is compaction,
+        // which the divider and the compacting indicator already report. Only
+        // trimming the post-boundary tail is the truncation this flag means,
+        // or every step of every compacted chat would claim history was cut.
+        (projected_messages, history_reduced)
     }
 
     /// Load the pixels for the image blocks left in `messages`.
@@ -375,4 +517,15 @@ impl Agent {
         }
         Ok(attachments)
     }
+}
+
+fn is_compaction_provider_hard_failure(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::RateLimited(_) | AgentError::Overloaded(_)
+    )
+}
+
+fn is_compaction_provider_hard_failure_info(error: &crate::error::ProviderErrorInfo) -> bool {
+    matches!(error.kind.as_str(), "rate_limited" | "overloaded")
 }

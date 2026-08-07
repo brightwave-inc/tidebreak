@@ -12,6 +12,7 @@ use std::path::Path as FsPath;
 use openwave_core::{
     Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome, DocumentId, Message as StoredMessage,
     MessageId, PermissionMode, Project, ProjectId, ReasoningEffort, Role, TurnId,
+    CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
 };
 
 use crate::error::ServerError;
@@ -532,15 +533,19 @@ pub struct ChatTranscript {
 /// The roles a visible transcript entry can have.
 ///
 /// Narrower than [`Role`] on purpose. The transcript shows the conversation, not
-/// the model's plumbing, so `System` and `Tool` never appear — and that was
-/// previously guaranteed only by a `matches!` filter at the one call site, while
-/// the snapshot's own type still admitted all four. The renderer mirrored the
-/// narrow version and branched on `assistant` with no third arm, so a `system`
-/// entry reaching it would have rendered as a user message.
+/// the model's plumbing, so `System` and `Tool` never appear from storage as
+/// tool rows — and that was previously guaranteed only by a `matches!` filter
+/// at the one call site, while the snapshot's own type still admitted all four.
+/// The renderer mirrored the narrow version and branched on `assistant` with no
+/// third arm, so a `system` entry reaching it would have rendered as a user
+/// message.
 ///
 /// Encoding it here makes the guarantee the type's rather than the caller's, and
 /// makes a new [`Role`] variant a decision in [`Self::for_transcript`] instead of
 /// something that silently appears in the transcript.
+///
+/// [`Self::Compaction`] is synthetic: injected from the current context
+/// checkpoint, never stored as a [`StoredMessage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptRole {
@@ -550,6 +555,10 @@ pub enum TranscriptRole {
     /// — written between turns so the model's next turn learns what happened.
     /// Shown as a subtle inline notice, never as a user or assistant bubble.
     System,
+    /// Renderer-only marker that earlier conversation was compacted into a
+    /// semantic checkpoint. One current divider per chat, placed after the
+    /// checkpoint's source message. Content is empty; the client labels it.
+    Compaction,
 }
 
 impl TranscriptRole {
@@ -616,7 +625,7 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(TranscriptFileAttachment::from(attachment));
     }
-    let messages = transcript
+    let mut messages: Vec<ChatMessageSnapshot> = transcript
         .messages
         .into_iter()
         .filter_map(|message| {
@@ -639,6 +648,36 @@ pub async fn list_chat_messages(
             Some(snapshot)
         })
         .collect();
+    if let Some(checkpoint) = state
+        .store
+        .get_context_checkpoint(id)
+        .await?
+        .filter(|checkpoint| {
+            checkpoint.chat_id == id
+                && (checkpoint.format_version == CONTEXT_CHECKPOINT_FORMAT_V1
+                    || checkpoint.format_version == CONTEXT_CHECKPOINT_FORMAT_V2)
+                && checkpoint.validate().is_ok()
+        })
+    {
+        if let Some(insert_at) = messages
+            .iter()
+            .position(|message| message.id == checkpoint.source_message_id)
+            .map(|index| index + 1)
+        {
+            messages.insert(
+                insert_at,
+                ChatMessageSnapshot {
+                    id: MessageId::compaction_divider(checkpoint.source_message_id),
+                    role: TranscriptRole::Compaction,
+                    content: String::new(),
+                    created_at: checkpoint.created_at,
+                    citations: Vec::new(),
+                    image_attachments: None,
+                    file_attachments: None,
+                },
+            );
+        }
+    }
     let mut file_changes_by_turn = match list_file_change_summaries(
         &*state.store,
         &*state.blobs,

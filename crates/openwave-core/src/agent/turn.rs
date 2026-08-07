@@ -342,6 +342,7 @@ impl Agent {
             .await?;
         let mut checkpoint_boundary = loaded.checkpoint_boundary;
         let source_boundaries = loaded.source_boundaries;
+        let user_texts = loaded.user_texts;
         let mut transcript = loaded.messages;
         if let Some(instruction) = self.continuation_instruction.as_ref() {
             transcript.push(ChatMessage::text(Role::System, instruction.clone()));
@@ -408,17 +409,18 @@ impl Agent {
                 refusal_details,
             } = 'step_attempt: loop {
                 let stream = loop {
-                    if let Some(created) = self
-                        .maybe_create_context_checkpoint(
-                            chat.id,
-                            &transcript,
-                            &source_boundaries,
-                            checkpoint.as_ref(),
-                            reduction_level,
-                            &mut checkpoint_attempt_boundary,
-                        )
-                        .await
-                    {
+                    let created = self
+                        .maybe_create_context_checkpoint(super::context::CreateContextCheckpoint {
+                            chat_id: chat.id,
+                            transcript: &transcript,
+                            source_boundaries: &source_boundaries,
+                            user_texts: &user_texts,
+                            current: checkpoint.as_ref(),
+                            attempted_boundary: &mut checkpoint_attempt_boundary,
+                            events,
+                        })
+                        .await?;
+                    if let Some(created) = created {
                         checkpoint_boundary = source_boundaries
                             .iter()
                             .find(|source| source.message_id == created.source_message_id)
@@ -502,10 +504,17 @@ impl Agent {
                             // a UI can surface it. Emitted only for the request that
                             // actually went out (after any retry climb).
                             if reduced {
+                                // Against what the step would have sent, not
+                                // the raw transcript: a prefix a checkpoint
+                                // already stands in for was never headed out,
+                                // so counting it would overstate the cut.
+                                let original_tokens = self.model_view_tokens(
+                                    &transcript,
+                                    checkpoint.as_ref(),
+                                    checkpoint_boundary,
+                                );
                                 events.send(AgentEvent::ContextTruncated {
-                                    original_tokens: context::estimate_transcript_tokens(
-                                        &transcript,
-                                    ) as u32,
+                                    original_tokens: original_tokens as u32,
                                     fitted_tokens: fitted_tokens as u32,
                                 });
                             }

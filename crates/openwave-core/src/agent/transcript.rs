@@ -252,33 +252,6 @@ pub(crate) fn project_checkpoint(checkpoint: &ContextCheckpoint) -> ChatMessage 
     )
 }
 
-/// Whether the raw provider prefix through `boundary` no longer survives in
-/// the fitted request.
-///
-/// Reduction may merge adjacent messages while retaining every provider block,
-/// so compare the role/block stream rather than message-vector boundaries.
-/// That detects dropped and truncated historical content without treating a
-/// harmless provider-message merge as a reason to duplicate a checkpoint.
-pub(crate) fn covered_prefix_was_reduced(
-    transcript: &[ChatMessage],
-    fitted: &[ChatMessage],
-    boundary: usize,
-) -> bool {
-    let mut raw = transcript.iter().take(boundary).flat_map(|message| {
-        message
-            .content
-            .iter()
-            .map(move |block| (message.role, block))
-    });
-    let mut fitted = fitted.iter().flat_map(|message| {
-        message
-            .content
-            .iter()
-            .map(move |block| (message.role, block))
-    });
-    raw.any(|block| fitted.next() != Some(block))
-}
-
 #[cfg(test)]
 use super::types::AgentConfig;
 

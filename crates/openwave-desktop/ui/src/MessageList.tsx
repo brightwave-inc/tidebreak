@@ -89,6 +89,8 @@ export type ChatMessage =
       superseded?: boolean;
     }
   | { id: string; role: "system"; text: string }
+  /** Durable marker that earlier conversation was compacted. */
+  | { id: string; role: "compaction" }
   | {
       id: string;
       role: "refusal";
@@ -217,6 +219,11 @@ type MessageListProps = {
   /** The connected client, so a background agent row can fetch debug info. */
   backgroundAgentClient?: ApiClient;
   busy: boolean;
+  /**
+   * Semantic compaction is running for the open turn. Prefer a visible
+   * "Compacting conversation" status over the ordinary Working indicator.
+   */
+  compacting?: boolean;
   /** The live turn's stream has gone quiet — see [useStreamStalled]. */
   streamStalled?: boolean;
   scrollRef: Ref<HTMLDivElement>;
@@ -288,6 +295,7 @@ export function MessageList({
   onOpenBackgroundAgent,
   onOpenOutput,
   busy,
+  compacting = false,
   streamStalled = false,
   scrollRef,
   contentRef,
@@ -454,15 +462,19 @@ export function MessageList({
           request.callId,
         ),
       )}
-      {shouldShowAssistantWorking(
-        messages,
-        busy,
-        folderAccessRequests.length +
-          outputWritebackRequests.length +
-          userQuestionRequests.length +
-          planApprovalRequests.length,
-        streamStalled,
-      ) && <AssistantWorkingIndicator />}
+      {compacting ? (
+        <AssistantWorkingIndicator compacting />
+      ) : (
+        shouldShowAssistantWorking(
+          messages,
+          busy,
+          folderAccessRequests.length +
+            outputWritebackRequests.length +
+            userQuestionRequests.length +
+            planApprovalRequests.length,
+          streamStalled,
+        ) && <AssistantWorkingIndicator />
+      )}
     </>
   );
 
@@ -1197,6 +1209,14 @@ function MessageBubbleImpl({
     );
   }
 
+  if (message.role === "compaction") {
+    return (
+      <div className="message-notice is-compaction" role="status">
+        Compacted conversation
+      </div>
+    );
+  }
+
   if (message.role === "turn_failure") {
     return (
       <TurnFailureNotice
@@ -1300,6 +1320,7 @@ export function shouldShowAssistantWorking(
   }
   if (
     latest?.role === "system" ||
+    latest?.role === "compaction" ||
     latest?.role === "error" ||
     latest?.role === "turn_failure"
   ) {

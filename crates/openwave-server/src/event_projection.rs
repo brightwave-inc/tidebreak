@@ -261,6 +261,13 @@ pub(crate) enum RendererAgentEvent {
         /// Estimated transcript tokens after fitting to the budget.
         fitted_tokens: u32,
     },
+    /// Semantic compaction is about to run on the utility model.
+    CompactionStarted,
+    /// Semantic compaction finished for this attempt.
+    CompactionFinished {
+        /// Whether a new (or confirmed) checkpoint was stored.
+        compacted: bool,
+    },
     /// Fail-closed marker for a newer internal event until it gets an explicit
     /// renderer projection. The sequence still advances without dropping it.
     EventOmitted,
@@ -419,6 +426,12 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 original_tokens: *original_tokens,
                 fitted_tokens: *fitted_tokens,
             },
+            AgentEvent::CompactionStarted => RendererAgentEvent::CompactionStarted,
+            AgentEvent::CompactionFinished { compacted } => {
+                RendererAgentEvent::CompactionFinished {
+                    compacted: *compacted,
+                }
+            }
             _ => RendererAgentEvent::EventOmitted,
         };
 
@@ -520,6 +533,23 @@ mod tests {
                 original_tokens: 128_000,
                 fitted_tokens: 96_000,
             }
+        );
+    }
+
+    #[test]
+    fn compaction_events_project_to_the_renderer() {
+        let project = |event| RendererSequencedEvent::from(&SequencedEvent { seq: 1, event }).event;
+        assert_eq!(
+            project(AgentEvent::CompactionStarted),
+            RendererAgentEvent::CompactionStarted
+        );
+        assert_eq!(
+            project(AgentEvent::CompactionFinished { compacted: true }),
+            RendererAgentEvent::CompactionFinished { compacted: true }
+        );
+        assert_eq!(
+            project(AgentEvent::CompactionFinished { compacted: false }),
+            RendererAgentEvent::CompactionFinished { compacted: false }
         );
     }
 

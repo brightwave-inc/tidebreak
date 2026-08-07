@@ -339,6 +339,25 @@ id_type!(
     /// Identifies a persisted message within a chat.
     MessageId
 );
+
+impl MessageId {
+    /// Namespace for renderer-only compaction divider identities.
+    const COMPACTION_DIVIDER_NAMESPACE: Uuid =
+        Uuid::from_u128(0x6a1c_e8f2_4b9d_4a70_9e3f_12d5_87a0_bc41);
+
+    /// Stable synthetic id for the transcript divider after a compaction boundary.
+    ///
+    /// Not a durable message row — only projected into the chat messages API so
+    /// clients can render one "compacted conversation" marker.
+    #[must_use]
+    pub fn compaction_divider(source_message_id: MessageId) -> Self {
+        Self(Uuid::new_v5(
+            &Self::COMPACTION_DIVIDER_NAMESPACE,
+            source_message_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
 id_type!(
     /// Identifies one turn: a single user input through to the final answer.
     TurnId

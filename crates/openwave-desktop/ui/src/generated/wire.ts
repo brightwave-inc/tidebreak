@@ -677,6 +677,27 @@ export type CodeExecutionProviderKind = "local" | "e2b" | "daytona" | "docker";
 export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
+ * Host-tunable chat compaction cadence and retention.
+ */
+export type CompactionSettings = { 
+/**
+ * Compact when unabridged tokens exceed this fraction of the context window.
+ */
+threshold_fraction: number, 
+/**
+ * After compaction, keep about this fraction of the window as raw recent history.
+ */
+target_fraction: number, 
+/**
+ * Absolute floor applied before scaling by context window.
+ */
+min_threshold_tokens: number, 
+/**
+ * Newest durable messages that must never enter the compacted prefix.
+ */
+protect_recent_messages: number, };
+
+/**
  * Identifies one profile-scoped connected app — an outside integration
  * (an MCP server, a REST API) a profile can reach.
  *
@@ -1855,7 +1876,11 @@ original_tokens: number,
 /**
  * Estimated transcript tokens after fitting to the budget.
  */
-fitted_tokens: number, } | { "type": "event_omitted" };
+fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compaction_finished", 
+/**
+ * Whether a new (or confirmed) checkpoint was stored.
+ */
+compacted: boolean, } | { "type": "event_omitted" };
 
 /**
  * One frame on a chat's event socket.
@@ -2080,7 +2105,11 @@ chat_defaults: StickyChatDefaults,
 /**
  * Maximum nonterminal spawned agents allowed in one chat.
  */
-max_active_background_agents: number, };
+max_active_background_agents: number, 
+/**
+ * When and how hard semantic compaction may run.
+ */
+compaction: CompactionSettings, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
@@ -2340,17 +2369,21 @@ width: number, height: number, };
  * The roles a visible transcript entry can have.
  *
  * Narrower than [`Role`] on purpose. The transcript shows the conversation, not
- * the model's plumbing, so `System` and `Tool` never appear — and that was
- * previously guaranteed only by a `matches!` filter at the one call site, while
- * the snapshot's own type still admitted all four. The renderer mirrored the
- * narrow version and branched on `assistant` with no third arm, so a `system`
- * entry reaching it would have rendered as a user message.
+ * the model's plumbing, so `System` and `Tool` never appear from storage as
+ * tool rows — and that was previously guaranteed only by a `matches!` filter
+ * at the one call site, while the snapshot's own type still admitted all four.
+ * The renderer mirrored the narrow version and branched on `assistant` with no
+ * third arm, so a `system` entry reaching it would have rendered as a user
+ * message.
  *
  * Encoding it here makes the guarantee the type's rather than the caller's, and
  * makes a new [`Role`] variant a decision in [`Self::for_transcript`] instead of
  * something that silently appears in the transcript.
+ *
+ * [`Self::Compaction`] is synthetic: injected from the current context
+ * checkpoint, never stored as a [`StoredMessage`].
  */
-export type TranscriptRole = "user" | "assistant" | "system";
+export type TranscriptRole = "user" | "assistant" | "system" | "compaction";
 
 /**
  * Why a turn failed, closed and coarse enough to be stable.

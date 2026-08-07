@@ -911,6 +911,14 @@ body {
   text-align: left;
 }
 
+.message-notice.is-compaction {
+  padding: 0.15rem 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
 /* ---------- Working indicator ---------- */
 
 .assistant-working {
@@ -924,6 +932,10 @@ body {
   color: var(--muted-foreground);
   font-size: 0.8rem;
   font-weight: 500;
+}
+
+.assistant-working-label {
+  color: var(--muted-foreground);
 }
 
 .assistant-working-mark {

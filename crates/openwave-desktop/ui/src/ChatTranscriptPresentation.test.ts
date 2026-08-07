@@ -64,6 +64,47 @@ describe("terminal transcript presentation", () => {
     ]);
   });
 
+  it("presents a compaction divider without treating it as a bubble", () => {
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "Earlier ask",
+          created_at: "2026-07-30T12:00:00Z",
+          citations: [],
+        },
+        {
+          id: "compaction-1",
+          role: "compaction",
+          content: "",
+          created_at: "2026-07-30T12:01:00Z",
+          citations: [],
+        },
+        {
+          id: "user-2",
+          role: "user",
+          content: "Later ask",
+          created_at: "2026-07-30T12:02:00Z",
+          citations: [],
+        },
+      ],
+      tool_activity: [],
+      terminal_turns: [],
+      last_event_seq: 3,
+    });
+
+    expect(presented.messages.map((message) => message.role)).toEqual([
+      "user",
+      "compaction",
+      "user",
+    ]);
+    expect(presented.messages[1]).toEqual({
+      id: "compaction-1",
+      role: "compaction",
+    });
+  });
+
   it("keeps a historical spawn bound to its durable child", () => {
     const presented = presentChatTranscript({
       messages: [],

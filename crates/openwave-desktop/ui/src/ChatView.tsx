@@ -135,6 +135,7 @@ export function ChatView({
   );
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
+  const compacting = useChatSessionStore((session) => session.compacting);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
   // Every applied stream event advances the seq cursor, so it doubles as the
   // liveness signal for the stall-aware working indicator.
@@ -400,6 +401,7 @@ export function ChatView({
           onOpenOutput={onOpenOutput}
           backgroundAgentClient={client}
           busy={busy}
+          compacting={compacting}
           streamStalled={streamStalled}
           scrollRef={attachScrollRef}
           contentRef={attachContentRef}

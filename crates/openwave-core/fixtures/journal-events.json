@@ -138,6 +138,13 @@
     "fitted_tokens": 60000
   },
   {
+    "type": "compaction_started"
+  },
+  {
+    "type": "compaction_finished",
+    "compacted": true
+  },
+  {
     "type": "plan_proposed",
     "call_id": "00000000-0000-0000-0000-000000000005",
     "turn_id": "00000000-0000-0000-0000-000000000001"

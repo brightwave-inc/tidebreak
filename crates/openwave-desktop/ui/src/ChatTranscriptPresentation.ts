@@ -112,6 +112,14 @@ export function presentChatTranscript(
           } satisfies ChatMessage,
         ];
       }
+      if (entry.role === "compaction") {
+        return [
+          {
+            id: entry.id,
+            role: "compaction",
+          } satisfies ChatMessage,
+        ];
+      }
       if (entry.role === "assistant") {
         const assistant = {
           id: entry.id,
