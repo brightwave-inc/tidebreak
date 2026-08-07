@@ -71,11 +71,16 @@ describe("NetworkPolicyDialog", () => {
     const internetAccess = screen
       .getByText(/Reach public internet destinations/i)
       .closest("button")!;
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+
     fireEvent.click(internetAccess);
     fireEvent.click(internetAccess);
 
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(internetAccess).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Close" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Saving network policy");
 
     await act(async () => {
@@ -86,6 +91,7 @@ describe("NetworkPolicyDialog", () => {
       "The network policy could not be saved.",
     );
     expect(internetAccess).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 });

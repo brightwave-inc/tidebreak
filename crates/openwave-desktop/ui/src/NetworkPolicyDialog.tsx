@@ -129,7 +129,11 @@ export function NetworkPolicyDialog({
 
   return (
     <Dialog open={open} onOpenChange={openAndHydrate}>
-      <DialogContent className="max-w-md space-y-3" aria-busy={saving}>
+      <DialogContent
+        className="max-w-md space-y-3"
+        aria-busy={saving}
+        withCloseButton={!saving}
+      >
         <DialogHeader>
           <DialogTitle>Code execution network</DialogTitle>
           <DialogDescription>
