@@ -35,6 +35,8 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "xai",
   "gemini",
   "vertex",
+  "fireworks",
+  "together",
 ];
 
 const UNVERIFIED_TOOLTIP =
@@ -49,6 +51,24 @@ export function ModelVerificationChip({ model }: { model: ModelInfo }) {
         aria-label={`Unverified. ${UNVERIFIED_TOOLTIP}`}
       >
         Unverified
+      </span>
+    </WithTooltip>
+  );
+}
+
+/** Honest warning for routes OpenWave must run without host tools. */
+export function ModelToolCapabilityChip({ model }: { model: ModelInfo }) {
+  if (model.supports_tools) return null;
+  return (
+    <WithTooltip
+      label="OpenWave runs this model as chat-only because function tools are unsupported or tool use cannot yet be continued safely"
+      side="top"
+    >
+      <span
+        className="text-muted-foreground border-border rounded-full border px-1.5 py-0.5 text-[0.65rem] leading-none"
+        aria-label="Chat only. Function tools are unsupported or cannot yet be continued safely in OpenWave."
+      >
+        Chat only
       </span>
     </WithTooltip>
   );
@@ -302,6 +322,7 @@ export function ModelMenu({
                     />
                     <span className="text-sm">{model.display_name}</span>
                     <ModelVerificationChip model={model} />
+                    <ModelToolCapabilityChip model={model} />
                     {selected && <Check className="ml-auto size-4" />}
                   </DropdownMenuItem>
                 );

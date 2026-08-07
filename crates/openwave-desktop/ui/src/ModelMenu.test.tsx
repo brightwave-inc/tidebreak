@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   firstAvailableModel,
   ModelMenu,
+  ModelToolCapabilityChip,
   ModelVerificationChip,
   reasoningEffortOptions,
   visibleModelGroups,
@@ -22,6 +23,8 @@ const MODELS: ModelInfo[] = [
     max_output_tokens: 64_000,
     input_modalities: ["text", "image"],
     supports_reasoning: true,
+    supports_tools: true,
+    supports_structured_output: true,
     reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
     multimodal: true,
     available: true,
@@ -37,6 +40,8 @@ const MODELS: ModelInfo[] = [
     max_output_tokens: 16_384,
     input_modalities: ["text", "image"],
     supports_reasoning: false,
+    supports_tools: true,
+    supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: true,
     available: true,
@@ -102,6 +107,27 @@ describe("ModelMenu", () => {
     expect(markup).toContain(
       "Unverified. OpenWave hasn&#x27;t verified tool-calling and streaming for this model; issues are likely the model or provider, not the app",
     );
+  });
+
+  it("explains chat-only routing without blaming provider capability", () => {
+    const markup = renderToStaticMarkup(
+      <ModelToolCapabilityChip
+        model={{
+          ...MODELS[1],
+          key: "together::moonshotai/Kimi-K3",
+          id: "moonshotai/Kimi-K3",
+          display_name: "Kimi K3",
+          provider: "together",
+          verification: "unverified",
+          supports_tools: false,
+        }}
+      />,
+    );
+    expect(markup).toContain(">Chat only<");
+    expect(markup).toContain(
+      "Chat only. Function tools are unsupported or cannot yet be continued safely in OpenWave.",
+    );
+    expect(markup).not.toContain("hosted model does not support");
   });
 });
 

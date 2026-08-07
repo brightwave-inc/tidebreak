@@ -97,6 +97,12 @@ const EFFORT_LOW_TO_HIGH_AND_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
+/// Kimi K3's always-on thinking control exposes exactly these three levels.
+const EFFORT_LOW_HIGH_MAX: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
 /// For a model that takes no effort parameter at all. Not the same as a model
 /// that ignores one: Claude Haiku 4.5 rejects the request.
 const EFFORT_UNSUPPORTED: &[ReasoningEffort] = &[];
@@ -167,6 +173,66 @@ impl ModelSpec {
     #[cfg(test)]
     pub const fn supports_reasoning_effort(&self) -> bool {
         !self.reasoning_efforts.is_empty()
+    }
+
+    /// Whether this exact hosted row accepts Chat Completions function tools.
+    ///
+    /// Native providers and most hosted-compatible rows carry the tool path
+    /// OpenWave uses. Rows whose host does not offer function calling, or whose
+    /// same-model continuation requires reasoning content the compatible
+    /// adapter cannot yet replay, run as chat-only models rather than receiving
+    /// schemas they would reject or could not safely continue after a tool call.
+    pub fn supports_tools(&self) -> bool {
+        !matches!(
+            (self.provider, self.id),
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-flash"
+            ) | (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-pro"
+            ) | (ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2")
+                | (ProviderKind::Together, "Qwen/Qwen3.7-Max")
+                | (ProviderKind::Together, "Qwen/Qwen3.7-Plus")
+                | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro")
+                | (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Flash-0731")
+                | (ProviderKind::Together, "pearl-ai/gemma-4-31b-it")
+                | (ProviderKind::Together, "thinkingmachines/Inkling-Small")
+        )
+    }
+
+    /// Whether this exact hosted row can enforce the strict JSON Schema used
+    /// by utility work.
+    ///
+    /// Native adapters carry this contract for every curated row. Fireworks
+    /// exposes strict schema output at the platform layer. Together documents
+    /// it per serverless model, so that host uses an allow-list: a new row stays
+    /// ineligible for utility work until its endpoint explicitly supports the
+    /// response shape OpenWave sends.
+    pub fn supports_structured_output(&self) -> bool {
+        match self.provider {
+            ProviderKind::Anthropic
+            | ProviderKind::Openai
+            | ProviderKind::Gemini
+            | ProviderKind::Vertex
+            | ProviderKind::Fireworks => true,
+            ProviderKind::Together => matches!(
+                self.id,
+                "thinkingmachines/Inkling"
+                    | "MiniMaxAI/MiniMax-M3"
+                    | "moonshotai/Kimi-K3"
+                    | "moonshotai/Kimi-K2.7-Code"
+                    | "moonshotai/Kimi-K2.6"
+                    | "zai-org/GLM-5.2"
+                    | "deepseek-ai/DeepSeek-V4-Pro"
+                    | "deepseek-ai/DeepSeek-V4-Flash-0731"
+                    | "nvidia/nemotron-3-ultra-550b-a55b"
+                    | "google/gemma-4-31B-it"
+            ),
+            ProviderKind::Xai | ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway => {
+                false
+            }
+        }
     }
 }
 
@@ -568,6 +634,304 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
+    // Fireworks serverless catalog, verified against the public model pages on
+    // 2026-08-07. The ids are the exact paths sent to Chat Completions. Where
+    // Fireworks does not publish a generation ceiling, OpenWave deliberately
+    // uses a conservative cap instead of treating the context window as output.
+    ModelSpec {
+        id: "accounts/fireworks/models/kimi-k3",
+        display_name: "Kimi K3",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 1_040_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_HIGH_MAX,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/kimi-k2p7-code",
+        display_name: "Kimi K2.7 Code",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 262_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/kimi-k2p6",
+        display_name: "Kimi K2.6",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 262_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/glm-5p2",
+        display_name: "GLM-5.2",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/qwen3p7-plus",
+        display_name: "Qwen3.7 Plus",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 262_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/minimax-m3",
+        display_name: "MiniMax M3",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 512_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/deepseek-v4-flash",
+        display_name: "DeepSeek V4 Flash",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 1_040_000,
+        max_output_tokens: 393_216,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/deepseek-v4-pro",
+        display_name: "DeepSeek V4 Pro",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 1_040_000,
+        max_output_tokens: 393_216,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+        display_name: "Nemotron 3 Ultra",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 262_000,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "accounts/fireworks/models/inkling",
+        display_name: "Inkling",
+        provider: ProviderKind::Fireworks,
+        verification: VerificationTier::Unverified,
+        context_window: 1_040_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    // Together serverless catalog from the public model table on 2026-08-07.
+    // Same-family rows intentionally keep Together's own ids and limits rather
+    // than inheriting Fireworks metadata by canonical model name.
+    ModelSpec {
+        id: "thinkingmachines/Inkling",
+        display_name: "Inkling",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 524_288,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "MiniMaxAI/MiniMax-M3",
+        display_name: "MiniMax M3",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 524_288,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "Qwen/Qwen3.7-Max",
+        display_name: "Qwen3.7 Max",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        // Together does not publish a context value for this row. This stays
+        // below the model vendor's current window until the host documents its
+        // own limit.
+        context_window: 262_144,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "moonshotai/Kimi-K3",
+        display_name: "Kimi K3",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_HIGH_MAX,
+    },
+    ModelSpec {
+        id: "moonshotai/Kimi-K2.7-Code",
+        display_name: "Kimi K2.7 Code",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 262_144,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "moonshotai/Kimi-K2.6",
+        display_name: "Kimi K2.6",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 262_144,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "zai-org/GLM-5.2",
+        display_name: "GLM-5.2",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 262_144,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "deepseek-ai/DeepSeek-V4-Pro",
+        display_name: "DeepSeek V4 Pro",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 512_000,
+        max_output_tokens: 393_216,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "deepseek-ai/DeepSeek-V4-Flash-0731",
+        display_name: "DeepSeek V4 Flash",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 393_216,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "nvidia/nemotron-3-ultra-550b-a55b",
+        display_name: "Nemotron 3 Ultra",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 512_300,
+        max_output_tokens: 65_536,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "google/gemma-4-31B-it",
+        display_name: "Gemma 4 31B Instruct",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 262_144,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "pearl-ai/gemma-4-31b-it",
+        display_name: "Gemma 4 31B Instruct (Pearl AI)",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 32_000,
+        max_output_tokens: 8_192,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "Qwen/Qwen3.7-Plus",
+        display_name: "Qwen3.7 Plus",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 1_000_000,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
+    ModelSpec {
+        id: "thinkingmachines/Inkling-Small",
+        display_name: "Inkling Small",
+        provider: ProviderKind::Together,
+        verification: VerificationTier::Unverified,
+        context_window: 524_288,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: false,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
+    },
 ];
 
 /// Curated entries belonging to `provider`, preserving registry display order.
@@ -703,6 +1067,8 @@ mod tests {
             ProviderKind::Xai => true,
             ProviderKind::Gemini => true,
             ProviderKind::Vertex => true,
+            ProviderKind::Fireworks => true,
+            ProviderKind::Together => true,
             ProviderKind::OpenaiCompatible => false,
             ProviderKind::ModelGateway => true,
         }
@@ -896,7 +1262,10 @@ mod tests {
                 !spec.supports_vendor_web_search
                     || !matches!(
                         spec.provider,
-                        ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
+                        ProviderKind::Fireworks
+                            | ProviderKind::Together
+                            | ProviderKind::OpenaiCompatible
+                            | ProviderKind::ModelGateway
                     ),
                 "{} claims a provider-executed web search under `{}`, whose endpoint OpenWave cannot assume implements one",
                 spec.id,
@@ -961,6 +1330,120 @@ mod tests {
             find("gemini-3.6-flash").map(|spec| spec.provider),
             Some(ProviderKind::Gemini)
         );
+    }
+
+    #[test]
+    fn hosted_compatible_catalogs_keep_provider_specific_ids_and_capabilities() {
+        let fireworks_qwen = find_for(
+            ProviderKind::Fireworks,
+            "accounts/fireworks/models/qwen3p7-plus",
+        )
+        .unwrap();
+        let together_qwen = find_for(ProviderKind::Together, "Qwen/Qwen3.7-Plus").unwrap();
+        assert_eq!(fireworks_qwen.context_window, 262_000);
+        assert!(fireworks_qwen.accepts(InputModality::Image));
+        assert!(fireworks_qwen.supports_tools());
+        assert_eq!(together_qwen.context_window, 1_000_000);
+        assert!(together_qwen.accepts(InputModality::Image));
+        assert!(!together_qwen.supports_tools());
+
+        let together_inkling =
+            find_for(ProviderKind::Together, "thinkingmachines/Inkling").unwrap();
+        assert!(together_inkling.accepts(InputModality::Image));
+        let together_inkling_small =
+            find_for(ProviderKind::Together, "thinkingmachines/Inkling-Small").unwrap();
+        assert!(together_inkling_small.accepts(InputModality::Image));
+        assert!(!together_inkling_small.supports_structured_output());
+
+        let fireworks_glm =
+            find_for(ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2").unwrap();
+        let together_glm = find_for(ProviderKind::Together, "zai-org/GLM-5.2").unwrap();
+        assert_eq!(fireworks_glm.context_window, 1_040_000);
+        assert_eq!(together_glm.context_window, 262_144);
+
+        for id in [
+            "accounts/fireworks/models/kimi-k2p7-code",
+            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/minimax-m3",
+        ] {
+            assert!(
+                find_for(ProviderKind::Fireworks, id)
+                    .unwrap()
+                    .accepts(InputModality::Image),
+                "Fireworks publishes image input for {id}",
+            );
+        }
+
+        for (provider, id) in [
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-flash",
+            ),
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-pro",
+            ),
+            (ProviderKind::Fireworks, "accounts/fireworks/models/glm-5p2"),
+            (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Pro"),
+            (ProviderKind::Together, "deepseek-ai/DeepSeek-V4-Flash-0731"),
+        ] {
+            let model = find_for(provider, id).unwrap();
+            assert!(
+                !model.supports_tools(),
+                "{provider} `{id}` stays chat-only until reasoning content can be replayed",
+            );
+            assert!(
+                model.supports_structured_output(),
+                "chat-only tool routing must not disable strict utility responses for {provider} `{id}`",
+            );
+        }
+
+        for id in [
+            "moonshotai/Kimi-K3",
+            "moonshotai/Kimi-K2.7-Code",
+            "moonshotai/Kimi-K2.6",
+        ] {
+            assert!(
+                find_for(ProviderKind::Together, id)
+                    .unwrap()
+                    .supports_structured_output(),
+                "Together documents strict structured output for `{id}`",
+            );
+        }
+        for (provider, id) in [
+            (ProviderKind::Fireworks, "accounts/fireworks/models/kimi-k3"),
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/kimi-k2p7-code",
+            ),
+            (
+                ProviderKind::Fireworks,
+                "accounts/fireworks/models/kimi-k2p6",
+            ),
+            (ProviderKind::Together, "moonshotai/Kimi-K3"),
+            (ProviderKind::Together, "moonshotai/Kimi-K2.7-Code"),
+            (ProviderKind::Together, "moonshotai/Kimi-K2.6"),
+        ] {
+            let model = find_for(provider, id).unwrap();
+            assert!(model.supports_tools(), "{provider} `{id}` supports tools");
+            assert!(model.supports_reasoning, "{provider} `{id}` reasons");
+        }
+        for (provider, id) in [
+            (ProviderKind::Fireworks, "accounts/fireworks/models/kimi-k3"),
+            (ProviderKind::Together, "moonshotai/Kimi-K3"),
+        ] {
+            assert_eq!(
+                find_for(provider, id).unwrap().reasoning_efforts,
+                EFFORT_LOW_HIGH_MAX,
+                "{provider} `{id}` exposes only its documented effort scale",
+            );
+        }
+
+        assert_eq!(models_for(ProviderKind::Fireworks).count(), 10);
+        assert_eq!(models_for(ProviderKind::Together).count(), 14);
+        assert!(models_for(ProviderKind::Fireworks)
+            .chain(models_for(ProviderKind::Together))
+            .all(|model| model.verification == VerificationTier::Unverified));
     }
 
     #[test]

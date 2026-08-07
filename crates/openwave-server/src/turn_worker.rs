@@ -175,11 +175,25 @@ fn freeze_foreground_turn_surface_with_folders(
     web_search: openwave_core::TurnWebSearch,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
+    // A chat-only model gets one genuinely empty capability snapshot. Keeping
+    // the full host registry here would make the prompt describe tools the
+    // request layer later withholds, and would still leave those tools
+    // executable if the model emitted an unadvertised call.
+    let tools = if agent_config.tools_supported {
+        tools
+    } else {
+        Arc::new(ToolRegistry::new())
+    };
     // The prompt describes the capabilities the turn actually has. A vendor
     // turn still has `web_search` — the provider runs it, but the model names
     // and uses it the same way — so only the turn that has no search at all
     // drops the section, and a turn that keeps it keeps the guidance that has
     // always come with it.
+    let web_search = if agent_config.tools_supported {
+        web_search
+    } else {
+        openwave_core::TurnWebSearch::Off
+    };
     let mut specs = tools.specs_for_surface(true, plan_mode);
     if web_search == openwave_core::TurnWebSearch::Off {
         specs.retain(|spec| spec.name != openwave_core::WEB_SEARCH_TOOL);
@@ -707,22 +721,40 @@ impl TurnWorker {
                 )
                 .await;
         }
+        let mut turn_agent_config = self.agent_config.clone();
+        if let Some(policy) = model_policy.as_ref() {
+            crate::providers::apply_model_policy(
+                &mut turn_agent_config,
+                policy,
+                chat.reasoning_effort,
+            )?;
+        } else {
+            crate::providers::apply_free_form_model(
+                &mut turn_agent_config,
+                turn.model.clone(),
+                chat.reasoning_effort,
+            )?;
+        }
         // Resolved per turn, alongside the model: which search this turn gets
         // depends on both host policy and the model that is about to run, and
         // both can change between turns of one chat. A model the registry does
         // not own claims no vendor search. It is resolved before the surface is
         // frozen because the surface's prompt has to describe it.
-        let web_search = crate::web_search::resolve_turn_web_search(
-            &*self.store,
-            &*self.secrets,
-            model_policy
-                .as_ref()
-                .is_some_and(|policy| policy.supports_vendor_web_search),
-        )
-        .await?;
+        let web_search = if turn_agent_config.tools_supported {
+            crate::web_search::resolve_turn_web_search(
+                &*self.store,
+                &*self.secrets,
+                model_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.supports_vendor_web_search),
+            )
+            .await?
+        } else {
+            openwave_core::TurnWebSearch::Off
+        };
         let surface = freeze_foreground_turn_surface_with_folders(
             tools,
-            &self.agent_config,
+            &turn_agent_config,
             &exec_folders,
             &skills,
             &plugins,
@@ -819,15 +851,6 @@ impl TurnWorker {
             )));
             let mut heartbeat_open = true;
             let mut config = surface.agent_config.clone();
-            if let Some(policy) = model_policy.as_ref() {
-                crate::providers::apply_model_policy(&mut config, policy, chat.reasoning_effort)?;
-            } else {
-                crate::providers::apply_free_form_model(
-                    &mut config,
-                    turn.model.clone(),
-                    chat.reasoning_effort,
-                )?;
-            }
             config.utility_model = utility_model.clone();
             config.compaction = crate::routes::read_compaction_policy(&*self.store).await?;
             config.max_steps = remaining_steps;
@@ -2684,6 +2707,57 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
 #[cfg(test)]
 mod committed_event_drain_tests {
     use super::*;
+
+    #[test]
+    fn chat_only_surface_freezes_matching_empty_tools_and_prompt() {
+        let mut registry = ToolRegistry::new();
+        for name in [
+            "exec",
+            "search",
+            openwave_core::WEB_SEARCH_TOOL,
+            openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
+            openwave_core::SPAWN_SANDBOX_AGENT_TOOL,
+            openwave_core::WAIT_FOR_AGENTS_TOOL,
+            "mcp__documents__lookup",
+        ] {
+            registry.register_client(
+                openwave_core::ToolSpec {
+                    name: name.into(),
+                    description: "registered capability".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+                openwave_core::ApprovalClass::ReadOnly,
+            );
+        }
+        let surface = freeze_foreground_turn_surface(
+            Arc::new(registry),
+            &AgentConfig {
+                tools_supported: false,
+                ..AgentConfig::default()
+            },
+        );
+
+        assert!(surface.tools.specs_for_foreground(true).is_empty());
+        assert_eq!(
+            surface.agent_config.web_search,
+            openwave_core::TurnWebSearch::Off
+        );
+        let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
+        assert_eq!(prompt, crate::foreground_prompt::compose(&[]));
+        for unavailable in [
+            "exec",
+            "search",
+            "delegat",
+            "done",
+            "request_folder_access",
+            "mcp__",
+        ] {
+            assert!(
+                !prompt.contains(unavailable),
+                "chat-only foreground prompt advertised unavailable capability `{unavailable}`: {prompt}"
+            );
+        }
+    }
 
     #[test]
     fn mcp_refresh_keeps_prompt_and_tools_on_one_immutable_snapshot() {

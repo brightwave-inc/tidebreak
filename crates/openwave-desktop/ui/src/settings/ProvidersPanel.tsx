@@ -437,6 +437,12 @@ function ProviderRow({
           </div>
         </>
       )}
+      {(info.kind === "fireworks" || info.kind === "together") &&
+        info.base_url && (
+          <p className="text-xs text-muted-foreground">
+            Requests use the provider&apos;s fixed endpoint: {info.base_url}
+          </p>
+        )}
       {info.kind === "openai" ? (
         <OpenAiCredentialSection
           info={info}

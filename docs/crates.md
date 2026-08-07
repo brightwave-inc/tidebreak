@@ -58,9 +58,10 @@ Major surfaces present today:
 
 Owns the concrete Anthropic, OpenAI Responses, xAI Responses, Gemini, Google
 Vertex AI, and OpenAI-compatible provider adapters (including Fireworks,
-OpenRouter, vLLM, and LM Studio endpoints) plus a composite `Router`. Vertex
-keeps native Gemini GenerateContent and Claude Messages-over-`streamRawPredict`
-as separate protocol families under one explicit provider identity.
+Together, OpenRouter, vLLM, and LM Studio endpoints) plus a composite `Router`.
+Vertex keeps native Gemini GenerateContent and Claude
+Messages-over-`streamRawPredict` as separate protocol families under one
+explicit provider identity.
 
 The `Router` is itself a `ModelProvider`, so the agent loop holds one provider
 contract and does not depend on a concrete backend. Two things define it:

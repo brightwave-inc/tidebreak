@@ -1,7 +1,7 @@
 //! OpenAI-compatible Chat Completions provider.
 //!
 //! Speaks the widely-supported `/v1/chat/completions` streaming protocol so the
-//! same adapter covers OpenRouter, Fireworks, vLLM, LM Studio, and other
+//! same adapter covers Fireworks, Together, OpenRouter, vLLM, LM Studio, and other
 //! OpenAI-compatible gateways. Point `base_url` at the gateway's
 //! `/v1` root (default: `https://api.openai.com/v1`).
 //!
@@ -46,8 +46,7 @@ pub struct OpenAiCompatProvider {
     /// Whether to ask the endpoint to include usage in its streaming response.
     /// Off for arbitrary compatible endpoints, which may reject this option.
     streaming_usage: bool,
-    /// Stable id reported by [`ModelProvider::id`] — `"openai"` or
-    /// `"openai_compatible"` depending on how the caller configured it.
+    /// Stable route-specific id reported by [`ModelProvider::id`] and errors.
     provider_id: String,
 }
 
@@ -129,7 +128,7 @@ impl ModelProvider for OpenAiCompatProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let mut body = build_request_json(&req)?;
+        let mut body = build_request_json_for(&req, &self.provider_id)?;
         // Chat Completions omits usage on streaming chunks unless asked. Local
         // openai_compatible servers often reject unknown fields, so callers
         // opt in only for endpoints known to implement this option.
@@ -160,7 +159,7 @@ impl ModelProvider for OpenAiCompatProvider {
             // reqwest's display includes the URL, and a gateway URL can carry
             // tenant-identifying parts; `AgentError` strings reach the client
             // via TurnFailed. Only the fact of a failed request surfaces.
-            .map_err(|_| AgentError::Provider("openai-compat request failed".into()))?;
+            .map_err(|_| AgentError::Provider(format!("{} request failed", self.provider_id)))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -169,7 +168,7 @@ impl ModelProvider for OpenAiCompatProvider {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
             return Err(classify_provider_error(
-                "openai-compat",
+                &self.provider_id,
                 status.as_u16(),
                 &body,
                 retry_after,
@@ -177,11 +176,12 @@ impl ModelProvider for OpenAiCompatProvider {
         }
 
         let ceiling = crate::http::timeouts().total_stream;
+        let provider_id = self.provider_id.clone();
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
             let mut buffer: Vec<u8> = Vec::new();
-            let mut state = StreamState::default();
+            let mut state = StreamState::new(provider_id);
             while let Some(chunk) = bytes.next().await {
                 // A mid-stream transport error must not read as a clean end:
                 // the accumulated tool-call arguments may be truncated
@@ -191,7 +191,7 @@ impl ModelProvider for OpenAiCompatProvider {
                     Err(error) => {
                         yield ProviderEvent::Failed {
                             error: ProviderErrorInfo::provider(
-                                error.client_message("openai-compat"),
+                                error.client_message(&state.provider_id),
                             ),
                         };
                         return;
@@ -226,8 +226,13 @@ impl ModelProvider for OpenAiCompatProvider {
     }
 }
 
-/// Build the Chat Completions request body from a normalized [`ChatRequest`].
+#[cfg(test)]
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
+    build_request_json_for(req, "openai-compat")
+}
+
+/// Build the Chat Completions request body from a normalized [`ChatRequest`].
+fn build_request_json_for(req: &ChatRequest, provider_id: &str) -> Result<Value> {
     let mut messages = Vec::new();
     if let Some(system) = &req.system {
         messages.push(json!({
@@ -236,7 +241,14 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }));
     }
     for message in &req.messages {
-        extend_openai_messages(&mut messages, message, &req.images)?;
+        extend_openai_messages(
+            &mut messages,
+            message,
+            &req.images,
+            provider_id,
+            req.provider.as_ref(),
+            &req.model,
+        )?;
     }
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
@@ -245,27 +257,31 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         "messages": messages,
         "stream": true,
     });
-    // Reasoning models (o-series) reject `max_tokens` — they want
-    // `max_completion_tokens`. Everything else still speaks `max_tokens`.
-    if req.reasoning_model {
+    // OpenAI reasoning models reject `max_tokens` — they want
+    // `max_completion_tokens`. Fireworks and Together expose reasoning models
+    // through their compatible endpoints without adopting that OpenAI-only
+    // token field, so they keep the ordinary `max_tokens` spelling.
+    if req.reasoning_model && !matches!(provider_id, "fireworks" | "together") {
         body["max_completion_tokens"] = json!(max_tokens);
-        // Only reasoning models understand `reasoning_effort`; forwarding it to a
-        // plain chat model would be rejected. Absent, the provider's default holds.
+    } else {
+        body["max_tokens"] = json!(max_tokens);
+    }
+    // Only reasoning models understand `reasoning_effort`; forwarding it to a
+    // plain chat model would be rejected. Absent, the provider's default holds.
+    if req.reasoning_model {
         if let Some(effort) = req
             .reasoning_effort
             .filter(|effort| *effort != openwave_core::ReasoningEffort::None)
         {
             body["reasoning_effort"] = json!(effort.as_str());
         }
-    } else {
-        body["max_tokens"] = json!(max_tokens);
     }
 
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.iter().map(openai_tool).collect());
     }
     if let Some(choice) = &req.tool_choice {
-        body["tool_choice"] = openai_tool_choice(choice)?;
+        body["tool_choice"] = openai_tool_choice(choice, provider_id)?;
     }
     match &req.response_format {
         Some(ResponseFormat::JsonSchema { name, schema }) => {
@@ -276,7 +292,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
             let schema =
                 strict_json_schema(schema, OptionalProperties::AcceptNull).ok_or_else(|| {
                     AgentError::Provider(format!(
-                        "response format {name} has no strict JSON Schema form"
+                        "{provider_id} response format {name} has no strict JSON Schema form"
                     ))
                 })?;
             body["response_format"] = json!({
@@ -290,7 +306,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // looks like a success.
         Some(other) => {
             return Err(AgentError::Provider(format!(
-                "openai-compat cannot enforce response format {other:?}"
+                "{provider_id} cannot enforce response format {other:?}"
             )))
         }
     }
@@ -322,7 +338,7 @@ fn openai_tool(tool: &openwave_core::tool::ToolSpec) -> Value {
     json!({ "type": "function", "function": function })
 }
 
-fn openai_tool_choice(choice: &ToolChoice) -> Result<Value> {
+fn openai_tool_choice(choice: &ToolChoice, provider_id: &str) -> Result<Value> {
     Ok(match choice {
         ToolChoice::Auto => json!("auto"),
         ToolChoice::Required => json!("required"),
@@ -334,7 +350,7 @@ fn openai_tool_choice(choice: &ToolChoice) -> Result<Value> {
         // tool" into "may".
         other => {
             return Err(AgentError::Provider(format!(
-                "openai-compat cannot express tool choice {other:?}"
+                "{provider_id} cannot express tool choice {other:?}"
             )))
         }
     })
@@ -352,6 +368,9 @@ fn extend_openai_messages(
     out: &mut Vec<Value>,
     message: &openwave_core::ChatMessage,
     images: &ImageAttachments,
+    provider_id: &str,
+    replay_provider: Option<&ProviderId>,
+    replay_model: &str,
 ) -> Result<()> {
     let tool_results: Vec<_> = message
         .content
@@ -465,7 +484,7 @@ fn extend_openai_messages(
                 // than an intended omission — fail instead of asking the model
                 // about an image it was never sent.
                 AgentError::Provider(format!(
-                    "image attachment {} has no hydrated bytes",
+                    "{provider_id} image attachment {} has no hydrated bytes",
                     image.blob_id
                 ))
             })?;
@@ -485,12 +504,33 @@ fn extend_openai_messages(
     if !tool_calls.is_empty() {
         msg["tool_calls"] = Value::Array(tool_calls);
     }
+    if message.role == Role::Assistant {
+        // Compatible reasoning history is a provider-native assistant field,
+        // not visible content. Replay only to the exact provider/model route
+        // that minted it; a switch gets the ordinary text/tool projection.
+        for block in message
+            .reasoning
+            .replayable_for(replay_provider, replay_model)
+        {
+            let Some(block) = block.as_object() else {
+                continue;
+            };
+            for field in ["reasoning_content", "reasoning"] {
+                let Some(fragment) = block.get(field).and_then(Value::as_str) else {
+                    continue;
+                };
+                let prior = msg.get(field).and_then(Value::as_str).unwrap_or_default();
+                msg[field] = json!(format!("{prior}{fragment}"));
+            }
+        }
+    }
     out.push(msg);
     Ok(())
 }
 
-#[derive(Default)]
 struct StreamState {
+    /// Route-specific provider id used in every surfaced stream failure.
+    provider_id: String,
     /// Tool-call argument buffers keyed by the stream-local index.
     tool_calls: std::collections::BTreeMap<u32, ToolCallBuf>,
     usage: Usage,
@@ -502,9 +542,42 @@ struct StreamState {
     /// Set once the stream has terminalized on an in-band error. It suppresses
     /// both later frames and the synthetic end-of-stream event below.
     terminal: bool,
+    /// Complete provider-native reasoning fields accumulated across deltas.
+    /// They are emitted as opaque replay blocks only when the step finishes
+    /// cleanly; a failed or interrupted stream never persists a partial trace.
+    reasoning: std::collections::BTreeMap<&'static str, String>,
+}
+
+#[cfg(test)]
+impl Default for StreamState {
+    fn default() -> Self {
+        Self::new("openai-compat")
+    }
 }
 
 impl StreamState {
+    fn new(provider_id: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            tool_calls: std::collections::BTreeMap::new(),
+            usage: Usage::default(),
+            usage_emitted: false,
+            stopped: false,
+            terminal: false,
+            reasoning: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn take_reasoning_blocks(&mut self) -> Vec<ProviderEvent> {
+        std::mem::take(&mut self.reasoning)
+            .into_iter()
+            .filter(|(_, content)| !content.is_empty())
+            .map(|(field, content)| ProviderEvent::ReasoningBlock {
+                data: json!({ field: content }),
+            })
+            .collect()
+    }
+
     /// True once a usage total worth reporting has been recorded but not yet
     /// emitted. Zero usage stays silent — a server that never reports usage
     /// records zero, exactly as before.
@@ -521,13 +594,16 @@ impl StreamState {
     /// omitted `finish_reason` on the wire, and the call's argument JSON may be
     /// truncated mid-value, so the conservative reading fails the step rather
     /// than committing the fragment as a finished call.
-    fn end_of_stream(&self) -> Vec<ProviderEvent> {
+    fn end_of_stream(&mut self) -> Vec<ProviderEvent> {
         if self.tool_calls.values().any(|call| call.started) {
             vec![ProviderEvent::Failed {
-                error: ProviderErrorInfo::provider("openai-compat stream ended mid-tool-call"),
+                error: ProviderErrorInfo::provider(format!(
+                    "{} stream ended mid-tool-call",
+                    self.provider_id
+                )),
             }]
         } else {
-            let mut events = Vec::new();
+            let mut events = self.take_reasoning_blocks();
             if self.has_unemitted_usage() {
                 events.push(ProviderEvent::Usage(self.usage));
             }
@@ -562,7 +638,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     if let Some(error) = data.get("error") {
         state.terminal = true;
         return vec![ProviderEvent::Failed {
-            error: ProviderErrorInfo::from_error(&classify_in_band_error("openai-compat", error)),
+            error: ProviderErrorInfo::from_error(&classify_in_band_error(
+                &state.provider_id,
+                error,
+            )),
         }];
     }
 
@@ -612,6 +691,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         for key in ["reasoning_content", "reasoning"] {
             if let Some(text) = delta.get(key).and_then(Value::as_str) {
                 if !text.is_empty() {
+                    state.reasoning.entry(key).or_default().push_str(text);
                     events.push(ProviderEvent::ReasoningDelta {
                         text: text.to_string(),
                     });
@@ -671,6 +751,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     }
 
     if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        events.extend(state.take_reasoning_blocks());
         if state.has_unemitted_usage() {
             state.usage_emitted = true;
             events.push(ProviderEvent::Usage(state.usage));
@@ -699,7 +780,7 @@ fn map_stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwave_core::provider::{ChatMessage, MessageReasoning};
+    use openwave_core::provider::{ChatMessage, MessageReasoning, ReasoningOrigin};
     use openwave_core::tool::ToolSpec;
     use openwave_core::ReasoningEffort;
 
@@ -843,6 +924,62 @@ mod tests {
     }
 
     #[test]
+    fn hosted_kimi_reasoning_uses_compatible_token_and_effort_fields() {
+        let req = ChatRequest {
+            provider: Some(ProviderId::new("fireworks")),
+            model: "accounts/fireworks/models/kimi-k3".into(),
+            reasoning_model: true,
+            messages: vec![ChatMessage::text(Role::User, "hi")],
+            max_tokens: Some(4096),
+            reasoning_effort: Some(ReasoningEffort::Max),
+            ..Default::default()
+        };
+        let body = build_request_json_for(&req, "fireworks").unwrap();
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["reasoning_effort"], "max");
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn compatible_reasoning_replays_only_to_the_exact_route() {
+        let model = "accounts/fireworks/models/kimi-k3";
+        let assistant = ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "answer".into(),
+            }],
+            reasoning: MessageReasoning::captured(
+                ReasoningOrigin {
+                    provider: Some(ProviderId::new("fireworks")),
+                    model: model.into(),
+                },
+                vec![json!({"reasoning_content": "private plan"})],
+            ),
+        };
+        let request = |provider: &str, model: &str| ChatRequest {
+            provider: Some(ProviderId::new(provider)),
+            model: model.into(),
+            messages: vec![assistant.clone(), ChatMessage::text(Role::User, "continue")],
+            ..Default::default()
+        };
+
+        let same = build_request_json_for(&request("fireworks", model), "fireworks").unwrap();
+        assert_eq!(same["messages"][0]["reasoning_content"], "private plan");
+
+        let other_provider =
+            build_request_json_for(&request("together", model), "together").unwrap();
+        assert!(other_provider["messages"][0]
+            .get("reasoning_content")
+            .is_none());
+
+        let other_model =
+            build_request_json_for(&request("fireworks", "other-model"), "fireworks").unwrap();
+        assert!(other_model["messages"][0]
+            .get("reasoning_content")
+            .is_none());
+    }
+
+    #[test]
     fn gpt_5_6_none_uses_the_provider_default() {
         let req = ChatRequest {
             provider: Some(ProviderId::new("openai")),
@@ -879,7 +1016,15 @@ mod tests {
             reasoning: MessageReasoning::default(),
         };
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
+        extend_openai_messages(
+            &mut out,
+            &msg,
+            &ImageAttachments::new(),
+            "openai-compat",
+            None,
+            "test-model",
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "assistant");
         assert_eq!(out[0]["content"], "calling");
@@ -906,7 +1051,15 @@ mod tests {
             reasoning: MessageReasoning::default(),
         };
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
+        extend_openai_messages(
+            &mut out,
+            &msg,
+            &ImageAttachments::new(),
+            "openai-compat",
+            None,
+            "test-model",
+        )
+        .unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "tool");
         assert_eq!(out[0]["tool_call_id"], "call_1");
@@ -931,7 +1084,7 @@ mod tests {
 
     #[test]
     fn in_band_error_fails_the_stream_and_suppresses_the_synthetic_stop() {
-        let mut state = StreamState::default();
+        let mut state = StreamState::new("together");
         let out: Vec<ProviderEvent> = [
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}),
             json!({"error":{"message":"upstream is overloaded","type":"server_error","code":"server_overloaded"}}),
@@ -955,9 +1108,8 @@ mod tests {
                 ProviderEvent::Failed {
                     error: ProviderErrorInfo {
                         kind: "overloaded".into(),
-                        message:
-                            "openai-compat returned 500 (server_error): upstream is overloaded"
-                                .into(),
+                        message: "together returned 500 (server_error): upstream is overloaded"
+                            .into(),
                     },
                 },
             ]
@@ -977,7 +1129,7 @@ mod tests {
         // on streams that reported success before: a complete call whose
         // server dropped only `finish_reason` now fails too — the two are
         // indistinguishable on the wire.
-        let mut state = StreamState::default();
+        let mut state = StreamState::new("fireworks");
         let out: Vec<ProviderEvent> = [
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}),
         ]
@@ -989,12 +1141,11 @@ mod tests {
             Some(ProviderEvent::ToolCallArgsDelta { .. })
         ));
         let ending = state.end_of_stream();
-        assert!(
-            matches!(
-                ending.as_slice(),
-                [ProviderEvent::Failed { error }] if error.kind == "provider"
-            ),
-            "expected a failure, got {ending:?}"
+        assert_eq!(
+            ending,
+            vec![ProviderEvent::Failed {
+                error: ProviderErrorInfo::provider("fireworks stream ended mid-tool-call"),
+            }]
         );
 
         // Text alone keeps the synthetic `Stop`: some local servers omit
@@ -1034,6 +1185,41 @@ mod tests {
                     cache_read_input_tokens: 4,
                     cache_creation_input_tokens: 0,
                 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn reasoning_content_is_captured_whole_before_a_tool_stop() {
+        let out = run(&[
+            json!({"choices":[{"delta":{"reasoning_content":"plan "}}]}),
+            json!({"choices":[{"delta":{"reasoning_content":"carefully","tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::ReasoningDelta {
+                    text: "plan ".into()
+                },
+                ProviderEvent::ReasoningDelta {
+                    text: "carefully".into()
+                },
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::ReasoningBlock {
+                    data: json!({"reasoning_content": "plan carefully"}),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
             ]
         );
     }
@@ -1202,7 +1388,8 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg, &images).unwrap();
+        extend_openai_messages(&mut out, &msg, &images, "openai-compat", None, "test-model")
+            .unwrap();
         assert_eq!(out.len(), 1);
         let parts = out[0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["type"], "text");
@@ -1214,16 +1401,37 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_unhydrated_image_fails_the_request_instead_of_being_dropped() {
+    #[tokio::test]
+    async fn a_gateway_unhydrated_image_failure_keeps_the_public_provider_id() {
+        let image = png_ref(9);
+        let blob_id = image.blob_id;
         let msg = ChatMessage {
             role: Role::User,
-            content: vec![ContentBlock::Image { image: png_ref(9) }],
+            content: vec![ContentBlock::Image { image }],
             reasoning: MessageReasoning::default(),
         };
-        let mut out = Vec::new();
-        let err = extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap_err();
-        assert!(err.to_string().contains("no hydrated bytes"), "{err}");
+        let result = compatible_router(
+            crate::RouteKind::ModelGatewayOpenai,
+            "127.0.0.1:1".parse().unwrap(),
+        )
+        .stream(ChatRequest {
+            provider: Some(ProviderId::new("model_gateway")),
+            model: "hosted-model".into(),
+            messages: vec![msg],
+            ..Default::default()
+        })
+        .await;
+        let err = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the gateway unexpectedly accepted an unhydrated image"),
+        };
+        match err {
+            AgentError::Provider(message) => assert_eq!(
+                message,
+                format!("model_gateway image attachment {blob_id} has no hydrated bytes")
+            ),
+            other => panic!("wrong unhydrated-image error: {other:?}"),
+        }
     }
 
     #[test]
@@ -1248,7 +1456,8 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg, &images).unwrap();
+        extend_openai_messages(&mut out, &msg, &images, "openai-compat", None, "test-model")
+            .unwrap();
 
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "tool");
@@ -1263,7 +1472,15 @@ mod tests {
         // parts form, which some OpenAI-compatible servers do not accept.
         let msg = ChatMessage::text(Role::User, "hi");
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
+        extend_openai_messages(
+            &mut out,
+            &msg,
+            &ImageAttachments::new(),
+            "openai-compat",
+            None,
+            "test-model",
+        )
+        .unwrap();
         assert_eq!(out[0]["content"], "hi");
     }
 
@@ -1320,6 +1537,131 @@ mod tests {
                 },
             ]
         );
+    }
+
+    struct StaticGatewayTokenSource;
+
+    #[async_trait::async_trait]
+    impl crate::BearerTokenSource for StaticGatewayTokenSource {
+        async fn bearer_token(&self) -> openwave_core::Result<String> {
+            Ok("mg_at_test".to_string())
+        }
+    }
+
+    fn compatible_router(kind: crate::RouteKind, address: std::net::SocketAddr) -> crate::Router {
+        let is_gateway = kind == crate::RouteKind::ModelGatewayOpenai;
+        crate::Router::build(vec![crate::Route {
+            kind,
+            api_key: if is_gateway {
+                String::new()
+            } else {
+                "hosted-key".to_string()
+            },
+            base_url: Some(format!("http://{address}/v1")),
+            curated_models: vec!["hosted-model".to_string()],
+            token_source: is_gateway.then(|| {
+                std::sync::Arc::new(StaticGatewayTokenSource)
+                    as std::sync::Arc<dyn crate::BearerTokenSource>
+            }),
+            vertex: None,
+            chatgpt_account_id: None,
+        }])
+    }
+
+    #[tokio::test]
+    async fn compatible_route_http_errors_keep_the_public_provider_id() {
+        use axum::http::{header, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+
+        async fn unauthorized() -> impl IntoResponse {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"error":{"type":"invalid_api_key","message":"credential rejected"}}"#,
+            )
+        }
+
+        let app = Router::new().fallback(post(unauthorized));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for (kind, provider_id) in [
+            (crate::RouteKind::Fireworks, "fireworks"),
+            (crate::RouteKind::Together, "together"),
+            (crate::RouteKind::ModelGatewayOpenai, "model_gateway"),
+        ] {
+            let result = compatible_router(kind, address)
+                .stream(ChatRequest {
+                    provider: Some(ProviderId::new(provider_id)),
+                    model: "hosted-model".into(),
+                    messages: vec![ChatMessage::text(Role::User, "hi")],
+                    ..Default::default()
+                })
+                .await;
+            match result {
+                Err(AgentError::Authentication(message)) => assert_eq!(
+                    message,
+                    format!("{provider_id} returned 401 (invalid_api_key): credential rejected")
+                ),
+                Err(other) => panic!("wrong error attribution for {provider_id}: {other:?}"),
+                Ok(_) => panic!("the {provider_id} preset unexpectedly accepted the request"),
+            }
+        }
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn compatible_route_in_band_errors_keep_the_public_provider_id() {
+        use axum::http::{header, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+
+        async fn error_stream() -> impl IntoResponse {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"error\":{\"message\":\"upstream is overloaded\",\"type\":\"server_error\",\"code\":\"server_overloaded\"}}\n\n",
+            )
+        }
+
+        let app = Router::new().fallback(post(error_stream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for (kind, provider_id) in [
+            (crate::RouteKind::Fireworks, "fireworks"),
+            (crate::RouteKind::Together, "together"),
+            (crate::RouteKind::ModelGatewayOpenai, "model_gateway"),
+        ] {
+            let stream = compatible_router(kind, address)
+                .stream(ChatRequest {
+                    provider: Some(ProviderId::new(provider_id)),
+                    model: "hosted-model".into(),
+                    messages: vec![ChatMessage::text(Role::User, "hi")],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                stream.collect::<Vec<_>>().await,
+                vec![ProviderEvent::Failed {
+                    error: ProviderErrorInfo {
+                        kind: "overloaded".into(),
+                        message: format!(
+                            "{provider_id} returned 500 (server_error): upstream is overloaded"
+                        ),
+                    },
+                }],
+            );
+        }
+
+        server.abort();
     }
 
     #[tokio::test]

@@ -1501,6 +1501,15 @@ input_modalities: Array<InputModality>,
  */
 supports_reasoning: boolean, 
 /**
+ * Whether this provider/model route accepts function tools.
+ */
+supports_tools: boolean, 
+/**
+ * Whether this provider/model route can enforce the strict response schema
+ * utility work depends on.
+ */
+supports_structured_output: boolean, 
+/**
  * The reasoning-effort levels this model accepts, ascending. Empty when
  * the model exposes no effort control, which is what a client checks
  * before offering the selector at all.
@@ -1917,7 +1926,7 @@ models: Array<CustomModelConfig>, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "fireworks" | "together" | "openai_compatible" | "model_gateway";
 
 /**
  * How hard a reasoning-capable model should think before answering.

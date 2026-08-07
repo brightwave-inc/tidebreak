@@ -305,6 +305,127 @@ async fn openai_compat_request_contracts() {
 }
 
 #[tokio::test]
+async fn compatible_reasoning_replays_on_same_route_and_flattens_on_switch() {
+    let model = "accounts/fireworks/models/kimi-k3";
+    let build = |id: &'static str| {
+        move |base_url: &str| {
+            Arc::new(OpenAiCompatProvider::compatible(TEST_API_KEY, base_url).with_id(id))
+                as Arc<dyn ModelProvider>
+        }
+    };
+    let response = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan carefully\",\"content\":\"answer\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    );
+    let (_, events) = round_trip(
+        build("fireworks"),
+        ChatRequest {
+            provider: Some(ProviderId::new("fireworks")),
+            model: model.into(),
+            messages: vec![ChatMessage::text(Role::User, "first")],
+            ..Default::default()
+        },
+        response.into(),
+    )
+    .await;
+    let replay = events
+        .into_iter()
+        .find_map(|event| match event {
+            ProviderEvent::ReasoningBlock { data } => Some(data),
+            _ => None,
+        })
+        .expect("the compatible stream captured native reasoning_content");
+    let reasoning = MessageReasoning::captured(
+        ReasoningOrigin {
+            provider: Some(ProviderId::new("fireworks")),
+            model: model.into(),
+        },
+        vec![replay],
+    );
+
+    let (second_turn, _) = round_trip(
+        build("fireworks"),
+        ChatRequest {
+            provider: Some(ProviderId::new("fireworks")),
+            model: model.into(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "answer".into(),
+                    }],
+                    reasoning: reasoning.clone(),
+                },
+                ChatMessage::text(Role::User, "second"),
+            ],
+            ..Default::default()
+        },
+        terminal_frame("openai_compat").into(),
+    )
+    .await;
+    assert_eq!(
+        second_turn["body"]["messages"][0]["reasoning_content"],
+        "plan carefully"
+    );
+
+    let (tool_continuation, _) = round_trip(
+        build("fireworks"),
+        ChatRequest {
+            provider: Some(ProviderId::new("fireworks")),
+            model: model.into(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                        input: json!({"path": "a.toml"}),
+                    }],
+                    reasoning: reasoning.clone(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: "ok".into(),
+                        is_error: false,
+                    }],
+                    reasoning: MessageReasoning::default(),
+                },
+            ],
+            ..Default::default()
+        },
+        terminal_frame("openai_compat").into(),
+    )
+    .await;
+    assert_eq!(
+        tool_continuation["body"]["messages"][0]["reasoning_content"],
+        "plan carefully"
+    );
+
+    let (foreign, _) = round_trip(
+        build("together"),
+        ChatRequest {
+            provider: Some(ProviderId::new("together")),
+            model: model.into(),
+            messages: vec![ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "answer".into(),
+                }],
+                reasoning,
+            }],
+            ..Default::default()
+        },
+        terminal_frame("openai_compat").into(),
+    )
+    .await;
+    assert!(foreign["body"]["messages"][0]
+        .get("reasoning_content")
+        .is_none());
+}
+
+#[tokio::test]
 async fn gemini_request_contracts() {
     check_adapter("gemini", "gemini-3.6-flash", |base_url| {
         Arc::new(GeminiProvider::new(TEST_API_KEY).with_base_url(base_url))

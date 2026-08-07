@@ -19,6 +19,8 @@ Open **Settings → Providers**. Each provider is its own section: turn on
 | Google Gemini | Gemini Developer API key |
 | Google Vertex AI | Google Cloud service-account JSON containing its project ID; curated routes use the `global` location |
 | xAI | API key, plus the model IDs you want to use |
+| Fireworks AI | API key; OpenWave uses `https://api.fireworks.ai/inference/v1` |
+| Together AI | API key; OpenWave uses `https://api.together.ai/v1` |
 | OpenAI-compatible | Base URL, optional key, plus the model IDs you want to use |
 
 For new Google Cloud service-account setups, use the **Google Vertex AI**
@@ -45,23 +47,31 @@ not to a config file.
 
 <Callout>
 If you would rather not store anything, the server also reads
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, and `GEMINI_API_KEY`
-from the environment as a fallback when no credential is saved.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`,
+`FIREWORKS_API_KEY`, and `TOGETHER_API_KEY` from the environment as a fallback
+when no credential is saved.
 </Callout>
 
 ## Curated models
 
-Anthropic, OpenAI, Gemini, and Google Vertex AI ship with a curated list of
-models. Vertex includes provider-qualified native Gemini and Claude rows.
-Nothing to configure — once the provider has a credential, its models appear
-in the picker. The list is versioned with the app and refreshed as providers
-ship new models.
+Anthropic, OpenAI, Gemini, Google Vertex AI, Fireworks, and Together ship with a
+curated list of models. Vertex includes provider-qualified native Gemini and
+Claude rows; Fireworks and Together keep their host-specific model IDs and
+capabilities. Nothing to configure — once the provider has a credential, its
+models appear in the picker. The list is versioned with the app and refreshed
+as providers ship new models.
 
 Each entry carries what the app actually knows about it: context window,
 maximum output, whether it accepts images, whether it produces a reasoning
 stream, and which reasoning-effort levels it accepts. Those flags gate
 behavior, not just labels — a model is only offered an image attachment if the
 path that carries images is wired for it.
+
+Hosted Kimi K3, K2.7, and K2.6 rows preserve their native
+`reasoning_content` only when history returns to the same provider and model,
+including tool continuations. A provider or model switch drops that native
+field under the same flatten-on-switch rule used for other reasoning artifacts.
+Kimi K3 exposes its documented **Low**, **High**, and **Max** effort choices.
 
 Models the project has not exercised end to end are marked in the picker as
 unverified. They still run; the badge says tool calling and streaming have not

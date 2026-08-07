@@ -29,8 +29,12 @@ pub(super) const SANDBOX_PROMPT_WEB_SEARCH_CLAUSE: &str =
 pub(super) const SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE: &str = "request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker";
 pub(super) const SANDBOX_PROMPT_TASK_PLAN_CLAUSE: &str = "update_task_plan to keep an ordered checklist when the task takes several steps — send the whole list every time, keep exactly one step in_progress, and update it as steps finish rather than all at the end";
 pub(super) const SANDBOX_PROMPT_CLOSING: &str = "Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
+pub(super) const SANDBOX_CHAT_ONLY_PROMPT: &str = "You are a sandboxed background assistant. Work only on the task below. You cannot access the conversation, files, folders, the public internet, external capabilities, or other agents. Return the best final text result directly from the task and your own knowledge. Do not claim to have inspected, changed, or produced anything outside this reply.";
 
 /// Compose the run's instructions for the surface it actually has.
+///
+/// A chat-only route returns a final-text contract before any named capability
+/// is composed. Tool-capable runs retain the normal isolated executor prompt.
 ///
 /// A vendor-searching run still has `web_search` — the model provider runs it,
 /// but the model names and uses it the same way — so only a run with no search
@@ -38,7 +42,11 @@ pub(super) const SANDBOX_PROMPT_CLOSING: &str = "Take as many tool steps as the 
 pub(super) fn sandbox_system_prompt(
     delegated_file_available: bool,
     web_search: TurnWebSearch,
+    tools_supported: bool,
 ) -> String {
+    if !tools_supported {
+        return SANDBOX_CHAT_ONLY_PROMPT.to_owned();
+    }
     let mut clauses = Vec::with_capacity(4);
     if delegated_file_available {
         clauses.push(SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE);

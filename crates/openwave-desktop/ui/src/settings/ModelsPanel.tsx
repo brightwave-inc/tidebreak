@@ -189,6 +189,7 @@ export function ModelsPanel({
             return managed ? (
               <ManagedModelRoleRow
                 key={entry.role}
+                role={entry.role}
                 title={entry.title}
                 hint={entry.managedHint ?? entry.hint}
                 models={catalogModels}
@@ -200,6 +201,7 @@ export function ModelsPanel({
             ) : (
               <ModelRoleRow
                 key={entry.role}
+                role={entry.role}
                 title={entry.title}
                 hint={entry.hint}
                 models={models}
@@ -263,6 +265,7 @@ function ManagedCatalogNotice({ entitled }: { entitled: ModelInfo[] }) {
  * the automatic entry is a real change that persists `null`.
  */
 function ManagedModelRoleRow({
+  role,
   title,
   hint,
   models,
@@ -271,6 +274,7 @@ function ManagedModelRoleRow({
   saving,
   onSelect,
 }: {
+  role: ModelRole;
   title: string;
   hint: string;
   models: ModelInfo[];
@@ -280,10 +284,18 @@ function ManagedModelRoleRow({
   onSelect: (selection: ModelSelectionKey | null) => void;
 }) {
   const selected = modelForSelection(models, info.selection);
+  const selectableEntitled = entitled.filter((model) =>
+    modelSupportsRole(model, role),
+  );
+  const incompatiblePin =
+    selected !== null &&
+    info.selection !== null &&
+    !modelSupportsRole(selected, role);
   const gatewayServed =
     selected !== null &&
     selected.provider === "model_gateway" &&
-    selected.available;
+    selected.available &&
+    !incompatiblePin;
   const deadPin = !gatewayServed && info.selection !== null;
   // The kept-and-restored story belongs to a BYOK pin surviving managed mode.
   // A gateway pin that is merely unavailable — signed out, say — has no such
@@ -307,8 +319,8 @@ function ManagedModelRoleRow({
           value={selectValue}
           disabled={
             saving ||
-            entitled.length === 0 ||
-            !entitled.some((model) => model.available)
+            selectableEntitled.length === 0 ||
+            !selectableEntitled.some((model) => model.available)
           }
           onValueChange={(value) => {
             onSelect(value === AUTOMATIC ? null : (value as ModelSelectionKey));
@@ -325,7 +337,7 @@ function ManagedModelRoleRow({
                   } pin)`
                 : automatic}
             </SelectItem>
-            {entitled.map((model) => (
+            {selectableEntitled.map((model) => (
               <SelectItem
                 key={model.key}
                 value={model.key}
@@ -338,12 +350,20 @@ function ManagedModelRoleRow({
           </SelectContent>
         </Select>
       </SettingsField>
+      {incompatiblePin && (
+        <SettingsError>
+          The saved model “{selected?.display_name ?? info.selection}” cannot
+          enforce the strict structured responses this role requires. Pick a
+          compatible model or return to automatic.
+        </SettingsError>
+      )}
     </SettingsSection>
   );
 }
 
 /** One role's provider-then-model picker, plus what automatic resolves to. */
 function ModelRoleRow({
+  role,
   title,
   hint,
   models,
@@ -351,6 +371,7 @@ function ModelRoleRow({
   saving,
   onSelect,
 }: {
+  role: ModelRole;
   title: string;
   hint: string;
   models: ModelInfo[];
@@ -358,32 +379,45 @@ function ModelRoleRow({
   saving: boolean;
   onSelect: (selection: ModelSelectionKey | null) => void;
 }) {
+  const selectableModels = useMemo(
+    () => models.filter((model) => modelSupportsRole(model, role)),
+    [models, role],
+  );
   const providers = useMemo(
-    () => [...new Set(models.map((model) => model.provider))] as ProviderKind[],
-    [models],
+    () =>
+      [
+        ...new Set(selectableModels.map((model) => model.provider)),
+      ] as ProviderKind[],
+    [selectableModels],
   );
   const selected = modelForSelection(models, info.selection);
+  const incompatiblePin =
+    selected !== null &&
+    info.selection !== null &&
+    !modelSupportsRole(selected, role);
   const [provider, setProvider] = useState<ProviderKind | null>(null);
 
   // Open on the pinned model's provider, else on one that can actually serve
   // this role, so the list beneath is never a dead end.
   useEffect(() => {
     setProvider(
-      selected?.provider ??
+      (incompatiblePin ? null : selected?.provider) ??
         providers.find((kind) =>
-          models.some((model) => model.provider === kind && model.available),
+          selectableModels.some(
+            (model) => model.provider === kind && model.available,
+          ),
         ) ??
         providers[0] ??
         null,
     );
-  }, [selected?.provider, providers, models]);
+  }, [incompatiblePin, selected?.provider, providers, selectableModels]);
 
   const providerModels = provider
-    ? models.filter((model) => model.provider === provider)
+    ? selectableModels.filter((model) => model.provider === provider)
     : [];
   const canonical = canonicalModelSelection(models, info.selection);
   const selectedValue =
-    selected?.provider === provider ? (canonical ?? "") : "";
+    !incompatiblePin && selected?.provider === provider ? (canonical ?? "") : "";
   const unresolvedSelection = info.selection !== null && selected === null;
   // A pin left behind by the retired additive gateway mode. The catalog has
   // no gateway models on an unmanaged profile, so it resolves to nothing —
@@ -461,6 +495,12 @@ function ModelRoleRow({
           this profile is not connected to one. Pick a model here, or connect
           from your gateway&apos;s page.
         </SettingsError>
+      ) : incompatiblePin ? (
+        <SettingsError>
+          The saved model “{selected?.display_name ?? info.selection}” cannot
+          enforce the strict structured responses this role requires. Pick a
+          compatible model or return to automatic.
+        </SettingsError>
       ) : (
         unresolvedSelection && (
           <SettingsError>
@@ -473,6 +513,11 @@ function ModelRoleRow({
   );
 }
 
+/** Whether a catalog row carries the capabilities one named role requires. */
+function modelSupportsRole(model: ModelInfo, role: ModelRole): boolean {
+  return role !== "utility" || model.supports_structured_output;
+}
+
 /**
  * How much conversation a model can hold, beside its name.
  *
@@ -480,8 +525,10 @@ function ModelRoleRow({
  * models, and it was only visible by picking one and watching the meter.
  */
 function contextWindowSuffix(model: ModelInfo): string {
-  if (!model.context_window) return "";
-  return ` — ${formatTokenCount(model.context_window)} context`;
+  const context = model.context_window
+    ? ` — ${formatTokenCount(model.context_window)} context`
+    : "";
+  return `${context}${model.supports_tools ? "" : " — chat only"}`;
 }
 
 /**
