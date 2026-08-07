@@ -35,6 +35,7 @@ use openwave_core::{
 use crate::error::ServerError;
 use crate::extract::{Path, RawBytes};
 use crate::routes::SERVED_BYTES_CONTENT_POLICY;
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// Body limit for the publish endpoint, matching the durable per-image ceiling
@@ -81,13 +82,12 @@ impl From<ImageRef> for PublishedImageAttachment {
 /// identical bytes twice yields the same id and one stored copy.
 pub async fn publish_chat_image_attachment(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path(chat_id): Path<ChatId>,
     headers: HeaderMap,
     RawBytes(bytes): RawBytes,
 ) -> Result<impl IntoResponse, ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
+    store.require_chat(chat_id).await?;
     let bytes = bytes.to_vec();
     let image = inspect_image_bytes(&bytes)?;
     require_declared_type_matches(&headers, image.media_type)?;
@@ -112,21 +112,18 @@ pub async fn publish_chat_image_attachment(
 /// chat before bytes can cross this endpoint.
 pub async fn get_chat_image_attachment(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path((chat_id, attachment_id)): Path<(ChatId, Uuid)>,
 ) -> Result<Response, ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
-    let message_image = state
-        .store
+    store.require_chat(chat_id).await?;
+    let message_image = store
         .list_message_attachments(chat_id)
         .await?
         .into_iter()
         .find(|attachment| attachment.image.blob_id == attachment_id)
         .map(|attachment| attachment.image);
     let tool_image = if message_image.is_none() {
-        state
-            .store
+        store
             .list_tool_calls(chat_id)
             .await?
             .into_iter()

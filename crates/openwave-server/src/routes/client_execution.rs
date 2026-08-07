@@ -22,6 +22,7 @@ use openwave_core::{
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::principal::ClientExecutor;
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 const CLIENT_EXECUTION_LEASE: Duration = Duration::seconds(60);
@@ -175,12 +176,11 @@ pub struct PendingOutputWritebackRequest {
 /// Unknown, malformed, or non-folder-access client calls are omitted rather
 /// than exposing their canonical records across the renderer boundary.
 pub async fn list_pending_folder_access_requests(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingFolderAccessRequest>>, ServerError> {
-    ensure_chat(&state, id).await?;
-    let requests = state
-        .store
+    store.require_chat(id).await?;
+    let requests = store
         .list_pending_client_tool_calls(id)
         .await?
         .into_iter()
@@ -194,12 +194,11 @@ pub async fn list_pending_folder_access_requests(
 /// Create/no-clobber calls are handled automatically by the native executor and
 /// are intentionally omitted from the renderer.
 pub async fn list_pending_output_writebacks(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingOutputWritebackRequest>>, ServerError> {
-    ensure_chat(&state, id).await?;
-    let requests = state
-        .store
+    store.require_chat(id).await?;
+    let requests = store
         .list_pending_client_tool_calls(id)
         .await?
         .into_iter()
@@ -210,14 +209,13 @@ pub async fn list_pending_output_writebacks(
 
 /// Native-only authoritative pending work used by the trusted executor.
 pub async fn list_pending_client_executions_raw(
-    State(state): State<AppState>,
+    store: ScopedStore,
     _executor: ClientExecutor,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
-    ensure_chat(&state, id).await?;
+    store.require_chat(id).await?;
     Ok(Json(
-        state
-            .store
+        store
             .list_pending_client_tool_calls(id)
             .await?
             .into_iter()
@@ -269,17 +267,16 @@ fn renderer_output_writeback_request(
 
 /// `POST .../{call_id}/claim` — atomically acquire or recover one exact claim.
 pub async fn claim_client_execution(
-    State(state): State<AppState>,
+    store: ScopedStore,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ClaimClientExecution>,
 ) -> Result<Json<ClaimedClientExecution>, ServerError> {
-    ensure_chat(&state, id).await?;
+    store.require_chat(id).await?;
     ensure_non_nil(body.executor_id, "executor_id")?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let now = Utc::now();
-    let outcome = state
-        .store
+    let outcome = store
         .claim_client_tool_call(
             call_id,
             id,
@@ -309,16 +306,15 @@ pub async fn claim_client_execution(
 /// Heartbeats are monotonic liveness updates rather than exact commands: a
 /// repeated request can extend the lease again from its new server receive time.
 pub async fn heartbeat_client_execution(
-    State(state): State<AppState>,
+    store: ScopedStore,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<HeartbeatClientExecution>,
 ) -> Result<Json<ClientExecutionHeartbeat>, ServerError> {
-    ensure_chat(&state, id).await?;
+    store.require_chat(id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let now = Utc::now();
-    let disposition = match state
-        .store
+    let disposition = match store
         .heartbeat_client_tool_call(
             call_id,
             id,
@@ -346,18 +342,18 @@ pub async fn heartbeat_client_execution(
 /// with the first committed result.
 pub async fn resolve_client_execution(
     State(state): State<AppState>,
+    store: ScopedStore,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ResolveClientExecution>,
 ) -> Result<Json<ResolvedClientExecution>, ServerError> {
-    ensure_chat(&state, id).await?;
+    store.require_chat(id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let rows = body.resolution.rows().cloned();
     let resolution = body.resolution.into_core();
     validate_resolution(&resolution)?;
     let now = Utc::now();
-    let mut resolution_receipt = state
-        .store
+    let mut resolution_receipt = store
         .resolve_client_tool_call_and_append_event_with_rows(
             call_id,
             id,
@@ -369,8 +365,7 @@ pub async fn resolve_client_execution(
         )
         .await?;
     if resolution_receipt.outcome == ResolveToolCallOutcome::LeaseLost {
-        resolution_receipt = state
-            .store
+        resolution_receipt = store
             .resolve_expired_client_tool_call_and_append_event_with_rows(
                 call_id,
                 id,
@@ -413,13 +408,6 @@ pub async fn resolve_client_execution(
         state.turn_job_wake.notify_one();
     }
     Ok(Json(ResolvedClientExecution { disposition }))
-}
-
-async fn ensure_chat(state: &AppState, id: ChatId) -> Result<(), ServerError> {
-    if state.store.get_chat(id).await?.is_none() {
-        return Err(ServerError::not_found(format!("chat {id} not found")));
-    }
-    Ok(())
 }
 
 fn ensure_non_nil(value: uuid::Uuid, field: &str) -> Result<(), ServerError> {

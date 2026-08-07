@@ -3162,6 +3162,24 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
         "a listing never carries another owner's rows"
     );
 
+    // The parked-work recovery routes hang off the same gate: a pending plan
+    // approval or question set is only reachable through the chat that owns it.
+    for path in ["plans/pending", "questions/pending", "task-plan"] {
+        assert_eq!(
+            get(alice, format!("/chats/{}/{path}", chat.id))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get(bob, format!("/chats/{}/{path}", chat.id))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path} must not answer for another owner's chat"
+        );
+    }
+
     // Mutations answer the same way: nothing to patch, nothing to delete.
     let patch = router
         .clone()

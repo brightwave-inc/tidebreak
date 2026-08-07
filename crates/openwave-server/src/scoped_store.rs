@@ -25,14 +25,18 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 
+use openwave_core::storage::DecidePlanOutcome;
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, CallId, Chat,
-    ChatId, ChatTranscriptSnapshot, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
-    DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord,
-    ImageRef, JournaledTurnOutcome, NetworkPolicy, OwnerId, PermissionMode, Project, ProjectId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult,
+    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, CallId, Chat, ChatId,
+    ChatTranscriptSnapshot, ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome,
+    DeleteProjectOutcome, DocumentId, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceUpsert, DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
+    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, NetworkPolicy,
+    OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId,
     ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
     SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
-    TaskPlan, ToolApproval, ToolCallRecord, TurnId, TurnRun, TurnSteerId,
+    TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -388,6 +392,132 @@ impl ScopedStore {
     /// [`Store::get_task_plan`].
     pub async fn get_task_plan(&self, chat_id: ChatId) -> Result<Option<TaskPlan>> {
         self.store.get_task_plan(chat_id).await
+    }
+
+    /// [`Store::list_pending_plan_approvals`].
+    pub async fn list_pending_plan_approvals(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<PendingPlanApproval>> {
+        self.store.list_pending_plan_approvals(chat_id).await
+    }
+
+    /// [`Store::decide_plan`].
+    pub async fn decide_plan(
+        &self,
+        request: &DecidePlanRequest,
+        decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<DecidePlanOutcome> {
+        self.store.decide_plan(request, decided_at).await
+    }
+
+    /// [`Store::list_pending_user_questions`].
+    pub async fn list_pending_user_questions(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<PendingUserQuestions>> {
+        self.store.list_pending_user_questions(chat_id).await
+    }
+
+    /// [`Store::answer_user_questions`].
+    pub async fn answer_user_questions(
+        &self,
+        request: &AnswerUserQuestionsRequest,
+        answered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AnswerUserQuestionsOutcome> {
+        self.store.answer_user_questions(request, answered_at).await
+    }
+
+    /// [`Store::list_message_attachments`].
+    pub async fn list_message_attachments(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<MessageAttachment>> {
+        self.store.list_message_attachments(chat_id).await
+    }
+
+    /// [`Store::list_tool_calls`].
+    pub async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+        self.store.list_tool_calls(chat_id).await
+    }
+
+    /// [`Store::claim_client_tool_call`].
+    pub async fn claim_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        executor_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ClaimClientToolCallOutcome> {
+        self.store
+            .claim_client_tool_call(id, chat_id, executor_id, lease_token, now, lease_expires_at)
+            .await
+    }
+
+    /// [`Store::heartbeat_client_tool_call`].
+    pub async fn heartbeat_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<HeartbeatClientToolCallOutcome> {
+        self.store
+            .heartbeat_client_tool_call(id, chat_id, lease_token, now, lease_expires_at)
+            .await
+    }
+
+    /// [`Store::resolve_client_tool_call_and_append_event_with_rows`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        self.store
+            .resolve_client_tool_call_and_append_event_with_rows(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+                rows,
+            )
+            .await
+    }
+
+    /// [`Store::resolve_expired_client_tool_call_and_append_event_with_rows`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_expired_client_tool_call_and_append_event_with_rows(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        rows: Option<&serde_json::Value>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        self.store
+            .resolve_expired_client_tool_call_and_append_event_with_rows(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+                rows,
+            )
+            .await
     }
 }
 
