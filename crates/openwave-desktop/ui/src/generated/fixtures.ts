@@ -60,5 +60,6 @@ export const PENDING_FOLDER_ACCESS_REQUEST = {
 export const PENDING_OUTPUT_WRITEBACK_REQUEST = {
   "call_id": "00000000-0000-0000-0000-000000000006",
   "claimed": false,
+  "mode": "replace",
   "turn_id": "00000000-0000-0000-0000-000000000007"
 } as const;

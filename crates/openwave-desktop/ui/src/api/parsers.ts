@@ -99,10 +99,12 @@ export function parseOutputWritebackRequest(
     !onlyKeys<WirePendingOutputWritebackRequest>(value, [
       "call_id",
       "turn_id",
+      "mode",
       "claimed",
     ]) ||
     !nonEmptyBounded(value.call_id, 128) ||
     !nonEmptyBounded(value.turn_id, 128) ||
+    (value.mode !== "create" && value.mode !== "replace") ||
     typeof value.claimed !== "boolean"
   ) {
     return null;
@@ -110,6 +112,7 @@ export function parseOutputWritebackRequest(
   return {
     callId: value.call_id,
     turnId: value.turn_id,
+    mode: value.mode,
     claimedByDesktop: value.claimed,
   };
 }

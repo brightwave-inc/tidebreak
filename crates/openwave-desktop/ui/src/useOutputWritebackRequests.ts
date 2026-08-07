@@ -17,7 +17,11 @@ export type OutputWritebackRequests = {
   cancel: (callId: string, turnId: string) => void;
 };
 
-/** Resolves explicit replacement consent; create/no-clobber writes run natively. */
+/**
+ * Resolves write-back consent. Replacement always asks; a create asks only
+ * where the chat's permission mode says workspace mutations ask, and otherwise
+ * runs natively without reaching this hook.
+ */
 export function useOutputWritebackRequests(
   client: ApiClient | null,
   chatId: string | null,

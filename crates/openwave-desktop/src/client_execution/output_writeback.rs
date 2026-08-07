@@ -67,8 +67,8 @@ pub(crate) async fn resolve_output_writeback_request(
         .find(|call| call.id == call_id)
         .ok_or_else(|| "output write-back request is no longer pending".to_owned())?;
     let arguments = canonical_arguments(&call, chat_id, call_id)?;
-    if arguments.mode != OutputWriteMode::Replace {
-        return Err("only replacement write-backs require a decision".to_owned());
+    if !requires_user_decision(&state, chat_id, arguments.mode).await? {
+        return Err("this write-back does not require a decision".to_owned());
     }
 
     let claim = client
@@ -91,7 +91,12 @@ pub(crate) async fn resolve_output_writeback_request(
                 call_id,
                 claim.lease_token,
                 &StoredResolution::Cancelled {
-                    result: "Output replacement was declined.".to_owned(),
+                    result: match arguments.mode {
+                        OutputWriteMode::Create => {
+                            "Writing that output to the connected folder was declined.".to_owned()
+                        }
+                        OutputWriteMode::Replace => "Output replacement was declined.".to_owned(),
+                    },
                 },
             )
             .await
@@ -167,8 +172,16 @@ async fn recover_once(app: &AppHandle) -> bool {
             let Ok(arguments) = canonical_arguments(call, summary.chat_id, call_id) else {
                 continue;
             };
-            if arguments.mode != OutputWriteMode::Create {
-                continue;
+            // A write-back the reader still has to decide belongs to the
+            // approval card, not to this executor. The mode is read live, so a
+            // chat moved to `Auto` while one was parked simply proceeds here.
+            match requires_user_decision(&state, summary.chat_id, arguments.mode).await {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(_) => {
+                    failed = true;
+                    continue;
+                }
             }
             let lease_token = Uuid::new_v4();
             let claim = match client
@@ -212,6 +225,24 @@ async fn recover_once(app: &AppHandle) -> bool {
         }
     }
     failed
+}
+
+/// Whether this write-back parks on the approval card instead of running
+/// unattended, under the chat's current permission mode.
+async fn requires_user_decision(
+    state: &HostAccess,
+    chat_id: ChatId,
+    mode: OutputWriteMode,
+) -> Result<bool, String> {
+    let store = state
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let chat = store
+        .get_chat(chat_id)
+        .await
+        .map_err(|_| "could not read the conversation's permission mode".to_owned())?
+        .ok_or_else(|| "conversation is no longer available".to_owned())?;
+    Ok(mode.requires_user_decision(chat.permission_mode))
 }
 
 async fn prepare_receipt(

@@ -692,9 +692,11 @@ impl OutputWritebackReceipt {
             })
             || self.byte_len == 0
             || self.byte_len > MAX_BINARY_DELIVERABLE_BYTES as u64
-            || matches!(self.mode, OutputWriteMode::Create) && self.approval_id.is_some()
-            || matches!(self.mode, OutputWriteMode::Replace)
-                && self.approval_id.is_none_or(|id| id.is_nil())
+            // A create carries an approval id when the chat's permission mode
+            // made the reader decide it, and none when it ran unattended.
+            // Replacement always asks, so it always carries one.
+            || self.approval_id.is_some_and(|id| id.is_nil())
+            || matches!(self.mode, OutputWriteMode::Replace) && self.approval_id.is_none()
             || self.resolution.is_some() && self.phase != FolderOperationPhase::DispatchStarted
         {
             return Err(invalid_data("invalid output-writeback receipt"));
