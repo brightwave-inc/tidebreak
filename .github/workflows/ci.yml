@@ -22,14 +22,14 @@ concurrency:
   # Every other event gets a unique group (keyed by run id) so nothing cancels
   # it and it cancels nothing: post-merge runs are the full validation for the
   # exact commits they cover — a later merge whose narrower change scope skips
-  # a lane (notably the sandbox-container e2e) must not cancel the earlier run
-  # that was responsible for it, and a manual workflow_dispatch is the
-  # deliberate backstop for those lanes, so an unrelated push must never kill
-  # it. During a merge train this runs main pushes in parallel instead of
-  # superseding them; that costs runner time, but sccache shares compiler
-  # objects across the runs and correctness of the scoped lanes wins. A job may
-  # add narrower concurrency only when a newer run provably subsumes the older
-  # one; the Windows lane does that for Rust-scoped pushes to linear main.
+  # a lane must not cancel the earlier run that was responsible for it, and a
+  # manual workflow_dispatch is the deliberate backstop for those lanes, so an
+  # unrelated push must never kill it. During a merge train this runs main
+  # pushes in parallel instead of superseding them; that costs runner time, but
+  # sccache shares compiler objects across the runs and correctness of the
+  # scoped lanes wins. A job may add narrower concurrency only when a newer run
+  # provably subsumes the older one; the Windows lane does that for Rust-scoped
+  # pushes to linear main.
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -105,7 +105,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
-      sandbox_container: ${{ steps.scope.outputs.sandbox_container }}
       ui: ${{ steps.scope.outputs.ui }}
       workspace: ${{ steps.scope.outputs.workspace }}
     steps:
@@ -124,7 +123,6 @@ jobs:
           full_validation() {
             {
               echo "rust=true"
-              echo "sandbox_container=true"
               echo "ui=true"
               echo "workspace=true"
             } >> "$GITHUB_OUTPUT"
@@ -164,7 +162,6 @@ jobs:
           # stay false when a change cannot reach them. `workspace` implies
           # `rust`; the gate below asserts that.
           rust=false
-          sandbox_container=false
           ui=false
           workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
@@ -174,15 +171,7 @@ jobs:
               *.md|docs/*|assets/*|.githooks/*|docs-site/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
                 rust=true
-                sandbox_container=true
                 ui=true
-                workspace=true
-                ;;
-              # These inputs can change dependency resolution or compiler
-              # behavior for the heavyweight sandbox-container capability.
-              .cargo/*|Cargo.lock|Cargo.toml|rust-toolchain.toml)
-                rust=true
-                sandbox_container=true
                 workspace=true
                 ;;
               # Generated from Rust definitions, and a Rust test is what checks
@@ -193,18 +182,6 @@ jobs:
               crates/openwave-desktop/ui/src/generated/*)
                 rust=true; ui=true; workspace=true ;;
               crates/openwave-desktop/ui/*) ui=true ;;
-              crates/openwave-server/Cargo.toml)
-                rust=true
-                sandbox_container=true
-                workspace=true
-                ;;
-              # The real-container lane adds a packaging/runtime boundary over
-              # the loopback coverage that runs in every headless test job.
-              crates/openwave-sandbox-agent/*|crates/openwave-sandbox-protocol/*|crates/openwave-server/src/sandbox_container_run.rs|crates/openwave-server/src/sandbox_container_run/*|crates/openwave-server/src/sandbox_docker.rs)
-                rust=true
-                sandbox_container=true
-                workspace=true
-                ;;
               # Nothing in the workspace depends on openwave-desktop, and the
               # `test` lane already excludes it, so no edit to its own sources
               # can change that lane's result. The desktop lane still covers it.
@@ -220,14 +197,9 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
-          if [[ "$sandbox_container" == true && "$workspace" != true ]]; then
-            echo "sandbox-container scope without workspace scope; the detector is wrong." >&2
-            exit 1
-          fi
 
           {
             echo "rust=$rust"
-            echo "sandbox_container=$sandbox_container"
             echo "ui=$ui"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
@@ -388,7 +360,11 @@ jobs:
     # independent pre-merge choice: `full-ci` does not opt a pull request into
     # this long-running lane. Add `windows-ci` when the change reaches a Windows
     # boundary; main and scheduled/manual runs retain the automatic backstop.
-    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci')) }}
+    #
+    # The leading `false` parks the whole lane while Windows packaging is paused
+    # (see docs/deferred.md). The rest of the condition is the live gating
+    # policy, kept intact so resuming is one literal.
+    if: ${{ false && needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci')) }}
     runs-on: windows-latest
     # Every Rust-scoped main push contains the prior main state, so the newest
     # Windows run proves everything an older in-progress one would have proven.
@@ -562,61 +538,6 @@ jobs:
         run: >-
           cargo test -p openwave-core --no-default-features --features postgres
           --test postgres_turn_state --locked
-
-  sandbox-container:
-    name: sandbox-resident container e2e
-    needs: changes
-    # Builds the sandbox-agent image (compiling the agent crate's slice of the
-    # workspace inside Docker) and drives a real container end to end. That is
-    # expensive, and the container runtime is a detected capability rather than a
-    # hard dependency, so pay for it after relevant merges and in weekly/manual
-    # backstops instead of once per push to every open PR. The rest of the stack
-    # is covered on every PR by the loopback
-    # tests, which drive the same driver against the real agent over a socket.
-    if: ${{ needs.changes.outputs.sandbox_container == 'true' && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_ONLY
-      RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install toolchain (honors rust-toolchain.toml)
-        run: rustup show
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-      - name: Install headless system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mold
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          cache-targets: false
-          save-if: false
-      # The runner ships a working Docker daemon; assert it rather than letting
-      # the test skip silently and report a green lane that exercised nothing.
-      - name: The container runtime must be present
-        run: docker version --format '{{.Server.Version}}'
-      # `--ignored` runs the gated Docker tests: the end-to-end drive and the
-      # transport-boundary conformance checks against the packaged image. Both
-      # build the same image tag; one test thread serializes them so the second
-      # build is a cache hit and the containers never race.
-      - name: Drive a sandbox-resident run and conformance checks on a real container
-        run: >-
-          cargo test -p openwave-server --locked
-          sandbox_container_run::tests::docker
-          -- --ignored --nocapture --test-threads=1
 
   ui:
     name: desktop UI

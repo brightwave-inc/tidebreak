@@ -114,6 +114,35 @@ host-authority-reachable tools, and enforceable credential egress rules. Until
 those properties hold together, the in-process durable run path is the
 supported one.
 
+Because that tier is parked, the `sandbox-resident container e2e` CI lane has
+been removed rather than left failing against functionality nobody is
+advancing. The loopback tests still drive the same host driver against the real
+sandbox agent over a socket on every run; what is no longer proven is the
+Docker packaging and the container network boundary. Restoring that lane is
+part of picking the tier back up, not a separate task.
+
+## Windows packaging
+
+Windows builds shipped through v0.34.0 as an unsigned x86_64 NSIS installer,
+and the code that produces them is still in the tree. The lanes are parked, not
+deleted: `windows-check` in CI and the `prepare_windows`/`build_windows` jobs
+in the release workflow are each gated behind a literal `false`, and the
+`windows` descriptor in `scripts/create-release-manifests.mjs` is retained
+outside `RELEASE_PLATFORMS`. Releases are macOS-only until those are flipped
+back.
+
+The reason is cost, not a product decision. The native Windows runner is the
+slowest lane in the repo and the release build serializes a prepare and a build
+job behind it, which dominates the time to publish a tag. Nothing about the
+Windows boundary has been declared unsupported, and no Windows behavior has
+been removed.
+
+What resuming has to account for: the `/releases/latest/download/` link in the
+docs site points at an installer that later releases will not carry, and
+`latest.json` no longer publishes a `windows-x86_64` key. The in-app update
+loop runs only on macOS today, so no live updater breaks — but a Windows user
+on v0.34.0 has no upgrade path until the lanes come back.
+
 Reliability work also remains ahead of the product surface: replayable adapter
 contracts, recorded response decoding, and a protected live canary matrix would
 catch provider API drift before it becomes a user-visible turn failure. MCP app
