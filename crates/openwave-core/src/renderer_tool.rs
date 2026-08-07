@@ -157,10 +157,6 @@ mod tests {
             "",
             "SEARCH",
             "other",
-            // Removed 2026-07: journals recorded before the files-first outputs
-            // migration still carry these calls and must render as generic
-            // tools rather than fail the fold.
-            "create_deliverable",
         ] {
             assert_eq!(RendererToolName::from(name), RendererToolName::Other);
         }
