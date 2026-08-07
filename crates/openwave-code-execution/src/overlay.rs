@@ -1039,7 +1039,7 @@ async fn observe_prior(
                 mode: Some(stamp.mode),
             })
         }
-        Some(stamp) => {
+        Some(_stamp) => {
             let bytes = match target.read_file(name).await {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1057,7 +1057,7 @@ async fn observe_prior(
                 prior: PriorContents::Bytes(bytes),
                 precondition: FilePrecondition::Sha256(sha256),
                 #[cfg(unix)]
-                mode: Some(stamp.mode),
+                mode: Some(_stamp.mode),
             })
         }
     }

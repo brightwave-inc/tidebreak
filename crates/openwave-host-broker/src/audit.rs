@@ -753,7 +753,15 @@ mod tests {
     fn interrupted_rotation_reports_the_ambiguity_then_recovers_in_place() {
         let temp = tempfile::tempdir().unwrap();
         let first = event(AuditTarget::Subject);
-        let line_bytes = serde_json::to_vec(&first).unwrap().len() as u64 + 1;
+        let second = event(AuditTarget::Subject);
+        let first_len = serde_json::to_vec(&first).unwrap().len();
+        let second_len = serde_json::to_vec(&second).unwrap().len();
+        // Rotation triggers on a strict `>` bound. Follow-up events pick up new
+        // UUID/timestamp bytes, so cap the file from the first line and require
+        // later lines to stay within it — otherwise recovery can append into a
+        // fresh active file and spuriously rotate, wiping the archive on Windows.
+        assert!(second_len <= first_len);
+        let line_bytes = first_len as u64 + 1;
         let sink = JsonlAuditSink::open(temp.path()).with_max_file_bytes(line_bytes);
         sink.record(&first).unwrap();
         sink.writer.lock().unwrap().fail_rotation_after_archive_once = true;
@@ -762,7 +770,6 @@ mod tests {
             Err(AuditError::PublicationAmbiguous)
         ));
 
-        let second = event(AuditTarget::Subject);
         sink.record(&second).unwrap();
         let archive = fs::read_to_string(temp.path().join(AUDIT_ARCHIVE_NAME)).unwrap();
         let current = fs::read_to_string(temp.path().join(AUDIT_FILE_NAME)).unwrap();
