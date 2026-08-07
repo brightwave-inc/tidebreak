@@ -513,7 +513,10 @@ mod resource_dir_tests {
     fn cargo_dev_fallback_accepts_custom_target_dir_with_lock() {
         let dir = temp_dir("with-lock");
         fs::write(dir.join(".cargo-lock"), []).expect("lock");
-        assert_eq!(cargo_dev_resource_dir_from(&dir).as_deref(), Some(dir.as_path()));
+        assert_eq!(
+            cargo_dev_resource_dir_from(&dir).as_deref(),
+            Some(dir.as_path())
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
