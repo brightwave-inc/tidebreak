@@ -63,13 +63,16 @@ describe("UserQuestionsCard", () => {
       "Start with a canary.",
     );
     await user.click(screen.getByRole("button", { name: "Next" }));
-    const submit = screen.getByRole("button", { name: "Continue" });
-    expect(submit).toBeEnabled();
+    // The second page is where the last question lives; context is a page of
+    // its own behind "Continue and add context".
+    await user.click(
+      screen.getByRole("button", { name: "Continue and add context" }),
+    );
     await user.type(
       screen.getByRole("textbox", { name: "Additional context" }),
       "Keep it reversible.",
     );
-    await user.click(submit);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(onAnswer).toHaveBeenCalledWith(
       [
         {
@@ -80,6 +83,52 @@ describe("UserQuestionsCard", () => {
       ],
       "Keep it reversible.",
     );
+  });
+
+  /**
+   * Paging back has to keep what was already chosen: the answers are collected
+   * across pages and only sent once, so a lost draft is a silently wrong answer.
+   */
+  it("keeps answers when paging back and forward", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
+    render(
+      <UserQuestionsCard
+        request={request}
+        working={false}
+        error={undefined}
+        onAnswer={onAnswer}
+      />,
+    );
+    await user.click(screen.getByLabelText(/Staging/));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByLabelText(/Staging/)).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Go to question 2" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onAnswer).toHaveBeenCalledWith(
+      [{ questionId: "target", selectedOptionIds: ["staging"] }],
+      undefined,
+    );
+  });
+
+  it("skips all questions from the footer menu without cancelling the turn", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
+    render(
+      <UserQuestionsCard
+        request={request}
+        working={false}
+        error={undefined}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Skip all/ }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Skip these questions" }),
+    );
+    expect(onAnswer).toHaveBeenCalledWith([]);
   });
 
   it("skips all questions without cancelling the turn", async () => {

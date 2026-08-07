@@ -319,6 +319,8 @@ pub(in crate::db) async fn decide(
         active_chat.update(&transaction).await.map_err(store_err)?;
     }
 
+    let plan_title = plan_request.title.clone();
+    let plan = plan_request.plan.clone();
     let mut active_request: entities::plan_request::ActiveModel = plan_request.into();
     active_request.status = Set(decided_status.as_str().into());
     active_request.feedback = Set(request.decision.feedback.clone());
@@ -331,10 +333,52 @@ pub(in crate::db) async fn decide(
     let mut active_call: entities::tool_call::ActiveModel = call.into();
     active_call.status = Set(ToolCallStatus::Completed.as_str().into());
     active_call.result = Set(Some(result));
+    // Read back on history rehydration, so reopening the chat shows the same
+    // recap the live transcript settled to.
+    let preview = crate::ToolResultPreview::PlanDecision {
+        title: plan_title,
+        plan,
+        accepted: matches!(request.decision.decision, PlanDecisionChoice::Accept),
+        feedback: request.decision.feedback.clone(),
+    };
+    active_call.result_preview = Set(Some(serde_json::to_value(&preview)?));
     active_call.error_code = Set(None);
     active_call.error_detail = Set(None);
     active_call.resolved_at = Set(Some(decided_at));
     let resolved = active_call.update(&transaction).await.map_err(store_err)?;
+    // The plan call resolves outside the agent loop, so nothing else ever
+    // announces that it finished: the resumed worker reads the committed
+    // result straight into the model transcript and never revisits the call.
+    // Without this event the renderer showed the card waiting from
+    // `PlanProposed` until the turn's terminal hydration finally settled it —
+    // the decision looked lost exactly when it had committed.
+    //
+    // Journaled here, in the transaction that makes the row terminal, so the
+    // event cannot disagree with the row it describes. An exact retry returns
+    // above as `Existing` without reaching this, so the call announces itself
+    // once. Chat-scoped like its `PlanProposed`: the turn is parked with no
+    // lease, so no attempt owns this event.
+    let completion_event = AgentEvent::ToolCallCompleted {
+        call_id: request.call_id,
+        output: crate::ToolOutput::text(resolved.result.clone().ok_or_else(|| {
+            AgentError::Store(format!(
+                "decided plan {} committed no result",
+                request.call_id
+            ))
+        })?),
+        action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
+        result: Some(preview),
+    };
+    let seq = super::conversation::append_event_on(
+        &transaction,
+        ChatId(resolved.chat_id),
+        None,
+        None,
+        None,
+        None,
+        &completion_event,
+    )
+    .await?;
     let transition =
         super::turn::advance_turn_after_client_resolution_on(&transaction, &resolved, decided_at)
             .await?
@@ -345,7 +389,13 @@ pub(in crate::db) async fn decide(
                 ))
             })?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(DecidePlanOutcome::Decided(transition.turn))
+    Ok(DecidePlanOutcome::Decided {
+        turn: transition.turn,
+        completion_event: Box::new(SequencedEvent {
+            seq,
+            event: completion_event,
+        }),
+    })
 }
 
 /// Close presentation state when cancellation terminalizes the unclaimed

@@ -4102,7 +4102,10 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
     // The answer announces the call's completion itself: the renderer settles
     // the card from this event rather than waiting for the turn to end.
     let crate::AgentEvent::ToolCallCompleted {
-        call_id, output, ..
+        call_id,
+        output,
+        result: Some(preview),
+        ..
     } = &completion_event.event
     else {
         panic!("unexpected completion event: {completion_event:?}");
@@ -4113,6 +4116,45 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
         serde_json::from_str::<crate::AnswerUserQuestions>(&output.content).unwrap(),
         sample_user_answers()
     );
+    // The recap the transcript shows once the card is gone: option *labels*
+    // rather than ids, and a row for the question nobody answered so the card
+    // can say it was skipped instead of quietly dropping it.
+    let crate::ToolResultPreview::UserQuestions {
+        answers,
+        additional_context,
+    } = preview
+    else {
+        panic!("unexpected question recap: {preview:?}");
+    };
+    assert_eq!(
+        answers,
+        &vec![
+            crate::AnsweredUserQuestion {
+                question: "Where should I deploy?".into(),
+                selected: vec!["Staging".into(), "Production".into()],
+                custom_answer: Some("Start with a canary.".into()),
+            },
+            crate::AnsweredUserQuestion {
+                question: "Anything else I should know?".into(),
+                selected: Vec::new(),
+                custom_answer: None,
+            },
+        ]
+    );
+    assert_eq!(
+        additional_context.as_deref(),
+        Some("Keep the rollout reversible.")
+    );
+    let answered_call = restarted
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == request.id)
+        .unwrap();
+    // Rehydration reads the stored column, not the event, so a reload has to
+    // find the same recap there.
+    assert_eq!(answered_call.result_preview.as_ref(), Some(preview));
     let journaled_completions = restarted
         .list_events(chat.id, 0)
         .await
@@ -4603,10 +4645,39 @@ async fn accepted_plan_resumes_the_turn_and_leaves_plan_mode() {
         },
     };
     let decided_at = parked_at + chrono::Duration::seconds(1);
+    let outcome = restarted
+        .decide_plan(&decide_request, decided_at)
+        .await
+        .unwrap();
+    let crate::storage::DecidePlanOutcome::Decided {
+        turn,
+        completion_event,
+    } = outcome
+    else {
+        panic!("unexpected plan decision: {outcome:?}");
+    };
+    assert_eq!(turn.id, turn_id);
+    assert_eq!(turn.status, TurnRunStatus::Resuming);
+    // The call resolves outside the agent loop, so this event is the only
+    // thing that tells a connected renderer the card settled — and it carries
+    // the recap the transcript shows in the pending card's place.
+    let crate::AgentEvent::ToolCallCompleted {
+        call_id,
+        result: Some(preview),
+        ..
+    } = &completion_event.event
+    else {
+        panic!("unexpected completion: {:?}", completion_event.event);
+    };
+    assert_eq!(*call_id, request.id);
     assert!(matches!(
-        restarted.decide_plan(&decide_request, decided_at).await.unwrap(),
-        crate::storage::DecidePlanOutcome::Decided(turn)
-            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
+        preview,
+        crate::ToolResultPreview::PlanDecision {
+            title,
+            plan,
+            accepted: true,
+            feedback: None,
+        } if title == "Add health checks" && plan.contains("/healthz")
     ));
     assert_eq!(
         restarted
@@ -4628,6 +4699,9 @@ async fn accepted_plan_resumes_the_turn_and_leaves_plan_mode() {
     let result: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
     assert_eq!(result["decision"], "accepted");
     assert!(result["note"].as_str().unwrap().contains("left plan mode"));
+    // Rehydration reads the stored column, not the event, so a reload has to
+    // find the same recap there.
+    assert_eq!(call.result_preview.as_ref(), Some(preview));
 
     // An exact retry recovers; a different decision conflicts.
     assert!(matches!(
@@ -4684,7 +4758,7 @@ async fn rejected_plan_keeps_plan_mode_and_carries_feedback() {
             )
             .await
             .unwrap(),
-        crate::storage::DecidePlanOutcome::Decided(turn)
+        crate::storage::DecidePlanOutcome::Decided { turn, .. }
             if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
     ));
     assert_eq!(
@@ -4702,6 +4776,14 @@ async fn rejected_plan_keeps_plan_mode_and_carries_feedback() {
     let result: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
     assert_eq!(result["decision"], "rejected");
     assert_eq!(result["feedback"], "Split step 2 into its own slice.");
+    assert!(matches!(
+        call.result_preview.as_ref(),
+        Some(crate::ToolResultPreview::PlanDecision {
+            accepted: false,
+            feedback: Some(feedback),
+            ..
+        }) if feedback == "Split step 2 into its own slice."
+    ));
 }
 
 #[tokio::test]
@@ -7625,7 +7707,7 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
             )
             .await
             .unwrap(),
-        crate::storage::DecidePlanOutcome::Decided(_)
+        crate::storage::DecidePlanOutcome::Decided { .. }
     ));
     let planned_turn = store.get_turn_run(planned_turn_id).await.unwrap().unwrap();
     store

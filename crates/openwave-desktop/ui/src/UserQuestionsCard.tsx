@@ -1,15 +1,71 @@
-import { useMemo, useState } from "react";
-import { CornerDownLeft, X } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { ChevronDown, CornerDownLeft, X } from "lucide-react";
 import type { PendingUserQuestions, UserQuestionAnswer } from "./api";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
 type DraftAnswer = {
   selectedOptionIds: string[];
+  /** Undefined means "Other" is not chosen; "" means chosen but still empty. */
   customAnswer?: string;
 };
+
+function QuestionOption({
+  label,
+  description,
+  selected,
+  disabled,
+  onSelect,
+  children,
+}: {
+  label: string;
+  description: string | null;
+  selected: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "hover:bg-accent/50 flex cursor-pointer items-start space-x-3 rounded-md p-2 transition-colors",
+        selected && "bg-accent",
+        disabled && "pointer-events-none opacity-60",
+      )}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+    >
+      {children}
+      <div className="grid min-w-0 flex-1 gap-1.5 leading-none">
+        <div className="cursor-pointer text-sm leading-none font-medium break-words">
+          {label}
+        </div>
+        {description && (
+          <p className="text-muted-foreground cursor-pointer text-sm break-words">
+            {description}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function UserQuestionsCard({
   request,
@@ -27,7 +83,9 @@ export function UserQuestionsCard({
 }) {
   const [drafts, setDrafts] = useState<Record<string, DraftAnswer>>({});
   const [currentPage, setCurrentPage] = useState(0);
+  const [showContextForm, setShowContextForm] = useState(false);
   const [additionalContext, setAdditionalContext] = useState("");
+
   const answers = useMemo(
     () =>
       request.questions.flatMap<UserQuestionAnswer>((question) => {
@@ -45,265 +103,343 @@ export function UserQuestionsCard({
       }),
     [drafts, request.questions],
   );
+
+  const submit = useCallback(
+    (context?: string) => {
+      const trimmed = context?.trim();
+      onAnswer(answers, trimmed || undefined);
+    },
+    [answers, onAnswer],
+  );
+  const skipAll = useCallback(() => onAnswer([]), [onAnswer]);
+
+  const questions = request.questions;
   const currentQuestion =
-    request.questions[Math.min(currentPage, request.questions.length - 1)];
+    questions[Math.min(currentPage, questions.length - 1)];
   if (!currentQuestion) return null;
-  const currentDraft = drafts[currentQuestion.id] ?? {
-    selectedOptionIds: [],
+
+  const question = currentQuestion;
+  const draft = drafts[question.id] ?? { selectedOptionIds: [] };
+  const isMultiSelect = question.questionType === "multi_select";
+  const isLastPage = currentPage === questions.length - 1;
+  const otherChosen = draft.customAnswer !== undefined;
+
+  const update = (next: DraftAnswer) =>
+    setDrafts((current) => ({ ...current, [question.id]: next }));
+
+  const chooseOption = (optionId: string) => {
+    if (working) return;
+    if (isMultiSelect) {
+      update({
+        ...draft,
+        selectedOptionIds: draft.selectedOptionIds.includes(optionId)
+          ? draft.selectedOptionIds.filter((id) => id !== optionId)
+          : [...draft.selectedOptionIds, optionId],
+      });
+      return;
+    }
+    // Picking a listed option in a single-select drops any "Other" text, so the
+    // two can never both count as the answer.
+    update({ selectedOptionIds: [optionId] });
   };
-  const isMultiSelect = currentQuestion.questionType === "multi_select";
-  const isLastPage = currentPage === request.questions.length - 1;
 
-  const chooseSingleOption = (questionId: string, optionId: string) =>
-    setDrafts((current) => ({
-      ...current,
-      [questionId]: { selectedOptionIds: [optionId] },
-    }));
+  const chooseOther = () => {
+    if (working) return;
+    update({
+      selectedOptionIds: isMultiSelect ? draft.selectedOptionIds : [],
+      customAnswer: draft.customAnswer ?? "",
+    });
+  };
 
-  const toggleOption = (questionId: string, optionId: string) =>
-    setDrafts((current) => {
-      const draft = current[questionId] ?? { selectedOptionIds: [] };
-      return {
-        ...current,
-        [questionId]: {
-          ...draft,
-          selectedOptionIds: draft.selectedOptionIds.includes(optionId)
-            ? draft.selectedOptionIds.filter((id) => id !== optionId)
-            : [...draft.selectedOptionIds, optionId],
-        },
-      };
+  const setCustomAnswer = (value: string) =>
+    update({
+      selectedOptionIds: isMultiSelect ? draft.selectedOptionIds : [],
+      customAnswer: value,
     });
 
-  const updateCustomAnswer = (
-    questionId: string,
-    value: string | undefined,
-  ) =>
-    setDrafts((current) => {
-      const draft = current[questionId] ?? { selectedOptionIds: [] };
-      return {
-        ...current,
-        [questionId]: {
-          selectedOptionIds: isMultiSelect ? draft.selectedOptionIds : [],
-          ...(value === undefined ? {} : { customAnswer: value }),
-        },
-      };
+  const toggleOther = (checked: boolean) =>
+    update({
+      selectedOptionIds: draft.selectedOptionIds,
+      ...(checked ? { customAnswer: draft.customAnswer ?? "" } : {}),
     });
 
-  const submitAnswers = () => {
-    const context = additionalContext.trim();
-    onAnswer(answers, context || undefined);
-  };
+  const errorNotice = error ? (
+    <p className="text-destructive text-xs break-words" role="alert">
+      {error}
+    </p>
+  ) : null;
+
+  if (showContextForm) {
+    return (
+      <section
+        className="bg-background rounded-lg border p-4"
+        aria-labelledby={`questions-${request.callId}`}
+        aria-busy={working}
+      >
+        <div className="mb-6 flex items-start justify-between gap-3">
+          <h3
+            id={`questions-${request.callId}`}
+            className="min-w-0 font-medium"
+          >
+            What would you like to add or clarify?
+          </h3>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground shrink-0"
+            disabled={working}
+            onClick={skipAll}
+            aria-label="Skip questions"
+            title="Skip questions"
+          >
+            <X aria-hidden="true" />
+          </Button>
+        </div>
+
+        <div className="space-y-6">
+          <Input
+            maxLength={2000}
+            placeholder="Add additional context"
+            aria-label="Additional context"
+            value={additionalContext}
+            disabled={working}
+            onChange={(event) => setAdditionalContext(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !working) {
+                submit(additionalContext);
+              }
+            }}
+            autoFocus
+          />
+
+          {errorNotice}
+
+          <Separator />
+
+          <div className="flex items-center justify-between">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={working}
+              onClick={() => setShowContextForm(false)}
+            >
+              Back
+            </Button>
+            <Button
+              type="button"
+              disabled={working}
+              onClick={() => submit(additionalContext)}
+            >
+              {working ? "Sending…" : "Continue"}
+              {!working && <CornerDownLeft aria-hidden="true" />}
+            </Button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  const otherRow = question.allowFreeForm ? (
+    <div className="flex items-center space-x-3 p-2">
+      {isMultiSelect ? (
+        <Checkbox
+          checked={otherChosen}
+          disabled={working}
+          onCheckedChange={(checked) => toggleOther(checked === true)}
+          aria-label="Other"
+        />
+      ) : (
+        <RadioGroupItem value="other" aria-label="Other" disabled={working} />
+      )}
+      <Input
+        maxLength={2000}
+        placeholder="Other"
+        aria-label="Other answer"
+        value={draft.customAnswer ?? ""}
+        disabled={working}
+        onChange={(event) => setCustomAnswer(event.target.value)}
+        onClick={() => {
+          if (!isMultiSelect && !otherChosen) chooseOther();
+        }}
+        className="flex-1"
+      />
+    </div>
+  ) : null;
 
   return (
     <section
-      className="bg-background flex w-full max-w-prose flex-col gap-3 rounded-[20px] border p-3.5 shadow-sm"
+      className="bg-background rounded-lg border p-4"
       aria-labelledby={`questions-${request.callId}`}
       aria-busy={working}
     >
-      <div className="flex items-start gap-2.5">
-        <div className="min-w-0 flex-1">
-          <p className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
-            {currentQuestion.header}
-          </p>
-          <h3
-            id={`questions-${request.callId}`}
-            className="mt-1 text-[15px] leading-5 font-semibold break-words"
-          >
-            {currentQuestion.question}
-            {isMultiSelect && " Select all that apply."}
-          </h3>
-        </div>
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <h3 id={`questions-${request.callId}`} className="min-w-0 font-medium">
+          {question.question}
+          {isMultiSelect ? " Select all that apply." : ""}
+        </h3>
         <Button
           type="button"
           variant="ghost"
           size="icon-xs"
+          className="text-muted-foreground shrink-0"
           disabled={working}
-          onClick={() => onAnswer([])}
+          onClick={skipAll}
           aria-label="Skip questions"
           title="Skip questions"
-          className="text-muted-foreground shrink-0"
         >
           <X aria-hidden="true" />
         </Button>
       </div>
 
-      {currentQuestion.options.length > 0 && (
-        <div
-          role={isMultiSelect ? "group" : "radiogroup"}
-          aria-label={currentQuestion.header}
-          className="grid gap-1"
-        >
-          {currentQuestion.options.map((option) => {
-            const selected = currentDraft.selectedOptionIds.includes(option.id);
-            return (
-              <label
-                key={option.id}
-                className={cn(
-                  "hover:bg-muted/40 flex min-w-0 cursor-pointer items-start gap-2.5 rounded-[10px] border px-2.5 py-2.5 transition-colors",
-                  selected && "border-foreground bg-muted",
-                  working && "pointer-events-none opacity-60",
-                )}
-              >
-                <input
-                  type={isMultiSelect ? "checkbox" : "radio"}
-                  name={`${request.callId}-${currentQuestion.id}`}
-                  checked={selected}
-                  disabled={working}
-                  onChange={() =>
-                    isMultiSelect
-                      ? toggleOption(currentQuestion.id, option.id)
-                      : chooseSingleOption(currentQuestion.id, option.id)
-                  }
-                  className="accent-foreground mt-0.5 size-[18px] shrink-0"
-                />
-                <span className="min-w-0">
-                  <span className="block text-sm font-medium break-words">
-                    {option.label}
-                  </span>
-                  {option.description && (
-                    <span className="text-muted-foreground mt-0.5 block text-xs leading-4 break-words">
-                      {option.description}
-                    </span>
-                  )}
-                </span>
-              </label>
-            );
-          })}
-          {currentQuestion.allowFreeForm && (
-            <label
-              className={cn(
-                "flex min-w-0 items-center gap-2.5 px-1 py-1.5",
-                working && "pointer-events-none opacity-60",
-              )}
+      <div className="space-y-4">
+        <div>
+          {isMultiSelect ? (
+            <div
+              role="group"
+              aria-label={question.header}
+              className="flex flex-col gap-1"
             >
-              <input
-                type={isMultiSelect ? "checkbox" : "radio"}
-                name={`${request.callId}-${currentQuestion.id}`}
-                checked={currentDraft.customAnswer !== undefined}
-                disabled={working}
-                onChange={(event) =>
-                  updateCustomAnswer(
-                    currentQuestion.id,
-                    event.target.checked
-                      ? (currentDraft.customAnswer ?? "")
-                      : undefined,
-                  )
-                }
-                className="accent-foreground size-[18px] shrink-0"
-              />
-              <Input
-                type="text"
-                maxLength={2000}
-                value={currentDraft.customAnswer ?? ""}
-                onFocus={() => {
-                  if (currentDraft.customAnswer === undefined) {
-                    updateCustomAnswer(currentQuestion.id, "");
-                  }
-                }}
-                onChange={(event) =>
-                  updateCustomAnswer(currentQuestion.id, event.target.value)
-                }
-                disabled={working}
-                aria-label="Other answer"
-                placeholder="Other"
-                className="h-auto min-w-0 flex-1 rounded-lg px-2.5 py-2 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
-              />
-            </label>
+              {question.options.map((option) => {
+                const selected = draft.selectedOptionIds.includes(option.id);
+                return (
+                  <QuestionOption
+                    key={option.id}
+                    label={option.label}
+                    description={option.description}
+                    selected={selected}
+                    disabled={working}
+                    onSelect={() => chooseOption(option.id)}
+                  >
+                    <Checkbox
+                      checked={selected}
+                      disabled={working}
+                      onCheckedChange={() => chooseOption(option.id)}
+                      aria-label={option.label}
+                    />
+                  </QuestionOption>
+                );
+              })}
+              {otherRow}
+            </div>
+          ) : (
+            <RadioGroup
+              className="gap-1"
+              aria-label={question.header}
+              value={draft.selectedOptionIds[0] ?? (otherChosen ? "other" : "")}
+              onValueChange={(value) =>
+                value === "other" ? chooseOther() : chooseOption(value)
+              }
+            >
+              {question.options.map((option) => (
+                <QuestionOption
+                  key={option.id}
+                  label={option.label}
+                  description={option.description}
+                  selected={draft.selectedOptionIds[0] === option.id}
+                  disabled={working}
+                  onSelect={() => chooseOption(option.id)}
+                >
+                  <RadioGroupItem
+                    value={option.id}
+                    disabled={working}
+                    aria-label={option.label}
+                  />
+                </QuestionOption>
+              ))}
+              {otherRow}
+            </RadioGroup>
           )}
         </div>
-      )}
 
-      {currentQuestion.allowFreeForm &&
-        currentQuestion.options.length === 0 && (
-          <Textarea
-            maxLength={2000}
-            rows={3}
-            value={currentDraft.customAnswer ?? ""}
-            onChange={(event) =>
-              updateCustomAnswer(currentQuestion.id, event.target.value)
-            }
-            disabled={working}
-            aria-label={currentQuestion.header}
-            placeholder="Your answer"
-            className="min-h-16 resize-y rounded-[10px] py-2.5 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
-          />
-        )}
+        {errorNotice}
 
-      <Textarea
-        maxLength={2000}
-        rows={2}
-        value={additionalContext}
-        onChange={(event) => setAdditionalContext(event.target.value)}
-        disabled={working}
-        aria-label="Additional context"
-        placeholder="Additional context (optional)"
-        className="min-h-14 resize-y rounded-[10px] py-2.5 text-sm focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
-      />
+        <Separator />
 
-      {request.questions.length > 1 && (
-        <div
-          className="flex items-center justify-center gap-1.5 pt-0.5"
-          aria-label="Questions"
-        >
-          {request.questions.map((question, index) => (
-            <button
-              key={question.id}
-              type="button"
-              disabled={working}
-              onClick={() => setCurrentPage(index)}
-              aria-label={`Go to question ${index + 1}`}
-              aria-current={index === currentPage ? "step" : undefined}
-              className={cn(
-                "size-1.5 rounded-full transition-opacity",
-                index === currentPage
-                  ? "bg-foreground"
-                  : "bg-muted-foreground opacity-40 hover:opacity-70",
-              )}
-            />
-          ))}
-        </div>
-      )}
-
-      {error && (
-        <p className="text-destructive text-xs break-words" role="alert">
-          {error}
-        </p>
-      )}
-
-      <div className="flex items-center justify-between gap-2 pt-0.5">
-        <div>
-          {currentPage > 0 && (
+        <div className="flex items-center justify-between gap-2">
+          {currentPage === 0 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="outline" disabled={working}>
+                  {questions.length === 1 ? "Skip" : "Skip all"}
+                  <ChevronDown aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem onClick={() => setShowContextForm(true)}>
+                  Add your own context
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={skipAll}>
+                  {questions.length === 1
+                    ? "Skip question"
+                    : "Skip these questions"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
             <Button
               type="button"
               variant="outline"
-              size="sm"
               disabled={working}
               onClick={() => setCurrentPage((page) => page - 1)}
             >
               Back
             </Button>
           )}
+
+          {questions.length > 1 && (
+            <div className="flex items-center gap-2">
+              {questions.map((entry, index) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  disabled={working}
+                  onClick={() => setCurrentPage(index)}
+                  className={cn(
+                    "h-2 w-2 rounded-full transition-colors",
+                    index === currentPage
+                      ? "bg-primary"
+                      : "bg-muted-foreground/30",
+                  )}
+                  aria-label={`Go to question ${index + 1}`}
+                  aria-current={index === currentPage ? "step" : undefined}
+                />
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            {isLastPage ? (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={working}
+                  onClick={() => setShowContextForm(true)}
+                >
+                  Continue and add context
+                </Button>
+                <Button
+                  type="button"
+                  disabled={working}
+                  onClick={() => submit()}
+                >
+                  {working ? "Sending…" : "Continue"}
+                  {!working && <CornerDownLeft aria-hidden="true" />}
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={working}
+                onClick={() => setCurrentPage((page) => page + 1)}
+              >
+                Next
+              </Button>
+            )}
+          </div>
         </div>
-        {isLastPage ? (
-          <Button
-            type="button"
-            size="sm"
-            disabled={working}
-            onClick={submitAnswers}
-          >
-            {working ? "Sending…" : "Continue"}
-            {!working && <CornerDownLeft aria-hidden="true" />}
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="sm"
-            disabled={working}
-            onClick={() => setCurrentPage((page) => page + 1)}
-          >
-            Next
-          </Button>
-        )}
       </div>
     </section>
   );

@@ -100,45 +100,47 @@ describe("a tool result that cannot render", () => {
 });
 
 describe("a continuation card that cannot render", () => {
-  it("leaves the question the turn is waiting on standing", () => {
+  it("leaves the decision the turn is waiting on standing", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    list([], {
-      folderAccessRequests: [
+    list(
+      [
         {
-          callId: "f1",
-          turnId: "turn-1",
-          reason: "read the project folder",
-          folderHint: null,
-          claimedByDesktop: true,
+          id: "a1",
+          role: "approval",
+          callId: "c1",
+          summary: "Allow OpenWave to run a command?",
+          preview: {
+            tool: "exec",
+            command: "cargo",
+            args: ["build"],
+            cwd: ".",
+            files: [],
+          },
+          canApprove: true,
+          canRemember: true,
         },
       ],
-      userQuestionRequests: [
-        {
-          callId: "q1",
-          turnId: "turn-1",
-          questions: [
-            {
-              id: "q",
-              header: "Environment",
-              question: "Which environment?",
-              options: [
-                { id: "o1", label: "Staging", description: "the shared one" },
-              ],
-              questionType: "single_select",
-              allowFreeForm: false,
-            },
-          ],
-          askedAt: "2026-07-30T00:00:00Z",
-        },
-      ],
-    });
+      {
+        folderAccessRequests: [
+          {
+            callId: "f1",
+            turnId: "turn-1",
+            reason: "read the project folder",
+            folderHint: null,
+            claimedByDesktop: true,
+          },
+        ],
+      },
+    );
 
-    // Both cards are prompts the turn cannot get past. Sharing one boundary
-    // with the transcript meant either one taking the whole surface down.
+    // Both are prompts the turn cannot get past. Sharing one boundary with the
+    // transcript meant either one taking the whole surface down.
     expect(screen.getAllByText("This step could not be displayed.").length).toBe(
       1,
     );
-    expect(screen.getByText("Which environment?")).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: /Yes, run it once/ }),
+    ).toBeTruthy();
   });
 });
 

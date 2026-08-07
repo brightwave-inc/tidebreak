@@ -3,6 +3,7 @@ import {
   memo,
   useMemo,
   useRef,
+  type ReactElement,
   type ReactNode,
 } from "react";
 import ReactMarkdown, {
@@ -363,23 +364,31 @@ const MarkdownBlock = memo(function MarkdownBlock({
   headingIds,
   highlightStart,
   highlightEnd,
+  wrapBlock,
 }: {
   block: string;
   headingIds: boolean;
   /** Range to mark, in this block's own source. Primitives, so memo compares. */
   highlightStart?: number;
   highlightEnd?: number;
+  /** Stable across renders, or every block re-parses on every tick. */
+  wrapBlock?: WrapMarkdownBlock;
 }) {
   const processed = useMemo(() => processMarkdownContent(block), [block]);
   const plugins = useMemo(
     () => blockRehypePlugins(block, highlightStart, highlightEnd),
     [block, highlightStart, highlightEnd],
   );
+  const blockComponents = useMemo(() => {
+    const base = headingIds ? componentsWithHeadingIds : components;
+    const wrapping = wrappingComponents(wrapBlock, processed);
+    return wrapping ? { ...base, ...wrapping } : base;
+  }, [headingIds, wrapBlock, processed]);
   return (
     <ReactMarkdown
       remarkPlugins={remarkPlugins}
       rehypePlugins={plugins}
-      components={headingIds ? componentsWithHeadingIds : components}
+      components={blockComponents}
       skipHtml
       urlTransform={(url) => safeMarkdownUrl(url) ?? ""}
     >
@@ -426,6 +435,78 @@ function blockRehypePlugins(
   ];
 }
 
+/**
+ * Wrap each addressable block of a rendered message in caller-supplied chrome.
+ *
+ * The caller gets the block's own Markdown source alongside the element, which
+ * is what lets a comment be filed against the text a reader pointed at rather
+ * than against a rendered node nobody can name. Blocks are the units a person
+ * would quote: paragraphs, leaf list items, quotes, and code fences. A list
+ * item holding a nested list is left alone — wrapping it would put the chrome
+ * around its whole subtree, and its leaves are wrapped individually anyway.
+ */
+export type WrapMarkdownBlock = (
+  source: string,
+  element: ReactElement,
+) => ReactNode;
+
+/**
+ * The block-wrapping overrides for one parsed block, or nothing when the
+ * caller wants none.
+ *
+ * `processed` is what the parser was handed, so the offsets it recorded index
+ * into it and not into the caller's original text.
+ */
+function wrappingComponents(
+  wrapBlock: WrapMarkdownBlock | undefined,
+  processed: string,
+): Components | undefined {
+  if (!wrapBlock) return undefined;
+  const wrap = (
+    node: { position?: { start: { offset?: number }; end: { offset?: number } } } | undefined,
+    element: ReactElement,
+  ): ReactNode => {
+    const start = node?.position?.start.offset;
+    const end = node?.position?.end.offset;
+    const source =
+      start != null && end != null ? processed.slice(start, end) : "";
+    return wrapBlock(source, element);
+  };
+  return {
+    p: ({ node, children }) => wrap(node, <p>{children}</p>),
+    li: ({ node, children }) => {
+      const nested = node?.children?.some(
+        (child) =>
+          child.type === "element" &&
+          (child.tagName === "ul" || child.tagName === "ol"),
+      );
+      return nested ? <li>{children}</li> : wrap(node, <li>{children}</li>);
+    },
+    blockquote: ({ node, children }) =>
+      wrap(node, <blockquote>{children}</blockquote>),
+    // The fence keeps its copy button; the chrome goes around the whole block
+    // so it does not land on top of it.
+    pre: ({ node, children }) => {
+      const source = node ? rawCodeText(node) : "";
+      return wrap(
+        node,
+        <div className="code-block">
+          {source && (
+            <ClipboardCopyButton
+              value={source}
+              label="Copy code"
+              copiedAnnouncement="Code copied"
+              failedAnnouncement="Copy failed"
+              className="code-block-copy"
+            />
+          )}
+          <pre>{children}</pre>
+        </div>,
+      );
+    },
+  };
+}
+
 interface MessageMarkdownProps {
   children: string;
   /**
@@ -441,12 +522,19 @@ interface MessageMarkdownProps {
    * placed against the offsets the parser recorded for each of them.
    */
   highlightRange?: HighlightRange;
+  /**
+   * Wrap every addressable block in caller-supplied chrome — the plan card's
+   * per-block comment affordance. Must be stable (`useCallback`), or each
+   * render re-parses every block.
+   */
+  wrapBlock?: WrapMarkdownBlock;
 }
 
 export const MessageMarkdown = memo(function MessageMarkdown({
   children,
   headingIds = false,
   highlightRange,
+  wrapBlock,
 }: MessageMarkdownProps) {
   const blocks = useMemo(() => splitMarkdownBlocks(children), [children]);
   const blockStarts = useMemo(() => pieceStartOffsets(blocks), [blocks]);
@@ -467,6 +555,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
             headingIds={headingIds}
             highlightStart={inBlock?.start}
             highlightEnd={inBlock?.end}
+            wrapBlock={wrapBlock}
           />
         );
       })}

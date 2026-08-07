@@ -3,6 +3,7 @@ import {
   type AgentActivityDetail,
   type AgentActivityKind,
   type AgentActivityOutcome,
+  type AnsweredUserQuestion as WireAnsweredUserQuestion,
   type PendingApprovalSnapshot,
   type ToolResultPreview as WireToolResultPreview,
   type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
@@ -39,6 +40,7 @@ import {
   type ResultEntry,
   type ResultEntryKind,
   type ResultFailure,
+  type AnsweredUserQuestion,
   type SandboxAgentCancellation,
   type AgentRunTaskPlan,
   type TaskPlan,
@@ -945,6 +947,18 @@ type UncheckedEntriesResult = Partial<
   Record<keyof Extract<WireToolResultPreview, { tool: "entries" }>, unknown>
 >;
 
+type UncheckedUserQuestionsResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "user_questions" }>, unknown>
+>;
+
+type UncheckedPlanDecisionResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "plan_decision" }>, unknown>
+>;
+
+type UncheckedAnsweredUserQuestion = Partial<
+  Record<keyof WireAnsweredUserQuestion, unknown>
+>;
+
 const RESULT_ENTRY_KINDS: readonly ResultEntryKind[] = [
   "file",
   "folder",
@@ -1031,6 +1045,33 @@ function parseResultFailure(value: unknown): ResultFailure | null {
 }
 
 /**
+ * Validate one recap row.
+ *
+ * `selected` and `customAnswer` are both genuinely absent for a question the
+ * reader skipped, which is a row the card still shows — so their absence is
+ * normalized rather than rejected, and only a present value of the wrong type
+ * fails the row.
+ */
+function parseAnsweredUserQuestion(
+  value: unknown,
+): AnsweredUserQuestion | null {
+  if (!isRecord(value)) return null;
+  const { question, selected, custom_answer }: UncheckedAnsweredUserQuestion = value;
+  const labels = selected ?? [];
+  const custom = custom_answer ?? null;
+  if (
+    typeof question !== "string" ||
+    question.length === 0 ||
+    !Array.isArray(labels) ||
+    !labels.every((label) => typeof label === "string") ||
+    !isOptionalString(custom)
+  ) {
+    return null;
+  }
+  return { question, selected: labels as string[], customAnswer: custom };
+}
+
+/**
  * Validate a result field by field, on the same terms as an action: anything
  * that cannot be fully verified is dropped rather than half-rendered.
  */
@@ -1081,6 +1122,41 @@ export function parseToolResultPreview(
         Number(elided) +
         (entries.length - parsedEntries.length) +
         (failures.length - parsedFailures.length),
+    };
+  }
+  if (value.tool === "user_questions") {
+    const { answers, additional_context }: UncheckedUserQuestionsResult = value;
+    if (!Array.isArray(answers) || !isOptionalString(additional_context ?? null)) {
+      return null;
+    }
+    const parsed = answers
+      .map(parseAnsweredUserQuestion)
+      .filter((answer): answer is AnsweredUserQuestion => answer !== null);
+    // A recap that lost a row would misreport what the reader chose, so a
+    // malformed row takes the whole card down rather than being elided.
+    if (parsed.length !== answers.length) return null;
+    return {
+      tool: "user_questions",
+      answers: parsed,
+      additionalContext: (additional_context as string | undefined) ?? null,
+    };
+  }
+  if (value.tool === "plan_decision") {
+    const { title, plan, accepted, feedback }: UncheckedPlanDecisionResult = value;
+    if (
+      typeof title !== "string" ||
+      typeof plan !== "string" ||
+      typeof accepted !== "boolean" ||
+      !isOptionalString(feedback ?? null)
+    ) {
+      return null;
+    }
+    return {
+      tool: "plan_decision",
+      title,
+      plan,
+      accepted,
+      feedback: (feedback as string | undefined) ?? null,
     };
   }
   if (value.tool !== "exec") return null;

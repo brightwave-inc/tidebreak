@@ -372,6 +372,9 @@ body {
   min-height: 0;
   min-width: 0;
   overflow: clip;
+  /* A plan card taken full screen fills the pane, not the window: the pane is
+     the positioning context it expands into. */
+  position: relative;
 }
 
 /* ---------- Agent activity ---------- */

@@ -214,15 +214,16 @@ describe("approval card interactions", () => {
       }),
     );
 
-    // Every option on screen is one keystroke away, so the narrowest grant is
-    // inline and the wider ones are not.
+    // Every option on screen is one keystroke away, so the narrowest grants are
+    // inline and the widest ones are not.
     expect(
       screen.getAllByRole("option").map((option) => option.textContent),
     ).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
-      `3.${MORE}`,
-      "4.No, don't allow this",
+      "3.Yes, and always allow any \u201ccargo test\u201d command",
+      `4.${MORE}`,
+      "5.No, don't allow this",
     ]);
 
     await user.click(screen.getByText(MORE));
@@ -231,13 +232,47 @@ describe("approval card interactions", () => {
     ).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
-      // The rung this ladder previously could not offer.
       "3.Yes, and always allow any \u201ccargo test\u201d command",
+      // The rungs this ladder previously could not offer.
       "4.Yes, and always allow any \u201ccargo\u201d command",
       "5.Yes, and don't ask again about commands in this chat",
       "6.No, don't allow this",
     ]);
     expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Folding one rung behind "More options" spends a row to save a row, so the
+   * list is exactly as long either way and the keystroke buys nothing.
+   */
+  it("shows a short ladder whole rather than folding a single rung", () => {
+    render(
+      card({
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["test"],
+          cwd: ".",
+          files: [],
+        },
+        grantRungs: [
+          "exact_action",
+          { command_prefix: { tokens: 2 } },
+          "whole_tool",
+        ],
+      }),
+    );
+
+    expect(
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([
+      "1.Yes, run it once",
+      "2.Yes, and always allow exactly \u201ccargo test\u201d",
+      "3.Yes, and always allow any \u201ccargo test\u201d command",
+      "4.Yes, and don't ask again about commands in this chat",
+      "5.No, don't allow this",
+    ]);
+    expect(screen.queryByText(MORE)).toBeNull();
   });
 
   it("names the project when a remembered answer will reach past this chat", async () => {
@@ -258,12 +293,18 @@ describe("approval card interactions", () => {
       card({
         onDecide,
         preview: { tool: "exec", command: "cargo", args: ["test"], cwd: ".", files: [] },
+        grantRungs: [
+          "exact_action",
+          { command_prefix: { tokens: 2 } },
+          { command_prefix: { tokens: 1 } },
+          "whole_tool",
+        ],
       }),
     );
 
-    // "More options" sat at row 3; expanding puts a broader grant there. A
+    // "More options" sat at row 4; expanding puts a broader grant there. A
     // stray Enter must not commit whatever moved under the cursor.
-    await user.keyboard("3{Enter}");
+    await user.keyboard("4{Enter}");
     expect(screen.getAllByRole("option")[0]).toHaveAttribute(
       "aria-selected",
       "true",
@@ -297,7 +338,7 @@ describe("approval card interactions", () => {
     ).toEqual([
       ONCE,
       "2.Yes, and always allow exactly “quarterly filings”",
-      `3.${MORE}`,
+      "3.Yes, and don't ask again in this chat",
       "4.No, don't allow this",
     ]);
     // The filters are part of what is being consented to, so the card shows

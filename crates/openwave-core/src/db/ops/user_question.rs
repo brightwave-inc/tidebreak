@@ -365,6 +365,11 @@ pub(in crate::db) async fn answer(
     let mut active_call: entities::tool_call::ActiveModel = call.into();
     active_call.status = Set(ToolCallStatus::Completed.as_str().into());
     active_call.result = Set(Some(result));
+    // The recap card reads this column on history rehydration, the same way
+    // every other settled card does. Without it, reopening the chat showed the
+    // answered question as a bare rail line.
+    let preview = answers_preview(&questions, &canonical)?;
+    active_call.result_preview = Set(Some(serde_json::to_value(&preview)?));
     active_call.error_code = Set(None);
     active_call.error_detail = Set(None);
     active_call.resolved_at = Set(Some(answered_at));
@@ -390,7 +395,7 @@ pub(in crate::db) async fn answer(
             ))
         })?),
         action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
-        result: None,
+        result: Some(preview),
     };
     let seq = super::conversation::append_event_on(
         &transaction,
@@ -586,6 +591,45 @@ fn canonical_answers(
         answers,
         additional_user_context: supplied.additional_user_context.clone(),
     }))
+}
+
+/// Project the settled recap card from the questions and the exact answers.
+///
+/// Option *labels*, not ids: the recap is read by a person, and the ids are an
+/// internal handle they never saw. Every question is listed, answered or not,
+/// so the card can say which ones were skipped rather than quietly omitting
+/// them.
+fn answers_preview(
+    questions: &[entities::user_question::Model],
+    canonical: &crate::AnswerUserQuestions,
+) -> Result<crate::ToolResultPreview> {
+    let by_id: HashMap<_, _> = canonical
+        .answers
+        .iter()
+        .map(|answer| (answer.question_id.as_str(), answer))
+        .collect();
+    let mut answers = Vec::with_capacity(questions.len());
+    for question in questions {
+        let answer = by_id.get(question.question_id.as_str());
+        let options: Vec<crate::UserQuestionOption> =
+            serde_json::from_value(question.options.clone())?;
+        let selected = options
+            .into_iter()
+            .filter(|option| {
+                answer.is_some_and(|answer| answer.selected_option_ids.contains(&option.id))
+            })
+            .map(|option| option.label)
+            .collect();
+        answers.push(crate::AnsweredUserQuestion {
+            question: question.prompt.clone(),
+            selected,
+            custom_answer: answer.and_then(|answer| answer.custom_answer.clone()),
+        });
+    }
+    Ok(crate::ToolResultPreview::UserQuestions {
+        answers,
+        additional_context: canonical.additional_user_context.clone(),
+    })
 }
 
 fn stored_answers_match(

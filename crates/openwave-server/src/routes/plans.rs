@@ -54,7 +54,15 @@ pub async fn decide_plan(
         )
         .await?;
     let (disposition, turn) = match outcome {
-        DecidePlanOutcome::Decided(turn) => (PlanDecisionDisposition::Decided, turn),
+        DecidePlanOutcome::Decided {
+            turn,
+            completion_event,
+        } => {
+            // Live delivery of the journaled completion; replay covers anyone
+            // not connected, so a missed send is not a correctness gap.
+            let _ = state.events.sender(chat_id).send(*completion_event);
+            (PlanDecisionDisposition::Decided, turn)
+        }
         DecidePlanOutcome::Existing(turn) => (PlanDecisionDisposition::Existing, turn),
         DecidePlanOutcome::DecisionConflict => {
             return Err(ServerError::conflict(format!(

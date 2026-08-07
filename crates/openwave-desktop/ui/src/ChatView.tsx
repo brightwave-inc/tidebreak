@@ -8,23 +8,26 @@ import {
   type RefObject,
 } from "react";
 import type { ApiClient, Chat } from "./api";
-import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
+import {
+  followScrollBehavior,
+  isNearBottom,
+  scrollToLatest,
+} from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import {
   useComposerAttachments,
   useComposerDraft,
   useComposerDrafts,
-} from "./ComposerDrafts";import {
+} from "./ComposerDrafts";
+import {
   Composer,
   type ComposerFiles,
   type ComposerFolders,
   type ComposerImages,
   type ComposerVoice,
 } from "./Composer";
-import type {
-  ComposerNetwork,
-  ComposerReasoning,
-} from "./ComposerToolsMenu";
+import { ComposerPrompt } from "./ComposerPrompt";
+import type { ComposerNetwork, ComposerReasoning } from "./ComposerToolsMenu";
 import { MessageList, type RetryableTurn } from "./MessageList";
 import { revealPendingCall } from "./TranscriptFocus";
 import { useTranscriptVisible } from "./TranscriptVisibility";
@@ -125,6 +128,10 @@ export function ChatView({
   const userQuestions = useUserQuestions(client, chat.id);
   const planApprovals = usePlanApprovals(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
+  // A question or a proposed plan is the one thing the turn wants back, so its
+  // card stands in the composer's slot until it is answered.
+  const pendingPromptCount =
+    userQuestions.requests.length + planApprovals.requests.length;
   const turnControls = useTurnControls(
     client,
     chat.id,
@@ -175,9 +182,12 @@ export function ChatView({
   );
 
   const navigate = useNavigate();
-  const focusCallId = (useSearch({ strict: false }) as { focus?: string }).focus;
+  const focusCallId = (useSearch({ strict: false }) as { focus?: string })
+    .focus;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** The composer's slot, which a pending question or plan card takes over. */
+  const promptSlotRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
   const isProgrammaticRef = useRef(false);
   const visibleContinuationCallIdsRef = useRef<Set<string>>(new Set());
@@ -346,13 +356,19 @@ export function ChatView({
     };
     const attempt = () => {
       if (settled) return;
-      if (!revealPendingCall(scrollRef.current, focusCallId)) return;
-      // Arriving at a specific card means the reader is no longer following
-      // the end of the transcript; letting follow stay armed would scroll them
-      // straight back off it.
-      followsLatestRef.current = false;
-      setScrolledAway(true);
-      clear();
+      if (revealPendingCall(scrollRef.current, focusCallId)) {
+        // Arriving at a specific card means the reader is no longer following
+        // the end of the transcript; letting follow stay armed would scroll them
+        // straight back off it.
+        followsLatestRef.current = false;
+        setScrolledAway(true);
+        clear();
+        return;
+      }
+      // A question or a proposed plan stands in the composer's slot rather than
+      // the transcript, so it is on screen already: pointing it out is the whole
+      // reveal, and the transcript is left following its end.
+      if (revealPendingCall(promptSlotRef.current, focusCallId)) clear();
     };
     const timer = window.setInterval(attempt, 120);
     const deadline = window.setTimeout(clear, 5_000);
@@ -385,20 +401,13 @@ export function ChatView({
           chatId={chat.id}
           folderAccessRequests={folderAccess.requests}
           outputWritebackRequests={outputWritebacks.requests}
-          userQuestionRequests={userQuestions.requests}
-          planApprovalRequests={planApprovals.requests}
+          pendingPromptCount={pendingPromptCount}
           nativeHost={nativeHost}
           nativeBusy={folderAccess.resolving.size > 0}
           resolvingFolderCalls={folderAccess.resolving}
           folderAccessErrors={folderAccess.errors}
           resolvingOutputWritebackCalls={outputWritebacks.resolving}
           outputWritebackErrors={outputWritebacks.errors}
-          answeringQuestionCalls={userQuestions.answering}
-          userQuestionErrors={userQuestions.errors}
-          decidingPlanCalls={planApprovals.deciding}
-          planApprovalErrors={planApprovals.errors}
-          onPlanDecision={planApprovals.decide}
-          onPlanCancel={planApprovals.cancel}
           decidingApprovalCalls={approvals.deciding}
           approvalErrors={approvals.errors}
           grantScope={chat.project_id ? "project" : "chat"}
@@ -427,7 +436,6 @@ export function ChatView({
           onOutputWritebackCancel={(callId, turnId) =>
             outputWritebacks.cancel(callId, turnId)
           }
-          onAnswerUserQuestions={userQuestions.answer}
           onSelectPrompt={onSelectPrompt}
           onRetryTurn={onRetryTurn}
           hydrated={hydrated}
@@ -450,67 +458,79 @@ export function ChatView({
         </button>
       </div>
 
-      <div className="px-[clamp(0.5rem,4%,5rem)] pb-2">
+      <div className="px-[clamp(0.5rem,4%,5rem)] pb-2" ref={promptSlotRef}>
         {taskPlan !== null && (
           <div className="pb-2">
             <TaskPlanCard plan={taskPlan} live={taskPlanLive} />
           </div>
         )}
-        <Composer
-          activeTurnId={activeTurnId}
-          busy={busy}
-          cancelError={turnControls.cancelError}
-          cancelPending={
-            activeTurnId !== null &&
-            turnControls.cancelPendingTurnId === activeTurnId
-          }
-          disabled={deletingChat}
-          draft={draft}
-          modelMenu={composerModelMenu}
-          permissionMenu={composerPermissionMenu}
-          network={composerNetwork}
-          reasoning={composerReasoning}
-          plugins={composerPlugins.plugins}
-          slash={{
-            options: composerPlugins.slashOptions,
-            invoked: invokedSkills,
-            onInvoke: (names) =>
-              useComposerDrafts
-                .getState()
-                .setSkills(chat.id, [...invokedSkills, ...names]),
-            onRemove: (name) =>
-              useComposerDrafts
-                .getState()
-                .setSkills(
+        {pendingPromptCount > 0 ? (
+          <ComposerPrompt
+            userQuestionRequests={userQuestions.requests}
+            answeringQuestionCalls={userQuestions.answering}
+            userQuestionErrors={userQuestions.errors}
+            onAnswerUserQuestions={userQuestions.answer}
+            planApprovalRequests={planApprovals.requests}
+            decidingPlanCalls={planApprovals.deciding}
+            planApprovalErrors={planApprovals.errors}
+            onPlanDecision={planApprovals.decide}
+            onPlanCancel={planApprovals.cancel}
+          />
+        ) : (
+          <Composer
+            activeTurnId={activeTurnId}
+            busy={busy}
+            cancelError={turnControls.cancelError}
+            cancelPending={
+              activeTurnId !== null &&
+              turnControls.cancelPendingTurnId === activeTurnId
+            }
+            disabled={deletingChat}
+            draft={draft}
+            modelMenu={composerModelMenu}
+            permissionMenu={composerPermissionMenu}
+            network={composerNetwork}
+            reasoning={composerReasoning}
+            plugins={composerPlugins.plugins}
+            slash={{
+              options: composerPlugins.slashOptions,
+              invoked: invokedSkills,
+              onInvoke: (names) =>
+                useComposerDrafts
+                  .getState()
+                  .setSkills(chat.id, [...invokedSkills, ...names]),
+              onRemove: (name) =>
+                useComposerDrafts.getState().setSkills(
                   chat.id,
                   invokedSkills.filter((skill) => skill !== name),
                 ),
-            loadPromptBody: composerPlugins.loadPromptBody,
-          }}
-          images={composerImages}
-          files={composerFiles}
-          folders={folders}
-          voice={voice}
-          nativeDropTarget={nativeDropTarget}
-          attachError={attachError}
-          // Typing retires the verdict on the last piece of guidance. Accepted
-          // guidance clears the draft through the raw callback instead, so
-          // "Guidance sent" survives the clearing it caused.
-          onDraftChange={(value) => {
-            turnControls.clearSteerFeedback();
-            onDraftChange(value);
-          }}
-          onSend={handleSend}
-          onSteer={turnControls.steer}
-          onStop={turnControls.cancel}
-          resetKey={chat.id}
-          steerError={turnControls.steerError}
-          steerPending={
-            activeTurnId !== null &&
-            turnControls.steerPendingTurnId === activeTurnId
-          }
-          steerStatus={turnControls.steerStatus}
-        />
+              loadPromptBody: composerPlugins.loadPromptBody,
+            }}
+            images={composerImages}
+            files={composerFiles}
+            folders={folders}
+            voice={voice}
+            nativeDropTarget={nativeDropTarget}
+            attachError={attachError}
+            // Typing retires the verdict on the last piece of guidance. Accepted
+            // guidance clears the draft through the raw callback instead, so
+            // "Guidance sent" survives the clearing it caused.
+            onDraftChange={(value) => {
+              turnControls.clearSteerFeedback();
+              onDraftChange(value);
+            }}
+            onSend={handleSend}
+            onSteer={turnControls.steer}
+            onStop={turnControls.cancel}
+            resetKey={chat.id}
+            steerError={turnControls.steerError}
+            steerPending={
+              activeTurnId !== null &&
+              turnControls.steerPendingTurnId === activeTurnId
+            }
+            steerStatus={turnControls.steerStatus}
+          />
+        )}
       </div>
     </section>
   );

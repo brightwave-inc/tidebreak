@@ -206,8 +206,8 @@ pub use plan_mode::{
     MAX_PLAN_FEEDBACK_CHARS, MAX_PLAN_TITLE_CHARS, MIN_PLAN_CONTENT_CHARS,
 };
 pub use preview::{
-    format_bytes, AgentActivityDetail, ExecDegradation, ResultEntry, ResultEntryKind,
-    ResultFailure, ToolActionPreview, ToolResultPreview, MAX_RESULT_ENTRIES,
+    format_bytes, AgentActivityDetail, AnsweredUserQuestion, ExecDegradation, ResultEntry,
+    ResultEntryKind, ResultFailure, ToolActionPreview, ToolResultPreview, MAX_RESULT_ENTRIES,
     MAX_RESULT_ENTRY_CHARS,
 };
 pub use provider::{

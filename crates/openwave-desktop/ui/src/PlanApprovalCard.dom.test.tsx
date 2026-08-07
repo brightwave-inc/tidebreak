@@ -1,16 +1,21 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PlanApprovalCard } from "./PlanApprovalCard";
+import { usePlanComments } from "./PlanComments";
 
 afterEach(cleanup);
+beforeEach(() => {
+  window.localStorage.clear();
+  usePlanComments.setState({ byCall: {} });
+});
 
 const request = {
   callId: "call-1",
   turnId: "turn-1",
   title: "Add health checks",
-  plan: "## Steps\n1. Add a `/healthz` route.\n2. Cover it with one lifecycle test.",
+  plan: "## Steps\n\n1. Add a `/healthz` route.\n\n2. Cover it with one lifecycle test.",
   proposedAt: "2026-07-30T12:00:00Z",
 };
 
@@ -29,11 +34,16 @@ describe("PlanApprovalCard", () => {
     );
     expect(screen.getByText("Add health checks")).toBeInTheDocument();
     expect(screen.getByText(/lifecycle test/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Approve and run/ }));
+    await user.click(screen.getByRole("button", { name: /Execute plan/ }));
     expect(onDecide).toHaveBeenCalledWith({ decision: "accept" });
   });
 
-  it("sends the plan back with the exact typed feedback", async () => {
+  /**
+   * The revision path is per-block comments now, and the server still takes one
+   * feedback string — this pins the join, which is the only place the two
+   * shapes meet.
+   */
+  it("sends block comments back as quoted feedback", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(
@@ -45,17 +55,41 @@ describe("PlanApprovalCard", () => {
         onCancel={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Request changes" }));
+    const [firstStep] = screen.getAllByRole("button", { name: "Add comment" });
+    await user.click(firstStep!);
     await user.type(
       screen.getByLabelText("What should change"),
-      "Split step 2 into its own slice.",
+      "Split this into its own slice.",
     );
-    await user.click(
-      screen.getByRole("button", { name: "Send back for changes" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(screen.getByText("1 edit added")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Update plan/ }));
     expect(onDecide).toHaveBeenCalledWith({
       decision: "reject",
-      feedback: "Split step 2 into its own slice.",
+      feedback: "> Add a `/healthz` route.\n\nSplit this into its own slice.",
     });
+  });
+
+  it("drops pending edits when they are cancelled", async () => {
+    const user = userEvent.setup();
+    render(
+      <PlanApprovalCard
+        request={request}
+        working={false}
+        error={undefined}
+        onDecide={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    const [firstStep] = screen.getAllByRole("button", { name: "Add comment" });
+    await user.click(firstStep!);
+    await user.type(
+      screen.getByLabelText("What should change"),
+      "Reword this.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Cancel edits" }));
+    expect(screen.getByText("Hover over plan to edit")).toBeInTheDocument();
   });
 });

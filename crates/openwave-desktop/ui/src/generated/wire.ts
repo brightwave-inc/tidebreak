@@ -227,6 +227,28 @@ current: string | null, updated_at: string, };
 export type AgentRunTier = "foreground" | "background";
 
 /**
+ * One question as it was asked, with what the reader chose.
+ *
+ * Labels rather than option ids: the recap is read by a person, and the ids
+ * are an internal handle they never saw. A question the reader skipped
+ * carries neither a selection nor an answer, which is how the card knows to
+ * say so.
+ */
+export type AnsweredUserQuestion = { 
+/**
+ * The prompt the reader answered.
+ */
+question: string, 
+/**
+ * Labels of the options chosen, in the order the question listed them.
+ */
+selected?: Array<string>, 
+/**
+ * The reader's own words, when the question allowed them.
+ */
+custom_answer?: string, };
+
+/**
  * One app's detail: the summary fields plus its revision history.
  */
 export type AppDetail = { id: AppId, name: string, 
@@ -2425,7 +2447,19 @@ failures: Array<ResultFailure>,
  * that silently lists the first fifty of two hundred results is
  * telling the reader something false.
  */
-elided: number, };
+elided: number, } | { "tool": "user_questions", answers: Array<AnsweredUserQuestion>, 
+/**
+ * Whatever the reader added on their own, when they added any.
+ */
+additional_context?: string, } | { "tool": "plan_decision", title: string, plan: string, 
+/**
+ * Whether the reader approved the plan as proposed.
+ */
+accepted: boolean, 
+/**
+ * What the reader asked to change, when they sent it back.
+ */
+feedback?: string, };
 
 /**
  * One renderer-safe source document attached to a historical user message.
