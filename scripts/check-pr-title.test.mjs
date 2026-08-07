@@ -10,6 +10,7 @@ for (const title of [
   "deps(cargo): update database dependencies",
   "revert: restore the previous storage behavior",
   "ci(deps): update the checkout action",
+  "fix(desktop/ui): preserve release formatting",
   "chore(main): release 0.1.0",
 ]) {
   test(`accepts ${title}`, () => {
@@ -50,6 +51,8 @@ for (const title of [
   "Add document search",
   "feature: add document search",
   "feat(Core): add document search",
+  "fix(ui/): keep release automation running",
+  "fix(ui//tests): keep release automation running",
   "feat: ",
   "feat(core) add document search",
   "refactor(core)!: replace the public API",
