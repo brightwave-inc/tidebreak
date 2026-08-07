@@ -1407,6 +1407,23 @@ mod tests {
     }
 
     #[test]
+    fn low_reasoning_request_uses_low_not_minimal() {
+        // Direct Gemini and Vertex Gemini share this request builder. The host
+        // policy raises a stored `none` to `low` for Gemini 3.1 Pro Preview;
+        // keep that reconciled level intact on the native wire.
+        let mut req = request(vec![ChatMessage::text(Role::User, "hi")]);
+        req.model = "gemini-3.1-pro-preview".into();
+        req.reasoning_effort = Some(ReasoningEffort::Low);
+
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "low"
+        );
+        assert!(!body.to_string().contains("minimal"));
+    }
+
+    #[test]
     fn all_tool_schemas_translate_to_geminis_supported_subset() {
         let mut req = request(vec![ChatMessage::text(Role::User, "hi")]);
         req.tools = vec![

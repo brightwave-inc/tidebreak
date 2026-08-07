@@ -69,10 +69,16 @@ const EFFORT_NONE_TO_XHIGH: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
 ];
-/// Gemini 3 maps OpenWave's `none` to its `minimal` thinking level and has no
-/// separate levels above `high`.
+/// Gemini 3 Flash maps OpenWave's `none` to its `minimal` thinking level and
+/// has no separate levels above `high`.
 const EFFORT_NONE_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+];
+/// Gemini 3.1 Pro Preview starts at `low`; it does not accept `minimal`.
+const EFFORT_LOW_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
@@ -350,8 +356,9 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
     },
     // Gemini rows are intentionally limited to ids currently published by
     // Google. All four accept images, expose thinking levels through `high`,
-    // and have 1,048,576 input / 65,536 output token limits; the native
-    // adapter owns the corresponding GenerateContent wire shape.
+    // and have 1,048,576 input / 65,536 output token limits; the Flash rows
+    // start at `minimal`, while Pro Preview starts at `low`. The native adapter
+    // owns the corresponding GenerateContent wire shape.
     ModelSpec {
         id: "gemini-3.6-flash",
         display_name: "Gemini 3.6 Flash",
@@ -398,7 +405,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
     },
     // Vertex is one explicit serving provider with two native protocol
     // families. These rows intentionally mirror only models in the current
@@ -452,7 +459,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_NONE_TO_HIGH,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
     },
     ModelSpec {
         id: "claude-opus-5",
@@ -853,8 +860,20 @@ mod tests {
             assert_eq!(spec.context_window, 1_048_576, "{}", spec.id);
             assert_eq!(spec.max_output_tokens, 65_536, "{}", spec.id);
             assert!(spec.supports_reasoning, "{}", spec.id);
-            assert_eq!(spec.reasoning_efforts, EFFORT_NONE_TO_HIGH, "{}", spec.id);
+            if spec.id != "gemini-3.1-pro-preview" {
+                assert_eq!(spec.reasoning_efforts, EFFORT_NONE_TO_HIGH, "{}", spec.id);
+            }
         }
+    }
+
+    #[test]
+    fn gemini_3_1_pro_excludes_minimal_on_direct_and_vertex() {
+        let direct = find_for(ProviderKind::Gemini, "gemini-3.1-pro-preview").unwrap();
+        let vertex = find_for(ProviderKind::Vertex, "gemini-3.1-pro-preview").unwrap();
+
+        assert_eq!(direct.reasoning_efforts, EFFORT_LOW_TO_HIGH);
+        assert_eq!(vertex.reasoning_efforts, direct.reasoning_efforts);
+        assert!(!direct.reasoning_efforts.contains(&ReasoningEffort::None));
     }
 
     #[test]

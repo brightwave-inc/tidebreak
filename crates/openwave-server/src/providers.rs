@@ -2318,6 +2318,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gemini_3_1_pro_none_clamps_to_low_for_direct_and_vertex() {
+        for provider in [ProviderKind::Gemini, ProviderKind::Vertex] {
+            let mut config = AgentConfig::default();
+            let policy = ResolvedModelPolicy::curated(
+                model_registry::find_for(provider, "gemini-3.1-pro-preview").unwrap(),
+            );
+
+            apply_model_policy(&mut config, &policy, Some(ReasoningEffort::None)).unwrap();
+
+            assert_eq!(config.provider, Some(ProviderId::new(provider.as_str())));
+            assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
+        }
+    }
+
     /// Repro: a chat pinned to `openai::gpt-5.6-sol` reached the
     /// OpenAI-compatible `/v1/chat/completions` route with `reasoning_effort`
     /// attached and the vendor refused the request. The free-form turn path
