@@ -137,6 +137,7 @@ describe("ProvidersPanel", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "low" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "medium" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "high" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "xhigh" }));
     fireEvent.click(
       screen.getByRole("button", { name: "Save configuration" }),
     );
@@ -153,7 +154,7 @@ describe("ProvidersPanel", () => {
             max_output_tokens: 4_096,
             input_modalities: ["text", "image"],
             supports_reasoning: true,
-            reasoning_efforts: ["low", "medium", "high"],
+            reasoning_efforts: ["low", "medium", "high", "xhigh"],
           },
         ],
       }),

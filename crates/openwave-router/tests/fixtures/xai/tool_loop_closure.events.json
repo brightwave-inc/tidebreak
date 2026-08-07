@@ -4,6 +4,16 @@
     "type": "reasoning_delta"
   },
   {
+    "data": {
+      "encrypted_content": "opaque-current",
+      "id": "rs_current",
+      "status": "completed",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "type": "reasoning_block"
+  },
+  {
     "text": "a.toml is read. ",
     "type": "text_delta"
   },

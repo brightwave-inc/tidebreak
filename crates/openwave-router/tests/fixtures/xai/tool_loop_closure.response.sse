@@ -1,5 +1,7 @@
 data: {"type":"response.reasoning_summary_text.delta","delta":"Checking the files. "}
 
+data: {"type":"response.output_item.done","item":{"id":"rs_current","summary":[],"type":"reasoning","status":"completed","encrypted_content":"opaque-current"}}
+
 data: {"type":"response.output_text.delta","delta":"a.toml is read. "}
 
 data: {"type":"response.output_text.delta","delta":"Retrying b.toml."}

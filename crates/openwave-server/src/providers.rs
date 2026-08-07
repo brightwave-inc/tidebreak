@@ -1300,7 +1300,10 @@ fn validate_configured_models_against(
         if model.reasoning_efforts.iter().any(|effort| {
             !matches!(
                 effort,
-                ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High
+                ReasoningEffort::Low
+                    | ReasoningEffort::Medium
+                    | ReasoningEffort::High
+                    | ReasoningEffort::XHigh
             )
         }) {
             return Err(ServerError::bad_request(format!(
@@ -1556,8 +1559,9 @@ pub async fn collect_routes(
         routes.push(openwave_router::Route {
             kind: route_kind(kind),
             api_key,
-            // Gemini's curated Developer API endpoint is fixed in production.
-            base_url: (kind != ProviderKind::Gemini)
+            // Gemini and xAI use fixed first-party endpoints in production.
+            // Never let a stale/directly written setting redirect their keys.
+            base_url: (!matches!(kind, ProviderKind::Gemini | ProviderKind::Xai))
                 .then_some(config.base_url)
                 .flatten(),
             curated_models: model_registry::models_for(kind)
@@ -2055,6 +2059,7 @@ mod tests {
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,
+                ReasoningEffort::XHigh,
             ],
             ..Default::default()
         };
@@ -2067,7 +2072,7 @@ mod tests {
         assert_eq!(policy.reasoning_efforts, model.reasoning_efforts);
 
         let mut unsupported = model.clone();
-        unsupported.reasoning_efforts.push(ReasoningEffort::XHigh);
+        unsupported.reasoning_efforts.push(ReasoningEffort::Max);
         assert!(validate_configured_models(ProviderKind::Xai, &[unsupported]).is_err());
         assert!(validate_configured_models(ProviderKind::OpenaiCompatible, &[model]).is_err());
     }

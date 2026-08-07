@@ -409,13 +409,10 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             Some(Arc::new(p))
         }
         #[cfg(feature = "xai")]
-        RouteKind::Xai => {
-            let mut p = XaiProvider::new(route.api_key.clone());
-            if let Some(base) = &route.base_url {
-                p = p.with_base_url(base.clone());
-            }
-            Some(Arc::new(p))
-        }
+        // xAI credentials are valid only for the fixed first-party endpoint.
+        // Ignore even a directly constructed route override so stale config
+        // cannot redirect the bearer token around the server's collector.
+        RouteKind::Xai => Some(Arc::new(XaiProvider::new(route.api_key.clone()))),
         #[cfg(feature = "openai-compat")]
         RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;

@@ -1,5 +1,8 @@
 {
   "body": {
+    "include": [
+      "reasoning.encrypted_content"
+    ],
     "input": [
       {
         "content": [
@@ -18,6 +21,13 @@
           }
         ],
         "role": "user"
+      },
+      {
+        "encrypted_content": "opaque-previous",
+        "id": "rs_previous",
+        "status": "completed",
+        "summary": [],
+        "type": "reasoning"
       },
       {
         "content": "Reading both.",
@@ -49,7 +59,7 @@
     "max_output_tokens": 4096,
     "model": "grok-test",
     "reasoning": {
-      "effort": "high"
+      "effort": "xhigh"
     },
     "store": false,
     "stream": true,

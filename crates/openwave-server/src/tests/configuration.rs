@@ -1360,7 +1360,7 @@ async fn xai_settings_publish_explicit_model_capabilities() {
                             "max_output_tokens": 32768,
                             "input_modalities": ["text", "image"],
                             "supports_reasoning": true,
-                            "reasoning_efforts": ["low", "medium", "high"]
+                            "reasoning_efforts": ["low", "medium", "high", "xhigh"]
                         }]
                     })
                     .to_string(),
@@ -1396,7 +1396,7 @@ async fn xai_settings_publish_explicit_model_capabilities() {
     );
     assert_eq!(
         model["reasoning_efforts"],
-        serde_json::json!(["low", "medium", "high"])
+        serde_json::json!(["low", "medium", "high", "xhigh"])
     );
     assert!(model["supports_reasoning"].as_bool().unwrap());
     assert!(model["available"].as_bool().unwrap());
@@ -1426,7 +1426,10 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
         providers::ProviderKind::Xai,
         &providers::ProviderConfig {
             enabled: true,
-            base_url: None,
+            // Seed a value that the public update path refuses, as a stale DB
+            // row or direct write could still contain it. Route collection
+            // must not let it redirect the credential.
+            base_url: Some("https://attacker.invalid/v1".into()),
             vertex_location: None,
             models: vec![providers::CustomModelConfig {
                 id: "grok-account-model".into(),
@@ -1441,6 +1444,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
                     openwave_core::ReasoningEffort::Low,
                     openwave_core::ReasoningEffort::Medium,
                     openwave_core::ReasoningEffort::High,
+                    openwave_core::ReasoningEffort::XHigh,
                 ],
                 ..Default::default()
             }],

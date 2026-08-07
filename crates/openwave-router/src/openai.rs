@@ -15,7 +15,7 @@ use openwave_core::provider::{
     ProviderId, RefusalDetails, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
-use openwave_core::{ImageAttachments, Role};
+use openwave_core::Role;
 
 use crate::sse::{
     classify_in_band_error, classify_provider_error, drain_frames, frame_data,
@@ -134,6 +134,11 @@ impl OpenAiProvider {
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn base_url_for_test(&self) -> &str {
+        &self.base_url
     }
 
     /// Fetch the credential from `source` at each request instead of using a
@@ -255,7 +260,7 @@ pub(crate) fn build_request_json_for(
     req: &ChatRequest,
     profile: ResponsesProfile,
 ) -> Result<Value> {
-    let input = build_input(req)?;
+    let input = build_input_for(req, profile)?;
     let mut body = json!({
         "model": req.model,
         "input": input,
@@ -271,6 +276,12 @@ pub(crate) fn build_request_json_for(
             } else {
                 json!({ "effort": effort.as_str() })
             };
+        }
+        if profile == ResponsesProfile::Xai {
+            // xAI is stateless here (`store: false`). Its encrypted reasoning
+            // output is the only provider-native state that preserves full
+            // context across later turns and tool continuations.
+            body["include"] = json!(["reasoning.encrypted_content"]);
         }
     } else if profile == ResponsesProfile::OpenAi {
         if let Some(temperature) = req.temperature {
@@ -324,7 +335,7 @@ pub(crate) fn build_request_json_for(
     Ok(body)
 }
 
-fn build_input(req: &ChatRequest) -> Result<Vec<Value>> {
+fn build_input_for(req: &ChatRequest, profile: ResponsesProfile) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     if let Some(system) = &req.system {
         out.push(json!({
@@ -338,19 +349,25 @@ fn build_input(req: &ChatRequest) -> Result<Vec<Value>> {
     // carries two different tools called the same thing.
     let rename_client_web_search = req.vendor_web_search.is_some();
     for message in &req.messages {
-        extend_input(&mut out, message, &req.images, rename_client_web_search)?;
+        extend_input(&mut out, message, req, rename_client_web_search, profile)?;
     }
     Ok(sanitize_tool_pairs(out))
+}
+
+#[cfg(test)]
+fn build_input(req: &ChatRequest) -> Result<Vec<Value>> {
+    build_input_for(req, ResponsesProfile::OpenAi)
 }
 
 fn extend_input(
     out: &mut Vec<Value>,
     message: &openwave_core::ChatMessage,
-    images: &ImageAttachments,
+    req: &ChatRequest,
     rename_client_web_search: bool,
+    profile: ResponsesProfile,
 ) -> Result<()> {
     if message.role == Role::Assistant {
-        return extend_assistant_input(out, message, rename_client_web_search);
+        return extend_assistant_input(out, message, req, rename_client_web_search, profile);
     }
     let mut message_parts = Vec::new();
     for block in &message.content {
@@ -359,12 +376,23 @@ fn extend_input(
                 message_parts.push(json!({ "type": "input_text", "text": text }));
             }
             ContentBlock::Image { image } => {
-                let data = images.get(image.blob_id).ok_or_else(|| {
+                let data = req.images.get(image.blob_id).ok_or_else(|| {
                     AgentError::Provider(format!(
                         "image attachment {} has no hydrated bytes",
                         image.blob_id
                     ))
                 })?;
+                if profile == ResponsesProfile::Xai
+                    && matches!(
+                        data.media_type(),
+                        openwave_core::ImageMediaType::Webp | openwave_core::ImageMediaType::Gif
+                    )
+                {
+                    return Err(AgentError::Provider(format!(
+                        "xai image input supports only PNG and JPEG, not {}",
+                        data.media_type()
+                    )));
+                }
                 message_parts.push(json!({
                     "type": "input_image",
                     "image_url": format!(
@@ -435,8 +463,19 @@ fn extend_input(
 fn extend_assistant_input(
     out: &mut Vec<Value>,
     message: &openwave_core::ChatMessage,
+    req: &ChatRequest,
     rename_client_web_search: bool,
+    profile: ResponsesProfile,
 ) -> Result<()> {
+    if profile == ResponsesProfile::Xai && req.reasoning_model {
+        out.extend(
+            message
+                .reasoning
+                .replayable_for(req.provider.as_ref(), &req.model)
+                .iter()
+                .cloned(),
+        );
+    }
     let mut texts = Vec::new();
     let mut calls = Vec::new();
     for block in &message.content {
@@ -674,6 +713,16 @@ fn normalize_for(
         "response.output_item.done" => {
             if data["item"]["type"] == "web_search_call" {
                 return finish_search(&data["item"], state, provider);
+            }
+            if provider == "xai"
+                && data["item"]["type"] == "reasoning"
+                && data["item"]["encrypted_content"]
+                    .as_str()
+                    .is_some_and(|content| !content.is_empty())
+            {
+                return vec![ProviderEvent::ReasoningBlock {
+                    data: data["item"].clone(),
+                }];
             }
             start_call(data, state, true)
         }
@@ -913,7 +962,7 @@ mod tests {
     use super::*;
     use openwave_core::provider::{ChatMessage, MessageReasoning, VendorWebSearch};
     use openwave_core::tool::ToolSpec;
-    use openwave_core::{ImageData, ImageMediaType, ImageRef, ReasoningEffort};
+    use openwave_core::{ImageAttachments, ImageData, ImageMediaType, ImageRef, ReasoningEffort};
 
     fn tool() -> ToolSpec {
         ToolSpec {

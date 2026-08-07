@@ -46,9 +46,7 @@ use openwave_core::{
     ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
     ResponseFormat, Role, ToolChoice, ToolSpec,
 };
-use openwave_router::{
-    AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiProvider, XaiProvider,
-};
+use openwave_router::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiProvider};
 use serde_json::{json, Value};
 
 /// The credential every adapter is handed. It must never reach a fixture: the
@@ -276,17 +274,6 @@ async fn openai_responses_request_contracts() {
 }
 
 #[tokio::test]
-async fn xai_responses_request_contracts() {
-    check_selected_adapter(
-        "xai",
-        "grok-test",
-        &["minimal_turn", "tool_loop_closure"],
-        |base_url| Arc::new(XaiProvider::new(TEST_API_KEY).with_base_url(base_url)),
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn openai_compat_request_contracts() {
     check_adapter("openai_compat", "gpt-5.6-sol", |base_url| {
         Arc::new(OpenAiCompatProvider::compatible(TEST_API_KEY, base_url))
@@ -309,22 +296,7 @@ async fn check_adapter(
     model: &str,
     build: impl Fn(&str) -> Arc<dyn ModelProvider>,
 ) {
-    check_selected_adapter(provider, model, &[], build).await;
-}
-
-/// Run only the named scenarios. An empty selection means every canonical
-/// scenario; direct xAI pins the two boundaries this provider claim depends on
-/// without duplicating all of OpenAI's shared encoder fixtures.
-async fn check_selected_adapter(
-    provider: &str,
-    model: &str,
-    selected: &[&str],
-    build: impl Fn(&str) -> Arc<dyn ModelProvider>,
-) {
-    for (scenario, request) in scenarios(model)
-        .into_iter()
-        .filter(|(scenario, _)| selected.is_empty() || selected.contains(scenario))
-    {
+    for (scenario, request) in scenarios(model) {
         let recording = recorded_response(provider, scenario);
         let response_body = recording
             .clone()
@@ -433,7 +405,6 @@ fn terminal_frame(provider: &str) -> &'static str {
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
         }
         "openai" => "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
-        "xai" => "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
         "openai_compat" => "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         "gemini" => "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
         other => panic!("no terminal frame for {other}"),

@@ -32,6 +32,7 @@ const XAI_REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "low",
   "medium",
   "high",
+  "xhigh",
 ];
 
 function newConfiguredModel(): CustomModelConfig {
