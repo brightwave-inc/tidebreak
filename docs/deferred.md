@@ -1,0 +1,132 @@
+# What comes after v1
+
+OpenWave's first stable release is deliberately narrow: a local-first coworker
+that can work over user-approved files, use configured models and bounded
+tools, run code in an isolation boundary, and produce files the user explicitly
+exports. The work below is valuable, but it is not silently implied by that
+promise.
+
+This is the canonical record of deliberately parked product scope. It is not a
+ticket queue and it does not make dates or release promises. A concrete task
+with an owner belongs in an issue; a long-horizon capability belongs here until
+the conditions for building it are real.
+
+## Completing the v1 foundation
+
+Several pieces are ordinary implementation work, not deferred product bets.
+They stay as open issues without a `deferred` label because a contributor can
+pick them up now:
+
+- Finish the disposable pre-v1 database baseline: consolidate the migration
+  history and remove obsolete schema paths before compatibility commitments
+  begin at 1.0.
+- Close the remaining multi-principal prompt-inbox ownership gap in the
+  self-hosted profile.
+- Enforce the strict `network off` setting in Docker code execution, then use
+  the existing egress topology to make the other network policies enforceable.
+- Surface the already-built project model in the desktop, including optional
+  chat organization and project-scoped context.
+- Make deletion of a terminal chat erase its background-run workspaces without
+  waiting for the periodic reaper, and add an app actor to the host-folder audit
+  vocabulary.
+
+These are important finishing work, but they do not change the product's basic
+shape. They should be delivered as normal, reviewable slices rather than held
+in a parking label.
+
+## A coworker that can work later
+
+Background agent runs make work durable, but OpenWave does not yet schedule
+work for a future time or recurring cadence. A future local-first scheduler
+should reuse the run journal and admission path rather than create a second
+automation engine. Its first useful shape is deliberately modest: one-time,
+daily, and weekly tasks; explicit enable/disable controls; visible history; and
+bounded catch-up after the computer has been asleep or offline.
+
+Scheduling does not create blanket consent. A task that reaches an external
+effect still needs an applicable approval, and future exact-target recurring
+grants must stay constrained to a tool's canonical destination. Arbitrary cron,
+cloud execution while the user's machine is unavailable, and a separate agent
+runtime are outside that first step.
+
+## A browser without ambient computer control
+
+Browser automation is a major missing capability, but it must not become a way
+to take over the user's everyday browser or desktop. The future browser surface
+needs its own OpenWave-managed profile, clear cookie and login lifetime rules,
+visible foreground control, durable history, cancellation, and a reset path.
+
+The initial contract must distinguish navigation from entering sensitive text,
+uploading files, downloading files, and submitting an external action. It must
+also keep page-authored content separate from model instructions and from host
+credentials and capabilities. General desktop control, personal-profile access
+by default, CAPTCHA evasion, and password-manager integration are not in this
+plan.
+
+## More ways to organize and shape work
+
+The basic chat remains useful on its own. Later work can make it easier to
+organize and direct:
+
+- Search inside an already approved connected folder from the composer, using
+  root-relative paths and bounded discovery rather than exposing absolute host
+  paths.
+- Let a reusable plugin provide an output template as well as a prompt or
+  skill, once there is a settled way to deliver a template into a turn.
+- Install instruction-only plugins from pinned Git sources or public skill
+  indexes, with explicit updates and no background auto-update.
+- Eventually admit capability-bearing plugin components packaged as MCPB
+  bundles, only with component-level consent, keychain-backed configuration,
+  and enforced tool-schema validation.
+
+The marketplace and executable-plugin work follows the simpler
+instruction-only pipeline; it is not a v1 dependency.
+
+## Connected services: local control first, managed entitlements later
+
+OpenWave already has local connected folders, configured MCP servers, web
+search, and a governed REST executor for local apps. It does not plan to become
+the publisher and refresh-token broker for a parallel catalog of Slack, Google,
+Microsoft 365, Dropbox, or Box integrations.
+
+Where a service requires a registered OAuth app, the intended managed path is a
+model gateway entitlement. OpenWave should consume those entitled apps or
+virtual MCP endpoints and explain what a gateway provides, while unmanaged
+users retain local escape hatches such as MCP mounting and user-provided REST
+definitions and credentials. Curated desktop-owned OAuth connectors are not on
+the current path.
+
+Two related capabilities wait on clear boundaries: choosing governed REST
+operations to expose as foreground chat tools, and making gateway-attested MCP
+execution modes visible in Settings. The former needs its own model-tool,
+approval, snapshot, and audit contract; the latter waits for the gateway to
+expose execution-mode metadata. Recording a gateway identity beside turns and
+host-access audit events is likewise a future attribution feature, not local
+access control.
+
+## Deeper isolation and reliability
+
+OpenWave can run code through local and managed execution providers today. The
+more ambitious sandbox-resident agent-run tier remains attached-only and
+opt-in. Detached background execution needs scoped model tokens, provider
+lifetime caps, image verification in the right trust root, no
+host-authority-reachable tools, and enforceable credential egress rules. Until
+those properties hold together, the in-process durable run path is the
+supported one.
+
+Reliability work also remains ahead of the product surface: replayable adapter
+contracts, recorded response decoding, and a protected live canary matrix would
+catch provider API drift before it becomes a user-visible turn failure. MCP app
+and gateway follow-ups are retained as a small, prioritized maintenance list:
+prompt server replies during an HTTP stream, propagate theme changes into app
+views, recover visibly from a transient frame-payload failure, make gateway
+sign-in restartable, and validate the external-app protocol against its SDK.
+
+## What this means for planning
+
+V1 is not a claim that OpenWave has every kind of automation or connector. It
+is a commitment to make the capabilities it does expose legible, local-first,
+and bounded. New ideas should be added here when they describe a deliberate
+product direction or a dependency outside this repository. Once a direction has
+a concrete, buildable slice, turn that slice into a normal issue, claim it, and
+remove it from this document when it ships or is reconsidered.

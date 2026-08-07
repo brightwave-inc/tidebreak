@@ -11,10 +11,10 @@ in [agent runs](agent-runs.md); the broker and capability model this design
 reuses in [host access](host-access.md). This document is the design that
 connects them.
 
-## Status: explicitly deferred
+## Status: deliberately parked
 
-The sandbox-resident run tier is **deferred** as of 2026-08, tracked in
-[#1749](https://github.com/brightwave-inc/openwave/issues/1749). The shipped
+The sandbox-resident run tier is **deliberately parked** as of 2026-08; see
+[What comes after v1](deferred.md) for the product-level record. The shipped
 code — the local Docker backend, the container run driver, the admission gate,
 and their post-merge e2e lane — stays in the tree and is kept green, but no
 further roadmap step below is being built, and the tier remains opt-in

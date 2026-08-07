@@ -1,0 +1,82 @@
+---
+title: What comes after v1
+description: The capabilities OpenWave deliberately does not promise in its first stable release, and why.
+---
+
+OpenWave v1 is a local-first coworker for real work: it can use configured
+models, work over user-approved files, call bounded tools, run code in an
+isolation boundary, and produce files you explicitly export. That is a useful
+foundation, not a claim that every kind of automation is already present.
+
+## Not yet, by design
+
+<Cards>
+  <Card title="Scheduled work" href="#a-coworker-that-can-work-later">
+    Future runs will reuse the durable run journal and never turn a schedule
+    into blanket permission.
+  </Card>
+  <Card title="Browser automation" href="#a-browser-without-ambient-computer-control">
+    Browser control needs its own isolated profile and visible, reviewable
+    action boundary.
+  </Card>
+  <Card title="Connected services" href="#connected-services">
+    Managed OAuth integrations belong with gateway entitlements, not a parallel
+    desktop-owned connector catalog.
+  </Card>
+</Cards>
+
+## A coworker that can work later
+
+OpenWave has durable background runs, but it does not schedule work for a
+future time or recurring cadence yet. The first local-first scheduler should
+support one-time, daily, and weekly tasks with visible history, explicit
+enable/disable controls, and bounded catch-up after sleep or offline time. It
+will reuse the existing journal and admission path instead of introducing a
+second automation engine.
+
+A schedule cannot manufacture consent. Actions with external effects will
+remain subject to the applicable approval boundary; future recurring grants
+must be limited to exact, canonicalized destinations.
+
+## A browser without ambient computer control
+
+Browser automation is valuable, but OpenWave will not take over your everyday
+browser profile or silently become general desktop control. A future browser
+capability needs an OpenWave-managed profile with explicit rules for cookies,
+logins, reset, uploads, downloads, cancellation, and a visible foreground
+control surface.
+
+It must keep web-page content separate from model instructions, credentials,
+and host capabilities. Personal-profile access by default, CAPTCHA evasion,
+and password-manager integration are outside this direction.
+
+## Connected services
+
+OpenWave supports local connected folders, MCP servers, web search, and
+user-configured REST definitions. It does not intend to publish and operate a
+separate desktop-owned OAuth catalog for services such as Slack, Google,
+Microsoft 365, Dropbox, or Box.
+
+For services that require a registered OAuth application, the intended managed
+path is a gateway entitlement that OpenWave consumes and explains. Local users
+retain their escape hatches: mounted MCP servers and user-provided REST
+definitions and credentials.
+
+## Further out
+
+Later work can add connected-folder search from the composer, reusable output
+templates, an instruction-only plugin marketplace, and eventually
+capability-bearing plugin components with explicit per-component consent.
+
+Deeper isolation is also planned carefully. Detached background agents require
+scoped model tokens, provider lifetime caps, verified images, no reachable host
+authority, and enforceable credential-egress rules. Until those properties fit
+together, durable background runs remain local and attached.
+
+## What we are finishing now
+
+The v1 foundation still has ordinary implementation work: consolidating the
+pre-v1 schema baseline, closing the remaining self-hosted prompt-inbox ownership
+gap, enforcing Docker's strict network-off policy, surfacing the built-in
+project model, and tightening deletion and audit behavior. These are active,
+buildable slices rather than deferred promises.
