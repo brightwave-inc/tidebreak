@@ -1046,6 +1046,27 @@ pub mod plan_request {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod task_plan {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "task_plan")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub chat_id: Uuid,
+        pub turn_id: Uuid,
+        pub call_id: Uuid,
+        pub steps: String,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod user_question_request {
     use sea_orm::entity::prelude::*;
 

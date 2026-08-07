@@ -336,6 +336,9 @@ mod tests {
         generate::collect_from::<openwave_core::PendingUserQuestions>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PendingPlanApproval>(&cfg, &mut out);
         generate::collect_from::<openwave_core::PlanDecisionChoice>(&cfg, &mut out);
+        // The task-plan route's own root: the journal carries only a refresh
+        // hint, so the steps reach the renderer from here.
+        generate::collect_from::<openwave_core::TaskPlan>(&cfg, &mut out);
         generate::collect_from::<crate::routes::client_execution::PendingFolderAccessRequest>(
             &cfg, &mut out,
         );

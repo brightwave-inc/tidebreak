@@ -46,6 +46,7 @@ pub enum RendererToolName {
     WaitForAgents,
     AskUserQuestions,
     ExitPlanMode,
+    UpdateTaskPlan,
     Exec,
     CreateApp,
     /// The fold for anything unrecognized, including a tool that has since been
@@ -82,6 +83,7 @@ impl From<&str> for RendererToolName {
             "wait_for_agents" => Self::WaitForAgents,
             crate::ASK_USER_QUESTIONS_TOOL => Self::AskUserQuestions,
             crate::EXIT_PLAN_MODE_TOOL => Self::ExitPlanMode,
+            crate::UPDATE_TASK_PLAN_TOOL => Self::UpdateTaskPlan,
             "exec" => Self::Exec,
             crate::local_app::CREATE_APP_TOOL => Self::CreateApp,
             _ => Self::Other,
@@ -129,6 +131,7 @@ mod tests {
             "wait_for_agents",
             crate::ASK_USER_QUESTIONS_TOOL,
             crate::EXIT_PLAN_MODE_TOOL,
+            crate::UPDATE_TASK_PLAN_TOOL,
             "exec",
             crate::local_app::CREATE_APP_TOOL,
         ] {

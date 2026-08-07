@@ -220,6 +220,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Plan decided",
     settled: "Proposed a plan",
   },
+  update_task_plan: {
+    label: "Update the task plan",
+    active: "Updating the task plan",
+    complete: "Task plan updated",
+    settled: "Updated the task plan",
+  },
   spawn_sandbox_agent: {
     label: "Delegate a task",
     active: "Delegating a task",

@@ -29,6 +29,7 @@ mod projects_chats;
 mod providers_models;
 mod root_attachment;
 mod settings;
+mod task_plan;
 mod turn_control;
 mod user_questions;
 
@@ -51,6 +52,7 @@ pub use projects_chats::*;
 pub use providers_models::*;
 pub use root_attachment::*;
 pub use settings::*;
+pub use task_plan::*;
 pub use turn_control::*;
 pub use user_questions::*;
 

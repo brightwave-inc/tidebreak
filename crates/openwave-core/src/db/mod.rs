@@ -2147,6 +2147,20 @@ impl Store for DbStore {
         ops::plan::list_pending(self, chat_id).await
     }
 
+    async fn update_task_plan(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        steps: &[crate::TaskPlanStep],
+        updated_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<crate::TaskPlan>> {
+        ops::task_plan::upsert_for_chat(self, chat_id, call_id, steps, updated_at).await
+    }
+
+    async fn get_task_plan(&self, chat_id: ChatId) -> Result<Option<crate::TaskPlan>> {
+        ops::task_plan::get_for_chat(self, chat_id).await
+    }
+
     async fn decide_plan(
         &self,
         request: &crate::DecidePlanRequest,

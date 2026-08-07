@@ -558,6 +558,64 @@ pub(super) fn plan_request_indexes() -> Vec<IndexCreateStatement> {
     ]
 }
 
+/// The foreground agent's durable task plan: one row per chat, replaced whole
+/// by each `update_task_plan` call.
+///
+/// The steps ride as a JSON array rather than a child table. They are bounded
+/// and validated at the tool boundary before anything is written, nothing
+/// queries an individual step, and a whole-list replacement is one row write
+/// instead of a delete-and-reinsert that has to stay ordered.
+pub(super) fn task_plan_table() -> TableCreateStatement {
+    Table::create()
+        .table(TaskPlan::Table)
+        .col(
+            ColumnDef::new(TaskPlan::ChatId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(TaskPlan::TurnId).uuid().not_null())
+        .col(ColumnDef::new(TaskPlan::CallId).uuid().not_null())
+        .col(ColumnDef::new(TaskPlan::Steps).text().not_null())
+        .col(
+            ColumnDef::new(TaskPlan::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(TaskPlan::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_task_plan_chat")
+                .from(TaskPlan::Table, TaskPlan::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_task_plan_turn")
+                .from(TaskPlan::Table, TaskPlan::TurnId)
+                .to(TurnRun::Table, TurnRun::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_task_plan_call")
+                .from(TaskPlan::Table, TaskPlan::CallId)
+                .to(ToolCall::Table, ToolCall::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(TaskPlan::UpdatedAt).gte(Expr::col(TaskPlan::CreatedAt)))
+        .to_owned()
+}
+
+pub(super) fn task_plan_indexes() -> Vec<IndexCreateStatement> {
+    Vec::new()
+}
+
 pub(super) fn user_question_request_table() -> TableCreateStatement {
     Table::create()
         .table(UserQuestionRequest::Table)

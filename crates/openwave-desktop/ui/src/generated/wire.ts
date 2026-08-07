@@ -1835,7 +1835,7 @@ export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compatibl
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
-export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
+export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * Whether the Auto-mode judge owns this card right now. The card
  * stays fully actionable either way; this only adds the "deciding
@@ -1919,7 +1919,7 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, r
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "exec" | "create_app" | "other";
+export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "exec" | "create_app" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -2205,6 +2205,42 @@ export type SubmittedOutputSnapshot = { output_id: OutputId,
  * The name the run gave the file, which is the output's name.
  */
 filename: string, };
+
+/**
+ * Renderer-safe durable projection of a chat's current plan.
+ */
+export type TaskPlan = { 
+/**
+ * The turn whose call last replaced this plan.
+ */
+turn_id: TurnId, 
+/**
+ * The steps, in order.
+ */
+steps: Array<TaskPlanStep>, 
+/**
+ * When the last replacement committed.
+ */
+updated_at: string, };
+
+/**
+ * One step of the plan.
+ */
+export type TaskPlanStep = { 
+/**
+ * What this step does, as one short imperative line.
+ */
+content: string, 
+/**
+ * Where the step stands: `pending` before it starts, `in_progress` while
+ * it is being worked on (at most one step at a time), `completed` after.
+ */
+status: TaskPlanStepStatus, };
+
+/**
+ * Where one step stands.
+ */
+export type TaskPlanStepStatus = "pending" | "in_progress" | "completed";
 
 /**
  * The action a call will take, in a form a human can inspect.
@@ -2514,6 +2550,7 @@ export const RENDERER_TOOL_NAMES = [
   "wait_for_agents",
   "ask_user_questions",
   "exit_plan_mode",
+  "update_task_plan",
   "exec",
   "create_app",
   "other",

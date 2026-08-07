@@ -7380,6 +7380,125 @@ async fn list_chats_is_newest_first_and_messages_follow_commit_sequence() {
     assert_eq!(listed, vec![m1, m2]);
 }
 
+/// A plan write is a live-turn journal write, so it takes the same lease fence
+/// as every other one: a stalled attempt that lost its turn must not overwrite
+/// the plan the current attempt is being judged by, and one call must record
+/// its plan once however many times the loop replays it.
+#[tokio::test]
+async fn task_plan_writes_are_fenced_on_the_turn_lease_and_recorded_once() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "plan the work")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let claim_at = accepted.available_at;
+    let stale_lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            stale_lease,
+            claim_at,
+            claim_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    let call = |provider_id: &str| ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: provider_id.into(),
+        name: crate::UPDATE_TASK_PLAN_TOOL.into(),
+        arguments: serde_json::json!({"steps": []}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: claim_at,
+        resolved_at: None,
+    };
+    // Both calls are admitted while the first attempt still owns the turn.
+    let first = call("tu_plan_1");
+    let stalled = call("tu_plan_2");
+    for record in [&first, &stalled] {
+        assert!(matches!(
+            store
+                .accept_claimed_tool_call(record, stale_lease, claim_at)
+                .await
+                .unwrap(),
+            AcceptClaimedToolCallOutcome::Accepted(_)
+        ));
+    }
+    let step = |content: &str| crate::TaskPlanStep {
+        content: content.into(),
+        status: crate::TaskPlanStepStatus::InProgress,
+    };
+
+    let recorded = store
+        .update_task_plan(chat.id, first.id, &[step("draft the change")], Utc::now())
+        .await
+        .unwrap()
+        .expect("the owning attempt records its plan");
+    assert_eq!(recorded.turn_id, turn_id);
+    // The row and the projection agree on when it committed; the row's value
+    // is clamped to what the database can hold and the caller sees that one.
+    assert_eq!(
+        store.get_task_plan(chat.id).await.unwrap(),
+        Some(recorded.clone())
+    );
+    let hints = |events: Vec<crate::SequencedEvent>| {
+        events
+            .into_iter()
+            .filter(|event| matches!(event.event, AgentEvent::TaskPlanUpdated { .. }))
+            .count()
+    };
+    assert_eq!(hints(store.list_events(chat.id, 0).await.unwrap()), 1);
+
+    // The loop re-executing a row it already admitted must not journal a
+    // second hint for the same call.
+    assert_eq!(
+        store
+            .update_task_plan(chat.id, first.id, &[step("draft the change")], Utc::now())
+            .await
+            .unwrap(),
+        Some(recorded.clone())
+    );
+    assert_eq!(hints(store.list_events(chat.id, 0).await.unwrap()), 1);
+
+    // The turn is reclaimed by a later attempt. The first attempt is still
+    // running somewhere with an admitted call in hand.
+    let retry_at = claim_at + chrono::Duration::seconds(2);
+    store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            retry_at,
+            retry_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .update_task_plan(chat.id, stalled.id, &[step("stale intent")], Utc::now())
+            .await
+            .unwrap(),
+        None,
+        "an attempt that lost its lease must not replace the live plan"
+    );
+    assert_eq!(store.get_task_plan(chat.id).await.unwrap(), Some(recorded));
+    assert_eq!(hints(store.list_events(chat.id, 0).await.unwrap()), 1);
+}
+
 #[tokio::test]
 async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_roots() {
     let (_dir, store) = temp_store().await;
@@ -7437,10 +7556,48 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         )
         .await
         .unwrap();
+    // A recorded task plan restricts against the chat, its turn, and the call
+    // that wrote it, so deletion has to erase it explicitly. Before it did,
+    // any chat that ever made a plan became undeletable.
+    let planning_call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: active.id,
+        turn_id: active_turn_id,
+        provider_id: "tu_plan".into(),
+        name: crate::UPDATE_TASK_PLAN_TOOL.into(),
+        arguments: serde_json::json!({"steps": []}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&planning_call).await.unwrap();
+    store
+        .update_task_plan(
+            active.id,
+            planning_call.id,
+            &[crate::TaskPlanStep {
+                content: "ship it".into(),
+                status: crate::TaskPlanStepStatus::InProgress,
+            }],
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("an unclaimed turn has no lease to fence against");
     assert_eq!(
         store.delete_chat(active.id).await.unwrap(),
         DeleteChatOutcome::Deleted
     );
+    assert_eq!(store.get_task_plan(active.id).await.unwrap(), None);
 
     let root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
     let mut rooted = sample_chat();

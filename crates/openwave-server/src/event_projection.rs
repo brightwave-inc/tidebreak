@@ -196,6 +196,10 @@ pub(crate) enum RendererAgentEvent {
         call_id: CallId,
         turn_id: TurnId,
     },
+    TaskPlanUpdated {
+        call_id: CallId,
+        turn_id: TurnId,
+    },
     ApprovalRequired {
         call_id: CallId,
         action: RendererToolName,
@@ -365,6 +369,12 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 call_id: *call_id,
                 turn_id: *turn_id,
             },
+            AgentEvent::TaskPlanUpdated { call_id, turn_id } => {
+                RendererAgentEvent::TaskPlanUpdated {
+                    call_id: *call_id,
+                    turn_id: *turn_id,
+                }
+            }
             AgentEvent::ApprovalRequired {
                 auto_judging,
                 call_id,

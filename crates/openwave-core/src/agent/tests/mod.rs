@@ -4216,16 +4216,41 @@ fn plan_surface_advertises_only_read_only_tools() {
     );
     tools.register_foreground_agent_orchestration();
 
+    tools = tools.with(Box::new(TaskPlanStub));
+
     let mut names = tools
         .specs_for_surface(true, true)
         .into_iter()
         .map(|spec| spec.name)
         .collect::<Vec<_>>();
     names.sort();
+    // `update_task_plan` is read-only by consent class but still commits a
+    // durable row, and a plan-mode turn is drafting a proposal the reader has
+    // not accepted. It is carved out by name rather than by class.
     assert_eq!(
         names,
         vec!["ask_user_questions", "read_connected_file", "read_file"]
     );
+    assert!(tools
+        .specs_for_surface(true, false)
+        .iter()
+        .any(|spec| spec.name == crate::UPDATE_TASK_PLAN_TOOL));
+}
+
+/// Stands in for the server-side task-plan tool: read-only class, real write.
+struct TaskPlanStub;
+
+#[async_trait]
+impl Tool for TaskPlanStub {
+    fn spec(&self) -> ToolSpec {
+        crate::update_task_plan_tool_spec()
+    }
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+    async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+        Ok(ToolOutput::text("recorded"))
+    }
 }
 
 /// A Sensitive tool that escapes the chat workspace (`exec`) and records

@@ -32,7 +32,7 @@ use openwave_core::{
     ImageRef, JournaledTurnOutcome, NetworkPolicy, OwnerId, PermissionMode, Project, ProjectId,
     ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
     SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
-    ToolApproval, ToolCallRecord, TurnId, TurnRun, TurnSteerId,
+    TaskPlan, ToolApproval, ToolCallRecord, TurnId, TurnRun, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -375,6 +375,11 @@ impl ScopedStore {
     /// [`Store::list_events`].
     pub async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
         self.store.list_events(chat_id, after).await
+    }
+
+    /// [`Store::get_task_plan`].
+    pub async fn get_task_plan(&self, chat_id: ChatId) -> Result<Option<TaskPlan>> {
+        self.store.get_task_plan(chat_id).await
     }
 }
 
