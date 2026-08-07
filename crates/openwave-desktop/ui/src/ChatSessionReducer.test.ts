@@ -170,6 +170,57 @@ describe("turn_started", () => {
     ).toEqual(["call-approved"]);
     expect(state.provisionalToolCallIds.size).toBe(0);
   });
+
+  it("keeps queued sibling agent spawns across checkpoint resumes", () => {
+    const { state } = play([
+      TURN,
+      {
+        type: "tool_call_started",
+        call_id: "spawn-a",
+        name: "spawn_sandbox_agent",
+      },
+      {
+        type: "tool_call_started",
+        call_id: "spawn-b",
+        name: "spawn_sandbox_agent",
+      },
+      {
+        type: "tool_call_started",
+        call_id: "spawn-c",
+        name: "spawn_sandbox_agent",
+      },
+      {
+        type: "tool_call_completed",
+        call_id: "spawn-a",
+        status: "completed",
+      },
+      TURN,
+      {
+        type: "tool_call_completed",
+        call_id: "spawn-b",
+        status: "completed",
+      },
+      TURN,
+      {
+        type: "tool_call_completed",
+        call_id: "spawn-c",
+        status: "completed",
+      },
+    ]);
+
+    expect(
+      state.messages.flatMap((message) =>
+        message.role === "tool"
+          ? [{ callId: message.callId, status: message.status }]
+          : [],
+      ),
+    ).toEqual([
+      { callId: "spawn-a", status: "completed" },
+      { callId: "spawn-b", status: "completed" },
+      { callId: "spawn-c", status: "completed" },
+    ]);
+    expect(state.provisionalToolCallIds.size).toBe(0);
+  });
 });
 
 describe("text_delta", () => {

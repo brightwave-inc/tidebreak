@@ -143,8 +143,10 @@ export function reduceChatSessionEvent(
       // A resumed attempt starts a new renderer candidate for the same turn.
       // Calls admitted before an approval boundary have already left this set;
       // any IDs still here were only streamed optimistically and will never
-      // receive completion events from the resumed attempt.
-      const messages = discardToolCalls(
+      // receive completion events from the resumed attempt. Sandbox-spawn
+      // siblings are the exception: the server checkpoints them one at a time,
+      // and each resume still owes completion events for the carried tail.
+      const messages = discardUnadmittedToolCallsAtResume(
         state.messages,
         state.provisionalToolCallIds,
       );
@@ -770,4 +772,20 @@ export function discardToolCalls(
   return messages.filter(
     (message) => message.role !== "tool" || !callIds.has(message.callId),
   );
+}
+
+function discardUnadmittedToolCallsAtResume(
+  messages: ChatMessage[],
+  callIds: ReadonlySet<string>,
+): ChatMessage[] {
+  const unadmitted = new Set(
+    messages.flatMap((message) =>
+      message.role === "tool" &&
+      callIds.has(message.callId) &&
+      message.name !== "spawn_sandbox_agent"
+        ? [message.callId]
+        : [],
+    ),
+  );
+  return discardToolCalls(messages, unadmitted);
 }
