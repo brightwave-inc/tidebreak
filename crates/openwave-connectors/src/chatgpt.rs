@@ -288,14 +288,25 @@ impl ChatGptAuth {
         })
     }
 
-    /// Exchange a refresh token for a new access/refresh pair.
+    /// Exchange a refresh token for a complete replacement credential set.
+    ///
+    /// Vault-backed callers should use [`ChatGptConnection`], which can retain
+    /// stable fields when a refresh response omits them.
     pub async fn refresh(&self, refresh_token: &str) -> Result<ChatGptCredentials> {
+        self.refresh_with_fallback(refresh_token, None).await
+    }
+
+    async fn refresh_with_fallback(
+        &self,
+        refresh_token: &str,
+        fallback: Option<&ChatGptCredentials>,
+    ) -> Result<ChatGptCredentials> {
         let form = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", self.config.client_id.as_str()),
         ];
-        self.request_token(&form).await
+        credentials_from_token(self.request_token(&form).await?, fallback)
     }
 
     /// Best-effort revoke. Failures are ignored by callers that are clearing
@@ -328,10 +339,10 @@ impl ChatGptAuth {
             ("client_id", self.config.client_id.as_str()),
             ("code_verifier", verifier),
         ];
-        self.request_token(&form).await
+        credentials_from_token(self.request_token(&form).await?, None)
     }
 
-    async fn request_token(&self, form: &[(&str, &str)]) -> Result<ChatGptCredentials> {
+    async fn request_token(&self, form: &[(&str, &str)]) -> Result<TokenResponse> {
         let response = self
             .http
             .post(self.config.token_url.clone())
@@ -353,29 +364,55 @@ impl ChatGptAuth {
                 .unwrap_or_else(|| format!("HTTP status {}", status.as_u16()));
             return Err(chatgpt_error("token request", detail));
         }
-        let token: TokenResponse = response
+        response
             .json()
             .await
-            .map_err(|_| chatgpt_error("token request", "invalid token response"))?;
-        let account_id = token
-            .account_id
-            .filter(|id| !id.is_empty())
-            .or_else(|| extract_account_id(&token.access_token))
-            .or_else(|| token.id_token.as_deref().and_then(extract_account_id))
-            .ok_or_else(|| {
-                chatgpt_error(
-                    "token request",
-                    "response did not include a ChatGPT account id",
-                )
-            })?;
-        Ok(ChatGptCredentials {
-            access_token: token.access_token,
-            refresh_token: token.refresh_token,
-            account_id,
-            expires_at_unix: unix_time()
-                .saturating_add(u64::try_from(token.expires_in).unwrap_or(3600)),
-        })
+            .map_err(|_| chatgpt_error("token request", "invalid token response"))
     }
+}
+
+fn credentials_from_token(
+    token: TokenResponse,
+    fallback: Option<&ChatGptCredentials>,
+) -> Result<ChatGptCredentials> {
+    let TokenResponse {
+        access_token,
+        expires_in,
+        refresh_token,
+        id_token,
+        account_id,
+    } = token;
+    if access_token.is_empty() {
+        return Err(chatgpt_error(
+            "token request",
+            "response did not include an access token",
+        ));
+    }
+    let account_id = account_id
+        .filter(|id| !id.is_empty())
+        .or_else(|| extract_account_id(&access_token))
+        .or_else(|| id_token.as_deref().and_then(extract_account_id))
+        .or_else(|| fallback.map(|credentials| credentials.account_id.clone()))
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            chatgpt_error(
+                "token request",
+                "response did not include a ChatGPT account id",
+            )
+        })?;
+    let refresh_token = refresh_token
+        .filter(|token| !token.is_empty())
+        .or_else(|| fallback.map(|credentials| credentials.refresh_token.clone()))
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            chatgpt_error("token request", "response did not include a refresh token")
+        })?;
+    Ok(ChatGptCredentials {
+        access_token,
+        refresh_token,
+        account_id,
+        expires_at_unix: unix_time().saturating_add(u64::try_from(expires_in).unwrap_or(3600)),
+    })
 }
 
 /// A sign-in in flight. Dropping this cancels the listener.
@@ -499,21 +536,16 @@ impl ChatGptConnection {
     /// A currently valid access token, refreshing near expiry.
     pub async fn access_token(&self) -> Result<String> {
         let _guard = self.token_motion.lock().await;
-        let Some(mut credentials) = self.vault.load().await? else {
+        let Some(credentials) = self.vault.load().await? else {
             return Err(sign_in_required("no ChatGPT session is stored"));
         };
         if credentials.access_is_fresh() {
             return Ok(credentials.access_token);
         }
-        let refreshed = self.auth.refresh(&credentials.refresh_token).await?;
-        // Preserve account id if refresh omits it (should not, but be safe).
-        if refreshed.account_id.is_empty() {
-            credentials.access_token = refreshed.access_token;
-            credentials.refresh_token = refreshed.refresh_token;
-            credentials.expires_at_unix = refreshed.expires_at_unix;
-            self.vault.save(&credentials).await?;
-            return Ok(credentials.access_token);
-        }
+        let refreshed = self
+            .auth
+            .refresh_with_fallback(&credentials.refresh_token, Some(&credentials))
+            .await?;
         self.vault.save(&refreshed).await?;
         Ok(refreshed.access_token)
     }
@@ -642,7 +674,8 @@ struct CallbackResult {
 struct TokenResponse {
     access_token: String,
     expires_in: i64,
-    refresh_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     #[serde(default)]
     id_token: Option<String>,
     #[serde(default)]

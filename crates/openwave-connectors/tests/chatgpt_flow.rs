@@ -84,6 +84,15 @@ impl FakeAuth {
             "scope": "openid profile email offline_access",
         })
     }
+
+    fn sparse_refresh(&self) -> Value {
+        json!({
+            "access_token": format!("opaque-access-{}", next_id()),
+            "token_type": "Bearer",
+            "expires_in": 600,
+            "scope": "openid profile email offline_access",
+        })
+    }
 }
 
 fn next_id() -> u64 {
@@ -151,14 +160,12 @@ async fn token(
             if form.get("client_id").map(String::as_str) != Some(CLIENT_ID) {
                 return invalid_grant();
             }
-            let mut refresh_tokens = auth.refresh_tokens.lock().unwrap();
-            if refresh_tokens.get(refresh) != Some(&true) {
-                drop(refresh_tokens);
+            if auth.refresh_tokens.lock().unwrap().get(refresh) != Some(&true) {
                 return invalid_grant();
             }
-            refresh_tokens.insert(refresh.clone(), false);
-            drop(refresh_tokens);
-            Json(auth.mint()).into_response()
+            // OAuth refresh responses may keep the existing refresh token and
+            // omit identity fields that were already established at sign-in.
+            Json(auth.sparse_refresh()).into_response()
         }
         _ => StatusCode::BAD_REQUEST.into_response(),
     }
@@ -206,6 +213,21 @@ fn browser() -> reqwest::Client {
     reqwest::Client::builder().build().unwrap()
 }
 
+async fn expire_stored_access_token(secrets: &dyn SecretProvider) -> Value {
+    let raw = secrets
+        .get_secret(CHATGPT_SECRET_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut value: Value = serde_json::from_str(&raw).unwrap();
+    value["expires_at_unix"] = json!(0);
+    secrets
+        .set_secret(CHATGPT_SECRET_KEY, &serde_json::to_string(&value).unwrap())
+        .await
+        .unwrap();
+    value
+}
+
 #[tokio::test]
 async fn sign_in_refresh_and_sign_out_round_trip() {
     let (base, fake) = spawn_fake().await;
@@ -228,24 +250,40 @@ async fn sign_in_refresh_and_sign_out_round_trip() {
     assert!(!token.is_empty());
     assert_eq!(fake.token_requests.load(Ordering::SeqCst), 1);
 
-    // Expire the cached access token so the next read refreshes.
-    let raw = secrets
-        .get_secret(CHATGPT_SECRET_KEY)
-        .await
+    // Expire the cached access token so the next read refreshes. The fake's
+    // refresh response deliberately omits account_id, id_token, and
+    // refresh_token; the connection must retain those durable fields.
+    let before_refresh = expire_stored_access_token(secrets.as_ref()).await;
+    let original_refresh = before_refresh["refresh_token"]
+        .as_str()
         .unwrap()
-        .unwrap();
-    let mut value: Value = serde_json::from_str(&raw).unwrap();
-    value["expires_at_unix"] = json!(0);
-    secrets
-        .set_secret(CHATGPT_SECRET_KEY, &serde_json::to_string(&value).unwrap())
-        .await
-        .unwrap();
+        .to_string();
 
     let token_after = connection.access_token().await.unwrap();
-    assert!(!token_after.is_empty());
-    assert!(fake.token_requests.load(Ordering::SeqCst) >= 2);
+    assert!(token_after.starts_with("opaque-access-"));
+    assert_eq!(fake.token_requests.load(Ordering::SeqCst), 2);
+
+    let persisted: Value = serde_json::from_str(
+        &secrets
+            .get_secret(CHATGPT_SECRET_KEY)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["account_id"], ACCOUNT);
+    assert_eq!(persisted["refresh_token"], original_refresh);
+
+    // The retained token must remain usable for another refresh, not merely
+    // survive serialization once.
+    expire_stored_access_token(secrets.as_ref()).await;
+    let token_again = connection.access_token().await.unwrap();
+    assert!(token_again.starts_with("opaque-access-"));
+    assert_eq!(fake.token_requests.load(Ordering::SeqCst), 3);
 
     connection.sign_out().await.unwrap();
     assert!(!has_stored_chatgpt_credentials(secrets.as_ref()).await);
-    assert!(!fake.revoked.lock().unwrap().is_empty());
+    let revoked = fake.revoked.lock().unwrap();
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0], original_refresh);
 }
