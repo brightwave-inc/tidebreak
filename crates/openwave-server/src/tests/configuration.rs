@@ -1050,6 +1050,12 @@ async fn providers_list_and_put_roundtrip() {
     let providers = body["providers"].as_array().unwrap();
     assert!(providers.iter().any(|p| p["kind"] == "anthropic"));
     assert!(providers.iter().any(|p| p["kind"] == "openai"));
+    assert!(providers.iter().any(|p| {
+        p["kind"] == "fireworks" && p["base_url"] == "https://api.fireworks.ai/inference/v1"
+    }));
+    assert!(providers
+        .iter()
+        .any(|p| p["kind"] == "together" && p["base_url"] == "https://api.together.ai/v1"));
     assert!(providers.iter().any(|p| p["kind"] == "openai_compatible"));
 
     let put = router
@@ -1312,6 +1318,26 @@ async fn openai_compatible_requires_base_url_when_enabled() {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn direct_compatible_presets_refuse_endpoint_overrides() {
+    let (router, token, _store, _dir) = test_app().await;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/fireworks")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"base_url": "https://example.test/v1"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1653,6 +1679,43 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     assert_eq!(wrong_provider.status(), StatusCode::BAD_REQUEST);
     let error: AgentErrorInfo = json_body(wrong_provider).await;
     assert_eq!(error.kind, "unknown_model");
+    assert_eq!(
+        error.message,
+        "model `gpt-5.6-sol` is not registered for provider `anthropic`"
+    );
+
+    for (selection, message) in [
+        (
+            "fireworks::accounts/fireworks/models/not-a-model",
+            "model `accounts/fireworks/models/not-a-model` is not registered for provider `fireworks`",
+        ),
+        (
+            "together::not-a-model",
+            "model `not-a-model` is not registered for provider `together`",
+        ),
+    ] {
+        let response =
+            put_settings(&router, &bearer, serde_json::json!({"model": selection})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: AgentErrorInfo = json_body(response).await;
+        assert_eq!(error.kind, "unknown_model");
+        assert_eq!(error.message, message);
+        assert!(!error.message.contains("OpenAI-compatible"));
+    }
+
+    let custom_unknown = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model": "openai_compatible::not-a-model"}),
+    )
+    .await;
+    assert_eq!(custom_unknown.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(custom_unknown).await;
+    assert_eq!(error.kind, "unknown_model");
+    assert_eq!(
+        error.message,
+        "model `not-a-model` is not configured under OpenAI-compatible models"
+    );
 
     let unavailable = put_settings(
         &router,
@@ -1893,6 +1956,72 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "openai::gpt-5.4-mini"
     );
 
+    configure_provider(
+        "together",
+        serde_json::json!({
+            "enabled": true,
+            "credential": {"type": "api_key", "key": "together-key"}
+        }),
+    )
+    .await;
+
+    let catalog_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/models")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(catalog_response.status(), StatusCode::OK);
+    let catalog: serde_json::Value = json_body(catalog_response).await;
+    for id in [
+        "moonshotai/Kimi-K3",
+        "moonshotai/Kimi-K2.7-Code",
+        "moonshotai/Kimi-K2.6",
+    ] {
+        let model = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["provider"] == "together" && model["id"] == id)
+            .unwrap_or_else(|| panic!("the API reports Together `{id}`"));
+        assert!(model["supports_structured_output"].as_bool().unwrap());
+    }
+    let kimi = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["key"] == "together::moonshotai/Kimi-K3")
+        .unwrap();
+    assert!(!kimi["supports_tools"].as_bool().unwrap());
+
+    let kimi_pin = put_role(
+        "utility",
+        serde_json::json!({"selection": "together::moonshotai/Kimi-K3"}),
+    )
+    .await;
+    assert_eq!(kimi_pin.status(), StatusCode::OK);
+    let kimi_pin: serde_json::Value = json_body(kimi_pin).await;
+    assert_eq!(kimi_pin["resolved_key"], "together::moonshotai/Kimi-K3");
+
+    let incompatible = put_role(
+        "utility",
+        serde_json::json!({"selection": "together::thinkingmachines/Inkling-Small"}),
+    )
+    .await;
+    assert_eq!(incompatible.status(), StatusCode::CONFLICT);
+    let error: AgentErrorInfo = json_body(incompatible).await;
+    assert_eq!(error.kind, "model_structured_output_unsupported");
+    assert_eq!(
+        role_row(&role_rows().await, "utility")["selection"],
+        "together::moonshotai/Kimi-K3",
+        "a rejected utility pin must not replace the capable selection"
+    );
+
     let unavailable = put_role(
         "utility",
         serde_json::json!({"selection": "anthropic::claude-haiku-4-5-20251001"}),
@@ -1986,7 +2115,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
             models: vec![
                 providers::CustomModelConfig {
                     id: "gateway-flagship".to_string(),
-                    upstream_id: None,
+                    upstream_id: Some("claude-opus-5".to_string()),
                     display_name: Some("Gateway Flagship".to_string()),
                     context_window: 1_000_000,
                     max_output_tokens: 64_000,
@@ -1994,7 +2123,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                 },
                 providers::CustomModelConfig {
                     id: "gateway-haiku".to_string(),
-                    upstream_id: None,
+                    upstream_id: Some("claude-haiku-4-5-20251001".to_string()),
                     display_name: Some("Gateway Haiku".to_string()),
                     context_window: 200_000,
                     max_output_tokens: 8_192,
@@ -2110,6 +2239,7 @@ async fn custom_models_live_under_openai_compatible_with_conservative_capabiliti
     assert_eq!(custom["max_output_tokens"], 8_192);
     assert_eq!(custom["input_modalities"], serde_json::json!(["text"]));
     assert!(!custom["supports_reasoning"].as_bool().unwrap());
+    assert!(!custom["supports_structured_output"].as_bool().unwrap());
     assert!(custom["available"].as_bool().unwrap());
 }
 
@@ -2449,6 +2579,89 @@ async fn openai_compatible_route_is_free_form_fallback() {
     assert_eq!(
         router.select("llama-3-local"),
         Some(openwave_router::RouteKind::OpenaiCompatible)
+    );
+}
+
+#[tokio::test]
+async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+
+    for kind in [
+        providers::ProviderKind::Fireworks,
+        providers::ProviderKind::Together,
+    ] {
+        providers::write_credential(
+            &*secrets,
+            kind,
+            &providers::ProviderCredential::api_key(format!("{kind}-key")),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            kind,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+                vertex_location: None,
+                models: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let fireworks = routes
+        .iter()
+        .find(|route| route.kind == openwave_router::RouteKind::Fireworks)
+        .unwrap();
+    let together = routes
+        .iter()
+        .find(|route| route.kind == openwave_router::RouteKind::Together)
+        .unwrap();
+
+    assert_eq!(
+        fireworks.base_url.as_deref(),
+        Some("https://api.fireworks.ai/inference/v1")
+    );
+    assert_eq!(
+        together.base_url.as_deref(),
+        Some("https://api.together.ai/v1")
+    );
+    assert!(fireworks
+        .curated_models
+        .contains(&"accounts/fireworks/models/kimi-k3".to_owned()));
+    assert!(together
+        .curated_models
+        .contains(&"moonshotai/Kimi-K3".to_owned()));
+
+    let router = openwave_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("fireworks")),
+            "accounts/fireworks/models/kimi-k3"
+        ),
+        Some(openwave_router::RouteKind::Fireworks)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("together")),
+            "moonshotai/Kimi-K3"
+        ),
+        Some(openwave_router::RouteKind::Together)
     );
 }
 

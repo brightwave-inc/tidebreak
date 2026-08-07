@@ -666,7 +666,7 @@ async fn completes_a_claimed_run_with_a_no_tools_private_request() {
     );
     assert_eq!(
         requests[0].system.as_deref(),
-        Some(sandbox_system_prompt(false, TurnWebSearch::Host).as_str())
+        Some(sandbox_system_prompt(false, TurnWebSearch::Host, true).as_str())
     );
 }
 
@@ -2060,7 +2060,7 @@ async fn sandbox_request_does_not_inherit_foreground_system_or_tools() {
     .unwrap();
     assert_eq!(
         request.system.as_deref(),
-        Some(sandbox_system_prompt(false, TurnWebSearch::Host).as_str())
+        Some(sandbox_system_prompt(false, TurnWebSearch::Host, true).as_str())
     );
     assert_eq!(
         request
@@ -2076,6 +2076,60 @@ async fn sandbox_request_does_not_inherit_foreground_system_or_tools() {
             openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
         ]
     );
+}
+
+#[tokio::test]
+async fn sandbox_request_withholds_tools_from_a_chat_only_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DbStore::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("t.db").display()
+    ))
+    .await
+    .unwrap();
+    let request = sandbox_request(
+        &AgentConfig {
+            model: "chat-only".into(),
+            tools_supported: false,
+            web_search: TurnWebSearch::Vendor(openwave_core::VendorWebSearch {
+                max_uses: openwave_core::VendorWebSearch::DEFAULT_MAX_USES,
+            }),
+            ..AgentConfig::default()
+        },
+        "task".into(),
+        &[],
+        &store,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(request.tools.is_empty());
+    assert!(request.vendor_web_search.is_none());
+    let prompt = request.system.as_deref().unwrap();
+    assert_eq!(
+        prompt,
+        sandbox_system_prompt(
+            false,
+            TurnWebSearch::Vendor(openwave_core::VendorWebSearch {
+                max_uses: openwave_core::VendorWebSearch::DEFAULT_MAX_USES,
+            }),
+            false
+        )
+    );
+    for unavailable in [
+        "exec",
+        "search",
+        "delegat",
+        "done",
+        "update_task_plan",
+        "request_folder_access",
+    ] {
+        assert!(
+            !prompt.contains(unavailable),
+            "chat-only sandbox prompt advertised unavailable capability `{unavailable}`: {prompt}"
+        );
+    }
+    assert!(prompt.contains("Return the best final text result directly"));
 }
 
 #[tokio::test]
@@ -2168,7 +2222,7 @@ async fn desktop_delegation_advertises_one_canonical_file_read() {
     .unwrap();
     assert_eq!(
         request.system.as_deref(),
-        Some(sandbox_system_prompt(true, TurnWebSearch::Host).as_str())
+        Some(sandbox_system_prompt(true, TurnWebSearch::Host, true).as_str())
     );
     assert_eq!(
         request
@@ -2215,7 +2269,7 @@ async fn delegated_file_read_answers_nonempty_arguments_without_parking_work() {
         provider: None,
         model: "m".into(),
         reasoning_model: false,
-        system: Some(sandbox_system_prompt(true, TurnWebSearch::Host)),
+        system: Some(sandbox_system_prompt(true, TurnWebSearch::Host, true)),
         messages: vec![ChatMessage::text(Role::User, "task")],
         tools: vec![sandbox_read_delegated_file_tool_spec()],
         max_tokens: Some(100),

@@ -19,6 +19,8 @@ const models: ModelInfo[] = [
     max_output_tokens: 128_000,
     input_modalities: ["text"],
     supports_reasoning: true,
+    supports_tools: true,
+    supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
   },
@@ -34,6 +36,8 @@ const models: ModelInfo[] = [
     max_output_tokens: 16_384,
     input_modalities: ["text"],
     supports_reasoning: false,
+    supports_tools: true,
+    supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
   },
@@ -49,8 +53,44 @@ const models: ModelInfo[] = [
     max_output_tokens: 16_384,
     input_modalities: ["text"],
     supports_reasoning: false,
+    supports_tools: true,
+    supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
+  },
+  {
+    key: "openai::gpt-no-schema",
+    id: "gpt-no-schema",
+    display_name: "GPT No Schema",
+    provider: "openai",
+    vendor: null,
+    verification: "unverified",
+    available: true,
+    context_window: 128_000,
+    max_output_tokens: 16_384,
+    input_modalities: ["text"],
+    supports_reasoning: false,
+    supports_tools: true,
+    supports_structured_output: false,
+    reasoning_efforts: [],
+    multimodal: false,
+  },
+  {
+    key: "together::moonshotai/Kimi-K3",
+    id: "moonshotai/Kimi-K3",
+    display_name: "Kimi K3",
+    provider: "together",
+    vendor: null,
+    verification: "unverified",
+    available: true,
+    context_window: 1_000_000,
+    max_output_tokens: 32_768,
+    input_modalities: ["text", "image"],
+    supports_reasoning: false,
+    supports_tools: false,
+    supports_structured_output: true,
+    reasoning_efforts: [],
+    multimodal: true,
   },
 ];
 
@@ -92,6 +132,13 @@ describe("ModelsPanel", () => {
     expect(
       screen.getByRole("combobox", { name: "Chat model" }),
     ).toHaveTextContent("GPT-4o");
+    await user.click(screen.getByRole("combobox", { name: "Chat model" }));
+    expect(
+      screen.getByRole("option", {
+        name: "GPT No Schema — 128k context",
+      }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
 
     // The automatic choice says which model it lands on, per role.
     const utilityModel = screen.getByRole("combobox", {
@@ -111,8 +158,23 @@ describe("ModelsPanel", () => {
     expect(putModelRole).not.toHaveBeenCalled();
     await user.click(utilityModel);
     expect(
+      screen.queryByRole("option", { name: /GPT No Schema/ }),
+    ).toBeNull();
+    expect(
       screen.getByRole("option", { name: "Claude Opus 4.8 — 1M context — unavailable" }),
     ).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+
+    // Chat-only routing is independent from the strict structured-output
+    // contract: Kimi K3 remains available for background work.
+    await user.click(utilityProvider);
+    await user.click(screen.getByRole("option", { name: "Together AI" }));
+    await user.click(utilityModel);
+    expect(
+      screen.getByRole("option", {
+        name: "Kimi K3 — 1M context — chat only",
+      }),
+    ).toBeInTheDocument();
     await user.keyboard("{Escape}");
 
     // Choosing a model for one role pins that role.
@@ -156,6 +218,8 @@ function gatewayModel(
     max_output_tokens: 8_192,
     input_modalities: ["text"],
     supports_reasoning: false,
+    supports_tools: true,
+    supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
   };
@@ -168,6 +232,12 @@ const managedModels: ModelInfo[] = [
   models[0],
   gatewayModel("gw-flagship", "Gateway Flagship", 1_000_000),
   gatewayModel("gw-haiku", "Gateway Haiku", 200_000),
+  {
+    ...gatewayModel("moonshotai/Kimi-K3", "Kimi K3", 1_000_000),
+    vendor: "together",
+    supports_tools: false,
+    supports_structured_output: true,
+  },
 ];
 
 // A BYOK chat pin carried in from before the profile was managed: the server
@@ -230,6 +300,11 @@ describe("ModelsPanel under managed policy", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("option", { name: "Gateway Flagship — 1M context" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", {
+        name: "Kimi K3 — 1M context — chat only",
+      }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Claude Opus/ })).toBeNull();
 

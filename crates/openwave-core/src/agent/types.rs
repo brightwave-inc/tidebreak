@@ -71,6 +71,11 @@ pub struct AgentConfig {
     pub reasoning_model: bool,
     /// Whether the resolved registry model accepts image input.
     pub image_input: bool,
+    /// Whether this exact provider/model route accepts function tools.
+    ///
+    /// False turns the agent into a chat-only loop for that model: schemas are
+    /// withheld instead of sending a request the host documents as unsupported.
+    pub tools_supported: bool,
     /// Reasoning-effort hint for models that expose the control; ignored by the
     /// rest. `None` leaves the provider default in force.
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
@@ -155,6 +160,7 @@ impl Default for AgentConfig {
             model: String::new(),
             reasoning_model: false,
             image_input: false,
+            tools_supported: true,
             reasoning_effort: None,
             system_prompt: None,
             max_tokens: None,

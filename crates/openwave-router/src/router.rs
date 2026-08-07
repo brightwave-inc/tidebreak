@@ -135,6 +135,10 @@ pub enum RouteKind {
     Openai,
     /// Native xAI Responses API (api.x.ai).
     Xai,
+    /// Fireworks AI over the shared OpenAI-compatible adapter.
+    Fireworks,
+    /// Together AI over the shared OpenAI-compatible adapter.
+    Together,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
     /// Google Gemini Developer API (native GenerateContent protocol).
@@ -159,6 +163,8 @@ impl RouteKind {
             RouteKind::Anthropic => "anthropic",
             RouteKind::Openai => "openai",
             RouteKind::Xai => "xai",
+            RouteKind::Fireworks => "fireworks",
+            RouteKind::Together => "together",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
             RouteKind::Vertex => "vertex",
@@ -181,6 +187,8 @@ impl RouteKind {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
             "xai" => Some(Self::Xai),
+            "fireworks" => Some(Self::Fireworks),
+            "together" => Some(Self::Together),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
             "vertex" => Some(Self::Vertex),
@@ -287,6 +295,8 @@ impl Router {
             RouteKind::Xai,
             RouteKind::Gemini,
             RouteKind::Vertex,
+            RouteKind::Fireworks,
+            RouteKind::Together,
             RouteKind::ModelGateway,
             RouteKind::ModelGatewayOpenai,
             RouteKind::OpenaiCompatible,
@@ -410,6 +420,7 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             let source = route.token_source.clone()?;
             Some(Arc::new(
                 OpenAiCompatProvider::compatible(String::new(), base.to_string())
+                    .with_id(route.kind.provider_id())
                     .with_token_source(source)
                     .with_conversation_attribution()
                     .with_streaming_usage(),
@@ -445,17 +456,17 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         // cannot redirect the bearer token around the server's collector.
         RouteKind::Xai => Some(Arc::new(XaiProvider::new(route.api_key.clone()))),
         #[cfg(feature = "openai-compat")]
-        RouteKind::OpenaiCompatible => {
+        RouteKind::Fireworks | RouteKind::Together | RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
             // Refuse non-http(s) schemes so a stored base_url can't point the
             // adapter at an arbitrary scheme handler.
             if !(base.starts_with("https://") || base.starts_with("http://")) {
                 return None;
             }
-            Some(Arc::new(OpenAiCompatProvider::compatible(
-                route.api_key.clone(),
-                base.to_string(),
-            )))
+            Some(Arc::new(
+                OpenAiCompatProvider::compatible(route.api_key.clone(), base.to_string())
+                    .with_id(route.kind.as_str()),
+            ))
         }
         #[cfg(feature = "gemini")]
         RouteKind::Gemini => {
@@ -503,7 +514,7 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         #[cfg(not(feature = "xai"))]
         RouteKind::Xai => None,
         #[cfg(not(feature = "openai-compat"))]
-        RouteKind::OpenaiCompatible => None,
+        RouteKind::Fireworks | RouteKind::Together | RouteKind::OpenaiCompatible => None,
     }
 }
 
@@ -637,6 +648,18 @@ mod tests {
         let router = Router::build(vec![
             route(RouteKind::Anthropic, "sk-a", &["shared"], None),
             route(RouteKind::Openai, "sk-o", &["shared"], None),
+            route(
+                RouteKind::Fireworks,
+                "fw-key",
+                &["shared"],
+                Some("https://api.fireworks.ai/inference/v1"),
+            ),
+            route(
+                RouteKind::Together,
+                "tg-key",
+                &["shared"],
+                Some("https://api.together.ai/v1"),
+            ),
         ]);
         assert_eq!(
             router.select_for(Some(&ProviderId::new("anthropic")), "shared"),
@@ -645,6 +668,14 @@ mod tests {
         assert_eq!(
             router.select_for(Some(&ProviderId::new("openai")), "shared"),
             Some(RouteKind::Openai)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("fireworks")), "shared"),
+            Some(RouteKind::Fireworks)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("together")), "shared"),
+            Some(RouteKind::Together)
         );
         assert_eq!(
             router.select_for(Some(&ProviderId::new("anthropic")), "openai-only"),

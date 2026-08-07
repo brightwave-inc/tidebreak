@@ -258,6 +258,10 @@ pub enum ProviderKind {
     Gemini,
     /// Google Vertex AI with native Gemini and Anthropic Claude protocols.
     Vertex,
+    /// Fireworks AI's hosted OpenAI-compatible Chat Completions API.
+    Fireworks,
+    /// Together AI's hosted OpenAI-compatible Chat Completions API.
+    Together,
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
     OpenaiCompatible,
     /// A signed-in model-gateway deployment: entitled models synced from the
@@ -274,6 +278,8 @@ impl ProviderKind {
         ProviderKind::Xai,
         ProviderKind::Gemini,
         ProviderKind::Vertex,
+        ProviderKind::Fireworks,
+        ProviderKind::Together,
         ProviderKind::OpenaiCompatible,
         ProviderKind::ModelGateway,
     ];
@@ -286,6 +292,8 @@ impl ProviderKind {
             ProviderKind::Xai => "xai",
             ProviderKind::Gemini => "gemini",
             ProviderKind::Vertex => "vertex",
+            ProviderKind::Fireworks => "fireworks",
+            ProviderKind::Together => "together",
             ProviderKind::OpenaiCompatible => "openai_compatible",
             ProviderKind::ModelGateway => "model_gateway",
         }
@@ -299,10 +307,29 @@ impl ProviderKind {
             "xai" => Some(Self::Xai),
             "gemini" => Some(Self::Gemini),
             "vertex" => Some(Self::Vertex),
+            "fireworks" => Some(Self::Fireworks),
+            "together" => Some(Self::Together),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
+    }
+
+    /// Fixed API root for direct hosted compatible presets.
+    pub const fn default_base_url(self) -> Option<&'static str> {
+        match self {
+            Self::Fireworks => Some("https://api.fireworks.ai/inference/v1"),
+            Self::Together => Some("https://api.together.ai/v1"),
+            _ => None,
+        }
+    }
+
+    /// Whether this route speaks the shared OpenAI-compatible transport.
+    pub const fn uses_openai_compatible_transport(self) -> bool {
+        matches!(
+            self,
+            Self::Fireworks | Self::Together | Self::OpenaiCompatible
+        )
     }
 
     /// Store setting key for this kind's non-secret config.
@@ -584,6 +611,11 @@ pub struct ResolvedModelPolicy {
     pub max_output_tokens: u32,
     /// End-to-end supported input modalities.
     pub input_modalities: Vec<InputModality>,
+    /// Whether this exact provider/model route accepts function tools.
+    pub supports_tools: bool,
+    /// Whether this exact provider/model route can enforce a strict structured
+    /// response schema.
+    pub supports_structured_output: bool,
     /// Whether the provider request uses a reasoning-model shape.
     pub supports_reasoning: bool,
     /// Whether a turn on this model may run the provider's own server-side web
@@ -607,6 +639,8 @@ impl ResolvedModelPolicy {
             context_window: spec.context_window,
             max_output_tokens: spec.max_output_tokens,
             input_modalities: spec.input_modalities.to_vec(),
+            supports_tools: spec.supports_tools(),
+            supports_structured_output: spec.supports_structured_output(),
             supports_reasoning: spec.supports_reasoning,
             supports_vendor_web_search: spec.supports_vendor_web_search,
             reasoning_efforts: spec.reasoning_efforts.to_vec(),
@@ -645,6 +679,8 @@ impl ResolvedModelPolicy {
         policy.vendor = Some(spec.provider);
         policy.verification = spec.verification;
         policy.input_modalities = spec.input_modalities.to_vec();
+        policy.supports_tools = spec.supports_tools();
+        policy.supports_structured_output = spec.supports_structured_output();
         policy.supports_reasoning = spec.supports_reasoning;
         policy.reasoning_efforts = spec.reasoning_efforts.to_vec();
         policy
@@ -669,6 +705,13 @@ impl ResolvedModelPolicy {
             } else {
                 vec![InputModality::Text]
             },
+            // Preserve the existing custom-compatible contract: users register
+            // these endpoints specifically to run OpenWave's agent loop.
+            supports_tools: true,
+            // An arbitrary compatible endpoint may accept `response_format`
+            // while ignoring its schema. Without an explicit route contract,
+            // utility work must not depend on that response being enforced.
+            supports_structured_output: false,
             supports_reasoning: first_party_xai && model.supports_reasoning,
             // A pass-through endpoint cannot promise a provider-executed
             // search, whatever upstream model it is serving — the request
@@ -767,6 +810,7 @@ pub fn apply_model_policy(
     config.model = policy.id.clone();
     config.reasoning_model = policy.supports_reasoning;
     config.image_input = policy.input_modalities.contains(&InputModality::Image);
+    config.tools_supported = policy.supports_tools;
     config.context_window = usize::try_from(policy.context_window)
         .map_err(|_| openwave_core::AgentError::config("model context window is unsupported"))?;
     config.max_tokens = Some(policy.max_output_tokens);
@@ -1074,7 +1118,10 @@ pub async fn list_providers(
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
-            base_url: config.base_url.clone(),
+            base_url: kind
+                .default_base_url()
+                .map(str::to_owned)
+                .or_else(|| config.base_url.clone()),
             vertex_location: config.vertex_location.clone(),
             has_credential: has_credential(secrets, kind).await,
             auth_mode: auth_mode_for(secrets, kind).await,
@@ -1134,10 +1181,10 @@ pub async fn update_provider(
                 "xai uses its fixed first-party API endpoint",
             ));
         }
-        Some(_) if kind == ProviderKind::Vertex => {
-            return Err(ServerError::bad_request(
-                "Vertex AI uses fixed Google endpoints and does not support base_url",
-            ));
+        Some(_) if kind == ProviderKind::Vertex || kind.default_base_url().is_some() => {
+            return Err(ServerError::bad_request(format!(
+                "{kind} uses a fixed provider endpoint"
+            )));
         }
         Some(None) => config.base_url = None,
         Some(Some(url)) => {
@@ -1213,7 +1260,10 @@ pub async fn update_provider(
     Ok(ProviderInfo {
         kind,
         enabled: config.enabled,
-        base_url: config.base_url.clone(),
+        base_url: kind
+            .default_base_url()
+            .map(str::to_owned)
+            .or_else(|| config.base_url.clone()),
         vertex_location: config.vertex_location.clone(),
         has_credential: has_credential(secrets, kind).await,
         auth_mode: auth_mode_for(secrets, kind).await,
@@ -1385,6 +1435,12 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         // Vertex credentials are explicit service-account material in the
         // keychain. Ambient ADC and API-key modes are not implied.
         ProviderKind::Vertex => None,
+        ProviderKind::Fireworks => std::env::var("FIREWORKS_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
+        ProviderKind::Together => std::env::var("TOGETHER_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
         ProviderKind::OpenaiCompatible => None,
         // Gateway tokens rotate; they are supplied per request by the route's
         // token source, never resolved into a static key.
@@ -1406,6 +1462,8 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
         ProviderKind::Xai => openwave_router::RouteKind::Xai,
         ProviderKind::Gemini => openwave_router::RouteKind::Gemini,
         ProviderKind::Vertex => openwave_router::RouteKind::Vertex,
+        ProviderKind::Fireworks => openwave_router::RouteKind::Fireworks,
+        ProviderKind::Together => openwave_router::RouteKind::Together,
         ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
         ProviderKind::ModelGateway => openwave_router::RouteKind::ModelGateway,
     }
@@ -1618,14 +1676,18 @@ pub async fn collect_routes(
         let Some(api_key) = api_key else {
             continue;
         };
-        if kind == ProviderKind::OpenaiCompatible && config.base_url.is_none() {
+        let base_url = kind
+            .default_base_url()
+            .map(str::to_owned)
+            .or_else(|| config.base_url.clone());
+        if kind == ProviderKind::OpenaiCompatible && base_url.is_none() {
             continue;
         }
         if kind == ProviderKind::Xai && config.models.is_empty() {
             continue;
         }
-        if kind == ProviderKind::OpenaiCompatible {
-            let base = config.base_url.as_deref().unwrap_or("");
+        if kind.uses_openai_compatible_transport() {
+            let base = base_url.as_deref().unwrap_or("");
             if !(base.starts_with("https://") || base.starts_with("http://")) {
                 continue;
             }
@@ -1639,7 +1701,7 @@ pub async fn collect_routes(
                 kind,
                 ProviderKind::Gemini | ProviderKind::Xai | ProviderKind::Vertex
             ))
-            .then_some(config.base_url)
+            .then_some(base_url)
             .flatten(),
             curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
@@ -1781,8 +1843,9 @@ pub async fn provider_is_usable(
     if !has_credential(secrets, kind).await {
         return Ok(false);
     }
-    if kind == ProviderKind::OpenaiCompatible {
-        let Some(base) = config.base_url.as_deref() else {
+    if kind.uses_openai_compatible_transport() {
+        let base_url = kind.default_base_url().or(config.base_url.as_deref());
+        let Some(base) = base_url else {
             return Ok(false);
         };
         if !(base.starts_with("https://") || base.starts_with("http://")) {
@@ -2010,6 +2073,18 @@ mod tests {
         assert_eq!(
             ProviderKind::Xai.credential_key(),
             "provider.xai.credential"
+        );
+        assert_eq!(
+            ProviderKind::parse("fireworks"),
+            Some(ProviderKind::Fireworks)
+        );
+        assert_eq!(
+            ProviderKind::Fireworks.default_base_url(),
+            Some("https://api.fireworks.ai/inference/v1")
+        );
+        assert_eq!(
+            ProviderKind::Together.default_base_url(),
+            Some("https://api.together.ai/v1")
         );
     }
 
@@ -2243,6 +2318,7 @@ mod tests {
         assert_eq!(custom.verification, VerificationTier::Unverified);
         apply_model_policy(&mut config, &custom, Some(ReasoningEffort::High)).unwrap();
         assert!(!config.image_input);
+        assert!(config.tools_supported);
         assert_eq!(config.provider, Some(ProviderId::new("openai_compatible")));
         assert_eq!(config.context_window, 32_768);
         assert_eq!(config.max_tokens, Some(4_096));
@@ -2436,6 +2512,7 @@ mod tests {
                     usize::try_from(spec.context_window).unwrap()
                 );
                 assert_eq!(config.max_tokens, Some(spec.max_output_tokens));
+                assert_eq!(config.tools_supported, spec.supports_tools());
                 assert_eq!(config.reasoning_model, spec.supports_reasoning);
                 assert_eq!(
                     config.reasoning_effort,

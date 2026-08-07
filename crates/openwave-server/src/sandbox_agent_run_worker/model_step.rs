@@ -126,6 +126,7 @@ pub(super) async fn sandbox_request(
         system: Some(sandbox_system_prompt(
             delegated_file_available,
             config.web_search,
+            config.tools_supported,
         )),
         messages,
         // A checkpoint costs one model completion now and one more to consume
@@ -143,8 +144,9 @@ pub(super) async fn sandbox_request(
         // search. The budget is per request, and every claim replays the whole
         // chain, so a resumed run gets the same allowance its earlier steps had.
         vendor_web_search: match config.web_search {
-            TurnWebSearch::Vendor(vendor) => Some(vendor),
+            TurnWebSearch::Vendor(vendor) if config.tools_supported => Some(vendor),
             TurnWebSearch::Host | TurnWebSearch::Off => None,
+            TurnWebSearch::Vendor(_) => None,
         },
         // Sandbox runs replay text and tool blocks from checkpoints; no path
         // puts an image block in this transcript.
@@ -185,6 +187,9 @@ fn sandbox_tools(
     plan_rows: usize,
     delegated_file_available: bool,
 ) -> Vec<openwave_core::ToolSpec> {
+    if !config.tools_supported {
+        return Vec::new();
+    }
     if steps.saturating_add(1) > config.max_steps {
         return Vec::new();
     }

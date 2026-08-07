@@ -49,6 +49,10 @@ export function providerLabel(provider: ProviderKind): string {
       return "Google Gemini";
     case "vertex":
       return "Google Vertex AI";
+    case "fireworks":
+      return "Fireworks AI";
+    case "together":
+      return "Together AI";
     case "openai_compatible":
       return "OpenAI-compatible";
     case "model_gateway":

@@ -1243,6 +1243,7 @@ mod tests {
             .input_modalities
             .contains(&crate::model_registry::InputModality::Image));
         assert!(matched.supports_reasoning);
+        assert!(matched.supports_structured_output);
         assert!(!matched.reasoning_efforts.is_empty());
         // The deployment's reported limits, not the curated model's.
         assert_eq!(matched.context_window, 200_000);
@@ -1278,6 +1279,7 @@ mod tests {
             .input_modalities
             .contains(&crate::model_registry::InputModality::Image));
         assert!(aliased.supports_reasoning);
+        assert!(aliased.supports_structured_output);
         assert_eq!(aliased.context_window, 200_000);
 
         let unmatched =
@@ -1295,6 +1297,7 @@ mod tests {
             vec![crate::model_registry::InputModality::Text]
         );
         assert!(!unmatched.supports_reasoning);
+        assert!(!unmatched.supports_structured_output);
     }
 
     /// The background loop's first attempt is immediate — the boot case it

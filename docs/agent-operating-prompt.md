@@ -17,6 +17,10 @@ selects one immutable registry snapshot, derives both its advertised definitions
 and operating prompt from that snapshot, and retains the pair for the execution.
 Runtime MCP refreshes therefore affect only later turns. The baseline covers:
 
+A model policy that marks a route chat-only freezes an empty capability snapshot
+instead. Its prompt asks for a direct conversational answer and does not name,
+advertise, or retain host tools that the provider request cannot carry.
+
 - calibrating effort to the request;
 - making small reversible assumptions while asking about consequential choices;
 - claiming only work that was actually performed;

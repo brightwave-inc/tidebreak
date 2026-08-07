@@ -70,9 +70,7 @@ pub(super) async fn validate_model_selection(
     else {
         return Err(ServerError::bad_request_kind(
             "unknown_model",
-            format!(
-                "model `{value}` is not registered for that provider; configure it in that provider's model list first"
-            ),
+            unknown_model_message(value),
         ));
     };
     let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
@@ -86,6 +84,23 @@ pub(super) async fn validate_model_selection(
         ));
     }
     Ok(policy.key)
+}
+
+fn unknown_model_message(value: &str) -> String {
+    match crate::model_registry::parse_selection_key(value) {
+        Some((ProviderKind::OpenaiCompatible, id)) => {
+            format!("model `{id}` is not configured under OpenAI-compatible models")
+        }
+        Some((provider, id)) => {
+            format!("model `{id}` is not registered for provider `{provider}`")
+        }
+        None if value.contains(crate::model_registry::MODEL_KEY_SEPARATOR) => {
+            format!("model selection `{value}` names an unknown provider or model")
+        }
+        None => format!(
+            "model `{value}` is not registered; configure custom models under OpenAI-compatible settings first"
+        ),
+    }
 }
 
 /// Whether any model provider credential is configured — stored or via the
@@ -375,6 +390,11 @@ pub struct ModelInfo {
     pub input_modalities: Vec<crate::model_registry::InputModality>,
     /// Whether the model can produce an internal reasoning stream.
     pub supports_reasoning: bool,
+    /// Whether this provider/model route accepts function tools.
+    pub supports_tools: bool,
+    /// Whether this provider/model route can enforce the strict response schema
+    /// utility work depends on.
+    pub supports_structured_output: bool,
     /// The reasoning-effort levels this model accepts, ascending. Empty when
     /// the model exposes no effort control, which is what a client checks
     /// before offering the selector at all.
@@ -445,6 +465,8 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             max_output_tokens: entry.policy.max_output_tokens,
             input_modalities: entry.policy.input_modalities.clone(),
             supports_reasoning: entry.policy.supports_reasoning,
+            supports_tools: entry.policy.supports_tools,
+            supports_structured_output: entry.policy.supports_structured_output,
             reasoning_efforts: entry.policy.reasoning_efforts.clone(),
             multimodal: entry
                 .policy
@@ -479,7 +501,29 @@ pub async fn put_model_role(
     let role = ModelRole::parse(&role)
         .ok_or_else(|| ServerError::not_found(format!("unknown model role: {role}")))?;
     let selection = match body.selection {
-        Some(selection) => Some(validate_model_selection(&state, &selection, false).await?),
+        Some(selection) => {
+            let selection = validate_model_selection(&state, &selection, false).await?;
+            if role == ModelRole::Utility && state.resolver.enforces_model_registry() {
+                let policy = providers::resolve_model_policy(&*state.store, &selection, false)
+                    .await?
+                    .ok_or_else(|| {
+                        ServerError::bad_request_kind(
+                            "unknown_model",
+                            unknown_model_message(&selection),
+                        )
+                    })?;
+                if !role.supports_model(&policy) {
+                    return Err(ServerError::conflict_kind(
+                        "model_structured_output_unsupported",
+                        format!(
+                            "model `{}` from provider `{}` cannot be used for utility work because it does not support strict structured output",
+                            policy.id, policy.provider
+                        ),
+                    ));
+                }
+            }
+            Some(selection)
+        }
         None => None,
     };
     model_roles::write_selection(&*state.store, role, selection.as_deref()).await?;

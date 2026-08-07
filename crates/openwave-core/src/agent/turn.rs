@@ -478,7 +478,7 @@ impl Agent {
                         // terminal: a model with no tools to name cannot ask for
                         // another round of them, so this works on every provider
                         // without depending on a tool-choice constraint.
-                        tools: if wrap_up {
+                        tools: if wrap_up || !self.config.tools_supported {
                             Vec::new()
                         } else {
                             let mut specs = self.tools.specs_for_surface(

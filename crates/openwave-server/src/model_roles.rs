@@ -48,13 +48,15 @@ pub enum ModelRole {
 /// cheapest current row. Anthropic leads because it is the provider the product
 /// defaults to for chat, so the common single-provider install resolves on the
 /// first step; the rest follow so an install credentialed elsewhere still gets
-/// a utility model. Any of the three is a good answer for a multi-provider
-/// install, so the order only has to be stable and explainable.
+/// a utility model. Any entry is a good answer for a multi-provider install,
+/// so the order only has to be stable and explainable.
 const UTILITY_DEFAULTS: &[&str] = &[
     "anthropic::claude-haiku-4-5-20251001",
     "openai::gpt-5.4-nano",
     "gemini::gemini-3.5-flash-lite",
     "vertex::gemini-3.5-flash-lite",
+    "fireworks::accounts/fireworks/models/deepseek-v4-flash",
+    "together::deepseek-ai/DeepSeek-V4-Flash-0731",
 ];
 
 impl ModelRole {
@@ -113,6 +115,19 @@ impl ModelRole {
             ModelRole::Utility => Some(ReasoningEffort::None),
         }
     }
+
+    /// Whether `model` carries the capabilities this role requires.
+    ///
+    /// Foreground chat accepts every selectable model. Utility work emits a
+    /// strict checkpoint schema, so a model that cannot enforce that response
+    /// shape is skipped instead of letting a provider rejection silently turn
+    /// compaction into `None`.
+    pub fn supports_model(self, model: &ResolvedModelPolicy) -> bool {
+        match self {
+            ModelRole::Chat => true,
+            ModelRole::Utility => model.supports_structured_output,
+        }
+    }
 }
 
 impl std::fmt::Display for ModelRole {
@@ -160,10 +175,13 @@ pub async fn resolve(
     let managed = crate::managed_policy::resolve(store, os_policy).await?;
     if let Some(selection) = read_selection(store, role).await? {
         // A selection whose provider has since been disabled or lost its
-        // credential falls through to the defaults rather than issuing a
-        // request that would fail.
+        // credential, or whose capabilities no longer satisfy the role, falls
+        // through to the defaults rather than issuing a request that would
+        // fail or silently skip the work.
         if let Some(policy) = usable_policy(store, secrets, &managed, &selection).await? {
-            return Ok(Some(policy));
+            if role.supports_model(&policy) {
+                return Ok(Some(policy));
+            }
         }
     }
     // `chat` has no default list on purpose — its last resort is process
@@ -179,7 +197,9 @@ pub async fn resolve(
     };
     for key in defaults {
         if let Some(policy) = usable_policy(store, secrets, &managed, &key).await? {
-            return Ok(Some(policy));
+            if role.supports_model(&policy) {
+                return Ok(Some(policy));
+            }
         }
     }
     Ok(None)
@@ -393,6 +413,92 @@ mod tests {
         }
     }
 
+    /// The compatible adapter always sends a strict JSON Schema for utility
+    /// work. Keep every default on a row whose model contract promises that
+    /// output; function calling is separate and cannot stand in for it.
+    #[test]
+    fn utility_defaults_support_strict_structured_output() {
+        for key in ModelRole::Utility.defaults() {
+            let (provider, id) = model_registry::parse_selection_key(key)
+                .unwrap_or_else(|| panic!("utility default `{key}` is not a selection key"));
+            assert!(
+                model_registry::find_for(provider, id)
+                    .is_some_and(model_registry::ModelSpec::supports_structured_output),
+                "utility default `{key}` cannot enforce its strict structured response",
+            );
+        }
+    }
+
+    /// Utility resolution distinguishes function tools from structured output:
+    /// an incompatible pin falls through, while chat-only Kimi K3 remains a
+    /// valid utility model because its strict response contract is independent.
+    #[tokio::test]
+    async fn utility_resolution_uses_the_structured_output_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("incompatible-pin.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(TestSecrets::default());
+        let os_policy = crate::managed_policy::NoOsPolicy;
+
+        providers::write_credential(
+            &*secrets,
+            ProviderKind::Together,
+            &crate::providers::ProviderCredential::api_key("together-key"),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            ProviderKind::Together,
+            &ProviderConfig {
+                enabled: true,
+                ..ProviderConfig::disabled()
+            },
+        )
+        .await
+        .unwrap();
+        write_selection(
+            &*store,
+            ModelRole::Utility,
+            Some("together::thinkingmachines/Inkling-Small"),
+        )
+        .await
+        .unwrap();
+
+        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+            .await
+            .unwrap()
+            .expect("the capable Together default keeps utility work enabled");
+        assert_eq!(utility.model, "deepseek-ai/DeepSeek-V4-Flash-0731");
+        assert_eq!(
+            utility.provider,
+            Some(ProviderId::new(ProviderKind::Together.as_str()))
+        );
+
+        write_selection(
+            &*store,
+            ModelRole::Utility,
+            Some("together::moonshotai/Kimi-K3"),
+        )
+        .await
+        .unwrap();
+        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+            .await
+            .unwrap()
+            .expect("Kimi K3 supports the strict utility response contract");
+        assert_eq!(utility.model, "moonshotai/Kimi-K3");
+        assert_eq!(
+            utility.provider,
+            Some(ProviderId::new(ProviderKind::Together.as_str()))
+        );
+    }
+
     #[tokio::test]
     async fn utility_selection_skips_a_stored_regional_vertex_configuration() {
         let directory = tempfile::tempdir().unwrap();
@@ -528,7 +634,7 @@ mod tests {
                 models: vec![
                     CustomModelConfig {
                         id: "gateway-flagship".to_string(),
-                        upstream_id: None,
+                        upstream_id: Some("claude-opus-5".to_string()),
                         display_name: Some("Gateway Flagship".to_string()),
                         context_window: 1_000_000,
                         max_output_tokens: 64_000,
@@ -536,7 +642,7 @@ mod tests {
                     },
                     CustomModelConfig {
                         id: "gateway-haiku".to_string(),
-                        upstream_id: None,
+                        upstream_id: Some("claude-haiku-4-5-20251001".to_string()),
                         display_name: Some("Gateway Haiku".to_string()),
                         context_window: 200_000,
                         max_output_tokens: 8_192,

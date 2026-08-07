@@ -2488,6 +2488,59 @@ async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
     assert!(advertised[1].is_empty());
 }
 
+#[tokio::test]
+async fn a_chat_only_model_never_receives_tool_schemas() {
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            db.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+
+    let advertised = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(ToolSurfaceRecordingProvider {
+            // Start on the provider's answer branch: this test is about the
+            // outbound capability surface, not tool execution.
+            calls: AtomicUsize::new(1),
+            advertised: advertised.clone(),
+        }),
+        Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+        store,
+        AgentConfig {
+            model: "chat-only".into(),
+            tools_supported: false,
+            ..Default::default()
+        },
+    );
+
+    let (tx, _rx) = unbounded();
+    agent
+        .run_turn(&chat, "answer without tools", &tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        advertised.lock().unwrap().as_slice(),
+        &[Vec::<String>::new()]
+    );
+}
+
 /// One `read_file` call per step, arguments taken from a script, then a
 /// final answer once the script runs out.
 struct RepeatedCallProvider {

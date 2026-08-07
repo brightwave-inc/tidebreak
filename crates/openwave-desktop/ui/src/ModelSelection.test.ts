@@ -13,6 +13,8 @@ const base = {
   max_output_tokens: 4_000,
   input_modalities: ["text"] as const,
   supports_reasoning: false,
+  supports_tools: true,
+  supports_structured_output: true,
   reasoning_efforts: [],
   multimodal: false,
   available: true,
@@ -73,6 +75,8 @@ describe("typed model selection", () => {
     expect(providerLabel("xai")).toBe("xAI");
     expect(providerLabel("gemini")).toBe("Google Gemini");
     expect(providerLabel("vertex")).toBe("Google Vertex AI");
+    expect(providerLabel("fireworks")).toBe("Fireworks AI");
+    expect(providerLabel("together")).toBe("Together AI");
     expect(providerLabel("openai_compatible")).toBe("OpenAI-compatible");
   });
 });

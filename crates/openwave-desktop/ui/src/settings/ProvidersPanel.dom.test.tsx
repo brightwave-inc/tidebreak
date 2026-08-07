@@ -186,6 +186,41 @@ describe("ProvidersPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows fixed endpoints for direct compatible presets without editing them", () => {
+    const fireworks: ProviderInfo = {
+      kind: "fireworks",
+      enabled: false,
+      has_credential: false,
+      base_url: "https://api.fireworks.ai/inference/v1",
+      models: [],
+    };
+    const together: ProviderInfo = {
+      kind: "together",
+      enabled: false,
+      has_credential: false,
+      base_url: "https://api.together.ai/v1",
+      models: [],
+    };
+
+    render(
+      <ProvidersPanel
+        providers={[fireworks, together]}
+        client={{} as ApiClient}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Fireworks AI")).toBeInTheDocument();
+    expect(screen.getByText("Together AI")).toBeInTheDocument();
+    expect(
+      screen.getByText(/https:\/\/api\.fireworks\.ai\/inference\/v1/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/https:\/\/api\.together\.ai\/v1/),
+    ).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/base URL/)).not.toBeInTheDocument();
+  });
+
   it("starts ChatGPT OAuth from the OpenAI provider row", async () => {
     const openai: ProviderInfo = {
       kind: "openai",
