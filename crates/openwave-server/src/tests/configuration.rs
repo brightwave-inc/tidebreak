@@ -2715,6 +2715,71 @@ async fn bedrock_aws_credentials_build_an_explicit_non_fallback_route() {
 }
 
 #[tokio::test]
+async fn unreadable_bedrock_credential_never_advertises_or_builds_a_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Bedrock,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            aws_region: Some("us-east-1".into()),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let secret = "distinctive-bedrock-secret";
+
+    for raw in [
+        format!(r#"{{"type":"future_aws_credentials","secret_access_key":"{secret}"}}"#),
+        format!(r#"{{"type":"aws_credentials","secret_access_key":"{secret}""#),
+    ] {
+        secrets
+            .set_secret(&providers::ProviderKind::Bedrock.credential_key(), &raw)
+            .await
+            .unwrap();
+
+        let error = providers::read_credential(&*secrets, providers::ProviderKind::Bedrock)
+            .await
+            .expect_err("unreadable structured credentials must fail closed");
+        assert!(!error.to_string().contains(secret));
+        assert!(!providers::provider_is_usable(
+            &*store,
+            &*secrets,
+            providers::ProviderKind::Bedrock,
+            &policy
+        )
+        .await
+        .unwrap());
+        assert!(
+            providers::collect_routes(&*store, &*secrets, None, None, &policy)
+                .await
+                .is_empty()
+        );
+        assert!(providers::catalog_models(&*store, &*secrets, &policy)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|model| model.policy.provider == providers::ProviderKind::Bedrock)
+            .all(|model| !model.available));
+    }
+}
+
+#[tokio::test]
 async fn openai_compatible_route_is_free_form_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(

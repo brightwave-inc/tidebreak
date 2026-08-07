@@ -1035,10 +1035,16 @@ pub async fn read_credential(
         if raw.is_empty() {
             return Ok(None);
         }
-        // Prefer the typed blob; a bare string is treated as an api_key for
-        // resilience against hand-edited keychain entries.
+        // Prefer the typed blob. Legacy bare API-key values remain readable,
+        // but an object/array/JSON value belongs to the typed format and must
+        // never be transmitted verbatim when this version cannot decode it.
         if let Ok(cred) = serde_json::from_str::<ProviderCredential>(&raw) {
             return Ok(Some(cred));
+        }
+        if looks_like_structured_credential(&raw) {
+            return Err(openwave_core::AgentError::config(format!(
+                "stored {kind} credential is unreadable"
+            )));
         }
         return Ok(Some(ProviderCredential::api_key(raw)));
     }
@@ -1050,6 +1056,14 @@ pub async fn read_credential(
         }
     }
     Ok(None)
+}
+
+fn looks_like_structured_credential(raw: &str) -> bool {
+    let trimmed = raw.trim_start();
+    matches!(
+        trimmed.as_bytes().first(),
+        Some(b'{') | Some(b'[') | Some(b'"')
+    )
 }
 
 /// Store a validated typed credential for `kind`.
@@ -2271,6 +2285,50 @@ mod tests {
                 .as_api_key(),
             Some("existing-api-key")
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_bare_api_key_remains_readable() {
+        let secrets = TestSecrets::default();
+        secrets
+            .set_secret(
+                &ProviderKind::Bedrock.credential_key(),
+                "ABSKLEGACYBEDROCKKEY",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_credential(&secrets, ProviderKind::Bedrock)
+                .await
+                .unwrap()
+                .and_then(|credential| credential.as_api_key().map(str::to_owned)),
+            Some("ABSKLEGACYBEDROCKKEY".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_structured_credentials_fail_closed_without_echoing_secrets() {
+        let secrets = TestSecrets::default();
+        let secret = "distinctive-bedrock-secret";
+        let blobs = [
+            format!(r#"{{"type":"future_aws_credentials","secret_access_key":"{secret}"}}"#),
+            format!(r#"{{"type":"aws_credentials","secret_access_key":"{secret}""#),
+        ];
+
+        for raw in blobs {
+            secrets
+                .set_secret(&ProviderKind::Bedrock.credential_key(), &raw)
+                .await
+                .unwrap();
+
+            let error = read_credential(&secrets, ProviderKind::Bedrock)
+                .await
+                .expect_err("structured credential material must not become an API key");
+            assert!(!error.to_string().contains(secret));
+            assert!(!has_credential(&secrets, ProviderKind::Bedrock).await);
+            assert_eq!(resolve_api_key(&secrets, ProviderKind::Bedrock).await, None);
+        }
     }
 
     #[test]

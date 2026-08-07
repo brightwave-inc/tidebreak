@@ -236,6 +236,7 @@ fn contains_secret_marker(message: &str) -> bool {
     [
         "sk-",
         "aiza",
+        "absk",
         "bearer ",
         "api_key",
         "api-key",
@@ -245,6 +246,13 @@ fn contains_secret_marker(message: &str) -> bool {
         "x-goog-api-key",
         "private_key",
         "private key",
+        "access_key_id",
+        "access key id",
+        "secret_access_key",
+        "secret access key",
+        "session_token",
+        "session token",
+        "x-amz-security-token",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
