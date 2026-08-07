@@ -31,6 +31,7 @@ function renderChip({
   const onOpenOutputs = vi.fn();
   const onOpenFolders = vi.fn();
   const onOpenAgents = vi.fn();
+  const onOpenPermissions = vi.fn();
   render(
     <ChatStatusChip
       outputCount={outputCount}
@@ -39,9 +40,10 @@ function renderChip({
       onOpenOutputs={onOpenOutputs}
       onOpenFolders={onOpenFolders}
       onOpenAgents={onOpenAgents}
+      onOpenPermissions={onOpenPermissions}
     />,
   );
-  return { onOpenOutputs, onOpenFolders, onOpenAgents };
+  return { onOpenOutputs, onOpenFolders, onOpenAgents, onOpenPermissions };
 }
 
 afterEach(() => {
@@ -50,7 +52,7 @@ afterEach(() => {
 });
 
 it("summarizes activity on its face and opens the chat-scoped places", async () => {
-  const { onOpenOutputs, onOpenFolders } = renderChip({ outputCount: 2 });
+  const { onOpenOutputs, onOpenFolders, onOpenPermissions } = renderChip({ outputCount: 2 });
 
   // No live work, so the face falls back to what the chat has produced.
   const chip = screen.getByRole("button", { name: "Chat activity: 2 outputs" });
@@ -63,6 +65,10 @@ it("summarizes activity on its face and opens the chat-scoped places", async () 
   await userEvent.click(chip);
   await userEvent.click(await screen.findByText("Folders"));
   expect(onOpenFolders).toHaveBeenCalled();
+
+  await userEvent.click(chip);
+  await userEvent.click(await screen.findByText("Permissions"));
+  expect(onOpenPermissions).toHaveBeenCalled();
 });
 
 /**
