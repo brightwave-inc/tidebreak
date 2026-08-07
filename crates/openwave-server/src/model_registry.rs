@@ -90,6 +90,13 @@ const EFFORT_LOW_TO_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::XHigh,
     ReasoningEffort::Max,
 ];
+/// Claude Opus and Sonnet 4.6 accept `max`, but not the newer `xhigh` level.
+const EFFORT_LOW_TO_HIGH_AND_MAX: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
 /// For a model that takes no effort parameter at all. Not the same as a model
 /// that ignores one: Claude Haiku 4.5 rejects the request.
 const EFFORT_UNSUPPORTED: &[ReasoningEffort] = &[];
@@ -181,9 +188,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         supports_vendor_web_search: true,
         // Claude 4.6 and later reason on an adaptive thinking block, and the
-        // Anthropic adapter sends one along with the chat's chosen effort. That
-        // generation onward takes `low` through `max`; there is no `none`,
-        // because a model on the adaptive block always reasons.
+        // Anthropic adapter sends one along with the chat's chosen effort. The
+        // newest generation takes this full scale; 4.6 has the narrower scale
+        // declared on its own rows below. There is no `none`, because a model
+        // on the adaptive block always reasons.
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     // Second, not first: the built-in default is this provider's first curated
@@ -221,10 +229,11 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         context_window: 200_000,
         max_output_tokens: 64_000,
         input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: true,
+        // Haiku 4.5 uses classic extended thinking with a token budget. Until
+        // the adapter can send that request shape, keep the runtime honest and
+        // do not advertise reasoning that every request would silently omit.
+        supports_reasoning: false,
         supports_vendor_web_search: true,
-        // Haiku 4.5 predates the adaptive switch: it rejects the effort
-        // control, so the adapter leaves both off and the picker hides it.
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
     ModelSpec {
@@ -261,7 +270,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: true,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
     ModelSpec {
         id: "claude-sonnet-4-6",
@@ -273,7 +282,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: true,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
     ModelSpec {
         id: "gpt-5.6-sol",
@@ -531,7 +540,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
     ModelSpec {
         id: "claude-sonnet-4-6",
@@ -543,7 +552,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
     ModelSpec {
         id: "claude-haiku-4-5",
@@ -553,7 +562,9 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         context_window: 200_000,
         max_output_tokens: 64_000,
         input_modalities: TEXT_AND_IMAGE,
-        supports_reasoning: true,
+        // The Vertex route speaks the same adapter request shape as direct
+        // Anthropic, so it cannot claim classic extended thinking either.
+        supports_reasoning: false,
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_UNSUPPORTED,
     },
@@ -767,30 +778,72 @@ mod tests {
         assert!(sonnet.supports_reasoning);
         assert_eq!(sonnet.reasoning_efforts, EFFORT_LOW_TO_MAX);
 
-        // Haiku 4.5 predates the adaptive thinking switch and rejects the
-        // effort control, so it is the one Anthropic row without it.
+        // Haiku 4.5 needs the classic token-budget thinking request that the
+        // adapter does not implement yet, so the catalog must not promise a
+        // reasoning stream or an effort control.
         let haiku = find("claude-haiku-4-5-20251001").unwrap();
         assert_eq!(haiku.context_window, 200_000);
         assert_eq!(haiku.max_output_tokens, 64_000);
-        assert!(haiku.supports_reasoning);
+        assert!(!haiku.supports_reasoning);
         assert!(!haiku.supports_reasoning_effort());
         assert!(haiku.reasoning_efforts.is_empty());
     }
 
     #[test]
-    fn every_anthropic_entry_that_takes_an_effort_takes_xhigh_and_refuses_none() {
+    fn anthropic_effort_catalogs_refuse_none() {
         for spec in
             models_for(ProviderKind::Anthropic).filter(|spec| spec.supports_reasoning_effort())
         {
             assert!(
-                spec.reasoning_efforts.contains(&ReasoningEffort::XHigh),
-                "{} omits the level recommended for coding and agentic work",
-                spec.id
-            );
-            assert!(
                 !spec.reasoning_efforts.contains(&ReasoningEffort::None),
                 "{} offers an OpenAI-only level the Anthropic route rejects",
                 spec.id
+            );
+        }
+    }
+
+    #[test]
+    fn claude_4_6_effort_catalogs_match_on_direct_and_vertex() {
+        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            let direct = find_for(ProviderKind::Anthropic, id).unwrap();
+            let vertex = find_for(ProviderKind::Vertex, id).unwrap();
+
+            assert_eq!(direct.reasoning_efforts, EFFORT_LOW_TO_HIGH_AND_MAX);
+            assert_eq!(vertex.reasoning_efforts, direct.reasoning_efforts);
+            assert!(!direct.reasoning_efforts.contains(&ReasoningEffort::XHigh));
+            assert!(direct.reasoning_efforts.contains(&ReasoningEffort::Max));
+        }
+
+        // The generations that do accept `xhigh` keep advertising it.
+        for id in [
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            assert!(
+                find_for(ProviderKind::Anthropic, id)
+                    .unwrap()
+                    .reasoning_efforts
+                    .contains(&ReasoningEffort::XHigh),
+                "{id} lost xhigh while narrowing only Claude 4.6"
+            );
+        }
+    }
+
+    #[test]
+    fn haiku_4_5_is_non_reasoning_on_direct_and_vertex() {
+        for (provider, id) in [
+            (ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
+            (ProviderKind::Vertex, "claude-haiku-4-5"),
+        ] {
+            let spec = find_for(provider, id).unwrap();
+            assert!(!spec.supports_reasoning, "{}::{id}", provider.as_str());
+            assert!(
+                spec.reasoning_efforts.is_empty(),
+                "{}::{id}",
+                provider.as_str()
             );
         }
     }

@@ -2197,15 +2197,20 @@ mod tests {
         assert_eq!(vertex.verification, VerificationTier::Unverified);
         assert!(!vertex.supports_vendor_web_search);
 
-        // Haiku 4.5 reasons but rejects the effort control, so the request is
-        // shaped without it rather than with something the model would refuse.
-        let mut config = AgentConfig::default();
+        // Haiku 4.5 needs a classic token-budget thinking request that the
+        // adapter cannot send yet, so policy keeps both reasoning and effort
+        // off rather than promising reasoning that disappears on the wire.
+        let mut config = AgentConfig {
+            temperature: Some(0.7),
+            ..AgentConfig::default()
+        };
         let haiku = ResolvedModelPolicy::curated(
             model_registry::find_for(ProviderKind::Anthropic, "claude-haiku-4-5-20251001").unwrap(),
         );
         apply_model_policy(&mut config, &haiku, Some(ReasoningEffort::High)).unwrap();
-        assert!(config.reasoning_model);
+        assert!(!config.reasoning_model);
         assert_eq!(config.reasoning_effort, None);
+        assert_eq!(config.temperature, Some(0.7));
 
         let mut config = AgentConfig::default();
         let gpt = ResolvedModelPolicy::curated(
@@ -2305,16 +2310,52 @@ mod tests {
             ),
             Some(ReasoningEffort::XHigh)
         );
-        // Haiku 4.5 errors on the parameter, so it is dropped outright.
-        for effort in ReasoningEffort::ALL {
-            assert_eq!(
-                apply(
-                    "claude-haiku-4-5-20251001",
-                    ProviderKind::Anthropic,
-                    *effort
-                ),
-                None
-            );
+    }
+
+    #[test]
+    fn claude_policy_clamps_4_6_xhigh_and_disables_haiku_4_5_before_requests() {
+        for provider in [ProviderKind::Anthropic, ProviderKind::Vertex] {
+            for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+                let policy =
+                    ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
+
+                let mut config = AgentConfig::default();
+                apply_model_policy(&mut config, &policy, Some(ReasoningEffort::XHigh)).unwrap();
+                assert!(config.reasoning_model, "{}::{id}", provider.as_str());
+                assert_eq!(
+                    config.reasoning_effort,
+                    Some(ReasoningEffort::High),
+                    "{}::{id} let xhigh survive policy",
+                    provider.as_str()
+                );
+
+                let mut config = AgentConfig::default();
+                apply_model_policy(&mut config, &policy, Some(ReasoningEffort::Max)).unwrap();
+                assert_eq!(
+                    config.reasoning_effort,
+                    Some(ReasoningEffort::Max),
+                    "{}::{id} lost its supported max level",
+                    provider.as_str()
+                );
+            }
+        }
+
+        for (provider, id) in [
+            (ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
+            (ProviderKind::Vertex, "claude-haiku-4-5"),
+        ] {
+            let policy =
+                ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
+            for effort in ReasoningEffort::ALL {
+                let mut config = AgentConfig {
+                    temperature: Some(0.7),
+                    ..AgentConfig::default()
+                };
+                apply_model_policy(&mut config, &policy, Some(*effort)).unwrap();
+                assert!(!config.reasoning_model, "{}::{id}", provider.as_str());
+                assert_eq!(config.reasoning_effort, None, "{}::{id}", provider.as_str());
+                assert_eq!(config.temperature, Some(0.7), "{}::{id}", provider.as_str());
+            }
         }
     }
 

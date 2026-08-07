@@ -19,7 +19,7 @@ use openwave_core::provider::{
     ToolChoice, Usage,
 };
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
-use openwave_core::{ImageAttachments, Role};
+use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
@@ -559,7 +559,8 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // `type == "thinking"`.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         if let Some(effort) = req.reasoning_effort {
-            body["output_config"] = json!({ "effort": effort.as_str() });
+            body["output_config"] =
+                json!({ "effort": wire_reasoning_effort(&req.model, effort).as_str() });
         }
         attach_reasoning_blocks(&mut body, req);
     }
@@ -738,6 +739,23 @@ fn takes_adaptive_thinking(model: &str) -> bool {
     /// First Claude generation that reasons on `thinking: {"type": "adaptive"}`.
     const FIRST_ADAPTIVE: (u32, u32) = (4, 6);
     claude_generation(model).is_some_and(|generation| generation >= FIRST_ADAPTIVE)
+}
+
+/// The final effort value safe to put on an Anthropic request.
+///
+/// Host model policy normally clamps a stored selection against the curated
+/// catalog before building a [`ChatRequest`]. Keep the same guard at this last
+/// request boundary for embedders and stale in-memory configurations that can
+/// construct a request directly: Opus and Sonnet 4.6 accept `max`, but reject
+/// the newer `xhigh` token.
+fn wire_reasoning_effort(model: &str, effort: ReasoningEffort) -> ReasoningEffort {
+    let claude_4_6 = claude_generation(model) == Some((4, 6))
+        && (model.starts_with("claude-opus-") || model.starts_with("claude-sonnet-"));
+    if claude_4_6 && effort == ReasoningEffort::XHigh {
+        ReasoningEffort::High
+    } else {
+        effort
+    }
 }
 
 /// The name Anthropic gives its server-side web search tool, and the name the
@@ -1763,6 +1781,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_4_6_xhigh_is_clamped_before_the_request_wire() {
+        for id in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6-20260101",
+        ] {
+            let body =
+                build_request_json(&reasoning_request(id, Some(ReasoningEffort::XHigh))).unwrap();
+            assert_eq!(body["output_config"]["effort"], "high", "{id}");
+
+            let body =
+                build_request_json(&reasoning_request(id, Some(ReasoningEffort::Max))).unwrap();
+            assert_eq!(body["output_config"]["effort"], "max", "{id}");
+        }
+
+        // The newer rows that do accept xhigh keep it unchanged.
+        let body = build_request_json(&reasoning_request(
+            "claude-opus-4-7",
+            Some(ReasoningEffort::XHigh),
+        ))
+        .unwrap();
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+    }
+
+    #[test]
     fn a_non_reasoning_request_asks_for_no_thinking() {
         let req = request_with(
             vec![ContentBlock::Text { text: "hi".into() }],
@@ -1775,16 +1818,17 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_adaptive_model_keeps_the_request_it_understands() {
-        // Claude Haiku 4.5 rejects both an adaptive thinking block and
-        // `output_config.effort`; sending either would fail the whole turn.
-        let body = build_request_json(&reasoning_request(
-            "claude-haiku-4-5-20251001",
-            Some(ReasoningEffort::High),
-        ))
-        .unwrap();
-        assert!(body.get("thinking").is_none());
-        assert!(body.get("output_config").is_none());
+    fn haiku_4_5_never_gets_an_unsupported_adaptive_request() {
+        // Both curated routes mark Haiku 4.5 non-reasoning until classic
+        // `budget_tokens` thinking is implemented. A stale direct request that
+        // still calls it reasoning-capable must remain safe too: this adapter
+        // cannot silently substitute the adaptive 4.6+ shape.
+        for id in ["claude-haiku-4-5-20251001", "claude-haiku-4-5"] {
+            let body =
+                build_request_json(&reasoning_request(id, Some(ReasoningEffort::High))).unwrap();
+            assert!(body.get("thinking").is_none(), "{id}");
+            assert!(body.get("output_config").is_none(), "{id}");
+        }
     }
 
     #[test]
