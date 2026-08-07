@@ -72,6 +72,11 @@ export type ChatSessionEffect =
   | { type: "refresh_output_writebacks" }
   | { type: "refresh_user_questions" }
   | { type: "refresh_plan_approvals" }
+  /**
+   * The agent replaced its task plan. The event carries no steps — it is a
+   * hint that the chat's durable plan moved on, and the panel re-reads it.
+   */
+  | { type: "refresh_task_plan" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
   /** A turn reached a terminal event; the host clears cancel/steer state. */
@@ -281,6 +286,11 @@ export function reduceChatSessionEvent(
 
     case "plan_proposed": {
       effects.push({ type: "refresh_plan_approvals" });
+      return { state, effects };
+    }
+
+    case "task_plan_updated": {
+      effects.push({ type: "refresh_task_plan" });
       return { state, effects };
     }
 

@@ -286,6 +286,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       case "refresh_plan_approvals":
         signalRefresh("planApprovals");
         return;
+      case "refresh_task_plan":
+        signalRefresh("taskPlan");
+        return;
       case "warm_presentation_converter":
         warmPresentationConverter();
         return;

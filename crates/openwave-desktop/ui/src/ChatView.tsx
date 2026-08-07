@@ -34,6 +34,8 @@ import { useToolApprovals } from "./useToolApprovals";
 import { useStreamStalled } from "./useStreamStalled";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
+import { useTaskPlan } from "./useTaskPlan";
+import { TaskPlanCard } from "./TaskPlanCard";
 import { useUserQuestions } from "./useUserQuestions";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
 import { recentChatFiles } from "./ComposerMentions";
@@ -149,6 +151,12 @@ export function ChatView({
     [messages],
   );
   const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
+  const taskPlan = useTaskPlan(client, chat.id);
+  // The plan belongs to the turn that wrote it, so liveness comes from the
+  // session the transcript already tracks rather than from another read: a
+  // plan whose turn is not the running one describes work that has stopped.
+  const taskPlanLive =
+    taskPlan !== null && busy && activeTurnId === taskPlan.turn_id;
   // The files already on this conversation, so `@` can name one instead of
   // sending the reader back to the picker for a document we are already
   // holding. Read from the transcript rather than fetched: these are the
@@ -442,6 +450,11 @@ export function ChatView({
       </div>
 
       <div className="px-[clamp(0.5rem,4%,5rem)] pb-2">
+        {taskPlan !== null && (
+          <div className="pb-2">
+            <TaskPlanCard plan={taskPlan} live={taskPlanLive} />
+          </div>
+        )}
         <Composer
           activeTurnId={activeTurnId}
           busy={busy}
