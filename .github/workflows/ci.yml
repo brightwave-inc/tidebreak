@@ -27,7 +27,9 @@ concurrency:
   # deliberate backstop for those lanes, so an unrelated push must never kill
   # it. During a merge train this runs main pushes in parallel instead of
   # superseding them; that costs runner time, but sccache shares compiler
-  # objects across the runs and correctness of the scoped lanes wins.
+  # objects across the runs and correctness of the scoped lanes wins. A job may
+  # add narrower concurrency only when a newer run provably subsumes the older
+  # one; the Windows lane does that for Rust-scoped pushes to linear main.
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -378,11 +380,18 @@ jobs:
     name: Windows cargo check
     needs: changes
     # A native runner keeps the Windows SDK and MSVC available for native
-    # dependencies such as ring and SQLite. Keep the default PR gate fast; add
-    # `full-ci` for pre-merge validation, while main and scheduled/manual runs
-    # always check every crate that currently contains Windows-gated code.
-    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    # dependencies such as ring and SQLite. Native Windows validation is an
+    # independent pre-merge choice: `full-ci` does not opt a pull request into
+    # this long-running lane. Add `windows-ci` when the change reaches a Windows
+    # boundary; main and scheduled/manual runs retain the automatic backstop.
+    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci')) }}
     runs-on: windows-latest
+    # Every Rust-scoped main push contains the prior main state, so the newest
+    # Windows run proves everything an older in-progress one would have proven.
+    # PRs, schedules, and manual dispatches remain isolated by run id.
+    concurrency:
+      group: ${{ github.event_name == 'push' && 'windows-check-main' || format('windows-check-run-{0}', github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'push' }}
     # The persistence steps below compile openwave-server's test target, which
     # is the heaviest codegen this lane pays; leave headroom over the
     # check-plus-broker baseline.
@@ -390,10 +399,17 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22

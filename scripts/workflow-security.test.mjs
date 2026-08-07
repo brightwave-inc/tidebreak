@@ -166,6 +166,30 @@ test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
 
+test("native Windows CI is an explicit PR opt-in with a main backstop", () => {
+  const windows = workflowJob(workflows["ci.yml"], "windows-check");
+  const windowsCiGate =
+    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\)/;
+
+  assert.match(windows, windowsCiGate);
+  assert.doesNotMatch(windows, /'full-ci'/);
+  assert.match(
+    windows,
+    /group: \$\{\{ github\.event_name == 'push' && 'windows-check-main' \|\| format\('windows-check-run-\{0\}', github\.run_id\) \}\}/,
+  );
+  assert.match(
+    windows,
+    /cancel-in-progress: \$\{\{ github\.event_name == 'push' \}\}/,
+  );
+  assert.match(windows, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(windows, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+  assert.match(windows, /RUSTC_WRAPPER: sccache/);
+  assert.match(
+    windows,
+    /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+  );
+});
+
 test("UI tests and production build each gate the UI lane", () => {
   const ci = workflows["ci.yml"];
   const ui = workflowJob(ci, "ui");
@@ -186,6 +210,7 @@ test("PR compiler caches are writable, isolated, and deleted on close", () => {
   for (const name of [
     "lint",
     "desktop",
+    "windows-check",
     "test",
     "postgres",
   ]) {
