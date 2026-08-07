@@ -480,6 +480,60 @@ function OpenAiCredentialSection({
 
   useEffect(() => stopPolling, [stopPolling]);
 
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollRef.current = window.setInterval(() => {
+      void client
+        .getOpenaiChatgptStatus()
+        .then((status) => {
+          if (status.error) {
+            stopPolling();
+            setError(status.error);
+            toast.error("ChatGPT sign-in failed");
+            return;
+          }
+          if (status.signed_in) {
+            stopPolling();
+            onChanged();
+            toast.success("Signed in with ChatGPT");
+          }
+        })
+        .catch(() => {
+          /* transient; keep polling until the deadline below */
+        });
+    }, CHATGPT_SIGN_IN_POLL_MS);
+    pollDeadlineRef.current = window.setTimeout(
+      stopPolling,
+      CHATGPT_SIGN_IN_TIMEOUT_MS,
+    );
+  }, [client, onChanged, setError, stopPolling]);
+
+  // The sign-in runs on the server, so one started before this panel mounted —
+  // or left behind when the user navigated away — is still waiting on the
+  // browser. Pick it back up rather than sitting on a stale "no credential".
+  const resumeChecked = useRef(false);
+  useEffect(() => {
+    if (resumeChecked.current || signedInWithChatgpt) return;
+    resumeChecked.current = true;
+    let dropped = false;
+    void client
+      .getOpenaiChatgptStatus()
+      .then((status) => {
+        if (dropped) return;
+        if (status.error) {
+          setError(status.error);
+          return;
+        }
+        if (status.pending_authorization_url) startPolling();
+      })
+      .catch(() => {
+        /* the row still works without a resumed sign-in */
+      });
+    return () => {
+      dropped = true;
+    };
+  }, [client, setError, signedInWithChatgpt, startPolling]);
+
   async function signInWithChatgpt() {
     setSaving(true);
     setError(null);
@@ -487,31 +541,7 @@ function OpenAiCredentialSection({
       const { authorization_url } = await client.openaiChatgptSignIn();
       await openSignInPage(authorization_url);
       toast.message("Finish signing in with ChatGPT in your browser");
-      stopPolling();
-      pollRef.current = window.setInterval(() => {
-        void client
-          .getOpenaiChatgptStatus()
-          .then((status) => {
-            if (status.error) {
-              stopPolling();
-              setError(status.error);
-              toast.error("ChatGPT sign-in failed");
-              return;
-            }
-            if (status.signed_in) {
-              stopPolling();
-              onChanged();
-              toast.success("Signed in with ChatGPT");
-            }
-          })
-          .catch(() => {
-            /* transient; keep polling until the deadline below */
-          });
-      }, CHATGPT_SIGN_IN_POLL_MS);
-      pollDeadlineRef.current = window.setTimeout(
-        stopPolling,
-        CHATGPT_SIGN_IN_TIMEOUT_MS,
-      );
+      startPolling();
     } catch (err) {
       setError(String(err));
     } finally {

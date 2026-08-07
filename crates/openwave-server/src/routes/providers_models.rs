@@ -227,6 +227,16 @@ pub async fn put_provider(
 ) -> Result<Json<ProviderInfo>, ServerError> {
     let kind = ProviderKind::parse(&kind)
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    if kind == ProviderKind::Openai
+        && matches!(
+            body.credential,
+            Some(providers::ProviderCredential::ApiKey { .. })
+        )
+    {
+        // The write below clears the ChatGPT vault, but a sign-in still in
+        // flight would repopulate it and replace the key the user just chose.
+        state.chatgpt.cancel_pending().await;
+    }
     let info = providers::update_provider(
         &*state.store,
         &*state.secrets,
