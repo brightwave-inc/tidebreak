@@ -37,18 +37,6 @@ pub enum TaskPlanStepStatus {
     Completed,
 }
 
-impl TaskPlanStepStatus {
-    /// Stable durable and wire representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in_progress",
-            Self::Completed => "completed",
-        }
-    }
-}
-
 /// One step of the plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(deny_unknown_fields)]

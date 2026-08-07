@@ -1055,6 +1055,7 @@ pub mod task_plan {
         #[sea_orm(primary_key, auto_increment = false)]
         pub chat_id: Uuid,
         pub turn_id: Uuid,
+        pub call_id: Uuid,
         pub steps: String,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,

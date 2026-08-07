@@ -717,6 +717,7 @@ pub(crate) enum TaskPlan {
     Table,
     ChatId,
     TurnId,
+    CallId,
     Steps,
     CreatedAt,
     UpdatedAt,

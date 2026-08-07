@@ -411,6 +411,16 @@ impl ToolRegistry {
                 {
                     None
                 }
+                // Read-only by consent class, because it reaches nothing
+                // outside the conversation's own display state — but it does
+                // commit a row, and a plan-mode turn is drafting a proposal
+                // the reader has not accepted yet. Leaving it advertised would
+                // let a rejected proposal leave a live task plan behind.
+                RegisteredTool::Server { registered, .. }
+                    if read_only && registered.spec.name == crate::UPDATE_TASK_PLAN_TOOL =>
+                {
+                    None
+                }
                 RegisteredTool::Server { registered, .. } => Some(registered.spec.clone()),
                 RegisteredTool::Client { class, .. }
                 | RegisteredTool::ForegroundClient { class, .. }

@@ -2457,15 +2457,18 @@ pub trait Store: Send + Sync {
     /// Replace a chat's task plan and journal the bounded refresh hint.
     ///
     /// `call_id` names the already-admitted `update_task_plan` call, which is
-    /// what scopes the write to a turn. Steps must already be validated at the
-    /// tool boundary; storage records what it is given.
+    /// what scopes the write to a turn and its lease. Steps must already be
+    /// validated at the tool boundary; storage records what it is given.
+    ///
+    /// `Ok(None)` means the write was declined because the call's attempt no
+    /// longer owns its turn — an ordinary retry outcome, not a failure.
     async fn update_task_plan(
         &self,
         _chat_id: ChatId,
         _call_id: CallId,
         _steps: &[crate::TaskPlanStep],
         _updated_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<crate::TaskPlan> {
+    ) -> Result<Option<crate::TaskPlan>> {
         turn_storage_unavailable()
     }
 

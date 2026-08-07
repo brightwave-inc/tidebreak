@@ -2153,7 +2153,7 @@ impl Store for DbStore {
         call_id: CallId,
         steps: &[crate::TaskPlanStep],
         updated_at: chrono::DateTime<Utc>,
-    ) -> Result<crate::TaskPlan> {
+    ) -> Result<Option<crate::TaskPlan>> {
         ops::task_plan::upsert_for_chat(self, chat_id, call_id, steps, updated_at).await
     }
 

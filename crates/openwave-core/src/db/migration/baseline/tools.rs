@@ -575,6 +575,7 @@ pub(super) fn task_plan_table() -> TableCreateStatement {
                 .primary_key(),
         )
         .col(ColumnDef::new(TaskPlan::TurnId).uuid().not_null())
+        .col(ColumnDef::new(TaskPlan::CallId).uuid().not_null())
         .col(ColumnDef::new(TaskPlan::Steps).text().not_null())
         .col(
             ColumnDef::new(TaskPlan::CreatedAt)
@@ -598,6 +599,13 @@ pub(super) fn task_plan_table() -> TableCreateStatement {
                 .name("fk_task_plan_turn")
                 .from(TaskPlan::Table, TaskPlan::TurnId)
                 .to(TurnRun::Table, TurnRun::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_task_plan_call")
+                .from(TaskPlan::Table, TaskPlan::CallId)
+                .to(ToolCall::Table, ToolCall::Id)
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .check(Expr::col(TaskPlan::UpdatedAt).gte(Expr::col(TaskPlan::CreatedAt)))

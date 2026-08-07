@@ -3,18 +3,23 @@ use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
+use crate::storage::TurnLeaseFence;
 use crate::{CallId, ChatId, TaskPlan, TaskPlanStep, TurnId, UPDATE_TASK_PLAN_TOOL};
 
 use super::super::{entities, store_err, DbStore};
-use super::turn::canonical_db_timestamp;
-use super::{acquire_chat_write_lock, conversation::append_event_on};
+use super::turn::{canonical_db_timestamp, turn_lease_is_current_on};
+use super::{acquire_chat_write_lock, acquire_turn_write_lock, conversation::append_event_on};
 
 /// Replace a chat's task plan and journal the refresh hint in one transaction.
 ///
-/// The owning turn is read from the tool call rather than passed in: the call's
-/// row is admitted before the tool runs, so it is already the authority on
-/// which turn is speaking, and taking the caller's word for it would let a
-/// mis-scoped call write a plan against a turn it does not belong to.
+/// `Ok(None)` means the write was declined rather than that it failed: the
+/// call's attempt no longer owns its turn. That is an ordinary outcome on a
+/// retry path and not a reason to fail anything.
+///
+/// The owning turn and its lease are read from the tool call rather than passed
+/// in: the call's row is admitted before the tool runs, so it is already the
+/// authority on which attempt is speaking, and taking the caller's word for it
+/// would let a stalled attempt overwrite a newer one's plan.
 ///
 /// The journaled event carries no steps. It only tells a connected renderer to
 /// re-read the route, the same way a proposed plan does; a plan rewritten
@@ -26,8 +31,8 @@ pub(in crate::db) async fn upsert_for_chat(
     call_id: CallId,
     steps: &[TaskPlanStep],
     updated_at: DateTime<Utc>,
-) -> Result<TaskPlan> {
-    let updated_at = canonical_db_timestamp(updated_at)?;
+) -> Result<Option<TaskPlan>> {
+    let now = canonical_db_timestamp(updated_at)?;
     let encoded = serde_json::to_string(steps)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -48,6 +53,37 @@ pub(in crate::db) async fn upsert_for_chat(
         )));
     }
     let turn_id = TurnId(call.turn_id);
+    // The same fence every other live-turn journal writer takes. A claimed
+    // attempt that lost its lease — because it stalled past expiry and another
+    // worker reclaimed the turn — must not commit a plan the current attempt
+    // would then be judged by. Legacy unclaimed turns carry no lease and are
+    // not fenced, matching the rest of the durable write surface.
+    if let Some(lease_token) = call.turn_lease_token {
+        if !acquire_turn_write_lock(&transaction, turn_id).await? {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        }
+        if turn_lease_is_current_on(&transaction, turn_id, lease_token, now).await?
+            != TurnLeaseFence::Current
+        {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        }
+    }
+    let existing = entities::task_plan::Entity::find_by_id(chat_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    // One call records one plan. A re-executed call — the loop replaying a row
+    // it already admitted — carries the same arguments by construction, so
+    // recognizing its id is what keeps the hint from being journaled twice.
+    if let Some(existing) = existing.as_ref() {
+        if existing.call_id == call_id.0 {
+            let plan = projection(existing)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(plan));
+        }
+    }
     append_event_on(
         &transaction,
         chat_id,
@@ -58,40 +94,40 @@ pub(in crate::db) async fn upsert_for_chat(
         &AgentEvent::TaskPlanUpdated { call_id, turn_id },
     )
     .await?;
-    match entities::task_plan::Entity::find_by_id(chat_id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-    {
+    let updated_at = match existing {
         Some(existing) => {
-            let created_at = existing.created_at;
-            let mut row: entities::task_plan::ActiveModel = existing.into();
-            row.turn_id = Set(turn_id.0);
-            row.steps = Set(encoded);
             // A retried write must never move `updated_at` backwards past the
             // row's own creation, which the table's check constraint forbids.
-            row.updated_at = Set(updated_at.max(created_at));
+            let updated_at = now.max(existing.created_at);
+            let mut row: entities::task_plan::ActiveModel = existing.into();
+            row.turn_id = Set(turn_id.0);
+            row.call_id = Set(call_id.0);
+            row.steps = Set(encoded);
+            row.updated_at = Set(updated_at);
             row.update(&transaction).await.map_err(store_err)?;
+            updated_at
         }
         None => {
             entities::task_plan::ActiveModel {
                 chat_id: Set(chat_id.0),
                 turn_id: Set(turn_id.0),
+                call_id: Set(call_id.0),
                 steps: Set(encoded),
-                created_at: Set(updated_at),
-                updated_at: Set(updated_at),
+                created_at: Set(now),
+                updated_at: Set(now),
             }
             .insert(&transaction)
             .await
             .map_err(store_err)?;
+            now
         }
-    }
+    };
     transaction.commit().await.map_err(store_err)?;
-    Ok(TaskPlan {
+    Ok(Some(TaskPlan {
         turn_id,
         steps: steps.to_vec(),
         updated_at,
-    })
+    }))
 }
 
 /// The chat's current plan, or `None` when it never made one.
@@ -110,10 +146,26 @@ pub(in crate::db) async fn get_for_chat(
     else {
         return Ok(None);
     };
-    let steps: Vec<TaskPlanStep> = serde_json::from_str(&row.steps)?;
-    Ok(Some(TaskPlan {
+    // A row whose steps no longer parse is one unreadable plan, not a chat the
+    // reader can no longer open. Reporting it as "no plan" leaves every other
+    // surface working and lets the next call replace it.
+    match projection(&row) {
+        Ok(plan) => Ok(Some(plan)),
+        Err(error) => {
+            tracing::warn!(
+                chat_id = %chat_id,
+                %error,
+                "stored task plan could not be read; reporting no plan"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn projection(row: &entities::task_plan::Model) -> Result<TaskPlan> {
+    Ok(TaskPlan {
         turn_id: TurnId(row.turn_id),
-        steps,
+        steps: serde_json::from_str(&row.steps)?,
         updated_at: row.updated_at,
-    }))
+    })
 }

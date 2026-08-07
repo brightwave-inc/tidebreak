@@ -595,6 +595,13 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    // The task plan restricts against the chat, its last-writing turn, and the
+    // call that wrote it, so it goes before all three.
+    entities::task_plan::Entity::delete_many()
+        .filter(entities::task_plan::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
     entities::tool_call::Entity::delete_many()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)
