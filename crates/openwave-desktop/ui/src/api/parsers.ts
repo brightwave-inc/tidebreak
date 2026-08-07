@@ -9,6 +9,9 @@ import {
   type PendingOutputWritebackRequest as WirePendingOutputWritebackRequest,
   type PendingPlanApproval as WirePendingPlanApproval,
   type PendingUserQuestions as WirePendingUserQuestions,
+  type TaskPlan as WireTaskPlan,
+  type TaskPlanStep as WireTaskPlanStep,
+  type TaskPlanStepStatus,
   type UserQuestion as WireUserQuestion,
   type UserQuestionOption as WireUserQuestionOption,
 } from "../generated/wire";
@@ -36,6 +39,8 @@ import {
   type ResultEntryKind,
   type ResultFailure,
   type SandboxAgentCancellation,
+  type TaskPlan,
+  type TaskPlanStep,
   type ToolActionPreview,
   type ToolResultPreview,
   type UserQuestion,
@@ -270,6 +275,61 @@ export function parsePendingPlanApproval(
     title: value.title,
     plan: value.plan,
     proposedAt: value.proposed_at,
+  };
+}
+
+/** The plan's step statuses, as a closed set the renderer can switch on. */
+const TASK_PLAN_STEP_STATUSES = new Set<TaskPlanStepStatus>([
+  "pending",
+  "in_progress",
+  "completed",
+]);
+
+/** Mirrors the server's own limits on a plan it will accept. */
+const MAX_TASK_PLAN_STEPS = 20;
+const MAX_TASK_PLAN_STEP_CHARS = 500;
+
+/**
+ * The chat's current plan, or `null` when it has none or the payload is not
+ * one the renderer will draw.
+ *
+ * All or nothing, because a plan is written as one replacement and read as one
+ * checklist: dropping a step that failed validation would leave a list that
+ * silently disagrees with the work the agent thinks it is doing, which is a
+ * worse answer than showing no plan at all.
+ */
+export function parseTaskPlan(value: unknown): TaskPlan | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireTaskPlan>(value, ["turn_id", "steps", "updated_at"]) ||
+    !nonEmptyBounded(value.turn_id, 128) ||
+    !nonEmptyBounded(value.updated_at, 64) ||
+    !Array.isArray(value.steps) ||
+    value.steps.length === 0 ||
+    value.steps.length > MAX_TASK_PLAN_STEPS
+  ) {
+    return null;
+  }
+  const steps: TaskPlanStep[] = [];
+  for (const step of value.steps) {
+    if (
+      !isRecord(step) ||
+      !onlyKeys<WireTaskPlanStep>(step, ["content", "status"]) ||
+      !nonEmptyBounded(step.content, MAX_TASK_PLAN_STEP_CHARS) ||
+      typeof step.status !== "string" ||
+      !TASK_PLAN_STEP_STATUSES.has(step.status as TaskPlanStepStatus)
+    ) {
+      return null;
+    }
+    steps.push({
+      content: step.content,
+      status: step.status as TaskPlanStepStatus,
+    });
+  }
+  return {
+    turn_id: value.turn_id,
+    steps,
+    updated_at: value.updated_at,
   };
 }
 

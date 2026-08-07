@@ -9,6 +9,7 @@ import {
   parsePendingUserQuestions,
   parsePendingToolApproval,
   parseSandboxAgentCancellation,
+  parseTaskPlan,
   parseToolActionPreview,
   parseToolResultPreview,
 } from "./api";
@@ -222,6 +223,43 @@ describe("parseOutputWritebackRequest", () => {
         path: "private/file.txt",
       }),
     ).toBeNull();
+  });
+});
+
+describe("parseTaskPlan", () => {
+  const safe = {
+    turn_id: "turn-1",
+    updated_at: "2026-08-06T12:00:00Z",
+    steps: [
+      { content: "Read the spec", status: "completed" },
+      { content: "Draft the change", status: "in_progress" },
+    ],
+  };
+
+  it("accepts a well-formed plan in the order the agent wrote it", () => {
+    expect(parseTaskPlan(safe)).toEqual(safe);
+  });
+
+  // All or nothing: a plan is written as one replacement, so dropping the step
+  // that failed validation would leave a checklist that silently disagrees
+  // with the work the agent thinks it is doing.
+  it.each([
+    ["an unknown key", { ...safe, note: "extra" }],
+    [
+      "a status outside the closed vocabulary",
+      { ...safe, steps: [{ content: "Read the spec", status: "skipped" }] },
+    ],
+    [
+      "a step past the server's own length limit",
+      { ...safe, steps: [{ content: "x".repeat(501), status: "pending" }] },
+    ],
+    [
+      "a step carrying a line break",
+      { ...safe, steps: [{ content: "one\ntwo", status: "pending" }] },
+    ],
+    ["no steps at all", { ...safe, steps: [] }],
+  ])("rejects the whole plan over %s", (_case, payload) => {
+    expect(parseTaskPlan(payload)).toBeNull();
   });
 });
 

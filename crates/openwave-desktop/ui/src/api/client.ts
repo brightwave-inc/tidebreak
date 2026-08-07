@@ -68,6 +68,7 @@ import {
   type LocalVoiceInfo,
   type InboxItem,
   type PendingChatPrompt,
+  type TaskPlan,
 } from "./types";
 import {
   parseAgentActivityHistory,
@@ -80,6 +81,7 @@ import {
   parsePendingToolApproval,
   parsePendingUserQuestions,
   parseSandboxAgentCancellation,
+  parseTaskPlan,
 } from "./parsers";
 
 const WS_HANDSHAKE = "openwave-v1";
@@ -1012,6 +1014,21 @@ export class ApiClient {
       headers: this.headers(true),
       body: JSON.stringify({ network_policy: networkPolicy }),
     });
+  }
+
+  /**
+   * The conversation's current task plan, or `null` when it has none.
+   *
+   * The journal only carries a hint that the plan moved on, so this is where
+   * the steps come from — on the hint, and again on reload. The payload is
+   * model-authored text, so it is validated here rather than trusted.
+   */
+  async getTaskPlan(chatId: string): Promise<TaskPlan | null> {
+    const body = await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/task-plan`,
+      { headers: this.headers() },
+    );
+    return parseTaskPlan(body);
   }
 
   listAgentRuns(chatId: string): Promise<AgentRun[]> {

@@ -86,6 +86,9 @@ import {
   type RendererSequencedEvent,
   type RendererToolName,
   type ResultEntryKind,
+  type TaskPlan as WireTaskPlan,
+  type TaskPlanStep as WireTaskPlanStep,
+  type TaskPlanStepStatus as WireTaskPlanStepStatus,
   type ToolActionPreview,
   type TranscriptImageAttachment as WireTranscriptImageAttachment,
   type TranscriptRole,
@@ -383,6 +386,15 @@ export type ChatTranscript = WireChatTranscript;
 /** A durable foreground coordinator or sandboxed background run. */
 /** A durable foreground coordinator or sandboxed background run. */
 export type AgentRun = AgentRunSnapshot;
+
+/**
+ * The checklist the agent keeps for a long turn: replaced whole on every
+ * update, and the only place the steps themselves are carried — the event
+ * stream only says the plan moved on.
+ */
+export type TaskPlan = WireTaskPlan;
+export type TaskPlanStep = WireTaskPlanStep;
+export type TaskPlanStepStatus = WireTaskPlanStepStatus;
 
 /** The complete renderer projection returned by one sandbox stop request. */
 /** The complete renderer projection returned by one sandbox stop request. */

@@ -25,6 +25,7 @@ const client = {
   listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
   listPendingUserQuestions: vi.fn().mockResolvedValue([]),
   listAgentRuns: vi.fn().mockResolvedValue([]),
+  getTaskPlan: vi.fn().mockResolvedValue(null),
   decideApproval: vi.fn().mockResolvedValue(undefined),
   cancel: vi.fn().mockResolvedValue(undefined),
   steer: vi.fn().mockResolvedValue(undefined),

@@ -271,6 +271,19 @@ describe("tool call lifecycle", () => {
     expect(state.messages).toEqual([]);
   });
 
+  it("refreshes the task plan from the bounded plan-updated hint", () => {
+    const { state, effects } = play([
+      {
+        type: "task_plan_updated",
+        call_id: "plan-call",
+        turn_id: "turn-1",
+      },
+    ]);
+    expect(effects).toContainEqual({ type: "refresh_task_plan" });
+    // The hint carries no steps, so it leaves the transcript alone.
+    expect(state.messages).toEqual([]);
+  });
+
   it("keeps args streaming from downgrading an approval wait", () => {
     const { state } = play([
       TURN,
