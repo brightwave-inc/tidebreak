@@ -1,0 +1,105 @@
+---
+title: Installation
+description: Download OpenWave for macOS or Windows, or build it from source.
+---
+
+## macOS
+
+Download the disk image and drag OpenWave to Applications.
+
+[Download for macOS (Apple Silicon)](https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-apple-silicon.dmg)
+
+Releases ship an Apple Silicon (`aarch64`) build only. There is no Intel
+build; on an Intel Mac, build from source.
+
+The macOS app is signed and notarized, so it opens without a Gatekeeper
+override. Each download has a `.sha256` sidecar on the same release if you want
+to check it:
+
+```sh
+shasum -a 256 -c OpenWave-macos-apple-silicon.dmg.sha256
+```
+
+An installed macOS build keeps itself current. It checks for a newer signed
+release in the background and asks before restarting.
+
+## Windows
+
+Download the installer and run it. It installs per-user and needs no
+administrator elevation.
+
+[Download for Windows (x86_64)](https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-windows-x86_64-setup.exe)
+
+<Callout type="warn">
+The Windows installer is not yet Authenticode-signed, so SmartScreen warns on
+first run. Verify the download against its `.sha256` sidecar before you accept
+that warning.
+</Callout>
+
+Windows builds do not currently run the in-app update loop. To move to a newer
+version, download and run the newer installer.
+
+## Linux
+
+There is no prebuilt Linux package. Build from source.
+
+## Build from source
+
+You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup picks it
+up automatically), [pnpm](https://pnpm.io), the Tauri CLI, and CMake.
+
+```sh
+cargo install tauri-cli --version "^2"
+```
+
+CMake is required because the desktop app compiles a local speech-to-text
+engine (`brew install cmake` on macOS; the `cmake` package on Linux).
+
+Then, from a clone of the repository:
+
+```sh
+scripts/dev.sh
+```
+
+That installs the UI dependencies and opens the app window. Arguments are
+forwarded to `cargo tauri dev`.
+
+On Linux you also need the platform WebView dependencies (WebKitGTK); see the
+[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+## Where your data lives
+
+OpenWave owns one application data directory, created on first launch:
+
+| Platform | Path |
+| --- | --- |
+| macOS | `~/Library/Application Support/io.brightwave.openwave` |
+| Windows | `%APPDATA%\io.brightwave.openwave` |
+
+Inside it:
+
+| Item | What it holds |
+| --- | --- |
+| `openwave.db` | The SQLite database: chats, messages, turns, event history, document metadata, and canonical text |
+| `blobs/` | The original bytes of every document you attached |
+| `openwave.lock` | Proof that one process owns this directory |
+
+Provider API keys are **not** in that directory. They go to your OS credential
+store (the login keychain on macOS) under the service name `openwave`.
+
+<Callout type="warn">
+While OpenWave is pre-1.0, opening a database written by an older build can
+rebuild it from scratch rather than migrate it. Do not treat this directory as
+durable storage for anything you cannot lose. Export what you care about.
+</Callout>
+
+## Running it headless
+
+The same server the desktop app embeds can run on its own:
+
+```sh
+ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
+```
+
+It prints a loopback URL and a per-launch bearer token. See
+[Running headless](/headless) for the other commands.

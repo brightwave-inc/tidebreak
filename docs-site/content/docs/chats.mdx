@@ -1,0 +1,91 @@
+---
+title: Chats
+description: The unit of work in OpenWave — the composer, panels, the inbox, and what survives a restart.
+---
+
+A chat is the unit of work. It owns its own model, permission mode, network
+policy, attached files, connected folders, and the outputs it produced.
+Nothing is global except your credentials and defaults.
+
+Start one with **New chat** in the sidebar, or ⌘N.
+
+## The composer
+
+The message box is the main surface, and most controls hang off it.
+
+- **Tools** (the `+` button) — **Attach files**, **Attach folder**,
+  **Reasoning** effort, **Network** policy, and **Plugins**.
+- **Model pill** — the model this chat runs on. See
+  [Models and providers](/models-and-providers).
+- **Permission selector** — Plan, Ask, Auto, or Allow all. See
+  [Permission modes](/permission-modes).
+- **Microphone** — dictate a message. Transcription runs on a local model by
+  default; cloud models are available under **Settings → Voice input**.
+
+Two typed triggers:
+
+- **`@`** searches your files and folders and inserts them as attachments. It
+  also offers **Browse files…** and **Connect a folder…**.
+- **`/`** opens the plugin library — skills, plugin bundles, and saved
+  prompts. Picking a skill attaches it to the message as a chip. There are no
+  slash commands beyond this picker.
+
+## While a turn is running
+
+The composer stays usable. Typing and sending mid-turn **redirects** the
+active response rather than queueing a new one — the send button becomes
+**Redirect**. A separate stop button cancels the turn.
+
+The chat header carries a context meter and an activity chip that opens the
+per-chat panels.
+
+## Panels
+
+The right side of a chat holds panels, opened from the activity chip:
+
+| Panel | Contents |
+| --- | --- |
+| **Document** | An attached source, opened for reading. |
+| **Outputs** | Files the agent produced. See [Outputs](/outputs). |
+| **Folders** | Connected folders and their access. |
+| **Agents** | Background agents this chat started. |
+
+Which panels are open is part of the chat's URL, so a layout is stable across
+reloads.
+
+## Background agents
+
+For work that splits — reading twenty files, trying three approaches — the
+agent can start background agents that run their own sandboxed turns and
+report back. They appear in the **Agents** panel with their activity and task
+plans.
+
+They cannot start further agents of their own; delegation is one level deep.
+**Settings → Agents** caps how many may run at once for a single chat.
+
+## The inbox
+
+Anything waiting on you across every chat collects in the **Inbox** in the
+sidebar: approvals, questions the agent asked, plan reviews, folder access
+requests, and requests to save a file into a folder. The sidebar badges the
+count.
+
+## Durability
+
+Turns are journaled as they run. Closing the app mid-turn, or losing the
+window, does not lose the work — reopening reconnects to the running turn and
+replays what you missed. An approval card left unanswered is still there
+tomorrow.
+
+## Managing chats
+
+The **Chats** section of the sidebar lists them, with a filter box behind the
+section menu. Each row's menu has **Rename** and **Delete**; the chat header
+menu adds **Copy debug info** and **Save debug bundle…**, which are useful
+when reporting a problem.
+
+## Projects
+
+The data model has an optional project that can own several chats and hold
+approvals that apply across them. It is not surfaced in the desktop app yet.
+Everything you do today lives in a chat.

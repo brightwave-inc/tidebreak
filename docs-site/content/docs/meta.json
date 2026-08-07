@@ -1,0 +1,24 @@
+{
+  "title": "Docs",
+  "pages": [
+    "---Getting started---",
+    "index",
+    "installation",
+    "quickstart",
+    "---Using OpenWave---",
+    "chats",
+    "models-and-providers",
+    "connected-folders",
+    "code-execution",
+    "outputs",
+    "---Safety---",
+    "permission-modes",
+    "---Extending---",
+    "skills-and-plugins",
+    "mcp-servers",
+    "web-search",
+    "---Reference---",
+    "headless",
+    "troubleshooting"
+  ]
+}

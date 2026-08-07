@@ -1,0 +1,208 @@
+@import 'tailwindcss';
+
+@plugin 'tailwindcss-animate';
+@plugin '@tailwindcss/typography';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* --- OpenWave palette (oklch, light mode) --- */
+  --radius: 0.5rem;
+
+  --page-background: oklch(98.2% 0 0);
+  --background: oklch(1 0 0);
+  --foreground: oklch(0 0 0);
+
+  --border: var(--color-zinc-200);
+  --input: oklch(0.929 0.013 255.508);
+  --ring: oklch(0.704 0.04 256.788);
+
+  --primary: var(--color-zinc-900);
+  --primary-foreground: var(--color-zinc-100);
+
+  --secondary: oklch(0.924 0.001 0);
+  --secondary-foreground: var(--color-zinc-600);
+
+  --accent: oklch(0.924 0.001 0);
+  --accent-foreground: var(--color-zinc-900);
+
+  --muted: oklch(0.924 0.001 0);
+  --muted-foreground: var(--color-zinc-500);
+
+  --card: var(--color-neutral-50);
+  --card-foreground: var(--color-neutral-900);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2912 0.0215 94.24);
+
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.984 0.003 247.858);
+
+  --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.06);
+  --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.07);
+  --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.07);
+
+  color-scheme: light;
+}
+
+.dark {
+  /* --- OpenWave palette (oklch, dark mode) --- */
+  /* Cool near-neutral grays (hue ~262, chroma <= 0.01). Elevation is carried by
+     the lightness ramp alone: page chrome 0.12 < popover 0.14 < card 0.16 <
+     content surface 0.21. */
+  color-scheme: dark;
+
+  --page-background: oklch(0.12 0.005 262);
+  --background: oklch(0.21 0.008 262);
+  --foreground: oklch(0.95 0 0);
+
+  --border: oklch(0.31 0.009 262);
+  --input: oklch(0.4 0.01 262);
+  --ring: oklch(0.65 0.04 256.788);
+
+  --primary: oklch(0.95 0 0);
+  --primary-foreground: oklch(0.12 0.005 262);
+
+  --secondary: oklch(0.27 0.009 262);
+  --secondary-foreground: oklch(0.75 0 0);
+
+  --accent: oklch(0.27 0.009 262);
+  --accent-foreground: var(--color-zinc-100);
+
+  --muted: oklch(0.27 0.009 262);
+  --muted-foreground: oklch(0.68 0.006 262);
+
+  --card: oklch(0.16 0.006 262);
+  --card-foreground: var(--color-neutral-200);
+
+  --popover: oklch(0.14 0.006 262);
+  --popover-foreground: oklch(0.92 0.003 262);
+
+  --destructive: oklch(0.55 0.21 27.325);
+  --destructive-foreground: oklch(0.95 0.005 247.858);
+
+  --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.24);
+  --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.28);
+  --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.32);
+}
+
+@theme inline {
+  --color-page-background: var(--page-background);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --shadow-2xs: var(--shadow-sm);
+  --shadow-xs: var(--shadow-sm);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-lg);
+  --shadow-2xl: var(--shadow-lg);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 4rem;
+  }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    @apply bg-page-background text-foreground;
+  }
+}
+
+/* Prose overrides for article content */
+.prose {
+  --tw-prose-body: var(--foreground);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-links: var(--foreground);
+  --tw-prose-bold: var(--foreground);
+  --tw-prose-counters: var(--muted-foreground);
+  --tw-prose-bullets: var(--muted-foreground);
+  --tw-prose-hr: var(--border);
+  --tw-prose-quotes: var(--foreground);
+  --tw-prose-quote-borders: var(--border);
+  --tw-prose-captions: var(--muted-foreground);
+  --tw-prose-code: var(--foreground);
+  --tw-prose-th-borders: var(--border);
+  --tw-prose-td-borders: var(--border);
+  --tw-prose-pre-bg: var(--muted);
+  --tw-prose-pre-code: var(--foreground);
+}
+
+.prose a {
+  text-decoration-color: var(--border);
+  text-underline-offset: 4px;
+  text-decoration-thickness: 0.5px;
+  transition: text-decoration-color 0.15s;
+}
+
+.prose a:hover {
+  text-decoration-color: var(--foreground);
+}
+
+.prose code:not(pre code) {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8em;
+  font-weight: 450;
+  background-color: color-mix(in srgb, var(--muted) 75%, transparent);
+  padding: 0.2em 0.4em;
+  border-radius: 0.25rem;
+  border: 0.5px solid var(--border);
+}
+
+.prose code:not(pre code)::before,
+.prose code:not(pre code)::after {
+  content: none;
+}
+
+.prose pre {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+/* Heading anchor links */
+.prose h2 > a,
+.prose h3 > a,
+.prose h4 > a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.prose h2 > a:hover::after,
+.prose h3 > a:hover::after,
+.prose h4 > a:hover::after {
+  content: ' #';
+  color: var(--muted-foreground);
+}

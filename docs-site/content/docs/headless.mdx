@@ -1,0 +1,136 @@
+---
+title: Running headless
+description: The openwave CLI — serve, tui, one-shot prompts, and the MCP stdio server.
+---
+
+The desktop app embeds a local HTTP + WebSocket server. The same server, agent
+loop, and tools run from a command line without the window.
+
+Build the CLI from a clone of the repository:
+
+```sh
+cargo build -p openwave-cli --release
+```
+
+The examples below use `cargo run -p openwave-cli --` for clarity; substitute
+the built binary if you have it on your path.
+
+## Commands
+
+```text
+openwave serve
+openwave mcp <workspace>
+openwave rehome-secrets
+openwave tui [--chat <id>]
+openwave -p <prompt> [--chat <id>] [--output-format text|json]
+```
+
+A bare `openwave` with no arguments runs `serve`.
+
+### `serve`
+
+Starts the local API on an ephemeral loopback port and prints the address and a
+freshly minted per-launch bearer token:
+
+```sh
+ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
+```
+
+```text
+openwave: listening on http://127.0.0.1:53421
+openwave: token 7f2c…
+```
+
+The token is a secret. Capture the process's stdout directly rather than
+running it under a logging supervisor.
+
+The API is not exposed on a public interface. There is no generated OpenAPI
+document — the route table and handler documentation in `openwave-server` are
+the specification.
+
+### `tui`
+
+An interactive terminal chat. It boots the same in-process server and drives it
+over the loopback API.
+
+```sh
+cargo run -p openwave-cli -- tui
+cargo run -p openwave-cli -- tui --chat <chat-uuid>
+```
+
+With no `--chat`, it starts a fresh chat.
+
+### `-p` (one-shot)
+
+Runs a single turn with no interaction. stdout carries the assistant's text,
+and the exit status says whether the turn completed.
+
+```sh
+cargo run -p openwave-cli -- -p "summarize the CSV in output/"
+cargo run -p openwave-cli -- -p "…" --output-format json
+```
+
+`--output-format json` emits the turn's event stream as NDJSON instead of
+plain text. `--chat <id>` continues an existing conversation.
+
+### `mcp`
+
+Serves OpenWave's own read-only filesystem tools over MCP stdio, confined to
+one explicit workspace directory:
+
+```sh
+cargo run -p openwave-cli -- mcp /absolute/path/to/workspace
+```
+
+It exposes `read_file` and `list_dir`, and only after a proper MCP initialize
+handshake. This is OpenWave acting as an MCP *server* for some other client —
+it is unrelated to [connecting MCP servers to OpenWave](/mcp-servers).
+
+### `rehome-secrets`
+
+macOS ties keychain approvals to a binary's code signature, so credentials
+stored by an earlier build keep prompting. This rewrites each stored credential
+under the running binary's signature.
+
+```sh
+cargo run -p openwave-cli -- rehome-secrets
+```
+
+## Environment
+
+| Variable | Effect |
+| --- | --- |
+| `OPENWAVE_DATA_DIR` | Where the database, blobs, and logs live. Defaults to `./.openwave` under the current directory. |
+| `OPENWAVE_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
+| `OPENWAVE_DATABASE_URL` | Required for `self_host`. |
+| `OPENWAVE_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
+| `OPENWAVE_MCP_CONFIG` | JSON file of external MCP server definitions to load at boot. |
+| `OPENWAVE_MODEL` | Overrides the model the process launches with. |
+| `OPENWAVE_CONTAINER_EXECUTION_ENABLED` | Enables the container execution backend. Default `false`. |
+| `OPENWAVE_CONTAINER_IMAGE` | Overrides the container image. |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY` | Used as a credential for that provider when nothing is stored in the credential store. |
+
+<Callout>
+`openwave serve` defaults to `./.openwave` in your current directory, which is
+**not** the desktop app's data directory. Point `OPENWAVE_DATA_DIR` at the
+desktop's application data directory if you want the CLI to see the same chats.
+</Callout>
+
+Logs are written to `logs/openwave.log` under the data directory.
+
+## Self-hosting
+
+A `self_host` profile backed by PostgreSQL exists. It authenticates with named
+bearer tokens from an operator file, and every chat, project, and document
+query is scoped to the authenticated principal.
+
+One thing to know before using it: **settings are deployment-scoped, not
+per-user.** Enabled providers, credentials, model roles, and web-search and
+code-execution configuration are shared by everyone on the deployment, and
+anyone who can call the API can change them. The profile is for mutually
+trusting users of one operator's deployment — a household or a small team. It
+is not multi-tenant isolation.
+
+Document and blob storage on PostgreSQL, remote secret custody, object storage,
+and multi-process ownership are not finished. Treat self-hosting as
+experimental.

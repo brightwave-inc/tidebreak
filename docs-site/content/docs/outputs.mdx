@@ -1,0 +1,48 @@
+---
+title: Outputs
+description: Files the agent produces, their version history, and exporting them with a native save dialog.
+---
+
+An answer in a transcript is not a deliverable. When the agent produces a
+report, a spreadsheet, a chart, or a document, it writes the file into its
+`output/` directory and OpenWave publishes it as an **output**.
+
+Outputs are scanned for after every command the agent runs, so a file appears
+as soon as it is written — you do not have to ask for it.
+
+## Finding them
+
+- A strip above the transcript shows the chat's outputs. Toggle it with
+  **Show outputs** / **Hide outputs**.
+- The **Outputs** panel, opened from the activity chip in the chat header,
+  lists all of them with **Name**, **Type**, **Size**, **Revisions**, and
+  **Updated**, with search and a type filter.
+
+Opening one shows a preview. Charts written as Plotly figures render as
+interactive charts with hover and zoom, themed to match the app rather than
+using whatever colors the agent chose.
+
+## Versions
+
+The filename is the identity. When the agent writes the same filename again,
+that is a new **revision** of the same output, not a second file. The
+**Version history** popover on an output shows the revisions and lets you look
+at earlier ones.
+
+History is append-only. Restoring an older revision publishes it as a new
+revision on top; it does not erase what came after.
+
+## Exporting
+
+**Save as…** on an output opens your operating system's save dialog and writes
+the file wherever you choose. This is a real export — the file leaves the app
+and is yours.
+
+The agent can also propose writing an output into a
+[connected folder](/connected-folders), which you approve from the
+transcript.
+
+## Deleting
+
+**Delete** on an output removes it from the list, and the toast that follows
+offers **Undo**. It is a soft delete.

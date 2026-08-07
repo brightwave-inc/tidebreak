@@ -1,0 +1,93 @@
+---
+title: Quickstart
+description: Add a provider key, run your first task, and get a file out of it.
+---
+
+This walks through a first real task: attach a file, let the agent run code
+over it, and export what it produces.
+
+<Steps>
+
+<Step>
+
+## Add a model credential
+
+Open **Settings → Providers**, turn on the provider you have a key for, paste
+the key, and press **Save configuration**.
+
+If you have a ChatGPT Plus or Pro subscription, the OpenAI section offers
+**Sign in with ChatGPT** instead of a key.
+
+</Step>
+
+<Step>
+
+## Pick a default model
+
+Go to **Settings → Models**. Under **Chat**, choose the provider you just
+configured and a model it serves. Leave **Background work** automatic unless
+you have a preference — it resolves against whatever you have credentialed.
+
+</Step>
+
+<Step>
+
+## Start a chat and attach a file
+
+Press **New chat**. In the composer, open the **Tools** menu (the `+` button)
+and choose **Attach files**, or type `@` in the message box to search files
+and folders inline.
+
+Attached files show as chips above the message field.
+
+</Step>
+
+<Step>
+
+## Ask for something that requires work
+
+Not "summarize this" — something the agent has to compute:
+
+```text
+Read the attached CSV. Chart monthly revenue by region and
+save it as a spreadsheet with the chart embedded.
+```
+
+The agent will write and run a script. The first time it runs a command, you
+get an approval card asking whether to allow it. Choose **Yes, run it once**,
+or one of the "always allow" options to stop being asked for that kind of
+command in this chat.
+
+</Step>
+
+<Step>
+
+## Take the file
+
+Files the agent writes into its `output/` directory are published as outputs.
+They appear in a strip above the transcript and in the **Outputs** panel,
+reachable from the activity chip in the chat header.
+
+Open one, then use **Save as…** to write it wherever you want with a native
+save dialog.
+
+</Step>
+
+</Steps>
+
+## Where to go next
+
+<Cards>
+  <Card title="Permission modes" href="/permission-modes">
+    Stop approving every command, without giving away the machine.
+  </Card>
+  <Card title="Code execution" href="/code-execution">
+    Where commands run, and what network access they get.
+  </Card>
+  <Card title="Connected folders" href="/connected-folders">
+    Give the agent standing access to a directory on your machine.
+  </Card>
+  <Card title="Outputs" href="/outputs">
+    Versions, history, and exporting.
+  </Card>
+</Cards>

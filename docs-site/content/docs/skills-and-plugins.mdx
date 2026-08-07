@@ -1,0 +1,103 @@
+---
+title: Skills and plugins
+description: The packaged instructions behind document generation, and how to enable, disable, or add your own.
+---
+
+A **skill** is a package of instructions for a kind of work — how to build a
+spreadsheet that opens cleanly in Excel, how to validate a chart before
+claiming it is done, which library to install and at which version. A
+**plugin** bundles related skills under one name.
+
+Skills are what make the agent's document work reliable. Without them, a model
+asked for a PowerPoint improvises.
+
+## What ships with the app
+
+| Plugin | Skills |
+| --- | --- |
+| **Documents** | Word documents, PDF documents, presentations |
+| **Spreadsheets** | Spreadsheets |
+| **Charts** | Charts |
+
+Everything is enabled by default. The agent sees a catalog of the enabled
+skills and reads a skill's full instructions when it decides to use one.
+
+## Using one explicitly
+
+Type `/` in the composer to open the plugin library and pick a skill. It
+attaches to the message as a chip, telling the agent to use that skill for
+this request. The **Plugins** entry in the sidebar opens the same library as a
+full panel, with search.
+
+You do not have to do this — the agent picks skills on its own. Invoking one
+explicitly is for when it picked wrong, or you want a specific output format.
+
+## Enabling and disabling
+
+Disabling is install-wide, not per chat. A disabled skill is not staged into
+the sandbox and not advertised to the model, so it is genuinely gone rather
+than discouraged. Disabling a plugin disables its member skills without
+forgetting your per-skill choices — re-enable the plugin and they come back as
+they were.
+
+## Prompts
+
+Saved prompts live alongside skills in the same library and are also reachable
+with `/`. A prompt is text inserted into your message. It is never added to
+the agent's operating instructions and never staged into the sandbox — it is
+a shortcut for you, not an instruction to the model.
+
+## Writing your own
+
+Skills, plugins, and prompts are Markdown files with YAML frontmatter, read
+from your application data directory:
+
+```text
+<data dir>/skills/<name>/SKILL.md
+<data dir>/plugins/<name>/PLUGIN.md
+<data dir>/prompts/<name>/PROMPT.md
+```
+
+A `SKILL.md` needs a `name` and a `description`, and may declare dependencies
+the sandbox should install:
+
+```md
+---
+name: charts
+description: Produce charts as interactive native figures, or as PNG/SVG when an image file is needed.
+deps: { python: ["matplotlib==3.9.4"] }
+---
+
+# Charts
+
+Instructions the agent reads when it uses this skill…
+```
+
+`deps` takes `python`, `npm`, and `host` lists. Pin versions.
+
+A `PLUGIN.md` names the skills it groups:
+
+```md
+---
+name: documents
+display-name: Documents
+description: Word, PDF, and PowerPoint deliverables, each validated before delivery.
+category: documents
+skills: ["word-documents", "pdf-documents", "presentations"]
+---
+```
+
+Your skills are loaded after the built-in ones and cannot shadow a built-in
+name. Pick a different name if it collides.
+
+<Callout>
+The description is what the model sees in the catalog when it is deciding
+whether to use your skill. Write it as selection criteria, not as a summary.
+</Callout>
+
+## Capability badges
+
+The app labels each package with what it actually does — whether it writes to
+the workspace, needs network access, requires a host program, or brings an MCP
+server. Those labels are derived by reading the package. A package cannot
+declare its own badges, and a manifest that tries to is rejected.
