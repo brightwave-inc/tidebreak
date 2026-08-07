@@ -360,6 +360,8 @@ impl ProviderKind {
                     | ProviderKind::Xai
                     | ProviderKind::Gemini
                     | ProviderKind::Bedrock
+                    | ProviderKind::Fireworks
+                    | ProviderKind::Together
                     | ProviderKind::OpenaiCompatible
             ),
             ProviderCredential::Oauth {} => self == ProviderKind::Openai,

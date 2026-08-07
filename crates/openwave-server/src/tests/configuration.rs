@@ -2181,7 +2181,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .iter()
         .find(|model| model["key"] == "together::moonshotai/Kimi-K3")
         .unwrap();
-    assert!(!kimi["supports_tools"].as_bool().unwrap());
+    assert!(kimi["supports_tools"].as_bool().unwrap());
 
     let kimi_pin = put_role(
         "utility",
