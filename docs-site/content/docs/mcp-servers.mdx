@@ -1,0 +1,65 @@
+---
+title: MCP servers
+description: Connect external Model Context Protocol tool servers over stdio or HTTP.
+---
+
+OpenWave is an MCP client. Tools from a connected server are advertised to the
+agent alongside its own, namespaced as `mcp__<server>__<tool>`.
+
+## Adding a server
+
+**Settings → Connected apps**, in the **MCP servers** section. Servers are
+added and reconnected in place — no shell, no config file, no restart.
+
+Two transports:
+
+**Local process (stdio)** — OpenWave launches the server as a child process.
+
+| Field | |
+| --- | --- |
+| **Executable** | The program to run. |
+| **Arguments** | One per row. |
+| **Working directory** | Where to run it. |
+| **Environment** | Name/value pairs passed to the process. |
+| **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. |
+
+**Remote endpoint (HTTP)** — OpenWave connects to a URL.
+
+| Field | |
+| --- | --- |
+| **Server URL** | The endpoint. |
+| **Bearer token variable** | The name of an environment variable holding the token. |
+| **Request timeout (ms)** | |
+
+Every server has a **Namespace**, which is the `<server>` part of the tool
+names, and an **Enabled** switch.
+
+**Save and verify** connects and lists the server's tools, so a bad command or
+URL fails at configuration time rather than mid-turn. **Reconnect and refresh
+tools** picks up changes to a server you are developing.
+
+A health chip shows **Healthy**, **Connecting…**, **Reconnecting**, **Needs
+attention**, **Disabled**, or **Not verified**.
+
+## The approval boundary
+
+**Every MCP tool is sensitive.** There is no way to mark one safe, and no
+inspection of what a server's tool claims to do. In Ask and Auto, each call
+asks.
+
+That is deliberate. OpenWave classifies its own tools because it knows what
+they do. It knows nothing about a third-party server's tools beyond the names
+and descriptions the server supplies — and the server wrote those.
+
+<Callout type="warn">
+Descriptions and results from an MCP server are untrusted input. A server can
+put instructions in a tool description or a tool result, and those instructions
+reach the model. Connect servers you trust, and read approval cards for
+MCP calls rather than clicking through them.
+</Callout>
+
+## Running OpenWave as an MCP server
+
+The reverse direction also exists: `openwave mcp <workspace>` serves
+OpenWave's read-only file tools to another MCP client over stdio. See
+[Running headless](/headless).

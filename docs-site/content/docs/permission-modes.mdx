@@ -1,0 +1,80 @@
+---
+title: Permission modes
+description: Plan, Ask, Auto, and Allow all — what the agent can do without asking, and how standing grants work.
+---
+
+Every chat runs in one of four permission modes. The selector sits in the
+composer, next to the send button, and applies to that chat only.
+
+| Mode | What it means |
+| --- | --- |
+| **Plan** | Read-only. The agent explores and proposes a plan. Nothing is edited or run. |
+| **Ask** | Ask before edits and actions that leave the workspace. This is the default. |
+| **Auto** | Workspace edits run on their own; anything that leaves the workspace still asks. |
+| **Allow all** | Everything runs without asking, in this chat only. |
+
+New chats start in the mode you last chose. A fresh install starts in **Ask**.
+
+## What "leaves the workspace" means
+
+Every tool the agent can call carries one of three classes, fixed in the code
+rather than configured:
+
+- **Read-only** — reading an attached document, listing a directory, listing
+  connected folders, asking you a question.
+- **Workspace** — writing into the agent's own sandbox workspace, importing a
+  file from a connected folder, writing an output back into one.
+- **Sensitive** — running a command, searching the web, fetching a web page,
+  starting a background agent, publishing a local app, and every tool from an
+  external MCP server.
+
+Read-only calls never ask. Workspace calls ask only in **Ask**. Sensitive
+calls ask in **Ask** and in **Auto**, and are the whole reason **Allow all**
+exists.
+
+One exception outranks the mode: **replacing a file that already exists in a
+connected folder always asks**, including in Auto and Allow all. Creating a
+new file there does not.
+
+## Plan mode is a refusal, not a queue
+
+In Plan, a mutating call is refused outright — it does not park on an approval
+card waiting for you. The agent is expected to read, think, and produce a plan.
+
+When it has one, it presents a plan review card. You can comment on it, ask
+for an update, or execute it. Executing switches the chat out of Plan for you.
+
+## Approval cards
+
+When a call needs your consent, the turn pauses and an approval card appears
+in the transcript. It is durable: close the app, come back, and it is still
+waiting.
+
+The options run narrowest to widest:
+
+- **Yes, run it once** — approves this call and nothing else.
+- One or more "always allow" options, which save a standing grant. The
+  available shapes depend on the call: this exact command, any use of this
+  command name, any write under a directory, or the whole tool for the rest of
+  the chat.
+- **No, don't allow this** — refuses, and the agent continues without it.
+
+Everything waiting on you across all chats is collected in the **Inbox** in
+the sidebar: approvals, questions, plan reviews, folder access requests, and
+requests to save into a folder.
+
+## Standing grants
+
+An "always allow" answer creates a grant scoped to the chat, or to a project
+where one applies. Grants are checked before the mode is, so a grant keeps
+working even in Ask.
+
+**Settings → Permissions** lists everything you have granted, grouped by chat,
+with the folder capabilities you have approved. Revoke any of them there and
+you get asked again next time.
+
+## Network access is separate
+
+Permission mode governs whether the agent may act. It does not govern where
+executed code may connect. That is a separate per-chat setting — see
+[Code execution](/code-execution).

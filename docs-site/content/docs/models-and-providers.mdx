@@ -1,0 +1,110 @@
+---
+title: Models and providers
+description: Add provider credentials, pick the model each chat runs on, and switch models mid-conversation.
+---
+
+OpenWave has no model of its own and no hosted inference. You bring
+credentials for the providers you want, and the app talks to them directly
+from your machine.
+
+## Add a credential
+
+Open **Settings → Providers**. Each provider is its own section: turn on
+**Enabled**, fill in the credential, and press **Save configuration**.
+
+| Provider | What it takes |
+| --- | --- |
+| Anthropic | API key |
+| OpenAI | A ChatGPT subscription (**Sign in with ChatGPT**) or a platform API key |
+| Google Gemini | A Gemini API key, or a Google Cloud service-account JSON plus a Vertex AI location |
+| xAI | API key, plus the model IDs you want to use |
+| OpenAI-compatible | Base URL, optional key, plus the model IDs you want to use |
+
+The panel never shows a saved key back to you. It shows a status —
+**API key set**, **Signed in with ChatGPT**, **Credential set**, or
+**No credential**. **Clear** removes the stored credential after a
+confirmation.
+
+Keys go to your operating system's credential store, not to the database and
+not to a config file.
+
+<Callout>
+If you would rather not store anything, the server also reads
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, and `GEMINI_API_KEY`
+from the environment as a fallback when no credential is saved.
+</Callout>
+
+## Curated models
+
+Anthropic, OpenAI, and Gemini ship with a curated list of models. Nothing to
+configure — once the provider has a credential, its models appear in the
+picker. The list is versioned with the app and refreshed as providers ship new
+models.
+
+Each entry carries what the app actually knows about it: context window,
+maximum output, whether it accepts images, whether it produces a reasoning
+stream, and which reasoning-effort levels it accepts. Those flags gate
+behavior, not just labels — a model is only offered an image attachment if the
+path that carries images is wired for it.
+
+Models the project has not exercised end to end are marked in the picker as
+unverified. They still run; the badge says tool calling and streaming have not
+been confirmed on that exact provider/model pair.
+
+## Custom models
+
+**xAI** and **OpenAI-compatible** do not come with a curated list. You add
+rows yourself under the provider's **Models** section: a model ID, an optional
+display name, context and max-output token counts, and — for xAI — whether the
+model takes image input, whether it is a reasoning model, and which
+reasoning-effort levels it accepts.
+
+The OpenAI-compatible slot points at any endpoint that speaks the OpenAI
+chat-completions API, including a local one:
+
+```text
+base URL: http://127.0.0.1:1234/v1
+```
+
+You are asserting those capability flags yourself. Get them wrong and turns
+fail at the provider rather than being caught locally.
+
+## Choose the default model
+
+**Settings → Models** sets the model for two roles:
+
+- **Chat** — what new conversations start on. Each chat can still override it.
+- **Background work** — the model used for the app's own internal work
+  (titling a chat, and similar short tasks). Cheaper, faster models suit this.
+
+Either role can be left automatic, in which case it resolves against whatever
+you have credentialed at the moment you use it, rather than being frozen at
+the time you set it.
+
+## Change the model for one chat
+
+The composer has a model pill next to the send button. It reads **Default**
+until you pin something, then shows the model's name. The menu lets you switch
+providers and models, and a **Default** switch returns the chat to following
+your global setting.
+
+The same menu carries **Reasoning** effort for models that expose it:
+**Default**, **Off**, **Low**, **Medium**, **High**, **X-high**, **Max**.
+Levels a model does not accept are not offered.
+
+## Switching models mid-conversation
+
+You can change the model in the middle of a chat and keep the thread. The
+conversation is stored in a provider-neutral form, so history replays to
+whichever provider you switch to.
+
+Provider-specific artifacts do not survive the crossing. A reasoning trace
+produced by one vendor, or a search block that vendor executed on its own
+servers, is replayed to a different vendor as ordinary text — or dropped —
+rather than being translated into that vendor's equivalent. Switch back and
+new turns produce native artifacts again, but the ones already flattened stay
+flattened.
+
+This is deliberate. The alternative is a translator per pair of providers, and
+those degrade in ways that are hard to see. Expect a small loss of fidelity
+across a switch, not a silent re-interpretation.

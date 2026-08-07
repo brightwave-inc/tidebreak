@@ -1,0 +1,77 @@
+---
+title: Troubleshooting
+description: Common failures and what they mean.
+---
+
+## "Provider is unavailable or cannot serve model"
+
+The chat is pinned to a model whose provider is not enabled, has no
+credential, or does not list that model.
+
+OpenWave does not fail over to another provider. A foreground turn stays on
+the model you chose and refuses loudly rather than quietly answering from
+somewhere else. Fix the provider in **Settings → Providers**, or change the
+model on the chat.
+
+## The agent says it cannot run commands
+
+Code execution has no backend selected. On macOS the local sandbox is used
+automatically; on Windows and Linux you must configure one — Docker, E2B, or
+Daytona — under **Settings → Code execution**.
+
+If Docker is selected, check that the container runtime is actually running.
+
+## A package install fails
+
+`pip install` needs the chat's network policy to be **Package installs** or
+wider. Set it from the composer's **Tools → Network**. See
+[Code execution](/code-execution).
+
+## Search does not work on a Gemini model
+
+Gemini models in OpenWave do not use a provider-side search. With **Search
+mode** on Automatic and no search key saved, there is nothing for the tool to
+call. Add a key under **Settings → Web search**, or run that chat on an
+Anthropic or OpenAI model.
+
+## macOS keeps asking for keychain access
+
+macOS ties keychain approvals to a binary's code signature. After an update,
+or when switching between a release build and one you built yourself,
+previously stored credentials belong to a different signature.
+
+Re-enter the credential, or run:
+
+```sh
+openwave rehome-secrets
+```
+
+which rewrites each stored credential under the running binary's signature.
+
+## SmartScreen warns on the Windows installer
+
+The Windows installer is not yet Authenticode-signed. Check the download
+against its `.sha256` sidecar from the release page before accepting the
+warning.
+
+## The app will not start, or reports the data directory is in use
+
+One process owns the application data directory at a time, enforced with a
+lock file. Close the other instance — including a headless `openwave serve`
+pointed at the same directory.
+
+## Chats disappeared after an update
+
+While OpenWave is pre-1.0, opening a database written by an incompatible
+older build can rebuild it rather than migrate it. Export anything you need
+to keep with **Save as…** on outputs, and treat the local database as
+disposable until 1.0.
+
+## Reporting a problem
+
+The chat header menu has **Copy debug info** and **Save debug bundle…**.
+Attach the bundle to a
+[GitHub issue](https://github.com/brightwave-inc/openwave/issues) — it carries
+what is needed to reconstruct the turn.
+
+Logs are at `logs/openwave.log` inside the application data directory.

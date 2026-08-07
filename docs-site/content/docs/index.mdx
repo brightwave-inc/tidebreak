@@ -1,0 +1,67 @@
+---
+title: What OpenWave is
+description: A local-first AI agent desktop app that runs on your machine with your own model keys.
+---
+
+OpenWave is a desktop app for handing real work to an AI agent. You start a
+chat, attach the files the work depends on, and the agent reads them, runs
+code, searches the web, and writes the result out as a file you can save.
+
+It runs on your machine. Your conversations, your documents, and the files the
+agent produces live in a local database and a local folder. Your provider API
+keys live in your operating system's credential store. Nothing is routed
+through a service the project operates — the only outbound traffic is the
+requests you configure: your model provider, your search provider, and
+whatever the agent explicitly fetches.
+
+<Callout type="warn">
+OpenWave is pre-alpha and under active development. Interfaces, storage
+formats, and behavior change frequently. Expect rough edges.
+</Callout>
+
+## What you can do with it
+
+- **Work over your own files.** Attach documents to a chat from the composer,
+  or connect a folder on your machine that the agent can list and read.
+- **Run code in a sandbox.** The agent writes and executes scripts to analyze
+  spreadsheets, render PDFs, build charts, and generate documents. Commands run
+  confined, with network access off unless you grant it.
+- **Produce files, not just answers.** Anything the agent saves to its
+  `output/` directory becomes a versioned output you can preview and export
+  with a native save dialog.
+- **Use any model.** Anthropic, OpenAI, Google, xAI, and any
+  OpenAI-compatible endpoint, including a local one. You can switch models
+  mid-conversation without losing the thread.
+- **Decide how much rope to give it.** Every chat has a permission mode, from
+  read-only planning up to full autonomy.
+
+## Who it's for
+
+People who want an agent that can touch real data and produce real artifacts,
+and who would rather that happen on their own machine than in someone else's
+cloud. It assumes you are comfortable getting an API key from a model provider
+and pasting it into a settings field.
+
+## What it is not
+
+It is not a hosted service, and there is no account to create. It is not a
+coding assistant bound to a repository — the unit of work is a conversation
+with files attached, not a checkout. And it is not finished: several
+subsystems exist in the runtime before they have any UI.
+
+## Start here
+
+<Cards>
+  <Card title="Installation" href="/installation">
+    Download the app, or build it from source.
+  </Card>
+  <Card title="Quickstart" href="/quickstart">
+    Add a model key and run your first real task.
+  </Card>
+  <Card title="Models and providers" href="/models-and-providers">
+    Configure credentials and pick a model per chat.
+  </Card>
+  <Card title="Permission modes" href="/permission-modes">
+    Control what the agent can do without asking.
+  </Card>
+</Cards>

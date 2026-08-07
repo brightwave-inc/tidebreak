@@ -1,0 +1,63 @@
+---
+title: Connected folders
+description: Give the agent standing access to a directory on your machine, scoped to what you approve.
+---
+
+Attaching files works for a handful of documents. When the work is over a
+directory — a folder of reports, a data drop, a project you keep adding to —
+connect the folder instead.
+
+## Connecting one
+
+From the composer, open the **Tools** menu and choose **Attach folder**. Or
+open the **Folders** panel from the activity chip in the chat header and press
+**Connect folder**.
+
+Either way, your operating system's own folder picker opens. OpenWave gets
+access to what you pick and nothing else — the app cannot browse your
+filesystem to find candidates, and it cannot widen the selection afterward.
+
+Connected folders appear as chips above the message box and in the Folders
+panel, grouped into **Connected**, **Unavailable** (approved, but not
+reachable right now), and folders already approved elsewhere that you can
+attach to this chat.
+
+## What the agent can do with one
+
+Access is per capability, not all-or-nothing. A folder's badge shows which of
+these you approved:
+
+- **List folders** — see the directory tree.
+- **Read files** — read text files below the root.
+- **Write files** — create files there.
+- **Run commands** — execute in that directory.
+
+Large or binary files (PDFs, Office documents) are not read directly. The
+agent imports them into the conversation as sources, and reads them from
+there.
+
+The agent never sees where the folder lives on disk. It works with an opaque
+identifier for the root and paths relative to it, and it cannot construct
+access to a folder you did not pick — asking for one produces a request you
+have to answer.
+
+## Writing back into a folder
+
+Creating a new file in a folder you granted write access to proceeds under
+Auto and Allow all. **Replacing a file that already exists always asks**, in
+every mode, with a card headed **Replace an existing file?**
+
+That is the one place permission mode does not have the last word. Overwriting
+your data is not recoverable through the app.
+
+## Disconnecting and revoking
+
+Two different actions:
+
+- **Disconnect** detaches the folder from this chat. The approval survives, so
+  you can reattach it without picking it again.
+- **Forget** withdraws the approval entirely, for every chat.
+
+Both are in the Folders panel; **Disconnect** is also on the folder chip in
+the composer. **Settings → Permissions** lists every folder approval and lets
+you revoke there too.

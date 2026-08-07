@@ -1,0 +1,89 @@
+---
+title: Code execution
+description: Where the agent's commands run, what the sandbox contains, and how to bound network access.
+---
+
+Most real work the agent does is code it writes and runs: parsing a
+spreadsheet, rendering a PDF, building a chart, converting a document. Those
+commands run in a sandbox, never directly on your shell.
+
+## Where code runs
+
+**Settings → Code execution** chooses the backend.
+
+| Backend | What it needs |
+| --- | --- |
+| **Local native sandbox** | macOS only. Nothing to configure. |
+| **Docker container** | A reachable container runtime on this machine. |
+| **E2B cloud sandbox** | An E2B API key. |
+| **Daytona cloud sandbox** | A Daytona API key. |
+
+On macOS the local sandbox is selected by default and works out of the box —
+it uses the operating system's own sandbox facility to confine the process.
+On other platforms no backend is selected until you configure one, and the
+agent's `exec` tool is unavailable until then.
+
+The cloud backends run on a prebuilt image that already carries Python and the
+tooling the bundled skills expect. You do not build or publish an image
+yourself.
+
+Saved API keys are never shown back to you in the panel. The panel also
+carries an execution timeout (default 60 seconds, up to 120).
+
+## The sandbox filesystem
+
+Each chat gets a workspace. Three directories always exist inside it:
+
+| Directory | Purpose |
+| --- | --- |
+| `output/` | Deliverables. Anything written here is published to you as a versioned [output](/outputs). |
+| `documents/` | Working files the agent is operating on. |
+| `preview/` | Images the agent wants to look at after generating them. |
+
+The workspace is not your filesystem. Files you attach to the chat, and files
+the agent imports from a [connected folder](/connected-folders), are
+staged into it explicitly. Nothing on your machine is visible to executed code
+by default.
+
+## Network access
+
+Executed code gets whatever network access the chat's policy allows. Open the
+composer's **Tools** menu and choose **Network**:
+
+| Option | Effect |
+| --- | --- |
+| **Offline** | Every outbound connection is denied. |
+| **Package installs** | Only package registries are reachable. Enough for `pip install`. |
+| **Custom hosts** | An explicit list of exact hostnames. No wildcards. Package registries optionally included. |
+| **Internet access** | Public destinations are reachable. |
+
+<Callout type="warn">
+A new chat inherits the network policy you last chose, and a fresh install
+starts at **Internet access**. If you want executed code bounded, set it —
+the default is permissive, not restrictive.
+</Callout>
+
+Local, private, and link-local addresses stay unreachable even under
+**Internet access**. Executed code cannot reach a service on your own machine
+or on your LAN.
+
+The policy is written once and each backend compiles it to the strongest
+control it has. That is not the same everywhere, so the panel discloses how
+well each backend can enforce it:
+
+| Badge | Meaning |
+| --- | --- |
+| **Boundary** | The policy is a real boundary the sandboxed process cannot get around. |
+| **Boundary — conditional** | A boundary, given a condition the panel states. |
+| **Applied — not a full boundary** | Applied, with known gaps. |
+| **Unconfirmed** | Not verified on this backend. |
+| **Not enforced** | The backend does not carry it. |
+
+Read the badge before you rely on a restrictive policy.
+
+## Installing packages
+
+The agent installs what it needs at the start of a run, per chat, and the
+install persists for the rest of the conversation. Installs require a network
+policy of **Package installs** or wider; under **Offline** they fail and the
+agent is instructed to tell you rather than quietly deliver something lesser.

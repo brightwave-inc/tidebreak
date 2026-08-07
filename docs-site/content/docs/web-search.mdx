@@ -1,0 +1,53 @@
+---
+title: Web search
+description: Choose between your model provider's built-in search and your own search key, and bound every request.
+---
+
+The agent has two tools that reach the public web: `web_search`, which
+searches, and `web_extract`, which fetches a specific page. Both are sensitive
+calls, so they ask for approval in Ask and Auto.
+
+Pages the agent fetches are added to the conversation as sources, so it can
+cite them and you can read what it read.
+
+## Two ways to search
+
+**Your model provider's built-in search.** Anthropic and OpenAI models can run
+a search on the provider's own servers as part of the turn. Nothing leaves
+your machine except the request you were already making, and there is no extra
+key to configure. Gemini models do not offer this in OpenWave today.
+
+**A search provider you configure.** OpenWave calls the search API directly
+from your machine.
+
+| Provider | Notes |
+| --- | --- |
+| **Exa** | Search and page extraction. |
+| **Tavily** | Search and page extraction. |
+| **Brave Search** | Search only. Has a free tier. |
+| **SearXNG** | Self-hosted. No key — you provide the instance URL. |
+
+When the chosen provider cannot extract a page, `web_extract` falls back to
+OpenWave's own fetch-and-read path rather than failing.
+
+## Configuring it
+
+**Settings → Web search**. **Search mode** decides which of the two paths is
+used:
+
+| Mode | Behavior |
+| --- | --- |
+| **Automatic** | Use your configured provider if there is one; otherwise the model provider's built-in search; otherwise nothing. |
+| **Model provider (built-in)** | Always the provider's own search. Turns off on models that do not support it, rather than falling back. |
+| **Configured provider** | Always your own key. |
+
+Below that, save keys for as many providers as you like, then pick the
+**Active provider**. **Disabled** turns search off entirely. There is also a
+request timeout (default 20 seconds).
+
+Saved keys are never displayed back to you — the panel shows **Ready** or
+**Not configured** per provider.
+
+On a fresh install with no search key, Automatic gives you working search on
+Anthropic and OpenAI models through the provider's own search, and nothing on
+Gemini models until you add a key.
