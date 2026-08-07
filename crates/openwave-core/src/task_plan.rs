@@ -115,11 +115,7 @@ fn check_steps(steps: &[TaskPlanStep]) -> std::result::Result<(), String> {
                 index + 1
             ));
         }
-        if step
-            .content
-            .chars()
-            .any(|character| character.is_control() && character != '\t')
-        {
+        if step.content.chars().any(char::is_control) {
             return Err(format!(
                 "step {} contains control characters; send plain single-line text",
                 index + 1
