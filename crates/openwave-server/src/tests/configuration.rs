@@ -1218,6 +1218,61 @@ async fn gemini_vertex_location_is_validated_and_public_info_never_grows_a_proje
 }
 
 #[tokio::test]
+async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_account_auth() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let configured = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/vertex")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": false,
+                        "vertex_location": "us-east5"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(configured.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(configured).await;
+    assert_eq!(body["kind"], "vertex");
+    assert_eq!(body["vertex_location"], "us-east5");
+    assert_eq!(body["has_credential"], false);
+    assert!(body.get("project_id").is_none());
+
+    for update in [
+        serde_json::json!({"base_url": "https://example.test"}),
+        serde_json::json!({"credential": {"type": "api_key", "key": "not-supported"}}),
+        serde_json::json!({"vertex_location": "us"}),
+    ] {
+        let rejected = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/vertex")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(update.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = json_body(rejected).await;
+        assert!(!body.to_string().contains("not-supported"));
+    }
+}
+
+#[tokio::test]
 async fn openai_compatible_requires_base_url_when_enabled() {
     let (router, token, _store, _dir) = test_app().await;
     let response = router

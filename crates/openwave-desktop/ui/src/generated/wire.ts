@@ -1875,7 +1875,7 @@ export type PromptOrigin = "builtin" | "user";
 /**
  * How a provider's credential was established.
  */
-export type ProviderAuthMode = "api_key" | "chatgpt";
+export type ProviderAuthMode = "api_key" | "chatgpt" | "service_account";
 
 /**
  * Public view of a provider — never includes the credential itself.
@@ -1914,7 +1914,7 @@ models: Array<CustomModelConfig>, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "openai_compatible" | "model_gateway";
 
 /**
  * How hard a reasoning-capable model should think before answering.

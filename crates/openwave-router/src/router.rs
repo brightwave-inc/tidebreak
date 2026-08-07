@@ -27,6 +27,17 @@ use crate::OpenAiCompatProvider;
 use crate::OpenAiProvider;
 #[cfg(feature = "xai")]
 use crate::XaiProvider;
+#[cfg(all(feature = "anthropic", feature = "gemini"))]
+use crate::VertexProvider;
+
+/// Native request protocol used by one curated Vertex model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VertexModelFamily {
+    /// Google Gemini GenerateContent.
+    Gemini,
+    /// Anthropic Claude Messages over `streamRawPredict`.
+    Anthropic,
+}
 
 /// Header a model-gateway deployment reads to group inference into one
 /// conversation. Gateway adapters opt in explicitly; direct providers never
@@ -66,6 +77,7 @@ pub struct VertexRoute {
     project_id: String,
     location: String,
     credential_fingerprint: [u8; 32],
+    model_families: Vec<(String, VertexModelFamily)>,
 }
 
 impl VertexRoute {
@@ -79,7 +91,19 @@ impl VertexRoute {
             project_id: project_id.into(),
             location: location.into(),
             credential_fingerprint,
+            model_families: Vec::new(),
         }
+    }
+
+    /// Attach the explicit protocol family for every model curated under the
+    /// first-class Vertex provider. Legacy Gemini service-account routes leave
+    /// this empty because their route kind already determines the protocol.
+    pub fn with_model_families(
+        mut self,
+        model_families: impl IntoIterator<Item = (String, VertexModelFamily)>,
+    ) -> Self {
+        self.model_families = model_families.into_iter().collect();
+        self
     }
 
     pub fn project_id(&self) -> &str {
@@ -96,6 +120,7 @@ impl std::fmt::Debug for VertexRoute {
             .field("project_id", &"***")
             .field("location", &self.location)
             .field("credential_fingerprint", &"***")
+            .field("model_families", &self.model_families)
             .finish()
     }
 }
@@ -114,6 +139,8 @@ pub enum RouteKind {
     OpenaiCompatible,
     /// Google Gemini Developer API (native GenerateContent protocol).
     Gemini,
+    /// Google Vertex AI with native Gemini and Anthropic Claude protocols.
+    Vertex,
     /// A model-gateway deployment's Anthropic-compatible surface, authenticated
     /// with short-lived resource-scoped tokens instead of a static key.
     ModelGateway,
@@ -134,6 +161,7 @@ impl RouteKind {
             RouteKind::Xai => "xai",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
+            RouteKind::Vertex => "vertex",
             RouteKind::ModelGateway => "model_gateway",
             RouteKind::ModelGatewayOpenai => "model_gateway_openai",
         }
@@ -155,6 +183,7 @@ impl RouteKind {
             "xai" => Some(Self::Xai),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
+            "vertex" => Some(Self::Vertex),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
@@ -176,8 +205,8 @@ pub struct Route {
     /// Per-request credential supplier for short-lived tokens. Takes
     /// precedence over `api_key` when present.
     pub token_source: Option<Arc<dyn BearerTokenSource>>,
-    /// Vertex resource/auth metadata. Present only for a Gemini route backed
-    /// by a Google service account.
+    /// Vertex resource/auth metadata. Present for the first-class Vertex route
+    /// and for a legacy Gemini route backed by a Google service account.
     pub vertex: Option<VertexRoute>,
     /// ChatGPT account id for OpenAI routes authenticated via ChatGPT OAuth.
     /// Baked into the adapter (only the bearer rotates).
@@ -257,6 +286,7 @@ impl Router {
             RouteKind::Openai,
             RouteKind::Xai,
             RouteKind::Gemini,
+            RouteKind::Vertex,
             RouteKind::ModelGateway,
             RouteKind::ModelGatewayOpenai,
             RouteKind::OpenaiCompatible,
@@ -325,9 +355,9 @@ impl ModelProvider for Router {
                 req.model
             )));
         };
-        // The route hint is host policy, not provider wire data, but adapters
-        // retain it for origin-gating provider-native replay. Their encoders
-        // must never serialize it into the provider request body.
+        // The route hint is host policy, not provider wire data. Adapters keep
+        // it only to gate provider-native reasoning/tool replay; their request
+        // builders enumerate wire fields explicitly and never serialize it.
         adapter.stream(req).await
     }
 }
@@ -448,6 +478,24 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             }
             Some(Arc::new(p))
         }
+        #[cfg(all(feature = "anthropic", feature = "gemini"))]
+        RouteKind::Vertex => {
+            let vertex = route.vertex.as_ref()?;
+            let source = route.token_source.clone()?;
+            let mut provider = VertexProvider::new(
+                vertex.project_id.clone(),
+                vertex.location.clone(),
+                source,
+                vertex.model_families.clone(),
+            )
+            .ok()?;
+            if let Some(base) = &route.base_url {
+                provider = provider.with_base_url(base.clone());
+            }
+            Some(Arc::new(provider))
+        }
+        #[cfg(not(all(feature = "anthropic", feature = "gemini")))]
+        RouteKind::Vertex => None,
         #[cfg(not(feature = "gemini"))]
         RouteKind::Gemini => None,
         #[cfg(not(feature = "openai"))]
@@ -488,7 +536,14 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>();
-                    format!("{}:{credential}", vertex.location)
+                    let mut families = vertex.model_families.clone();
+                    families.sort_by(|left, right| left.0.cmp(&right.0));
+                    let families = families
+                        .into_iter()
+                        .map(|(model, family)| format!("{model}:{family:?}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{}:{credential}:{families}", vertex.location)
                 }),
                 r.chatgpt_account_id.as_deref().unwrap_or("")
             )
@@ -734,6 +789,40 @@ mod tests {
         assert_ne!(
             build("global", 1).fingerprint(),
             build("global", 2).fingerprint()
+        );
+    }
+
+    #[test]
+    fn first_class_vertex_routes_both_curated_protocol_families() {
+        let mut route = route(
+            RouteKind::Vertex,
+            "",
+            &["gemini-3.6-flash", "claude-opus-5"],
+            None,
+        );
+        route.token_source = Some(Arc::new(StaticSource("vertex-token")));
+        route.vertex = Some(
+            VertexRoute::new("test-project", "global", [1; 32]).with_model_families([
+                ("gemini-3.6-flash".to_string(), VertexModelFamily::Gemini),
+                ("claude-opus-5".to_string(), VertexModelFamily::Anthropic),
+            ]),
+        );
+        let router = Router::build(vec![route]);
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("vertex")), "gemini-3.6-flash"),
+            Some(RouteKind::Vertex)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("vertex")), "claude-opus-5"),
+            Some(RouteKind::Vertex)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("vertex")), "unknown"),
+            None
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("anthropic")), "claude-opus-5"),
+            None
         );
     }
 

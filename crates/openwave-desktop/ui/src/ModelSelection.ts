@@ -10,8 +10,9 @@ import type {
  * Resolve a stored selection against the typed catalog.
  *
  * New values match only their provider-qualified key. Old bare ids are
- * accepted only when the catalog has exactly one owner, so migration can never
- * silently change providers.
+ * accepted only when exactly one direct-vendor row owns it. Hosted mirrors
+ * (for example Vertex) carry `vendor` and never steal a legacy selection from
+ * the original direct route.
  */
 export function modelForSelection(
   models: ModelInfo[],
@@ -21,7 +22,9 @@ export function modelForSelection(
   const exact = models.find((model) => model.key === value);
   if (exact) return exact;
   if (value.includes("::")) return null;
-  const legacy = models.filter((model) => model.id === value);
+  const legacy = models.filter(
+    (model) => model.id === value && model.vendor === null,
+  );
   return legacy.length === 1 ? legacy[0] : null;
 }
 
@@ -44,6 +47,8 @@ export function providerLabel(provider: ProviderKind): string {
       return "xAI";
     case "gemini":
       return "Google Gemini";
+    case "vertex":
+      return "Google Vertex AI";
     case "openai_compatible":
       return "OpenAI-compatible";
     case "model_gateway":

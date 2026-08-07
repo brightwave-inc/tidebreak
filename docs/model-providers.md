@@ -86,6 +86,28 @@ Existing machinery that already follows this:
 - Registry flags such as `supports_vendor_web_search` — honest absence beats
   a half-working path.
 
+## Google Vertex AI
+
+Vertex is a first-class serving provider, not a Gemini credential mode. One
+validated Google Cloud service account can route two curated native protocol
+families:
+
+- Gemini models use Vertex GenerateContent under the `google` publisher.
+- Claude models use Anthropic Messages through Vertex `streamRawPredict`.
+
+The provider derives its host from a validated `global` or regional location;
+credentials cannot supply an endpoint. Uploaded service-account JSON is
+exchanged only through Google's fixed OAuth token endpoint and never appears in
+the provider API response. Custom Vertex hosts, multi-region aliases, ambient
+Application Default Credentials, and arbitrary Model Garden entries are not
+promised by this surface.
+
+Vertex rows remain provider-qualified (`vertex::<model>`), even when the raw
+model id matches a direct Anthropic or Gemini row. That identity is also the
+native-replay boundary: a Claude reasoning block produced through Vertex may
+replay only to the same Vertex model. Switching to direct Anthropic (or the
+reverse) drops the opaque block and keeps the portable transcript.
+
 ## Checklist for a new provider-coupled feature
 
 Before merging something that adds provider-native state to a turn:

@@ -47,6 +47,7 @@ use openwave_core::{
     ResponseFormat, Role, ToolChoice, ToolSpec,
 };
 use openwave_router::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiProvider};
+use openwave_router::{BearerTokenSource, VertexModelFamily, VertexProvider};
 use serde_json::{json, Value};
 
 /// The credential every adapter is handed. It must never reach a fixture: the
@@ -289,6 +290,59 @@ async fn gemini_request_contracts() {
     .await;
 }
 
+struct StaticVertexToken;
+
+#[async_trait::async_trait]
+impl BearerTokenSource for StaticVertexToken {
+    async fn bearer_token(&self) -> openwave_core::Result<String> {
+        Ok("test-vertex-access-token".into())
+    }
+}
+
+#[tokio::test]
+async fn vertex_gemini_replay_request_contract() {
+    check_scenario(
+        "vertex_gemini",
+        "tool_loop_closure",
+        tool_loop_closure("gemini-3.6-flash"),
+        |base_url| {
+            Arc::new(
+                VertexProvider::new(
+                    "test-project",
+                    "global",
+                    Arc::new(StaticVertexToken),
+                    [("gemini-3.6-flash".to_string(), VertexModelFamily::Gemini)],
+                )
+                .unwrap()
+                .with_base_url(base_url),
+            )
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn vertex_anthropic_replay_request_contract() {
+    check_scenario(
+        "vertex_anthropic",
+        "tool_loop_closure",
+        tool_loop_closure("claude-opus-5"),
+        |base_url| {
+            Arc::new(
+                VertexProvider::new(
+                    "test-project",
+                    "global",
+                    Arc::new(StaticVertexToken),
+                    [("claude-opus-5".to_string(), VertexModelFamily::Anthropic)],
+                )
+                .unwrap()
+                .with_base_url(base_url),
+            )
+        },
+    )
+    .await;
+}
+
 /// Run every scenario through one adapter and compare both directions against
 /// the committed fixtures.
 async fn check_adapter(
@@ -312,6 +366,21 @@ async fn check_adapter(
             assert_matches_fixture(&format!("{provider}/{scenario}.events.json"), &events);
         }
     }
+}
+
+/// Run one high-value replay scenario through a hosted protocol route. The
+/// direct adapters already pin every ordinary request shape; this fixture is
+/// deliberately narrower and proves the provider-specific endpoint/auth/body
+/// delta without duplicating all four contracts.
+async fn check_scenario(
+    provider: &str,
+    scenario: &str,
+    request: ChatRequest,
+    build: impl Fn(&str) -> Arc<dyn ModelProvider>,
+) {
+    let response_body = terminal_frame(provider).to_string();
+    let (captured, _) = round_trip(build, request, response_body).await;
+    assert_matches_fixture(&format!("{provider}/{scenario}.request.json"), &captured);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,12 +470,12 @@ async fn intercept(State(endpoint): State<Endpoint>, request: Request) -> Respon
 /// subject is the request rather than the decode path.
 fn terminal_frame(provider: &str) -> &'static str {
     match provider {
-        "anthropic" => {
+        "anthropic" | "vertex_anthropic" => {
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
         }
         "openai" => "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
         "openai_compat" => "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        "gemini" => "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+        "gemini" | "vertex_gemini" => "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
         other => panic!("no terminal frame for {other}"),
     }
 }

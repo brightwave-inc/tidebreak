@@ -1,0 +1,106 @@
+{
+  "body": {
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Read both configs."
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "text": "Reading both."
+          },
+          {
+            "functionCall": {
+              "args": {
+                "path": "a.toml"
+              },
+              "name": "read_file"
+            },
+            "thoughtSignature": "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+          },
+          {
+            "functionCall": {
+              "args": {
+                "path": "b.toml"
+              },
+              "name": "read_file"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      {
+        "parts": [
+          {
+            "functionResponse": {
+              "name": "read_file",
+              "response": {
+                "output": "retries = 3"
+              }
+            }
+          },
+          {
+            "functionResponse": {
+              "name": "read_file",
+              "response": {
+                "error": "no such file"
+              }
+            }
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 4096,
+      "thinkingConfig": {
+        "thinkingLevel": "high"
+      }
+    },
+    "systemInstruction": {
+      "parts": [
+        {
+          "text": "Use the tools."
+        }
+      ]
+    },
+    "toolConfig": {
+      "functionCallingConfig": {
+        "mode": "AUTO"
+      }
+    },
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "description": "Read a file from the workspace.",
+            "name": "read_file",
+            "parameters": {
+              "properties": {
+                "path": {
+                  "type": "STRING"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "OBJECT"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/v1/projects/test-project/locations/global/publishers/google/models/gemini-3.6-flash:streamGenerateContent",
+  "query": "alt=sse"
+}

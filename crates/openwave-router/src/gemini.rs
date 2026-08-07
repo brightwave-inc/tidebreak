@@ -25,7 +25,7 @@ use openwave_core::provider::{
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
-use crate::google_auth::{valid_resource_segment, valid_vertex_location};
+use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
     classify_in_band_error, classify_provider_error, drain_frames, frame_data_raw,
     read_bounded_error_body,

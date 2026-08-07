@@ -12,6 +12,9 @@ pub mod router;
 mod sse;
 
 #[cfg(feature = "_http")]
+mod google;
+
+#[cfg(feature = "_http")]
 pub mod http;
 
 #[cfg(feature = "anthropic")]
@@ -32,19 +35,23 @@ pub mod gemini;
 #[cfg(feature = "gemini")]
 pub mod google_auth;
 
+#[cfg(all(feature = "anthropic", feature = "gemini"))]
+pub mod vertex;
+
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicProvider;
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiProvider;
+#[cfg(feature = "_http")]
+pub use google::{valid_resource_segment as valid_google_resource_segment, valid_vertex_location};
 #[cfg(feature = "gemini")]
-pub use google_auth::{
-    valid_resource_segment as valid_google_resource_segment, valid_vertex_location,
-    GoogleServiceAccount, GoogleServiceAccountTokenSource,
-};
+pub use google_auth::{GoogleServiceAccount, GoogleServiceAccountTokenSource};
 #[cfg(feature = "openai")]
 pub use openai::OpenAiProvider;
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
-pub use router::{BearerTokenSource, Route, RouteKind, Router, VertexRoute};
+pub use router::{BearerTokenSource, Route, RouteKind, Router, VertexModelFamily, VertexRoute};
 #[cfg(feature = "xai")]
 pub use xai::XaiProvider;
+#[cfg(all(feature = "anthropic", feature = "gemini"))]
+pub use vertex::VertexProvider;

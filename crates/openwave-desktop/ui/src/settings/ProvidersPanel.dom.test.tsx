@@ -282,31 +282,24 @@ describe("ProvidersPanel", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("configures Gemini service-account auth without projecting the secret", async () => {
-    const gemini: ProviderInfo = {
-      kind: "gemini",
+  it("configures Vertex service-account auth without projecting the secret", async () => {
+    const vertex: ProviderInfo = {
+      kind: "vertex",
       enabled: false,
       has_credential: false,
       models: [],
     };
-    const putProvider = vi.fn().mockResolvedValue(gemini);
+    const putProvider = vi.fn().mockResolvedValue(vertex);
     const client = { putProvider } as unknown as ApiClient;
 
     render(
       <ProvidersPanel
-        providers={[gemini]}
+        providers={[vertex]}
         client={client}
         onChanged={vi.fn()}
       />,
     );
 
-    const user = userEvent.setup();
-    await user.click(screen.getByLabelText("Gemini credential type"));
-    await user.click(
-      await screen.findByRole("option", {
-        name: "Google Cloud service account",
-      }),
-    );
     fireEvent.change(screen.getByLabelText("Vertex AI location"), {
       target: { value: "us-central1" },
     });
@@ -318,7 +311,7 @@ describe("ProvidersPanel", () => {
     );
 
     await waitFor(() =>
-      expect(putProvider).toHaveBeenCalledWith("gemini", {
+      expect(putProvider).toHaveBeenCalledWith("vertex", {
         enabled: true,
         vertex_location: "us-central1",
         credential: {
