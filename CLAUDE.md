@@ -133,8 +133,7 @@ Coverage percentage is not a goal and is not tracked. Confidence is.
 During active greenfield development, pull requests use a deliberately fast
 default gate. Full validation remains automatic after merge and on scheduled or
 manual runs. Add `full-ci` when a change warrants the heavyweight
-platform-neutral lanes before merge, and add `windows-ci` independently when it
-warrants the native Windows lane. Re-running the full workspace suite before
+platform-neutral lanes before merge. Re-running the full workspace suite before
 every push buys little and costs minutes on each iteration. Run a cheap relevant
 subset locally, push early, and let the configured lanes work while you keep
 going.
@@ -161,34 +160,23 @@ is the whole rule, and it is coarse on purpose:
   `full-ci` label is added. The always-running change detector rejects
   impossible narrower-scope combinations before conditional jobs consume them.
   There is no serial aggregate wrapper after the slowest job.
-- The native Windows lane checks the Windows-gated crates plus the host-broker,
-  desktop SQLite profile, and Credential Manager contracts. It runs
-  automatically for Rust-scoped pushes to `main`, weekly schedules, and manual
-  dispatches; a pull request runs it only with `windows-ci`. Use that label for
-  Windows-gated code, host-broker or sidecar packaging, desktop persistence or
-  keychain work, Windows release inputs, and native dependency or toolchain
-  changes. `full-ci` does not imply `windows-ci`. Superseded Windows jobs on
-  linear `main` are cancelled because the newer Rust-scoped state covers the
-  older one; pull-request, scheduled, and manual runs remain isolated.
-- The heavyweight `sandbox-resident container e2e` lane is scoped separately on
-  merges to `main`. It runs when the sandbox agent/protocol, container driver,
-  Dockerfile, or dependency/toolchain inputs change. A weekly scheduled run and
-  every `workflow_dispatch` exercise it as a backstop. Pull requests drive the
-  same host driver against the real sandbox agent over loopback, but only the
-  post-merge/scheduled lane proves the Docker packaging and container network
-  boundary.
+- The native Windows lane is **parked**, along with the release workflow's
+  Windows build — see [`docs/deferred.md`](docs/deferred.md). `windows-check`
+  and `prepare_windows`/`build_windows` are each gated behind a literal `false`
+  and never run; the `windows-ci` label currently does nothing. Releases are
+  macOS-only until those literals flip back. Nothing about the Windows boundary
+  has been declared unsupported, so a change that touches Windows-gated code
+  still deserves the same care — it just gets no CI signal right now.
 
 An ordinary pull request's heavy-job skips are the intended fast path, backed by
 full validation on `main`. For risky or boundary-crossing changes, add
-`full-ci` and wait for the applicable platform-neutral lanes; add `windows-ci`
-too when the Windows boundary is relevant. Run a cheap subset for fast local
-feedback on what you actually touched — `cargo check -p <crate>`, the one test
-module you changed, `tsc` — and push.
+`full-ci` and wait for the applicable platform-neutral lanes. Run a cheap subset
+for fast local feedback on what you actually touched — `cargo check -p <crate>`,
+the one test module you changed, `tsc` — and push.
 
 **The real trap is confusing the fast gate with full validation.** When a PR has
 `full-ci`, judge by whether every applicable platform-neutral job is present and
-passed, not by the absence of red. When it also has `windows-ci`, wait for the
-native Windows lane as well. A conflicting PR runs nothing but trivial policy
+passed, not by the absence of red. A conflicting PR runs nothing but trivial policy
 checks; rebase it before believing its status. `gh pr checks <n>` shows the
 truth.
 

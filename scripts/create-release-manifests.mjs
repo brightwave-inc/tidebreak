@@ -16,9 +16,21 @@ import { parseReleaseTag } from "./check-release-tag.mjs";
 // the single source of truth for what a release contains: it drives the
 // manifest, the `latest.json` platform keys, and the immutable hosting prefix.
 // macOS is Apple Silicon only while the product is in active development; see
-// docs/releases.md. Windows ships one unsigned NSIS installer, which is also
+// docs/releases.md.
+//
+// Windows packaging is paused (see docs/deferred.md), so no release currently
+// carries a Windows artifact. The descriptor is retained rather than deleted:
+// it shipped through v0.34.0, and resuming means moving it back into
+// RELEASE_PLATFORMS. Windows ships one unsigned NSIS installer, which is also
 // its Tauri updater artifact (Tauri v2 installs updates from the installer
 // itself, so the `.sig` covers those exact bytes).
+export const PAUSED_WINDOWS_PLATFORM = {
+  platform: "windows",
+  updaterPlatform: "windows",
+  architectures: ["x86_64"],
+  formats: [{ extension: "-setup.exe", format: "nsis", updater: true }],
+};
+
 export const RELEASE_PLATFORMS = [
   {
     platform: "macos",
@@ -29,12 +41,6 @@ export const RELEASE_PLATFORMS = [
       { extension: ".app.zip", format: "app.zip" },
       { extension: ".app.tar.gz", format: "app.tar.gz", updater: true },
     ],
-  },
-  {
-    platform: "windows",
-    updaterPlatform: "windows",
-    architectures: ["x86_64"],
-    formats: [{ extension: "-setup.exe", format: "nsis", updater: true }],
   },
 ];
 

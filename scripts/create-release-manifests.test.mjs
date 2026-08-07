@@ -51,10 +51,7 @@ test("creates a complete manifest and Tauri updater document", () => {
   const { manifest, latest } = createReleaseManifests({ dist, ...RELEASE });
 
   assert.equal(manifest.artifacts.length, EXPECTED_ARTIFACT_COUNT);
-  assert.deepEqual(Object.keys(latest.platforms), [
-    "darwin-aarch64",
-    "windows-x86_64",
-  ]);
+  assert.deepEqual(Object.keys(latest.platforms), ["darwin-aarch64"]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
     /releases\/v0\.4\.2\/macos\/aarch64\/OpenWave_0\.4\.2_aarch64\.app\.tar\.gz$/,
@@ -62,14 +59,6 @@ test("creates a complete manifest and Tauri updater document", () => {
   assert.equal(
     latest.platforms["darwin-aarch64"].signature,
     "signature-macos-aarch64",
-  );
-  assert.match(
-    latest.platforms["windows-x86_64"].url,
-    /releases\/v0\.4\.2\/windows\/x86_64\/OpenWave_0\.4\.2_x86_64-setup\.exe$/,
-  );
-  assert.equal(
-    latest.platforms["windows-x86_64"].signature,
-    "signature-windows-x86_64",
   );
 
   const diskManifest = JSON.parse(

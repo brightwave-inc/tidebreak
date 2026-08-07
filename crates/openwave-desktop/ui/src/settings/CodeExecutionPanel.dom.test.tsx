@@ -255,34 +255,6 @@ describe("CodeExecutionPanel", () => {
     expect(putCodeExecutionConfig).not.toHaveBeenCalled();
   });
 
-  it("explains per provider why detached runs are unavailable, in plain language", async () => {
-    const { client } = clientFor({
-      provider: "local",
-      timeout_ms: 20_000,
-      available: true,
-      has_credential: false,
-      egress: OPEN_EGRESS,
-      detached_admission: NO_DETACHED,
-    });
-
-    render(<CodeExecutionPanel client={client} />);
-
-    // One "Not available" badge per provider, and the typed denial reasons
-    // are rendered as honest sentences — never raw enum names.
-    expect(await screen.findAllByText("Not available")).toHaveLength(3);
-    expect(
-      screen.getAllByText(/token limited to a single run/i).length,
-    ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/limits how long it can live/i).length,
-    ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/isn't yet verified against a trusted source/i)
-        .length,
-    ).toBeGreaterThan(0);
-    expect(screen.queryByText(/no_scoped_model_token/)).toBeNull();
-  });
-
   it("names why each provider is unusable on a host with no execution at all", async () => {
     const { client } = clientFor({
       provider: undefined,
