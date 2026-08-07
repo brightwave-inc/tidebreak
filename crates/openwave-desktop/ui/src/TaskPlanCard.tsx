@@ -6,8 +6,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 export type TaskPlanCardProps = {
-  /** The chat's current plan, or `null` when it has none. */
-  plan: TaskPlan | null;
+  /**
+   * The chat's plan. A chat without one renders no card at all, which the
+   * caller decides — there is no such thing as an empty plan to draw.
+   */
+  plan: TaskPlan;
   /**
    * Whether the turn that wrote this plan is still running.
    *
@@ -41,10 +44,6 @@ export function TaskPlanCard({ plan, live }: TaskPlanCardProps) {
     setExpanded(live);
   }
 
-  // A chat with no plan says nothing at all: an empty checklist above the
-  // composer is chrome that describes nothing.
-  if (!plan) return null;
-
   const total = plan.steps.length;
   const completed = plan.steps.filter(
     (step) => step.status === "completed",
@@ -53,7 +52,7 @@ export function TaskPlanCard({ plan, live }: TaskPlanCardProps) {
   return (
     <section
       className={cn(
-        "bg-background w-full max-w-prose overflow-hidden rounded-lg border",
+        "bg-background mx-auto w-full max-w-3xl overflow-hidden rounded-lg border",
         !live && "opacity-80",
       )}
       aria-label="Task plan"
@@ -80,7 +79,14 @@ export function TaskPlanCard({ plan, live }: TaskPlanCardProps) {
         </span>
       </button>
       {expanded && (
-        <ol id={bodyId} className="grid gap-1.5 border-t px-2.5 py-2 text-sm">
+        // Capped and scrolled rather than allowed to grow: the card opens
+        // itself when a turn goes live, so a twenty-step plan would otherwise
+        // push the composer out of a pane that cannot scroll. The cap shows
+        // most of a plan at a glance and leaves the rest a scroll away.
+        <ol
+          id={bodyId}
+          className="grid max-h-64 gap-1.5 overflow-y-auto border-t px-2.5 py-2 text-sm"
+        >
           {plan.steps.map((step, index) => (
             <TaskPlanRow
               // Steps have no identity of their own — the plan is replaced
@@ -121,7 +127,10 @@ function TaskPlanRow({
       </span>
       <span
         className={cn(
-          "min-w-0",
+          // The line is the agent's own text, up to 500 characters of it and
+          // not necessarily with a space in them. It wraps rather than being
+          // clipped away by the card's own overflow.
+          "min-w-0 break-words",
           working ? "text-foreground" : "text-muted-foreground",
         )}
       >
