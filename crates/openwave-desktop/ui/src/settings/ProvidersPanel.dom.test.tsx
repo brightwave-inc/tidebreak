@@ -62,6 +62,9 @@ describe("ProvidersPanel", () => {
             display_name: "Vendor Model",
             context_window: 65_536,
             max_output_tokens: 8_192,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            reasoning_efforts: [],
           },
         ],
       }),
@@ -101,8 +104,62 @@ describe("ProvidersPanel", () => {
       id: "vendor/model",
       context_window: 32_768,
       max_output_tokens: 4_096,
+      input_modalities: ["text"],
+      supports_reasoning: false,
+      reasoning_efforts: [],
     });
     expect("display_name" in sent.models[0]).toBe(false);
+  });
+
+  it("configures xAI model capabilities without an endpoint override", async () => {
+    const xai: ProviderInfo = {
+      kind: "xai",
+      enabled: false,
+      has_credential: false,
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue(xai);
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel providers={[xai]} client={client} onChanged={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
+      target: { value: "grok-account-model" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("API key"), {
+      target: { value: "xai-key" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Image input" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Reasoning model" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "low" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "medium" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "high" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("xai", {
+        enabled: true,
+        credential: { type: "api_key", key: "xai-key" },
+        models: [
+          {
+            id: "grok-account-model",
+            display_name: undefined,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_modalities: ["text", "image"],
+            supports_reasoning: true,
+            reasoning_efforts: ["low", "medium", "high"],
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByPlaceholderText(/base URL/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Requests go directly to api.x.ai/v1.")).toBeInTheDocument();
   });
 
   it("does not expose custom model registration for curated providers", () => {

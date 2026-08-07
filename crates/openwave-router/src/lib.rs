@@ -23,6 +23,9 @@ pub mod openai_compat;
 #[cfg(feature = "openai")]
 pub mod openai;
 
+#[cfg(feature = "xai")]
+pub mod xai;
+
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
@@ -43,3 +46,5 @@ pub use openai::OpenAiProvider;
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
 pub use router::{BearerTokenSource, Route, RouteKind, Router, VertexRoute};
+#[cfg(feature = "xai")]
+pub use xai::XaiProvider;

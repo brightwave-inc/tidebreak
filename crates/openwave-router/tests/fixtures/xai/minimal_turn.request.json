@@ -1,0 +1,35 @@
+{
+  "body": {
+    "input": [
+      {
+        "content": [
+          {
+            "text": "You are a careful assistant.",
+            "type": "input_text"
+          }
+        ],
+        "role": "system"
+      },
+      {
+        "content": [
+          {
+            "text": "What changed in this file?",
+            "type": "input_text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "max_output_tokens": 1024,
+    "model": "grok-test",
+    "store": false,
+    "stream": true
+  },
+  "headers": {
+    "authorization": "<redacted>",
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "path": "/responses",
+  "query": null
+}

@@ -196,6 +196,7 @@ fn contains_secret_marker(message: &str) -> bool {
         "bearer ",
         "api_key",
         "api-key",
+        "api key",
         "apikey",
         "authorization:",
         "x-goog-api-key",

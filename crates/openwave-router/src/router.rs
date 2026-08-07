@@ -25,6 +25,8 @@ use crate::GeminiProvider;
 use crate::OpenAiCompatProvider;
 #[cfg(feature = "openai")]
 use crate::OpenAiProvider;
+#[cfg(feature = "xai")]
+use crate::XaiProvider;
 
 /// Header a model-gateway deployment reads to group inference into one
 /// conversation. Gateway adapters opt in explicitly; direct providers never
@@ -106,6 +108,8 @@ pub enum RouteKind {
     Anthropic,
     /// Native OpenAI Responses API (api.openai.com).
     Openai,
+    /// Native xAI Responses API (api.x.ai).
+    Xai,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
     /// Google Gemini Developer API (native GenerateContent protocol).
@@ -127,6 +131,7 @@ impl RouteKind {
         match self {
             RouteKind::Anthropic => "anthropic",
             RouteKind::Openai => "openai",
+            RouteKind::Xai => "xai",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
             RouteKind::ModelGateway => "model_gateway",
@@ -147,6 +152,7 @@ impl RouteKind {
         match value {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
+            "xai" => Some(Self::Xai),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
             "model_gateway" => Some(Self::ModelGateway),
@@ -249,6 +255,7 @@ impl Router {
         for kind in [
             RouteKind::Anthropic,
             RouteKind::Openai,
+            RouteKind::Xai,
             RouteKind::Gemini,
             RouteKind::ModelGateway,
             RouteKind::ModelGatewayOpenai,
@@ -401,6 +408,14 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             }
             Some(Arc::new(p))
         }
+        #[cfg(feature = "xai")]
+        RouteKind::Xai => {
+            let mut p = XaiProvider::new(route.api_key.clone());
+            if let Some(base) = &route.base_url {
+                p = p.with_base_url(base.clone());
+            }
+            Some(Arc::new(p))
+        }
         #[cfg(feature = "openai-compat")]
         RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
@@ -439,6 +454,8 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         RouteKind::Gemini => None,
         #[cfg(not(feature = "openai"))]
         RouteKind::Openai => None,
+        #[cfg(not(feature = "xai"))]
+        RouteKind::Xai => None,
         #[cfg(not(feature = "openai-compat"))]
         RouteKind::OpenaiCompatible => None,
     }
@@ -532,6 +549,28 @@ mod tests {
         let router = Router::build(vec![route(RouteKind::Openai, "sk-o", &["gpt-4o"], None)]);
         assert_eq!(router.select("gpt-4o"), Some(RouteKind::Openai));
         assert_eq!(router.select("unknown"), None);
+    }
+
+    #[test]
+    fn explicit_xai_model_selects_xai_without_compat_fallback() {
+        let router = Router::build(vec![
+            route(RouteKind::Xai, "xai-key", &["grok-custom"], None),
+            route(
+                RouteKind::OpenaiCompatible,
+                "compat-key",
+                &[],
+                Some("http://127.0.0.1:1234/v1"),
+            ),
+        ]);
+        assert_eq!(router.select("grok-custom"), Some(RouteKind::Xai));
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("xai")), "grok-custom"),
+            Some(RouteKind::Xai)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("openai")), "grok-custom"),
+            None
+        );
     }
 
     #[test]

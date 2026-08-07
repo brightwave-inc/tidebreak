@@ -617,6 +617,7 @@ mod tests {
                     display_name: None,
                     context_window: 32_768,
                     max_output_tokens: 4_096,
+                    ..Default::default()
                 }],
                 model_protocols: Default::default(),
             },

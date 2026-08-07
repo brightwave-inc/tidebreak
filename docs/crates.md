@@ -56,9 +56,9 @@ Major surfaces present today:
 
 ## `openwave-router` — model providers & routing 🟢
 
-Owns the concrete Anthropic and OpenAI-compatible provider adapters (including
-OpenAI, Fireworks, OpenRouter, vLLM, and LM Studio endpoints) plus a composite
-`Router`.
+Owns the concrete Anthropic, OpenAI Responses, xAI Responses, Gemini, and
+OpenAI-compatible provider adapters (including Fireworks, OpenRouter, vLLM,
+and LM Studio endpoints) plus a composite `Router`.
 
 The `Router` is itself a `ModelProvider`, so the agent loop holds one provider
 contract and does not depend on a concrete backend. Two things define it:

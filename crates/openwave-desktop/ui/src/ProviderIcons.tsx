@@ -52,6 +52,24 @@ export function GeminiIcon(props: IconProps) {
   );
 }
 
+export function XaiIcon(props: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M5 4l14 16" />
+      <path d="M19 4L5 20" />
+    </svg>
+  );
+}
+
 export function KimiIcon(props: IconProps) {
   return (
     <svg
@@ -113,6 +131,8 @@ export function ProviderIcon({
       return <ClaudeIcon {...rest} />;
     case "openai":
       return <OpenAIIcon {...rest} />;
+    case "xai":
+      return <XaiIcon {...rest} />;
     case "gemini":
       return <GeminiIcon {...rest} />;
     case "openai_compatible":

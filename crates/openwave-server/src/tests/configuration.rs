@@ -1298,6 +1298,184 @@ async fn models_catalog_includes_enabled_credentialed_providers() {
 }
 
 #[tokio::test]
+async fn xai_settings_publish_explicit_model_capabilities() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let endpoint_override = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/xai")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"base_url": "https://example.test/v1"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(endpoint_override.status(), StatusCode::BAD_REQUEST);
+
+    let missing_models = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/xai")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "credential": {"type": "api_key", "key": "xai-key"},
+                        "models": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_models.status(), StatusCode::BAD_REQUEST);
+
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/xai")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "credential": {"type": "api_key", "key": "xai-key"},
+                        "models": [{
+                            "id": "grok-account-model",
+                            "display_name": "Grok account model",
+                            "context_window": 500000,
+                            "max_output_tokens": 32768,
+                            "input_modalities": ["text", "image"],
+                            "supports_reasoning": true,
+                            "reasoning_efforts": ["low", "medium", "high"]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/models")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let catalog: serde_json::Value = json_body(response).await;
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["key"] == "xai::grok-account-model")
+        .unwrap();
+    assert_eq!(model["provider"], "xai");
+    assert_eq!(
+        model["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert_eq!(
+        model["reasoning_efforts"],
+        serde_json::json!(["low", "medium", "high"])
+    );
+    assert!(model["supports_reasoning"].as_bool().unwrap());
+    assert!(model["available"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn xai_config_builds_a_provider_qualified_native_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Xai,
+        &providers::ProviderCredential::api_key("xai-key"),
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Xai,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            vertex_location: None,
+            models: vec![providers::CustomModelConfig {
+                id: "grok-account-model".into(),
+                context_window: 500_000,
+                max_output_tokens: 32_768,
+                input_modalities: vec![
+                    crate::model_registry::InputModality::Text,
+                    crate::model_registry::InputModality::Image,
+                ],
+                supports_reasoning: true,
+                reasoning_efforts: vec![
+                    openwave_core::ReasoningEffort::Low,
+                    openwave_core::ReasoningEffort::Medium,
+                    openwave_core::ReasoningEffort::High,
+                ],
+                ..Default::default()
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].kind, openwave_router::RouteKind::Xai);
+    assert_eq!(routes[0].base_url, None);
+    assert_eq!(routes[0].curated_models, ["grok-account-model"]);
+
+    let router = openwave_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("xai")),
+            "grok-account-model"
+        ),
+        Some(openwave_router::RouteKind::Xai)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&openwave_core::ProviderId::new("openai")),
+            "grok-account-model"
+        ),
+        None
+    );
+}
+
+#[tokio::test]
 async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unavailable_providers() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -1712,6 +1890,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                     display_name: Some("Gateway Flagship".to_string()),
                     context_window: 1_000_000,
                     max_output_tokens: 64_000,
+                    ..Default::default()
                 },
                 providers::CustomModelConfig {
                     id: "gateway-haiku".to_string(),
@@ -1719,6 +1898,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                     display_name: Some("Gateway Haiku".to_string()),
                     context_window: 200_000,
                     max_output_tokens: 8_192,
+                    ..Default::default()
                 },
             ],
             model_protocols: Default::default(),

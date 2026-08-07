@@ -71,7 +71,7 @@ pub(super) async fn validate_model_selection(
         return Err(ServerError::bad_request_kind(
             "unknown_model",
             format!(
-                "model `{value}` is not registered for that provider; configure it under OpenAI-compatible models first"
+                "model `{value}` is not registered for that provider; configure it in that provider's model list first"
             ),
         ));
     };

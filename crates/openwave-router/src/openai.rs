@@ -1,4 +1,4 @@
-//! Native OpenAI Responses API provider.
+//! Shared native Responses API transport for OpenAI and xAI.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{
     classify_in_band_error, classify_provider_error, drain_frames, frame_data,
-    read_bounded_error_body,
+    read_bounded_error_body, safe_http_error,
 };
 use crate::BearerTokenSource;
 
@@ -27,6 +27,62 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const CHATGPT_BETA_HEADER: &str = "responses=v1";
 const DEFAULT_CHATGPT_ORIGINATOR: &str = "openwave";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponsesProfile {
+    OpenAi,
+    Xai,
+}
+
+impl ResponsesProfile {
+    const fn provider(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Xai => "xai",
+        }
+    }
+
+    fn classify_http_error(
+        self,
+        status: u16,
+        body: &str,
+        retry_after: Option<std::time::Duration>,
+    ) -> AgentError {
+        // xAI currently reports a bad API key as a 400 with a human message,
+        // rather than the 401 / `invalid_api_key` shape the shared classifier
+        // already recognizes. Inspect only for classification; the client-safe
+        // message still comes from the same bounded/redacted formatter.
+        if self == Self::Xai && status == 400 && xai_bad_api_key(body) {
+            return AgentError::Authentication(safe_http_error("xai", status, body));
+        }
+        classify_provider_error(self.provider(), status, body, retry_after)
+    }
+}
+
+fn xai_bad_api_key(body: &str) -> bool {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let top_level_error = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let error = parsed
+        .as_ref()
+        .map(|value| value.get("error").unwrap_or(value));
+    let code = error
+        .and_then(|value| value.get("code").or_else(|| value.get("type")))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let message = error
+        .and_then(|value| value.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or(top_level_error)
+        .to_ascii_lowercase();
+    matches!(code.as_str(), "invalid_api_key" | "authentication_error")
+        || message.contains("incorrect api key")
+        || message.contains("invalid api key")
+}
 
 /// A [`ModelProvider`] for OpenAI's native Responses API.
 #[derive(Clone)]
@@ -42,6 +98,7 @@ pub struct OpenAiProvider {
     chatgpt_account_id: Option<String>,
     /// `originator` header value when [`Self::chatgpt_account_id`] is set.
     chatgpt_originator: String,
+    profile: ResponsesProfile,
 }
 
 impl OpenAiProvider {
@@ -53,6 +110,23 @@ impl OpenAiProvider {
             token_source: None,
             chatgpt_account_id: None,
             chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
+            profile: ResponsesProfile::OpenAi,
+        }
+    }
+
+    pub(crate) fn for_profile(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        profile: ResponsesProfile,
+    ) -> Self {
+        Self {
+            client: crate::http::streaming_client(),
+            api_key: api_key.into(),
+            base_url: base_url.into(),
+            token_source: None,
+            chatgpt_account_id: None,
+            chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
+            profile,
         }
     }
 
@@ -90,11 +164,12 @@ impl OpenAiProvider {
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
     fn id(&self) -> ProviderId {
-        ProviderId::new("openai")
+        ProviderId::new(self.profile.provider())
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let body = build_request_json(&req)?;
+        let body = build_request_json_for(&req, self.profile)?;
+        let provider = self.profile.provider();
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
         let api_key = match &self.token_source {
             Some(source) => source.bearer_token_for(req.conversation).await?,
@@ -115,18 +190,15 @@ impl ModelProvider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|_| AgentError::Provider("openai request failed".into()))?;
+            .map_err(|_| AgentError::Provider(format!("{provider} request failed")))?;
 
         let status = response.status();
         if !status.is_success() {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(classify_provider_error(
-                "openai",
-                status.as_u16(),
-                &body,
-                retry_after,
-            ));
+            return Err(self
+                .profile
+                .classify_http_error(status.as_u16(), &body, retry_after));
         }
 
         let ceiling = crate::http::timeouts().total_stream;
@@ -140,7 +212,7 @@ impl ModelProvider for OpenAiProvider {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield ProviderEvent::Failed {
-                            error: ProviderErrorInfo::provider(error.client_message("openai")),
+                            error: ProviderErrorInfo::provider(error.client_message(provider)),
                         };
                         return;
                     }
@@ -148,7 +220,7 @@ impl ModelProvider for OpenAiProvider {
                 buffer.extend_from_slice(&chunk);
                 for frame in drain_frames(&mut buffer) {
                     if let Some(data) = frame_data(&frame) {
-                        for event in normalize(&data, &mut state) {
+                        for event in normalize_for(&data, &mut state, provider) {
                             yield event;
                         }
                     }
@@ -157,14 +229,16 @@ impl ModelProvider for OpenAiProvider {
             if !buffer.is_empty() {
                 let frame = String::from_utf8_lossy(&buffer).into_owned();
                 if let Some(data) = frame_data(&frame) {
-                    for event in normalize(&data, &mut state) {
+                    for event in normalize_for(&data, &mut state, provider) {
                         yield event;
                     }
                 }
             }
             if !state.terminal {
                 yield ProviderEvent::Failed {
-                    error: ProviderErrorInfo::provider("openai stream ended before completion"),
+                    error: ProviderErrorInfo::provider(format!(
+                        "{provider} stream ended before completion"
+                    )),
                 };
             }
         };
@@ -172,7 +246,15 @@ impl ModelProvider for OpenAiProvider {
     }
 }
 
+#[cfg(test)]
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
+    build_request_json_for(req, ResponsesProfile::OpenAi)
+}
+
+pub(crate) fn build_request_json_for(
+    req: &ChatRequest,
+    profile: ResponsesProfile,
+) -> Result<Value> {
     let input = build_input(req)?;
     let mut body = json!({
         "model": req.model,
@@ -184,10 +266,16 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
 
     if req.reasoning_model {
         if let Some(effort) = req.reasoning_effort {
-            body["reasoning"] = json!({ "effort": effort.as_str(), "summary": "auto" });
+            body["reasoning"] = if profile == ResponsesProfile::OpenAi {
+                json!({ "effort": effort.as_str(), "summary": "auto" })
+            } else {
+                json!({ "effort": effort.as_str() })
+            };
         }
-    } else if let Some(temperature) = req.temperature {
-        body["temperature"] = json!(temperature);
+    } else if profile == ResponsesProfile::OpenAi {
+        if let Some(temperature) = req.temperature {
+            body["temperature"] = json!(temperature);
+        }
     }
 
     if !req.tools.is_empty() {
@@ -229,7 +317,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         None => {}
         Some(other) => {
             return Err(AgentError::Provider(format!(
-                "openai cannot enforce response format {other:?}"
+                "Responses API cannot enforce response format {other:?}"
             )))
         }
     }
@@ -328,7 +416,7 @@ fn extend_input(
             }
             other => {
                 return Err(AgentError::Provider(format!(
-                    "openai cannot express content block {other:?}"
+                    "Responses API cannot express content block {other:?}"
                 )))
             }
         }
@@ -356,7 +444,7 @@ fn extend_assistant_input(
             ContentBlock::Text { text } => texts.push(text.clone()),
             ContentBlock::Image { .. } => {
                 return Err(AgentError::Provider(
-                    "openai cannot express an image in assistant history".into(),
+                    "Responses API cannot express an image in assistant history".into(),
                 ))
             }
             ContentBlock::ToolUse { id, name, input } => {
@@ -396,7 +484,7 @@ fn extend_assistant_input(
             )),
             other => {
                 return Err(AgentError::Provider(format!(
-                    "openai cannot express content block {other:?}"
+                    "Responses API cannot express content block {other:?}"
                 )))
             }
         }
@@ -472,7 +560,7 @@ fn openai_tool_choice(choice: &ToolChoice) -> Result<Value> {
         ToolChoice::Tool { name } => json!({ "type": "function", "name": name }),
         other => {
             return Err(AgentError::Provider(format!(
-                "openai cannot express tool choice {other:?}"
+                "Responses API cannot express tool choice {other:?}"
             )))
         }
     })
@@ -519,7 +607,16 @@ struct CallState {
     saw_argument_delta: bool,
 }
 
+#[cfg(test)]
 fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
+    normalize_for(data, state, "openai")
+}
+
+fn normalize_for(
+    data: &Value,
+    state: &mut StreamState,
+    provider: &'static str,
+) -> Vec<ProviderEvent> {
     if state.terminal {
         return Vec::new();
     }
@@ -527,10 +624,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     match event_type {
         "error" => {
             state.terminal = true;
-            let mut events = flush_search(state);
+            let mut events = flush_search(state, provider);
             events.push(ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&classify_in_band_error(
-                    "openai",
+                    provider,
                     data.get("error").unwrap_or(data),
                 )),
             });
@@ -576,14 +673,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         }
         "response.output_item.done" => {
             if data["item"]["type"] == "web_search_call" {
-                return finish_search(&data["item"], state);
+                return finish_search(&data["item"], state, provider);
             }
             start_call(data, state, true)
         }
         "response.completed" => {
             state.terminal = true;
             let response = &data["response"];
-            let mut events = flush_search(state);
+            let mut events = flush_search(state, provider);
             events.extend(usage_event(response));
             if state.refused {
                 events.push(ProviderEvent::Refusal {
@@ -604,7 +701,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         "response.incomplete" => {
             state.terminal = true;
             let response = &data["response"];
-            let mut events = flush_search(state);
+            let mut events = flush_search(state, provider);
             events.extend(usage_event(response));
             match response["incomplete_details"]["reason"].as_str() {
                 Some("max_output_tokens") => events.push(ProviderEvent::Stop {
@@ -614,9 +711,9 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     details: RefusalDetails::from_category(Some("content_filter")),
                 }),
                 _ => events.push(ProviderEvent::Failed {
-                    error: ProviderErrorInfo::provider(
-                        "openai response ended incomplete without a supported reason",
-                    ),
+                    error: ProviderErrorInfo::provider(format!(
+                        "{provider} response ended incomplete without a supported reason"
+                    )),
                 }),
             }
             events
@@ -624,9 +721,9 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         "response.failed" => {
             state.terminal = true;
             let error = data["response"].get("error").unwrap_or(&data["response"]);
-            let mut events = flush_search(state);
+            let mut events = flush_search(state, provider);
             events.push(ProviderEvent::Failed {
-                error: ProviderErrorInfo::from_error(&classify_in_band_error("openai", error)),
+                error: ProviderErrorInfo::from_error(&classify_in_band_error(provider, error)),
             });
             events
         }
@@ -640,10 +737,14 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
 /// search was pending before it. A search that ended any other way produced
 /// nothing to cite, so it goes out immediately as a failure — dropping it
 /// would hide from the host that the model tried to search at all.
-fn finish_search(item: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
+fn finish_search(
+    item: &Value,
+    state: &mut StreamState,
+    provider: &'static str,
+) -> Vec<ProviderEvent> {
     let input = search_input(item.get("action"));
     let status = item["status"].as_str().unwrap_or_default();
-    let mut events = flush_search(state);
+    let mut events = flush_search(state, provider);
     if status == "completed" {
         state.pending_search = Some(PendingSearch {
             input,
@@ -716,7 +817,7 @@ fn collect_citation(annotation: &Value, state: &mut StreamState) {
 
 /// Emit the pending search, if there is one, as a finished provider-executed
 /// call.
-fn flush_search(state: &mut StreamState) -> Vec<ProviderEvent> {
+fn flush_search(state: &mut StreamState, provider: &'static str) -> Vec<ProviderEvent> {
     let Some(search) = state.pending_search.take() else {
         return Vec::new();
     };
@@ -725,7 +826,7 @@ fn flush_search(state: &mut StreamState) -> Vec<ProviderEvent> {
         input: search.input,
         // A search that cited nothing still ran, and is reported as a search
         // that found nothing rather than as a failure.
-        output: json!({ "provider": "openai", "results": search.results }),
+        output: json!({ "provider": provider, "results": search.results }),
         is_error: false,
         replay: None,
     }]

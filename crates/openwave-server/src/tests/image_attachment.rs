@@ -657,6 +657,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
                 display_name: Some("Vendor Model".into()),
                 context_window: 65_536,
                 max_output_tokens: 8_192,
+                ..Default::default()
             }],
         },
     )

@@ -252,6 +252,8 @@ pub enum ProviderKind {
     Anthropic,
     /// Native OpenAI Responses API (api.openai.com).
     Openai,
+    /// Native xAI Responses API (api.x.ai).
+    Xai,
     /// Google Gemini Developer API (generativelanguage.googleapis.com).
     Gemini,
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
@@ -267,6 +269,7 @@ impl ProviderKind {
     pub const ALL: &'static [ProviderKind] = &[
         ProviderKind::Anthropic,
         ProviderKind::Openai,
+        ProviderKind::Xai,
         ProviderKind::Gemini,
         ProviderKind::OpenaiCompatible,
         ProviderKind::ModelGateway,
@@ -277,6 +280,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Openai => "openai",
+            ProviderKind::Xai => "xai",
             ProviderKind::Gemini => "gemini",
             ProviderKind::OpenaiCompatible => "openai_compatible",
             ProviderKind::ModelGateway => "model_gateway",
@@ -288,6 +292,7 @@ impl ProviderKind {
         match s {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
+            "xai" => Some(Self::Xai),
             "gemini" => Some(Self::Gemini),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "model_gateway" => Some(Self::ModelGateway),
@@ -453,11 +458,12 @@ pub struct ProviderConfig {
     /// credential. An absent value defaults to `global`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertex_location: Option<String>,
-    /// Explicit model ids served by a custom OpenAI-compatible endpoint.
+    /// Explicit model rows served by a configurable endpoint.
     ///
-    /// Curated providers ignore this field and obtain their models from the
-    /// host registry. Keeping custom entries beside the endpoint removes the
-    /// old ambiguous global free-form model setting.
+    /// OpenAI-compatible and xAI catalogs can change independently of an
+    /// OpenWave release, so their configured rows live beside the endpoint.
+    /// Other curated providers ignore this field and obtain their models from
+    /// the host registry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<CustomModelConfig>,
 }
@@ -482,8 +488,15 @@ fn default_custom_max_output_tokens() -> u32 {
     4_096
 }
 
-/// Conservative, user-inspectable capabilities for one model served by an
-/// OpenAI-compatible endpoint.
+fn default_custom_input_modalities() -> Vec<InputModality> {
+    vec![InputModality::Text]
+}
+
+/// User-inspectable routing limits and capabilities for one configured model.
+///
+/// OpenAI-compatible rows are validated to the conservative text-only shape.
+/// xAI rows may opt into the capabilities its first-party Responses adapter
+/// actually carries end to end.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct CustomModelConfig {
@@ -506,6 +519,30 @@ pub struct CustomModelConfig {
     /// Maximum output sent to the endpoint.
     #[serde(default = "default_custom_max_output_tokens")]
     pub max_output_tokens: u32,
+    /// Inputs OpenWave may place on this model's request.
+    #[serde(default = "default_custom_input_modalities")]
+    pub input_modalities: Vec<InputModality>,
+    /// Whether the model uses xAI's reasoning request shape.
+    #[serde(default)]
+    pub supports_reasoning: bool,
+    /// Reasoning-effort levels accepted by the model, ascending.
+    #[serde(default)]
+    pub reasoning_efforts: Vec<ReasoningEffort>,
+}
+
+impl Default for CustomModelConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            display_name: None,
+            upstream_id: None,
+            context_window: default_custom_context_window(),
+            max_output_tokens: default_custom_max_output_tokens(),
+            input_modalities: default_custom_input_modalities(),
+            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
+        }
+    }
 }
 
 /// Owned runtime policy resolved from a provider-qualified selection.
@@ -599,6 +636,7 @@ impl ResolvedModelPolicy {
     }
 
     fn custom_for(provider: ProviderKind, model: &CustomModelConfig) -> Self {
+        let first_party_xai = provider == ProviderKind::Xai;
         Self {
             key: model_registry::selection_key(provider, &model.id),
             id: model.id.clone(),
@@ -611,16 +649,22 @@ impl ResolvedModelPolicy {
             verification: VerificationTier::Unverified,
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
-            input_modalities: vec![InputModality::Text],
-            // Unknown endpoints get deliberately conservative request shaping.
-            // Capability editing can be added later without changing the key.
-            supports_reasoning: false,
+            input_modalities: if first_party_xai {
+                model.input_modalities.clone()
+            } else {
+                vec![InputModality::Text]
+            },
+            supports_reasoning: first_party_xai && model.supports_reasoning,
             // A pass-through endpoint cannot promise a provider-executed
             // search, whatever upstream model it is serving — the request
             // shape that would enable one is the vendor's own, and this route
             // does not speak it. Deliberately not inherited by `gateway_for`.
             supports_vendor_web_search: false,
-            reasoning_efforts: Vec::new(),
+            reasoning_efforts: if first_party_xai {
+                model.reasoning_efforts.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -633,6 +677,9 @@ impl ResolvedModelPolicy {
                 upstream_id: None,
                 context_window: default_custom_context_window(),
                 max_output_tokens: default_custom_max_output_tokens(),
+                input_modalities: default_custom_input_modalities(),
+                supports_reasoning: false,
+                reasoning_efforts: Vec::new(),
             },
         )
     }
@@ -785,7 +832,7 @@ pub struct ProviderInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub auth_mode: Option<ProviderAuthMode>,
-    /// Explicit custom model entries for this endpoint.
+    /// Explicit configured model entries for this endpoint.
     pub models: Vec<CustomModelConfig>,
 }
 
@@ -822,7 +869,8 @@ pub struct ProviderUpdate {
     pub vertex_location: Option<Option<String>>,
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
-    /// Replacement custom-model list. Only valid for `openai_compatible`.
+    /// Replacement configured-model list. Valid for `openai_compatible` and
+    /// first-party xAI.
     #[serde(default)]
     pub models: Option<Vec<CustomModelConfig>>,
 }
@@ -1060,6 +1108,11 @@ pub async fn update_provider(
     }
     match update.base_url {
         None => {}
+        Some(_) if kind == ProviderKind::Xai => {
+            return Err(ServerError::bad_request(
+                "xai uses its fixed first-party API endpoint",
+            ));
+        }
         Some(None) => config.base_url = None,
         Some(Some(url)) => {
             if url.is_empty() {
@@ -1086,12 +1139,12 @@ pub async fn update_provider(
         }
     }
     if let Some(models) = update.models {
-        if kind != ProviderKind::OpenaiCompatible {
+        if !matches!(kind, ProviderKind::OpenaiCompatible | ProviderKind::Xai) {
             return Err(ServerError::bad_request(
-                "custom models are only supported by openai_compatible",
+                "configured models are only supported by openai_compatible and xai",
             ));
         }
-        validate_custom_models(&models)?;
+        validate_configured_models(kind, &models)?;
         config.models = models;
     }
 
@@ -1099,6 +1152,11 @@ pub async fn update_provider(
     if kind == ProviderKind::OpenaiCompatible && config.enabled && config.base_url.is_none() {
         return Err(ServerError::bad_request(
             "openai_compatible requires a base_url when enabled",
+        ));
+    }
+    if kind == ProviderKind::Xai && config.enabled && config.models.is_empty() {
+        return Err(ServerError::bad_request(
+            "xai requires at least one configured model when enabled",
         ));
     }
 
@@ -1127,12 +1185,20 @@ pub async fn update_provider(
 pub(crate) fn validate_custom_models(
     models: &[CustomModelConfig],
 ) -> std::result::Result<(), ServerError> {
-    validate_custom_models_against(models, |id| {
-        model_registry::find_for(ProviderKind::OpenaiCompatible, id).is_some()
+    validate_configured_models(ProviderKind::OpenaiCompatible, models)
+}
+
+fn validate_configured_models(
+    kind: ProviderKind,
+    models: &[CustomModelConfig],
+) -> std::result::Result<(), ServerError> {
+    validate_configured_models_against(kind, models, |id| {
+        model_registry::find_for(kind, id).is_some()
     })
 }
 
-fn validate_custom_models_against(
+fn validate_configured_models_against(
+    kind: ProviderKind,
     models: &[CustomModelConfig],
     is_curated: impl Fn(&str) -> bool,
 ) -> std::result::Result<(), ServerError> {
@@ -1143,7 +1209,7 @@ fn validate_custom_models_against(
 
     if models.len() > MAX_CUSTOM_MODELS {
         return Err(ServerError::bad_request(format!(
-            "openai_compatible supports at most {MAX_CUSTOM_MODELS} custom models"
+            "{kind} supports at most {MAX_CUSTOM_MODELS} configured models"
         )));
     }
     let mut ids = std::collections::HashSet::new();
@@ -1155,22 +1221,22 @@ fn validate_custom_models_against(
             || id.chars().any(char::is_control)
         {
             return Err(ServerError::bad_request(
-                "custom model id must be non-empty, bounded, and contain no whitespace or control characters",
+                "configured model id must be non-empty, bounded, and contain no whitespace or control characters",
             ));
         }
         if id != model.id {
             return Err(ServerError::bad_request(
-                "custom model id must not have leading or trailing whitespace",
+                "configured model id must not have leading or trailing whitespace",
             ));
         }
         if !ids.insert(id) {
             return Err(ServerError::bad_request(format!(
-                "duplicate custom model id `{id}`"
+                "duplicate configured model id `{id}`"
             )));
         }
         if is_curated(id) {
             return Err(ServerError::bad_request(format!(
-                "custom model id `{id}` conflicts with a curated openai_compatible model"
+                "configured model id `{id}` conflicts with a curated {kind} model"
             )));
         }
         if model.display_name.as_ref().is_some_and(|name| {
@@ -1180,17 +1246,65 @@ fn validate_custom_models_against(
                 || name.chars().any(char::is_control)
         }) {
             return Err(ServerError::bad_request(
-                "custom model display_name must be non-empty, bounded, and contain no control characters",
+                "configured model display_name must be non-empty, bounded, and contain no control characters",
             ));
         }
         if !(1_024..=MAX_CONTEXT_WINDOW).contains(&model.context_window) {
             return Err(ServerError::bad_request(format!(
-                "custom model `{id}` context_window must be between 1024 and {MAX_CONTEXT_WINDOW}"
+                "configured model `{id}` context_window must be between 1024 and {MAX_CONTEXT_WINDOW}"
             )));
         }
         if model.max_output_tokens == 0 || model.max_output_tokens > model.context_window {
             return Err(ServerError::bad_request(format!(
-                "custom model `{id}` max_output_tokens must be positive and not exceed context_window"
+                "configured model `{id}` max_output_tokens must be positive and not exceed context_window"
+            )));
+        }
+        if model.input_modalities.is_empty()
+            || !model.input_modalities.contains(&InputModality::Text)
+            || model
+                .input_modalities
+                .iter()
+                .enumerate()
+                .any(|(index, modality)| model.input_modalities[..index].contains(modality))
+        {
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` input_modalities must contain text exactly once and no duplicates"
+            )));
+        }
+        if kind != ProviderKind::Xai && model.input_modalities != [InputModality::Text] {
+            return Err(ServerError::bad_request(
+                "only xai configured models may enable image input",
+            ));
+        }
+        if !model.supports_reasoning && !model.reasoning_efforts.is_empty() {
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` cannot list reasoning_efforts when supports_reasoning is false"
+            )));
+        }
+        if kind != ProviderKind::Xai
+            && (model.supports_reasoning || !model.reasoning_efforts.is_empty())
+        {
+            return Err(ServerError::bad_request(
+                "only xai configured models may enable reasoning",
+            ));
+        }
+        if model
+            .reasoning_efforts
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` reasoning_efforts must be unique and ascending"
+            )));
+        }
+        if model.reasoning_efforts.iter().any(|effort| {
+            !matches!(
+                effort,
+                ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High
+            )
+        }) {
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` uses a reasoning effort xai does not support"
             )));
         }
     }
@@ -1221,6 +1335,7 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         ProviderKind::Openai => std::env::var("OPENAI_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
+        ProviderKind::Xai => std::env::var("XAI_API_KEY").ok().filter(|k| !k.is_empty()),
         ProviderKind::Gemini => std::env::var("GEMINI_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
@@ -1242,6 +1357,7 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
     match kind {
         ProviderKind::Anthropic => openwave_router::RouteKind::Anthropic,
         ProviderKind::Openai => openwave_router::RouteKind::Openai,
+        ProviderKind::Xai => openwave_router::RouteKind::Xai,
         ProviderKind::Gemini => openwave_router::RouteKind::Gemini,
         ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
         ProviderKind::ModelGateway => openwave_router::RouteKind::ModelGateway,
@@ -1428,6 +1544,9 @@ pub async fn collect_routes(
         if kind == ProviderKind::OpenaiCompatible && config.base_url.is_none() {
             continue;
         }
+        if kind == ProviderKind::Xai && config.models.is_empty() {
+            continue;
+        }
         if kind == ProviderKind::OpenaiCompatible {
             let base = config.base_url.as_deref().unwrap_or("");
             if !(base.starts_with("https://") || base.starts_with("http://")) {
@@ -1502,7 +1621,9 @@ pub async fn resolve_model_policy(
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
         let models = match provider {
-            ProviderKind::OpenaiCompatible => read_config(store, provider).await?.models,
+            ProviderKind::OpenaiCompatible | ProviderKind::Xai => {
+                read_config(store, provider).await?.models
+            }
             // Resolution is not an offer: usability and routing gate the
             // gateway on policy separately, so the raw snapshot read here
             // only keeps stored selections legible.
@@ -1521,17 +1642,19 @@ pub async fn resolve_model_policy(
             }));
     }
 
-    let config = read_config(store, ProviderKind::OpenaiCompatible).await?;
     let mut owners = model_registry::models_named(value)
         .map(ResolvedModelPolicy::curated)
         .collect::<Vec<_>>();
-    owners.extend(
-        config
-            .models
-            .iter()
-            .filter(|model| model.id == value)
-            .map(|model| ResolvedModelPolicy::custom_for(ProviderKind::OpenaiCompatible, model)),
-    );
+    for provider in [ProviderKind::Xai, ProviderKind::OpenaiCompatible] {
+        let config = read_config(store, provider).await?;
+        owners.extend(
+            config
+                .models
+                .iter()
+                .filter(|model| model.id == value)
+                .map(|model| ResolvedModelPolicy::custom_for(provider, model)),
+        );
+    }
     match owners.len() {
         1 => return Ok(owners.pop()),
         count if count > 1 => return Ok(None),
@@ -1587,6 +1710,9 @@ pub async fn provider_is_usable(
             return Ok(false);
         }
     }
+    if kind == ProviderKind::Xai && config.models.is_empty() {
+        return Ok(false);
+    }
     Ok(true)
 }
 
@@ -1608,7 +1734,9 @@ pub async fn catalog_models(
         // and the managed gateway's entitled snapshot — which is empty on an
         // unmanaged profile, so no gateway row ever reaches the catalog there.
         let configured = match kind {
-            ProviderKind::OpenaiCompatible => read_config(store, kind).await?.models,
+            ProviderKind::OpenaiCompatible | ProviderKind::Xai => {
+                read_config(store, kind).await?.models
+            }
             ProviderKind::ModelGateway => gateway_models(store, policy).await?,
             _ => Vec::new(),
         };
@@ -1720,6 +1848,10 @@ mod tests {
                 ProviderKind::Anthropic,
                 ProviderCredential::api_key("existing-api-key"),
             ),
+            (
+                ProviderKind::Xai,
+                ProviderCredential::api_key("existing-xai-api-key"),
+            ),
             (ProviderKind::Openai, ProviderCredential::Oauth {}),
             (
                 ProviderKind::Gemini,
@@ -1738,6 +1870,11 @@ mod tests {
                 Some(credential)
             );
         }
+        assert!(
+            write_credential(&secrets, ProviderKind::Xai, &ProviderCredential::Oauth {})
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1772,6 +1909,11 @@ mod tests {
             "provider.anthropic.credential"
         );
         assert_eq!(ProviderKind::Openai.setting_key(), "provider.openai");
+        assert_eq!(ProviderKind::parse("xai"), Some(ProviderKind::Xai));
+        assert_eq!(
+            ProviderKind::Xai.credential_key(),
+            "provider.xai.credential"
+        );
     }
 
     #[test]
@@ -1811,6 +1953,7 @@ mod tests {
             display_name: None,
             context_window: 32_768,
             max_output_tokens: 4_096,
+            ..Default::default()
         };
         let json = serde_json::to_value(&unset).expect("a model config serializes");
         assert!(
@@ -1866,12 +2009,17 @@ mod tests {
             display_name: Some("Local Model".into()),
             context_window: 32_768,
             max_output_tokens: 4_096,
+            ..Default::default()
         };
         assert!(validate_custom_models(std::slice::from_ref(&valid)).is_ok());
         assert!(validate_custom_models(&[valid.clone(), valid.clone()]).is_err());
         assert!(
-            validate_custom_models_against(std::slice::from_ref(&valid), |id| id == "local/model")
-                .is_err(),
+            validate_configured_models_against(
+                ProviderKind::OpenaiCompatible,
+                std::slice::from_ref(&valid),
+                |id| id == "local/model"
+            )
+            .is_err(),
             "custom ids must not shadow a curated id under the same provider"
         );
         assert!(validate_custom_models(&[CustomModelConfig {
@@ -1880,6 +2028,7 @@ mod tests {
             display_name: None,
             context_window: 32_768,
             max_output_tokens: 4_096,
+            ..Default::default()
         }])
         .is_err());
         assert!(validate_custom_models(&[CustomModelConfig {
@@ -1888,8 +2037,39 @@ mod tests {
             display_name: None,
             context_window: 1_000,
             max_output_tokens: 4_096,
+            ..Default::default()
         }])
         .is_err());
+    }
+
+    #[test]
+    fn xai_configured_models_carry_only_supported_capabilities() {
+        let model = CustomModelConfig {
+            id: "grok-account-model".into(),
+            display_name: Some("Grok account model".into()),
+            context_window: 500_000,
+            max_output_tokens: 32_768,
+            input_modalities: vec![InputModality::Text, InputModality::Image],
+            supports_reasoning: true,
+            reasoning_efforts: vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ],
+            ..Default::default()
+        };
+        validate_configured_models(ProviderKind::Xai, std::slice::from_ref(&model)).unwrap();
+
+        let policy = ResolvedModelPolicy::custom_for(ProviderKind::Xai, &model);
+        assert_eq!(policy.provider, ProviderKind::Xai);
+        assert_eq!(policy.input_modalities, model.input_modalities);
+        assert!(policy.supports_reasoning);
+        assert_eq!(policy.reasoning_efforts, model.reasoning_efforts);
+
+        let mut unsupported = model.clone();
+        unsupported.reasoning_efforts.push(ReasoningEffort::XHigh);
+        assert!(validate_configured_models(ProviderKind::Xai, &[unsupported]).is_err());
+        assert!(validate_configured_models(ProviderKind::OpenaiCompatible, &[model]).is_err());
     }
 
     #[test]
@@ -1945,6 +2125,7 @@ mod tests {
                 display_name: None,
                 context_window: 32_768,
                 max_output_tokens: 4_096,
+                ..Default::default()
             },
         );
         assert_eq!(custom.verification, VerificationTier::Unverified);
