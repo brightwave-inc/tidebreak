@@ -3715,3 +3715,108 @@ fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
         ErrorCode::Denied
     );
 }
+
+#[test]
+fn purge_conversation_subject_forgets_deleted_chat_authority() {
+    let (_temp, broker, path) = setup();
+    let conversation = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let other_subject = GrantSubject::conversation(other).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    // A second conversation attached to the same root must survive the purge.
+    let attach = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::AttachRoot(RootAttachmentMutationRequest {
+            operation_id: OperationId::new(),
+            subject: other_subject,
+            conversation_id: other,
+            root_id: registered.root.root_id,
+            consent_method: Some(ConsentMethod::PermissionDialog),
+        }),
+    }))
+    .unwrap();
+    assert!(matches!(
+        attach,
+        ControlResult::AttachRoot(RootAttachmentMutationResult { changed: true, .. })
+    ));
+
+    let purge = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::PurgeConversationSubject(PurgeConversationSubjectRequest {
+            conversation_id: conversation,
+        }),
+    }))
+    .unwrap();
+    assert_eq!(
+        purge,
+        ControlResult::PurgeConversationSubject(PurgeConversationSubjectResult { changed: true })
+    );
+
+    let grants = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListGrantStatements,
+    }))
+    .unwrap();
+    let ControlResult::ListGrantStatements { grants } = grants else {
+        panic!("unexpected control result");
+    };
+    assert!(
+        grants.iter().all(|grant| grant.subject != subject),
+        "deleted conversation grants must be gone: {grants:?}"
+    );
+    assert!(
+        grants.iter().any(|grant| grant.subject == other_subject),
+        "surviving conversation grants must remain: {grants:?}"
+    );
+
+    // Root stays for the other conversation.
+    let context = ExecutionContext::standalone(other).unwrap();
+    assert!(operate(
+        &broker.operator(),
+        context,
+        OperationRequest::ReadFile(PathRequest {
+            root_id: registered.root.root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }),
+    )
+    .is_ok());
+
+    let dead = ExecutionContext::standalone(conversation).unwrap();
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            dead,
+            OperationRequest::ReadFile(PathRequest {
+                root_id: registered.root.root_id,
+                path: RelativePath::parse("note.txt").unwrap(),
+            }),
+        ),
+        Err(ErrorResponse {
+            code: ErrorCode::Denied,
+            ..
+        })
+    ));
+
+    let again = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::PurgeConversationSubject(PurgeConversationSubjectRequest {
+            conversation_id: conversation,
+        }),
+    }))
+    .unwrap();
+    assert_eq!(
+        again,
+        ControlResult::PurgeConversationSubject(PurgeConversationSubjectResult { changed: false })
+    );
+}

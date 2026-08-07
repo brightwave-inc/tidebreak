@@ -166,7 +166,16 @@ fn read_marker(marker: &Path) -> Result<Option<SchemaMarker>> {
 }
 
 fn reset_pre_v1_state(database: &Path) -> Result<()> {
-    remove_sqlite_files(database)
+    remove_sqlite_files(database)?;
+    // Host-broker authority is durable beside SQLite, not inside it. An epoch
+    // wipe throws away every conversation id the product will ever know; grants
+    // and attachments keyed to those ids would otherwise keep authorizing work
+    // against subjects that can never come back. Clear the broker's durable
+    // files with the database during disposable pre-v1 resets.
+    let data_dir = database
+        .parent()
+        .ok_or_else(|| AgentError::config("local SQLite database path has no parent directory"))?;
+    remove_host_broker_durable_state(data_dir)
 }
 
 fn remove_sqlite_files(database: &Path) -> Result<()> {
@@ -177,6 +186,34 @@ fn remove_sqlite_files(database: &Path) -> Result<()> {
             Err(error) => {
                 return Err(AgentError::config(format!(
                     "failed to reset local SQLite database file {}: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Durable host-broker files that outlive SQLite unless explicitly cleared.
+///
+/// Conversation-scoped grants and attachments name product UUIDs. After a
+/// pre-v1 epoch reset those UUIDs are gone from the journal, so leaving these
+/// files would keep live authority for deleted subjects and show ghost chats
+/// on the Permissions surface.
+fn remove_host_broker_durable_state(data_dir: &Path) -> Result<()> {
+    for name in [
+        "host-broker-state.json",
+        "host-broker.lock",
+        "host-broker-audit.jsonl",
+        "host-broker-audit.previous.jsonl",
+    ] {
+        let path = data_dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AgentError::config(format!(
+                    "failed to reset host-broker durable file {}: {error}",
                     path.display()
                 )))
             }
@@ -388,7 +425,10 @@ mod tests {
             b"unreachable private scratch"
         );
         assert_eq!(std::fs::read(receipt).unwrap(), b"native recovery state");
-        assert_eq!(std::fs::read(broker).unwrap(), b"native broker state");
+        assert!(
+            !broker.exists(),
+            "epoch reset must clear host-broker durable authority with the database"
+        );
         assert!(!dir.path().join(VECTOR_DIRECTORY).exists());
         assert_eq!(
             serde_json::from_slice::<SchemaMarker>(

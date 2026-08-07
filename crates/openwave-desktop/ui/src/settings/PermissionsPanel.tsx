@@ -152,19 +152,59 @@ export function levelKey(statement: ConsentStatementSnapshot): string {
 }
 
 /**
+ * Whether a statement's subject can still be resolved in product state.
+ * Missing titles are normal for untitled chats; the caller passes known live
+ * ids when it wants to distinguish deleted subjects from untitled ones.
+ */
+export function isMissingSubject(
+  statement: ConsentStatementSnapshot,
+  known?: { chatIds?: ReadonlySet<string>; projectIds?: ReadonlySet<string> },
+): boolean {
+  if (!known) return false;
+  if (statement.level.level === "chat") {
+    return known.chatIds ? !known.chatIds.has(statement.level.chat_id) : false;
+  }
+  return known.projectIds
+    ? !known.projectIds.has(statement.level.project_id)
+    : false;
+}
+
+/**
  * What a group of statements applies to, named the way the reader chose it. A
  * project statement says so out loud: it reaches conversations that have not
- * been started yet, which is the whole point and also the thing worth being
- * able to see.
+ * been started yet. When `known` is provided, subjects missing from product
+ * state are labeled as deleted rather than as opaque ids.
  */
-export function levelLabel(statement: ConsentStatementSnapshot): string {
+export function levelLabel(
+  statement: ConsentStatementSnapshot,
+  known?: { chatIds?: ReadonlySet<string>; projectIds?: ReadonlySet<string> },
+): string {
   const title = statement.level_title?.trim();
   if (statement.level.level === "project") {
+    if (isMissingSubject(statement, known)) {
+      return `Deleted project ${shortOpaqueId(statement.level.project_id)}`;
+    }
     return title
       ? `Everything in ${title}`
       : `Everything in project ${shortOpaqueId(statement.level.project_id)}`;
   }
+  if (isMissingSubject(statement, known)) {
+    return `Deleted chat ${shortOpaqueId(statement.level.chat_id)}`;
+  }
   return title || `Chat ${shortOpaqueId(statement.level.chat_id)}`;
+}
+
+/** Statements that reach one conversation: its own grants plus project grants. */
+export function statementsForChat(
+  statements: readonly ConsentStatementSnapshot[],
+  chat: { id: string; project_id: string | null },
+): ConsentStatementSnapshot[] {
+  return statements.filter((statement) => {
+    if (statement.level.level === "chat") {
+      return statement.level.chat_id === chat.id;
+    }
+    return chat.project_id != null && statement.level.project_id === chat.project_id;
+  });
 }
 
 function grantedAtLabel(statement: ConsentStatementSnapshot): string {
@@ -188,6 +228,7 @@ export function handleKey(statement: ConsentStatementSnapshot): string {
 /** Statements in listing order, bucketed by what they reach, order preserved. */
 export function groupByLevel(
   statements: readonly ConsentStatementSnapshot[],
+  known?: { chatIds?: ReadonlySet<string>; projectIds?: ReadonlySet<string> },
 ): { key: string; label: string; statements: ConsentStatementSnapshot[] }[] {
   const groups = new Map<
     string,
@@ -200,7 +241,7 @@ export function groupByLevel(
     else
       groups.set(key, {
         key,
-        label: levelLabel(statement),
+        label: levelLabel(statement, known),
         statements: [statement],
       });
   }
@@ -239,13 +280,39 @@ function StatementRow({
   );
 }
 
-export function PermissionsPanel({ client }: { client: ApiClient }) {
+export type PermissionsPanelProps = {
+  client: ApiClient;
+  /**
+   * When set, only statements that reach this conversation (chat-level grants
+   * plus applicable project grants) are shown, and the chrome is panel-sized
+   * rather than the settings page shell.
+   */
+  chat?: { id: string; project_id: string | null };
+  /** Live chat ids, used to label deleted subjects on the global surface. */
+  knownChatIds?: ReadonlySet<string>;
+  /** Live project ids, used to label deleted subjects on the global surface. */
+  knownProjectIds?: ReadonlySet<string>;
+};
+
+export function PermissionsPanel({
+  client,
+  chat,
+  knownChatIds,
+  knownProjectIds,
+}: PermissionsPanelProps) {
   const [statements, setStatements] = useState<
     ConsentStatementSnapshot[] | null
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
+  const known =
+    knownChatIds || knownProjectIds
+      ? { chatIds: knownChatIds, projectIds: knownProjectIds }
+      : undefined;
+
+  const chatId = chat?.id ?? null;
+  const chatProjectId = chat?.project_id ?? null;
 
   const reload = useCallback(async () => {
     try {
@@ -253,12 +320,17 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
         client.listConsentStatements(),
         listCapabilityConsents(),
       ]);
-      setStatements([...tool, ...capability]);
+      const all = [...tool, ...capability];
+      setStatements(
+        chatId
+          ? statementsForChat(all, { id: chatId, project_id: chatProjectId })
+          : all,
+      );
       setError(null);
     } catch {
       setError("Saved approvals could not be loaded.");
     }
-  }, [client]);
+  }, [client, chatId, chatProjectId]);
 
   useEffect(() => {
     void reload();
@@ -274,12 +346,13 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
               statement,
             )}” in ${levelLabel(
               statement,
+              known,
             ).toLowerCase()} — and command access to it, which depends on reading.`
           : `The agent will ask again before ${verbLabel(
               statement.verb,
             ).toLowerCase()} covered by “${resourceLabel(
               statement,
-            )}” in ${levelLabel(statement).toLowerCase()}.`,
+            )}” in ${levelLabel(statement, known).toLowerCase()}.`,
       confirmLabel: "Revoke",
       destructive: true,
     });
@@ -302,21 +375,18 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
     }
   }
 
-  return (
-    <SettingsPanel
-      title="Permissions"
-      description="What the agent can do without asking. Revoke anything to be asked again."
-      busy={statements === null}
-    >
+  const body = (
+    <>
       {error && <SettingsError>{error}</SettingsError>}
       {statements !== null && statements.length === 0 && !error && (
         <p className="text-sm text-muted-foreground">
-          Nothing saved yet. When you answer an approval with “always allow”
-          or connect a folder, it appears here.
+          {chat
+            ? "Nothing saved for this chat yet. When you answer an approval with “always allow” or connect a folder, it appears here."
+            : "Nothing saved yet. When you answer an approval with “always allow” or connect a folder, it appears here."}
         </p>
       )}
       {statements !== null &&
-        groupByLevel(statements).map((group) => (
+        groupByLevel(statements, known).map((group) => (
           <SettingsSection key={group.key} title={group.label}>
             <div className="flex flex-col gap-4">
               {group.statements.map((statement) => (
@@ -331,6 +401,35 @@ export function PermissionsPanel({ client }: { client: ApiClient }) {
           </SettingsSection>
         ))}
       {dialog}
+    </>
+  );
+
+  if (chat) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+        <div>
+          <h2 className="text-sm font-medium">Permissions</h2>
+          <p className="text-muted-foreground mt-1 text-sm">
+            What this chat can do without asking. Project-wide approvals that
+            reach it are included. Revoke anything to be asked again.
+          </p>
+        </div>
+        {statements === null ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          body
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <SettingsPanel
+      title="Permissions"
+      description="What the agent can do without asking. Revoke anything to be asked again."
+      busy={statements === null}
+    >
+      {body}
     </SettingsPanel>
   );
 }

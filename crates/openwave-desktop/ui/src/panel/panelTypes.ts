@@ -17,6 +17,8 @@ export type PanelContent =
   | { type: "document"; documentId: string; citationId?: string }
   | { type: "outputs"; outputId?: string }
   | { type: "folders" }
+  /** Standing approvals that reach this conversation. */
+  | { type: "permissions" }
   /** This conversation's background agents, as a table of runs. */
   | { type: "agents" }
   /** One background agent run, opened from the agents table or the transcript. */

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bot, ChevronDown, FolderOpen, Shapes } from "lucide-react";
+import { Bot, ChevronDown, FolderOpen, Shapes, Shield } from "lucide-react";
 
 import type { AgentRun } from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
@@ -37,8 +37,12 @@ export type ChatStatusChipProps = {
   onOpenOutputs: () => void;
   /** Bring the Folders panel forward. */
   onOpenFolders: () => void;
+  /** Bring the Permissions panel forward. */
+  onOpenPermissions: () => void;
   /** Bring the agents table forward. */
   onOpenAgents: () => void;
+  /** How many standing approvals reach this chat, when known. */
+  permissionCount?: number;
 };
 
 /**
@@ -46,7 +50,7 @@ export type ChatStatusChipProps = {
  * work first, what it has produced otherwise.
  *
  * Behind it, the places that describe only this conversation — its outputs,
- * its folders, its background agents. The context meter sits beside this chip
+ * its folders, its permissions, its background agents. The context meter sits beside this chip
  * in the header; the composer still owns the chat's settings (model, mode,
  * effort). This chip is the conversation's activity, not a second copy of
  * those controls.
@@ -57,7 +61,9 @@ export function ChatStatusChip({
   runs,
   onOpenOutputs,
   onOpenFolders,
+  onOpenPermissions,
   onOpenAgents,
+  permissionCount,
 }: ChatStatusChipProps) {
   const [open, setOpen] = useState(false);
 
@@ -97,6 +103,15 @@ export function ChatStatusChip({
         : runs.length === 1
           ? "1 finished"
           : `${runs.length} finished`;
+
+  const permissionsSummary =
+    permissionCount == null
+      ? "Saved approvals"
+      : permissionCount === 0
+        ? "None saved"
+        : permissionCount === 1
+          ? "1 saved"
+          : `${permissionCount} saved`;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -142,6 +157,15 @@ export function ChatStatusChip({
           onClick={() => {
             setOpen(false);
             onOpenFolders();
+          }}
+        />
+        <DetailRow
+          icon={<Shield className="size-3.5" aria-hidden="true" />}
+          label="Permissions"
+          value={permissionsSummary}
+          onClick={() => {
+            setOpen(false);
+            onOpenPermissions();
           }}
         />
         <DetailRow

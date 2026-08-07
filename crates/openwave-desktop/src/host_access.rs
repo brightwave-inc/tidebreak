@@ -80,6 +80,71 @@ impl HostAccess {
             .map_err(|_| "host access store was initialized more than once".to_owned())
     }
 
+    /// Drop conversation-scoped broker rows whose chats no longer exist.
+    ///
+    /// Epoch resets wipe broker state with SQLite. Normal chat delete purges
+    /// the subject after detach. This catch-up covers interrupted deletes and
+    /// older profiles that retained orphan grants across product history.
+    pub(crate) async fn reconcile_orphaned_conversation_authority(&self) -> Result<(), String> {
+        let Some(store) = self.store() else {
+            return Ok(());
+        };
+        let live: std::collections::HashSet<Uuid> = store
+            .list_chats()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|chat| chat.id.0)
+            .collect();
+        let result = self
+            .broker
+            .control(ControlRequest::ListGrantStatements)
+            .await
+            .map_err(|error| error.to_string())?;
+        let ControlResult::ListGrantStatements { grants } = result else {
+            return Err("host broker returned an unexpected response".to_owned());
+        };
+        let mut orphan_conversations = std::collections::HashSet::new();
+        for grant in grants {
+            if grant.subject.kind() != openwave_host_broker::SubjectKind::Conversation {
+                continue;
+            }
+            let conversation_id = grant.subject.id();
+            if !live.contains(&conversation_id) {
+                orphan_conversations.insert(conversation_id);
+            }
+        }
+        // Attachments can linger without a grant statement if only detach was
+        // skipped; list unavailable roots' attached conversations too.
+        let result = self
+            .broker
+            .control(ControlRequest::ListUnavailableRoots)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let ControlResult::ListUnavailableRoots { roots } = result {
+            for root in roots {
+                for conversation_id in root.attached_conversations {
+                    if !live.contains(&conversation_id) {
+                        orphan_conversations.insert(conversation_id);
+                    }
+                }
+            }
+        }
+        for conversation_id in orphan_conversations {
+            let result = self
+                .broker
+                .control(ControlRequest::PurgeConversationSubject(
+                    openwave_host_broker::PurgeConversationSubjectRequest { conversation_id },
+                ))
+                .await
+                .map_err(|error| error.to_string())?;
+            let ControlResult::PurgeConversationSubject(_) = result else {
+                return Err("host broker returned an unexpected response".to_owned());
+            };
+        }
+        Ok(())
+    }
+
     pub(crate) fn store(&self) -> Option<&std::sync::Arc<dyn Store>> {
         self.store.get()
     }
@@ -588,8 +653,10 @@ pub(crate) async fn list_capability_consents(
 /// build does not know how to render.
 ///
 /// A subject whose chat or project no longer exists keeps its row with no
-/// title: the grant still conveys authority until something revokes it, and
-/// the read model exists precisely so such consent stays visible.
+/// title until purge or revoke removes it. Conversation subjects are purged
+/// on chat delete (and should not linger after an epoch wipe); this fallback
+/// covers the brief window before cleanup and any project subject still live
+/// without a title.
 async fn capability_statement(
     store: &dyn Store,
     grant: openwave_host_broker::GrantStatementSummary,
@@ -889,6 +956,56 @@ pub(crate) async fn forget_folder(
         return Err("host broker returned an unexpected response".to_owned());
     };
     Ok(result.revoked)
+}
+
+/// Forget host-broker authority held by a conversation that no longer exists.
+///
+/// Chat ids are never reused. After the product deletes a chat, grants and
+/// attachments for that subject are leftover authority with no product surface
+/// left to exercise them. Detach still happens first while the chat exists;
+/// this is the terminal cleanup for any residual conversation-scoped rows.
+#[tauri::command]
+pub(crate) async fn purge_deleted_conversation_subject(
+    state: State<'_, HostAccess>,
+    request: PurgeDeletedConversationSubjectRequest,
+) -> Result<bool, String> {
+    if request.chat_id.is_nil() {
+        return Err("invalid conversation identity".to_owned());
+    }
+    // Refuse while the chat still exists: purge is for deleted subjects, not a
+    // shortcut around disconnect.
+    if let Some(store) = state.store() {
+        if store
+            .get_chat(ChatId::from(request.chat_id))
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err(
+                "disconnect folders and delete the chat before purging its host authority"
+                    .to_owned(),
+            );
+        }
+    }
+    let result = state
+        .broker
+        .control(ControlRequest::PurgeConversationSubject(
+            openwave_host_broker::PurgeConversationSubjectRequest {
+                conversation_id: request.chat_id,
+            },
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::PurgeConversationSubject(result) = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    Ok(result.changed)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PurgeDeletedConversationSubjectRequest {
+    chat_id: Uuid,
 }
 
 async fn approved_folders(state: &HostAccess) -> Result<Vec<ConnectedFolder>, String> {

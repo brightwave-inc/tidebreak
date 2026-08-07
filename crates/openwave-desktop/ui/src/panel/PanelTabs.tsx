@@ -1,4 +1,4 @@
-import { Bot, FileText, FolderOpen, Package, X } from "lucide-react";
+import { Bot, FileText, FolderOpen, Package, Shield, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "./panelTypes";
@@ -19,6 +19,8 @@ function panelTabFallbackLabel(panel: PanelContent): string {
       return panel.outputId ? "Output" : "Outputs";
     case "folders":
       return "Folders";
+    case "permissions":
+      return "Permissions";
     case "agents":
       return "Agents";
     case "agent":
@@ -35,6 +37,8 @@ function PanelTabIcon({ panel }: { panel: PanelContent }) {
       return <Package className={className} />;
     case "folders":
       return <FolderOpen className={className} />;
+    case "permissions":
+      return <Shield className={className} />;
     case "agents":
     case "agent":
       return <Bot className={className} />;

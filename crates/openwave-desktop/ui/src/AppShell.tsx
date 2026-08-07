@@ -15,6 +15,7 @@ import { resolveServerInfo } from "./boot";
 import {
   deletionDescription,
   detachChatFolders,
+  purgeDeletedChatHostAuthority,
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
@@ -278,6 +279,17 @@ export function AppShell() {
     try {
       await detachChatFolders(current);
       await client.deleteChat(target.id);
+      // Chat ids are never reused; residual broker grants for this subject are
+      // leftover authority and would otherwise haunt Permissions as a ghost chat.
+      try {
+        await purgeDeletedChatHostAuthority(target.id);
+      } catch (err) {
+        // Product delete already committed. Surface the host cleanup failure
+        // without undoing the delete — startup reconcile is the backup path.
+        chatListActions.setChatsError(
+          `Chat deleted, but host permissions could not be cleared: ${String(err)}`,
+        );
+      }
       // Nothing left to send it to.
       useComposerDrafts.getState().clearDraft(target.id);
       let refreshed = await client.listChats();

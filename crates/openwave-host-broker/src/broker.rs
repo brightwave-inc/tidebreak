@@ -38,9 +38,10 @@ use crate::{
         LookupRegisterRootReceiptRequest, LookupRegisterRootReceiptResult,
         LookupRootAttachmentReceiptRequest, LookupRootAttachmentReceiptResult, OperationEnvelope,
         OperationRequest, OperationResponseEnvelope, OperationResult, PathRequest,
-        ReadFileBinaryResult, ReadFileResult, RegisterRootReceipt, RegisterRootRequest,
-        RegisterRootResult, ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope,
-        RevokeGrantRequest, RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
+        PurgeConversationSubjectRequest, PurgeConversationSubjectResult, ReadFileBinaryResult,
+        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult,
+        ResolveExecRootsRequest, ResolvedExecRoot, Response, ResponseEnvelope, RevokeGrantRequest,
+        RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
         RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
         RootAttachmentMutationResult, RootSummary, UnavailableRootReason, UnavailableRootSummary,
         WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
@@ -450,6 +451,24 @@ impl ControlAudit {
                 operation_id: None,
                 target: AuditTarget::Subject,
             }),
+            ControlRequest::PurgeConversationSubject(request) => {
+                let Ok(subject) = GrantSubject::conversation(request.conversation_id) else {
+                    // Nil subjects are rejected in execute; skip audit construction
+                    // rather than panicking on a malformed trusted request.
+                    return None;
+                };
+                Some(Self {
+                    actor: AuditActor::Control {
+                        subject,
+                        conversation_id: Some(request.conversation_id),
+                    },
+                    mutates: true,
+                    operation: AuditOperation::PurgeConversationSubject,
+                    grant_id: None,
+                    operation_id: None,
+                    target: AuditTarget::Subject,
+                })
+            }
             ControlRequest::GrantRootCapability(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: request.subject,
@@ -748,6 +767,9 @@ impl Controller {
             ControlRequest::RevokeGrant(request) => {
                 self.revoke_grant(request).map(ControlResult::RevokeGrant)
             }
+            ControlRequest::PurgeConversationSubject(request) => self
+                .purge_conversation_subject(request)
+                .map(ControlResult::PurgeConversationSubject),
             ControlRequest::GrantRootCapability(request) => self
                 .grant_root_capability(request)
                 .map(ControlResult::GrantRootCapability),
@@ -1155,6 +1177,100 @@ impl Controller {
                 .map_err(error_response)?;
         }
         Ok(RevokeGrantResult { revoked })
+    }
+
+    /// Forget every durable host row owned by one conversation.
+    ///
+    /// Conversation ids are never remapped. After a chat is deleted, grants
+    /// and attachments for that subject are leftover authority with no product
+    /// subject left to exercise them, so the trusted desktop removes them in
+    /// one shot. Roots this conversation registered are revoked only when no
+    /// other conversation still holds an attachment — otherwise detach this
+    /// conversation and leave the registration for survivors.
+    fn purge_conversation_subject(
+        &self,
+        request: PurgeConversationSubjectRequest,
+    ) -> Result<PurgeConversationSubjectResult, ErrorResponse> {
+        let subject = match GrantSubject::conversation(request.conversation_id) {
+            Ok(subject) => subject,
+            Err(_) => {
+                return Err(error_response(BrokerError::SubjectConversationMismatch));
+            }
+        };
+        let mut state = self.lock_state().map_err(error_response)?;
+        let mut next = state.clone();
+        let mut changed = false;
+
+        let before = next.grants.len();
+        next.grants.retain(|grant| grant.subject() != subject);
+        changed |= next.grants.len() != before;
+
+        let before = next.attachments.len();
+        next.attachments
+            .retain(|attachment| attachment.conversation_id() != request.conversation_id);
+        changed |= next.attachments.len() != before;
+
+        for root in &mut next.unavailable {
+            let before = root.grants.len();
+            root.grants.retain(|grant| grant.subject() != subject);
+            changed |= root.grants.len() != before;
+
+            let before = root.attachments.len();
+            root.attachments
+                .retain(|attachment| attachment.conversation_id() != request.conversation_id);
+            changed |= root.attachments.len() != before;
+        }
+
+        // Drop registrations this conversation owns once nothing else is still
+        // attached to them. Shared roots keep their registration for survivors.
+        let owned_root_ids: Vec<RootId> = next
+            .roots
+            .iter()
+            .filter(|(_, root)| root.owner == subject)
+            .map(|(root_id, _)| *root_id)
+            .collect();
+        for root_id in owned_root_ids {
+            let still_attached = next
+                .attachments
+                .iter()
+                .any(|attachment| attachment.root_id() == root_id)
+                || next
+                    .unavailable
+                    .iter()
+                    .any(|root| root.id == root_id && !root.attachments.is_empty());
+            if still_attached {
+                continue;
+            }
+            if next.roots.remove(&root_id).is_some() {
+                changed = true;
+                next.grants
+                    .retain(|grant| !scope_targets_root(grant.scope(), root_id));
+                next.attachments
+                    .retain(|attachment| attachment.root_id() != root_id);
+            }
+        }
+
+        let owned_unavailable: Vec<RootId> = next
+            .unavailable
+            .iter()
+            .filter(|root| root.owner == subject && root.attachments.is_empty())
+            .map(|root| root.id)
+            .collect();
+        if !owned_unavailable.is_empty() {
+            changed = true;
+            next.unavailable
+                .retain(|root| !owned_unavailable.contains(&root.id));
+            for root_id in owned_unavailable {
+                next.grants
+                    .retain(|grant| !scope_targets_root(grant.scope(), root_id));
+            }
+        }
+
+        if changed {
+            self.commit_state(&mut state, next)
+                .map_err(error_response)?;
+        }
+        Ok(PurgeConversationSubjectResult { changed })
     }
 
     /// Widen one attached root by one capability, with fresh consent.
