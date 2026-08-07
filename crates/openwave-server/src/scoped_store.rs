@@ -24,6 +24,7 @@ use std::sync::Arc;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use serde_json::Value;
 
 use openwave_core::storage::DecidePlanOutcome;
 use openwave_core::{
@@ -86,11 +87,15 @@ impl ScopedStore {
         self.store.list_chats_scoped(&self.owner).await
     }
 
-    /// Create a chat owned by the principal, resolving project defaults only
-    /// from the principal's own projects.
-    pub async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
+    /// Create a chat and apply related settings only if the chat insert
+    /// succeeds.
+    pub async fn create_chat_with_project_defaults_and_settings(
+        &self,
+        chat: &Chat,
+        settings: &[(String, Value)],
+    ) -> Result<Chat> {
         self.store
-            .create_chat_with_project_defaults_scoped(&self.owner, chat)
+            .create_chat_with_project_defaults_and_settings_scoped(&self.owner, chat, settings)
             .await
     }
 

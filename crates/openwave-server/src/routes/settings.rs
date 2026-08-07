@@ -663,17 +663,24 @@ pub(super) async fn read_sticky_default<T: serde::de::DeserializeOwned>(
         .and_then(|value| serde_json::from_value(value).ok()))
 }
 
+/// Encode one sticky new-chat default for a direct or transactional write.
+pub(super) fn sticky_default_value<T: Serialize>(
+    value: Option<&T>,
+) -> Result<serde_json::Value, ServerError> {
+    match value {
+        Some(value) => serde_json::to_value(value)
+            .map_err(|_| ServerError::internal("could not encode a sticky chat default")),
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
 /// Record (or clear, with `None`) one sticky new-chat default.
 pub(super) async fn write_sticky_default<T: Serialize>(
     store: &dyn Store,
     key: &str,
     value: Option<&T>,
 ) -> Result<(), ServerError> {
-    let value = match value {
-        Some(value) => serde_json::to_value(value)
-            .map_err(|_| ServerError::internal("could not encode a sticky chat default"))?,
-        None => serde_json::Value::Null,
-    };
+    let value = sticky_default_value(value)?;
     Ok(store.set_setting(key, &value).await?)
 }
 

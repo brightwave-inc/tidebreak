@@ -23,8 +23,9 @@ use crate::state::AppState;
 
 use super::providers_models::{refuse_permission_mode_over_ceiling, validate_model_selection};
 use super::settings::{
-    double_option, read_sticky_default, write_sticky_default, STICKY_MODEL_KEY,
-    STICKY_NETWORK_POLICY_KEY, STICKY_PERMISSION_MODE_KEY, STICKY_REASONING_EFFORT_KEY,
+    double_option, read_sticky_default, sticky_default_value, write_sticky_default,
+    STICKY_MODEL_KEY, STICKY_NETWORK_POLICY_KEY, STICKY_PERMISSION_MODE_KEY,
+    STICKY_REASONING_EFFORT_KEY,
 };
 
 /// Product-facing project names stay compact across desktop and API clients.
@@ -207,24 +208,9 @@ pub async fn create_chat(
     if let Some(policy) = body.network_policy.as_mut() {
         crate::code_execution::normalize_network_policy(policy)?;
     }
-    // An explicit choice at creation is as much "the last-chosen mode" as one
-    // made mid-chat — the home composer's pickers land here, never at PATCH —
-    // so record it the same way. Absent fields never clear a sticky default;
-    // only an explicit PATCH `null` does.
-    if let Some(model) = &body.model {
-        write_sticky_default(&*state.store, STICKY_MODEL_KEY, Some(model)).await?;
-    }
-    if let Some(effort) = &body.reasoning_effort {
-        write_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY, Some(effort)).await?;
-    }
-    if let Some(mode) = &body.permission_mode {
-        write_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY, Some(mode)).await?;
-    }
-    if let Some(policy) = &body.network_policy {
-        write_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY, Some(policy)).await?;
-    }
-    let model = match body.model {
-        Some(model) => Some(model),
+    let title = normalize_chat_title(body.title)?;
+    let model = match body.model.as_ref() {
+        Some(model) => Some(model.clone()),
         // A sticky selection that no longer validates — deregistered model,
         // disabled or uncredentialed provider — falls back to the configured
         // default instead of failing the create or pinning a dead model.
@@ -233,12 +219,12 @@ pub async fn create_chat(
             None => None,
         },
     };
-    let reasoning_effort = match body.reasoning_effort {
-        Some(effort) => Some(effort),
+    let reasoning_effort = match body.reasoning_effort.as_ref() {
+        Some(effort) => Some(*effort),
         None => read_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY).await?,
     };
-    let permission_mode = match body.permission_mode {
-        Some(mode) => Some(mode),
+    let permission_mode = match body.permission_mode.as_ref() {
+        Some(mode) => Some(*mode),
         // The managed ceiling clamps a sticky mode recorded before the policy
         // arrived: a remembered `allow` under an `ask` ceiling seeds `ask`,
         // mirroring how the turn gate treats stored over-ceiling modes.
@@ -249,8 +235,8 @@ pub async fn create_chat(
             None => None,
         },
     };
-    let network_policy = match body.network_policy {
-        Some(policy) => policy,
+    let network_policy = match body.network_policy.as_ref() {
+        Some(policy) => policy.clone(),
         None => {
             let mut sticky = read_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY)
                 .await?
@@ -264,10 +250,40 @@ pub async fn create_chat(
             sticky
         }
     };
+    // An explicit choice at creation is as much "the last-chosen mode" as one
+    // made mid-chat — the home composer's pickers land here, never at PATCH.
+    // Apply only supplied values, and only in the transaction that successfully
+    // inserts the chat, so a project deletion race cannot partially advance
+    // the defaults before the create reports its failure.
+    let mut sticky_default_updates = Vec::with_capacity(4);
+    if let Some(model) = &body.model {
+        sticky_default_updates.push((
+            STICKY_MODEL_KEY.to_owned(),
+            sticky_default_value(Some(model))?,
+        ));
+    }
+    if let Some(effort) = &body.reasoning_effort {
+        sticky_default_updates.push((
+            STICKY_REASONING_EFFORT_KEY.to_owned(),
+            sticky_default_value(Some(effort))?,
+        ));
+    }
+    if let Some(mode) = &body.permission_mode {
+        sticky_default_updates.push((
+            STICKY_PERMISSION_MODE_KEY.to_owned(),
+            sticky_default_value(Some(mode))?,
+        ));
+    }
+    if let Some(policy) = &body.network_policy {
+        sticky_default_updates.push((
+            STICKY_NETWORK_POLICY_KEY.to_owned(),
+            sticky_default_value(Some(policy))?,
+        ));
+    }
     let chat = Chat {
         id: ChatId::new(),
         project_id: body.project_id,
-        title: normalize_chat_title(body.title)?,
+        title,
         model,
         reasoning_effort,
         permission_mode,
@@ -276,7 +292,9 @@ pub async fn create_chat(
         root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
-    let chat = store.create_chat_with_project_defaults(&chat).await?;
+    let chat = store
+        .create_chat_with_project_defaults_and_settings(&chat, &sticky_default_updates)
+        .await?;
     Ok((StatusCode::CREATED, Json(chat)))
 }
 

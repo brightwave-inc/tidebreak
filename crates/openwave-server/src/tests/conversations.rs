@@ -308,7 +308,7 @@ async fn chat_referencing_an_unknown_project_is_rejected() {
 }
 
 #[tokio::test]
-async fn chat_creation_reports_not_found_when_project_deletion_wins_after_preflight() {
+async fn project_deletion_during_chat_creation_leaves_sticky_defaults_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let database = Arc::new(
         DbStore::connect(&format!(
@@ -332,18 +332,52 @@ async fn chat_creation_reports_not_found_when_project_deletion_wins_after_prefli
         Arc::new(Notify::new()),
     ));
     injected.do_not_pause_terminal();
-    injected.delete_project_after_next_get();
-    let (router, token, _store, _dir) = test_app_from_parts(Arc::new(FakeProvider), injected, dir);
+    let (router, token, _store, _dir) =
+        test_app_from_parts(Arc::new(FakeProvider), injected.clone(), dir);
 
-    let response = router
+    let bearer = format!("Bearer {token}");
+    let baseline = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/chats")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"project_id": project.id}).to_string(),
+                    serde_json::json!({
+                        "model": "m-before",
+                        "reasoning_effort": "low",
+                        "permission_mode": "ask",
+                        "network_policy": {"mode": "off"},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(baseline.status(), StatusCode::CREATED);
+    let baseline: Chat = json_body(baseline).await;
+
+    injected.delete_project_after_next_get();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project_id": project.id,
+                        "model": "m-race",
+                        "reasoning_effort": "high",
+                        "permission_mode": "allow",
+                        "network_policy": {"mode": "package_managers"},
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -353,7 +387,39 @@ async fn chat_creation_reports_not_found_when_project_deletion_wins_after_prefli
     let info: AgentErrorInfo = json_body(response).await;
     assert_eq!(info.kind, "not_found");
     assert!(database.get_project(project.id).await.unwrap().is_none());
-    assert!(database.list_chats().await.unwrap().is_empty());
+    assert_eq!(
+        database
+            .list_chats()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|chat| chat.id)
+            .collect::<Vec<_>>(),
+        vec![baseline.id]
+    );
+
+    let settings: serde_json::Value = json_body(
+        router
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        settings["chat_defaults"],
+        serde_json::json!({
+            "model": "m-before",
+            "reasoning_effort": "low",
+            "permission_mode": "ask",
+            "network_policy": {"mode": "off"},
+        })
+    );
 }
 
 #[tokio::test]
@@ -627,6 +693,42 @@ async fn chat_settings_stick_to_the_next_chat() {
     let third = make_chat(&router, &bearer).await;
     assert_eq!(third.model, None);
     assert_eq!(third.permission_mode, None);
+}
+
+#[tokio::test]
+async fn rejected_chat_creation_does_not_change_sticky_defaults() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let rejected = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "title": "t".repeat(routes::MAX_CHAT_TITLE_CHARS + 1),
+                        "model": "m-rejected",
+                        "reasoning_effort": "high",
+                        "permission_mode": "allow",
+                        "network_policy": {"mode": "off"},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let next = make_chat(&router, &bearer).await;
+    assert_eq!(next.model, None);
+    assert_eq!(next.reasoning_effort, None);
+    assert_eq!(next.permission_mode, None);
+    assert_eq!(next.network_policy, openwave_core::NetworkPolicy::Open);
 }
 
 #[tokio::test]

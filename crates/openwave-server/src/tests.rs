@@ -922,6 +922,16 @@ impl Store for PauseTerminalStore {
     async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
         self.inner.create_chat_with_project_defaults(chat).await
     }
+    async fn create_chat_with_project_defaults_and_settings_scoped(
+        &self,
+        owner: &openwave_core::OwnerId,
+        chat: &Chat,
+        settings: &[(String, serde_json::Value)],
+    ) -> Result<Chat> {
+        self.inner
+            .create_chat_with_project_defaults_and_settings_scoped(owner, chat, settings)
+            .await
+    }
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         self.inner.get_chat(id).await
     }

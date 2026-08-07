@@ -1191,6 +1191,51 @@ fn store_is_object_safe_and_roundtrips() {
 }
 
 #[test]
+fn custom_store_atomic_chat_default_fails_closed() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::default());
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+    };
+    let owner = crate::model::OwnerId::local();
+
+    let created =
+        block_on(store.create_chat_with_project_defaults_and_settings_scoped(&owner, &chat, &[]))
+            .unwrap();
+    assert_eq!(created, chat);
+
+    let rejected = Chat {
+        id: ChatId::new(),
+        ..chat
+    };
+    block_on(store.set_setting("model", &serde_json::json!("before"))).unwrap();
+    let error = block_on(store.create_chat_with_project_defaults_and_settings_scoped(
+        &owner,
+        &rejected,
+        &[("model".into(), serde_json::json!("after"))],
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::Store(message)
+            if message == "atomic chat creation with setting updates is not implemented by this Store"
+    ));
+    assert_eq!(block_on(store.get_chat(rejected.id)).unwrap(), None);
+    assert_eq!(
+        block_on(store.get_setting("model")).unwrap(),
+        Some(serde_json::json!("before"))
+    );
+}
+
+#[test]
 fn mem_store_rejects_moving_a_live_document_between_corpora() {
     let store: Arc<dyn Store> = Arc::new(MemStore::default());
     let project_a = Project {

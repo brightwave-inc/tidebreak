@@ -629,7 +629,7 @@ impl Store for DbStore {
     }
 
     async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
-        ops::conversation::create_chat_with_project_defaults(self, chat, None).await
+        ops::conversation::create_chat_with_project_defaults(self, chat, None, &[]).await
     }
 
     async fn create_chat_with_project_defaults_scoped(
@@ -637,7 +637,17 @@ impl Store for DbStore {
         owner: &OwnerId,
         chat: &Chat,
     ) -> Result<Chat> {
-        ops::conversation::create_chat_with_project_defaults(self, chat, Some(owner)).await
+        ops::conversation::create_chat_with_project_defaults(self, chat, Some(owner), &[]).await
+    }
+
+    async fn create_chat_with_project_defaults_and_settings_scoped(
+        &self,
+        owner: &OwnerId,
+        chat: &Chat,
+        settings: &[(String, Value)],
+    ) -> Result<Chat> {
+        ops::conversation::create_chat_with_project_defaults(self, chat, Some(owner), settings)
+            .await
     }
 
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
