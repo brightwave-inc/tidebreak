@@ -112,6 +112,15 @@ pub enum ControlRequest {
     /// operation id — the grant id already names the exact row, so a retry
     /// observes `revoked: false` and nothing can be withdrawn twice.
     RevokeGrant(RevokeGrantRequest),
+    /// Forget every grant and attachment owned by one conversation subject.
+    ///
+    /// Conversation ids are never reused. Once a chat is deleted, authority
+    /// keyed to that subject can never be intentionally exercised again, so
+    /// the trusted desktop purges it rather than leaving ghost rows on the
+    /// consent surface. Idempotent: a subject with nothing left reports
+    /// `changed: false`. Project subjects are refused — project consent still
+    /// reaches future chats.
+    PurgeConversationSubject(PurgeConversationSubjectRequest),
     /// Widen what an already-connected root allows for one subject.
     ///
     /// The inverse of [`ControlRequest::RevokeGrant`] at the same statement
@@ -269,6 +278,13 @@ pub struct RevokeGrantRequest {
     /// indistinguishable from a grant that does not exist.
     pub subject: GrantSubject,
     pub grant_id: GrantId,
+}
+
+/// Forget authority held by one deleted conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PurgeConversationSubjectRequest {
+    pub conversation_id: Uuid,
 }
 
 /// Strict payload for widening one attached root by one capability.
@@ -444,6 +460,7 @@ pub enum ControlResult {
     LookupRootAttachmentReceipt(LookupRootAttachmentReceiptResult),
     RevokeRoot(RevokeRootResult),
     RevokeGrant(RevokeGrantResult),
+    PurgeConversationSubject(PurgeConversationSubjectResult),
     GrantRootCapability(GrantRootCapabilityResult),
     ListAppFolder { entries: Vec<DirectoryEntry> },
     ReadAppFolderFile(ReadFileBinaryResult),
@@ -668,6 +685,14 @@ pub struct RevokeRootResult {
 #[serde(deny_unknown_fields)]
 pub struct RevokeGrantResult {
     pub revoked: bool,
+}
+
+/// Result of purging one conversation subject's durable host authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PurgeConversationSubjectResult {
+    /// Whether any grant, attachment, or owned registration was removed.
+    pub changed: bool,
 }
 
 /// Result of an idempotent single-capability widening.

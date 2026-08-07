@@ -13,6 +13,7 @@ import { EMPTY_LAYOUT, panelKey, type LayoutState, type PanelContent } from "./p
  *   outputs
  *   outputs.{outputId}
  *   folders
+ *   permissions
  *   agents
  *   agent.{runId}
  *
@@ -32,6 +33,8 @@ export function parsePanelSegment(segment: string): PanelContent | null {
   switch (type) {
     case "folders":
       return id ? null : { type: "folders" };
+    case "permissions":
+      return id ? null : { type: "permissions" };
     case "document":
       return parseDocumentTarget(id);
     case "sources":
@@ -69,6 +72,8 @@ export function encodePanelSegment(panel: PanelContent): string {
   switch (panel.type) {
     case "folders":
       return "folders";
+    case "permissions":
+      return "permissions";
     case "document":
       return panel.citationId
         ? `document.${panel.documentId}.${panel.citationId}`

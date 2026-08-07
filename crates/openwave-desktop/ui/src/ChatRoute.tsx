@@ -36,6 +36,7 @@ import type { RetryableTurn } from "./MessageList";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { AgentsPanel } from "./AgentsPanel";
+import { PermissionsPanel } from "./settings/PermissionsPanel";
 import { BackgroundAgentPanel } from "./BackgroundAgentPanel";
 import { OutputDetailRoot } from "./outputs/OutputDetailRoot";
 import { OutputsView } from "./outputs/OutputsView";
@@ -769,6 +770,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             <FoldersView chat={chat!} />
           </PanelFrame>
         );
+      case "permissions":
+        return (
+          <PanelFrame spaceBetween>
+            <PermissionsPanel
+              client={client}
+              chat={{ id: chat!.id, project_id: chat!.project_id }}
+            />
+          </PanelFrame>
+        );
       case "agents":
         return (
           <AgentsPanel
@@ -825,6 +835,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             runs={chatAgentRuns}
             onOpenOutputs={() => openPanel({ type: "outputs" })}
             onOpenFolders={() => openPanel({ type: "folders" })}
+            onOpenPermissions={() => openPanel({ type: "permissions" })}
             onOpenAgents={() => openPanel({ type: "agents" })}
           />
         </div>

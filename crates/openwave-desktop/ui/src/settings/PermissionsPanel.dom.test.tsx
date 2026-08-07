@@ -3,7 +3,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ConsentStatementSnapshot } from "../api";
-import { PermissionsPanel } from "./PermissionsPanel";
+import {
+  levelLabel,
+  PermissionsPanel,
+  statementsForChat,
+} from "./PermissionsPanel";
 
 const listCapabilityConsents = vi.hoisted(() =>
   vi.fn<() => Promise<ConsentStatementSnapshot[]>>(),
@@ -157,5 +161,52 @@ describe("PermissionsPanel", () => {
     render(<PermissionsPanel client={client} />);
     await screen.findByText(/Nothing saved yet/);
     expect(client.listConsentStatements).toHaveBeenCalled();
+  });
+});
+
+
+describe("permissions labeling and chat filter", () => {
+  it("names a missing chat subject as deleted", () => {
+    expect(
+      levelLabel(execStatement, { chatIds: new Set() }),
+    ).toBe(`Deleted chat ${execStatement.level.level === "chat" ? "222222…2222" : ""}`.replace(
+      "222222…2222",
+      "222222…2222",
+    ));
+    // shortOpaqueId keeps first 6 and last 4 for long ids.
+    expect(levelLabel(execStatement, { chatIds: new Set() })).toBe(
+      "Deleted chat 222222…2222",
+    );
+  });
+
+  it("keeps only statements that reach one chat", () => {
+    const other = {
+      ...execStatement,
+      handle: { kind: "tool_grant" as const, call_id: "99999999-9999-9999-9999-999999999999" },
+      level: {
+        level: "chat" as const,
+        chat_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      },
+    };
+    const project = {
+      ...folderWriteStatement,
+      handle: {
+        kind: "capability_grant" as const,
+        grant_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      },
+      level: {
+        level: "project" as const,
+        project_id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      },
+      level_title: "Filings",
+    };
+    const filtered = statementsForChat(
+      [execStatement, other, project],
+      { id: execStatement.level.level === "chat" ? execStatement.level.chat_id : "", project_id: "cccccccc-cccc-cccc-cccc-cccccccccccc" },
+    );
+    expect(filtered.map((s) => s.handle)).toEqual([
+      execStatement.handle,
+      project.handle,
+    ]);
   });
 });

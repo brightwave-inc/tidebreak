@@ -332,6 +332,7 @@ pub fn run() {
             host_access::grant_folder_capability,
             host_access::disconnect_folder,
             host_access::forget_folder,
+            host_access::purge_deleted_conversation_subject,
             updater::desktop_update_state,
             updater::check_for_update,
             updater::restart_for_update
@@ -450,6 +451,18 @@ async fn boot_server(
         .initialize_store(server.store())?;
     app.state::<host_access::HostAccess>()
         .initialize_staged_folders(server.staged_folders())?;
+    let orphan_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = orphan_app
+            .state::<host_access::HostAccess>()
+            .reconcile_orphaned_conversation_authority()
+            .await
+        {
+            eprintln!(
+                "openwave: could not purge orphaned host-broker conversation authority: {error}"
+            );
+        }
+    });
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
     let _ = store_tx.send(Some(server.pairing_handle()));
     let base_url = format!("http://{}", server.local_addr());

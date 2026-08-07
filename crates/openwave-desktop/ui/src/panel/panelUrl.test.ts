@@ -11,6 +11,7 @@ describe("panel URLs", () => {
   it("reads navigation panels and addressed document viewers", () => {
     expect(parsePanelSegment("outputs")).toEqual({ type: "outputs" });
     expect(parsePanelSegment("folders")).toEqual({ type: "folders" });
+    expect(parsePanelSegment("permissions")).toEqual({ type: "permissions" });
     expect(parsePanelSegment("agents")).toEqual({ type: "agents" });
     expect(parsePanelSegment("agent.run-1")).toEqual({ type: "agent", runId: "run-1" });
     expect(parsePanelSegment("agent")).toBeNull();
@@ -58,6 +59,7 @@ describe("panel URLs", () => {
       { type: "outputs" },
       { type: "outputs", outputId: "output-1" },
       { type: "folders" },
+      { type: "permissions" },
       { type: "agents" },
       { type: "agent", runId: "run-1" },
     ] as const) {

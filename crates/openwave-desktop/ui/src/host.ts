@@ -104,6 +104,19 @@ export function forgetFolder(rootId: string): Promise<boolean> {
   });
 }
 
+/**
+ * Forget host-broker authority for a conversation that has already been
+ * deleted. Chat ids are never reused, so residual grants/attachments for that
+ * subject are leftover authority with no product surface left. No-op outside
+ * the native host.
+ */
+export function purgeDeletedConversationSubject(chatId: string): Promise<boolean> {
+  if (!isTauri()) return Promise.resolve(false);
+  return invoke("purge_deleted_conversation_subject", {
+    request: { chatId },
+  });
+}
+
 /** The reach the folders panel can add to an already-attached folder. Read is
  * absent on purpose: a folder whose read consent was revoked no longer
  * appears in the panel, so its recovery is the re-attach ceremony. */

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { useApp } from "@/AppContext";
+import { useChatListStore } from "@/ChatListStore";
 import { useManagedPolicy } from "@/managedPolicy";
 import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
@@ -106,7 +107,20 @@ function ConnectedAppsSection() {
 
 function PermissionsSection() {
   const { client } = useApp();
-  return <PermissionsPanel client={client} />;
+  const chats = useChatListStore((state) => state.chats);
+  const knownChatIds = new Set(chats.map((chat) => chat.id));
+  const knownProjectIds = new Set(
+    chats
+      .map((chat) => chat.project_id)
+      .filter((id): id is string => id != null),
+  );
+  return (
+    <PermissionsPanel
+      client={client}
+      knownChatIds={knownChatIds}
+      knownProjectIds={knownProjectIds}
+    />
+  );
 }
 
 function AppearanceSection() {

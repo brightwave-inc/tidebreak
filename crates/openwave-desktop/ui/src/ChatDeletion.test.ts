@@ -4,12 +4,18 @@ import {
   deletionDescription,
   detachChatFolders,
   prependReplacementChat,
+  purgeDeletedChatHostAuthority,
 } from "./ChatDeletion";
-import { disconnectFolder, hasNativeHost } from "./host";
+import {
+  disconnectFolder,
+  hasNativeHost,
+  purgeDeletedConversationSubject,
+} from "./host";
 
 vi.mock("./host", () => ({
   disconnectFolder: vi.fn(async () => true),
   hasNativeHost: vi.fn(() => true),
+  purgeDeletedConversationSubject: vi.fn(async () => true),
 }));
 
 function chat(id: string, projectId: string | null): Chat {
@@ -80,5 +86,23 @@ describe("connected folders on delete", () => {
     expect(deletionDescription(2)).toBe(
       "Disconnects 2 connected folders first. This cannot be undone.",
     );
+  });
+});
+
+describe("host authority after delete", () => {
+  beforeEach(() => {
+    vi.mocked(purgeDeletedConversationSubject).mockClear();
+    vi.mocked(hasNativeHost).mockReturnValue(true);
+  });
+
+  it("purges the deleted conversation subject on the host broker", async () => {
+    await purgeDeletedChatHostAuthority("chat-1");
+    expect(purgeDeletedConversationSubject).toHaveBeenCalledWith("chat-1");
+  });
+
+  it("skips host purge without a native host", async () => {
+    vi.mocked(hasNativeHost).mockReturnValue(false);
+    await purgeDeletedChatHostAuthority("chat-1");
+    expect(purgeDeletedConversationSubject).not.toHaveBeenCalled();
   });
 });

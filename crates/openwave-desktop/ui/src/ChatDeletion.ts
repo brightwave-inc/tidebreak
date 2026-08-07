@@ -1,5 +1,9 @@
 import type { Chat } from "./api";
-import { disconnectFolder, hasNativeHost } from "./host";
+import {
+  disconnectFolder,
+  hasNativeHost,
+  purgeDeletedConversationSubject,
+} from "./host";
 
 /** Retain every refreshed chat when a new loose replacement is required. */
 export function prependReplacementChat(chats: Chat[], replacement: Chat): Chat[] {
@@ -23,6 +27,17 @@ export async function detachChatFolders(chat: Chat): Promise<void> {
   for (const attachment of chat.root_attachments) {
     await disconnectFolder(chat, attachment.root_id);
   }
+}
+
+/**
+ * After the server has deleted the chat, drop any residual host-broker rows
+ * still keyed to that conversation subject. Detach handles live attachments
+ * first; this is the terminal cleanup so Permissions does not keep a deleted
+ * chat's grants.
+ */
+export async function purgeDeletedChatHostAuthority(chatId: string): Promise<void> {
+  if (!hasNativeHost()) return;
+  await purgeDeletedConversationSubject(chatId);
 }
 
 /** How the delete confirmation describes what else goes with the chat. */

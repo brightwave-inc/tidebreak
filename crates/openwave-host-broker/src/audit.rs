@@ -72,6 +72,7 @@ pub enum AuditOperation {
     LookupRootAttachmentReceipt,
     RevokeRoot,
     RevokeGrant,
+    PurgeConversationSubject,
     GrantRootCapability,
     PruneUnavailableRoot,
     ResolveExecRoots,
