@@ -20,6 +20,10 @@ use crate::tool::input_schema_for;
 pub const CONTEXT_CHECKPOINT_FORMAT_V1: u16 = 1;
 
 /// Current checkpoint payload format (structured fields + original requests).
+///
+/// Future formats must use a new value and add an explicit reader before they
+/// are accepted. Treating an unknown payload as current context could turn a
+/// failed migration into a misleading model prompt.
 pub const CONTEXT_CHECKPOINT_FORMAT_V2: u16 = 2;
 
 /// Largest UTF-8 payload accepted for one checkpoint.
@@ -99,6 +103,12 @@ const CONTEXT_CHECKPOINT_SCHEMA_NAME: &str = "context_checkpoint";
 
 impl ContextCheckpointPayloadV2 {
     /// The output constraint the checkpoint's maintenance call sends.
+    ///
+    /// The system prompt still spells the shape out in prose. That is not
+    /// redundancy for its own sake: this adapter layer covers any
+    /// OpenAI-compatible endpoint, including local runtimes that accept
+    /// `response_format` and then ignore it, and the prompt is what those
+    /// runtimes have to go on.
     pub(crate) fn response_format() -> ResponseFormat {
         ResponseFormat::JsonSchema {
             name: CONTEXT_CHECKPOINT_SCHEMA_NAME.to_owned(),
@@ -111,6 +121,12 @@ impl ContextCheckpointPayloadV2 {
     /// The producer fails open when this rejects an answer; it never stores a
     /// partial or vaguely-shaped summary merely because the model returned
     /// something readable.
+    ///
+    /// A constrained completion arrives as bare JSON, so the fence strip below
+    /// is dead weight against a provider that honored the schema. It stays for
+    /// the ones that do not — an OpenAI-compatible runtime that accepts
+    /// `response_format` and ignores it still answers the prompt, in a fenced
+    /// block, and there is no reason to throw that away.
     pub(crate) fn parse_and_canonicalize(content: &str) -> Result<String> {
         let content = strip_json_fence(content.trim());
         let payload: Self = serde_json::from_str(content).map_err(|error| {

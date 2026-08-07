@@ -411,22 +411,48 @@ impl Agent {
             .checked_sub(checkpoint_tokens)
             .filter(|budget| *budget > 0)
         else {
+            // A checkpoint that cannot share the normal request budget is not
+            // safe to project. Retain deterministic reduction instead.
             return (normal_fitted, reduced);
         };
-        let (mut fitted, _history_reduced) = context::fit_to_budget(history, history_budget, floor);
+        let (mut fitted, history_reduced) = context::fit_to_budget(history, history_budget, floor);
         if fitted.is_empty() {
+            // The normal fitting algorithm guarantees a user anchor when one
+            // can be retained. Do not let a large checkpoint displace all
+            // recent request context merely to include stale history.
             return (normal_fitted, reduced);
         }
         if context::estimate_transcript_tokens(&fitted).saturating_add(checkpoint_tokens) > budget {
+            // `fit_to_budget` may deliberately retain one oversized user
+            // anchor rather than produce an invalid empty request. In that
+            // exceptional case the checkpoint cannot also fit, so leave the
+            // established deterministic request untouched.
             return (normal_fitted, reduced);
         }
         let mut projected_messages = Vec::with_capacity(fitted.len() + 1);
         projected_messages.push(projected);
         projected_messages.append(&mut fitted);
-        (projected_messages, true)
+        // Standing in a checkpoint for its own covered prefix is compaction,
+        // which the divider and the compacting indicator already report. Only
+        // trimming the post-boundary tail is the truncation this flag means,
+        // or every step of every compacted chat would claim history was cut.
+        (projected_messages, history_reduced)
     }
 
     /// Load the pixels for the image blocks left in `messages`.
+    ///
+    /// Blocks and bytes are deliberately separate: the transcript carries
+    /// identity, and this is the one place bytes join a request. Two bounds
+    /// apply, both newest-first, because a long conversation would otherwise
+    /// re-upload every image it has ever accumulated on every turn: at most
+    /// [`context::MAX_HYDRATED_IMAGES`] attachments and at most
+    /// [`context::MAX_HYDRATED_IMAGE_BYTES`] of pixels.
+    ///
+    /// Anything not hydrated — over a bound, or whose bytes are simply gone —
+    /// is rewritten as a text stand-in in `messages` before the request is
+    /// built. That keeps the invariant adapters rely on: a surviving
+    /// [`ContentBlock::Image`] always has bytes, so an adapter that finds none
+    /// is looking at a real fault rather than an intended drop.
     pub(crate) async fn hydrate_images(
         &self,
         messages: &mut [ChatMessage],
@@ -450,9 +476,13 @@ impl Agent {
         let mut hydrated_bytes = 0usize;
         for message in messages.iter_mut().rev() {
             for block in message.content.iter_mut().rev() {
+                // `ImageRef` is `Copy`, so take it by value and release the
+                // borrow before the block may be rewritten below.
                 let ContentBlock::Image { image } = *block else {
                     continue;
                 };
+                // The same attachment can appear in several messages; its bytes
+                // are uploaded once and counted once.
                 if attachments.contains(image.blob_id) {
                     continue;
                 }

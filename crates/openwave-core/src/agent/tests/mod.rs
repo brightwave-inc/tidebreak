@@ -5979,9 +5979,13 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         }),
         "checkpoint usage is not charged to the user-visible turn"
     );
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, AgentEvent::ContextTruncated { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ContextTruncated { .. })),
+        "standing a checkpoint in for its own prefix is compaction, which the \
+         compaction events report — not deterministic truncation"
+    );
     let compaction: Vec<&AgentEvent> = events
         .iter()
         .filter(|event| {
@@ -6303,9 +6307,12 @@ async fn projects_a_checkpoint_whenever_its_boundary_is_valid() {
     assert!(projected[0].content.iter().any(
         |block| matches!(block, ContentBlock::Text { text } if text.contains(&checkpoint.content)),
     ));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, AgentEvent::ContextTruncated { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ContextTruncated { .. })),
+        "a projected checkpoint with a tail that fits has not truncated anything"
+    );
     assert!(store
         .list_messages(chat.id)
         .await
@@ -6415,7 +6422,10 @@ async fn checkpoint_fitting_preserves_tool_pairs_and_fails_closed_when_over_budg
         created_at: Utc::now(),
     };
     let (fitted, reduced) = agent.fit_transcript(&transcript, 0, Some(&checkpoint), Some(1));
-    assert!(reduced);
+    assert!(
+        !reduced,
+        "the post-boundary tail fits beside the checkpoint, so nothing was trimmed"
+    );
     assert!(matches!(
         fitted.first(),
         Some(ChatMessage {
