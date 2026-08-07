@@ -286,6 +286,7 @@ describe("ProvidersPanel", () => {
     const vertex: ProviderInfo = {
       kind: "vertex",
       enabled: false,
+      vertex_location: "us-central1",
       has_credential: false,
       models: [],
     };
@@ -300,17 +301,19 @@ describe("ProvidersPanel", () => {
       />,
     );
 
+    const locationNotice = screen.getByText(
+      (_, element) =>
+        element?.tagName === "P" &&
+        element.textContent?.includes(
+          "This provider uses the global Vertex location",
+        ) === true,
+    );
+    expect(locationNotice).toHaveTextContent(
+      /saving updates its location to global/i,
+    );
     expect(
-      screen.getByText(
-        (_, element) =>
-          element?.tagName === "P" &&
-          element.textContent?.includes("Claude models require global") === true,
-      ),
-    ).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("Vertex AI location"), {
-      target: { value: "us-central1" },
-    });
+      screen.queryByLabelText("Vertex AI location"),
+    ).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Google service account JSON"), {
       target: { value: '  {"type":"service_account","private_key":"secret"}  ' },
     });
@@ -321,11 +324,49 @@ describe("ProvidersPanel", () => {
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("vertex", {
         enabled: true,
-        vertex_location: "us-central1",
+        vertex_location: "global",
         credential: {
           type: "service_account",
           json: '{"type":"service_account","private_key":"secret"}',
         },
+      }),
+    );
+  });
+
+  it("retains regional location editing for a legacy Gemini service account", async () => {
+    const gemini: ProviderInfo = {
+      kind: "gemini",
+      enabled: true,
+      vertex_location: "us-central1",
+      has_credential: true,
+      auth_mode: "service_account",
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue(gemini);
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[gemini]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Gemini 3 requests always use/i)).toHaveTextContent(
+      /global endpoint/i,
+    );
+    fireEvent.change(screen.getByLabelText("Vertex AI location"), {
+      target: { value: "us-east5" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("gemini", {
+        enabled: true,
+        vertex_location: "us-east5",
       }),
     );
   });

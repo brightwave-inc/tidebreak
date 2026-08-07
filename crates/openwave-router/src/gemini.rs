@@ -147,9 +147,11 @@ impl GeminiProvider {
                 project_id,
                 location,
             } => {
-                // Gemini 3 is global-only. Keep a regional setting useful for
-                // older/future regional models without sending a curated 3.x
-                // row to an endpoint Google cannot serve.
+                // Gemini 3 is global-only. Legacy Gemini service-account
+                // configurations retain a regional setting for older/future
+                // regional models without sending a curated 3.x row to an
+                // endpoint Google cannot serve. First-class Vertex is
+                // global-only at the server configuration boundary.
                 let location = if requires_global_vertex(model) {
                     "global"
                 } else {
@@ -2008,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn vertex_endpoints_distinguish_global_and_regional_hosts() {
+    fn legacy_vertex_endpoints_distinguish_global_and_regional_hosts() {
         let global =
             GeminiProvider::vertex("test-project", "global", Arc::new(StaticToken)).unwrap();
         assert_eq!(

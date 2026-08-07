@@ -1895,7 +1895,9 @@ enabled: boolean,
  */
 base_url?: string, 
 /**
- * Vertex AI location. Never includes the project id from the credential.
+ * Vertex AI location. The first-class Vertex provider is global-only;
+ * legacy Gemini service-account configurations may retain a region. Never
+ * includes the project id from the credential.
  */
 vertex_location?: string, 
 /**

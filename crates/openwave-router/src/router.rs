@@ -827,6 +827,32 @@ mod tests {
     }
 
     #[test]
+    fn first_class_vertex_rejects_regional_route_claims() {
+        let mut route = route(
+            RouteKind::Vertex,
+            "",
+            &["gemini-3.6-flash", "claude-opus-5"],
+            None,
+        );
+        route.token_source = Some(Arc::new(StaticSource("vertex-token")));
+        route.vertex = Some(
+            VertexRoute::new("test-project", "us-east5", [1; 32]).with_model_families([
+                ("gemini-3.6-flash".to_string(), VertexModelFamily::Gemini),
+                ("claude-opus-5".to_string(), VertexModelFamily::Anthropic),
+            ]),
+        );
+        let router = Router::build(vec![route]);
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("vertex")), "gemini-3.6-flash"),
+            None
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("vertex")), "claude-opus-5"),
+            None
+        );
+    }
+
+    #[test]
     fn fingerprint_does_not_contain_raw_key() {
         let router = Router::build(vec![route(
             RouteKind::Anthropic,

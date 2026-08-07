@@ -97,8 +97,9 @@ function ProviderRow({
   client: ApiClient;
   onChanged: () => void;
 }) {
+  const isFirstClassVertex = info.kind === "vertex";
   const usesServiceAccount =
-    info.kind === "vertex" ||
+    isFirstClassVertex ||
     (info.kind === "gemini" && info.auth_mode === "service_account");
   const [key, setKey] = useState("");
   const credentialType = usesServiceAccount ? "service_account" : "api_key";
@@ -147,7 +148,9 @@ function ProviderRow({
         body.credential = { type: "api_key", key: key.trim() };
       }
       if (usesServiceAccount && credentialType === "service_account") {
-        body.vertex_location = vertexLocation.trim() || "global";
+        body.vertex_location = isFirstClassVertex
+          ? "global"
+          : vertexLocation.trim() || "global";
         if (serviceAccountJson.trim()) {
           body.credential = {
             type: "service_account",
@@ -461,25 +464,43 @@ function ProviderRow({
           {usesServiceAccount && credentialType === "service_account" && (
             <>
               <p className="text-xs text-muted-foreground">
-                {info.kind === "vertex"
+                {isFirstClassVertex
                   ? "Vertex AI uses this service account for native Gemini and Claude requests. OpenWave derives Google hosts itself and does not accept a custom Vertex endpoint."
                   : "This existing Gemini service-account configuration is retained for compatibility. New Vertex AI configurations belong in the Google Vertex AI provider row."}
               </p>
-              <Input
-                type="text"
-                aria-label="Vertex AI location"
-                placeholder="Vertex AI location"
-                value={vertexLocation}
-                onChange={(event) => setVertexLocation(event.target.value)}
-                autoComplete="off"
-              />
-              <p className="text-xs text-muted-foreground">
-                Use <code>global</code> or a region such as <code>us-east5</code>.
-                Claude models require <code>global</code>; regional locations
-                expose only the Vertex models OpenWave can route there.
-                Multi-region aliases and ambient application-default credentials
-                are not configured by this surface.
-              </p>
+              {isFirstClassVertex ? (
+                <p className="text-xs text-muted-foreground">
+                  This provider uses the <code>global</code> Vertex location for
+                  every curated model. Regional locations, multi-region aliases,
+                  and ambient application-default credentials are not configured
+                  by this surface.
+                  {info.vertex_location != null &&
+                    info.vertex_location !== "global" && (
+                      <>
+                        {" "}This older configuration is unavailable until it is
+                        saved; saving updates its location to <code>global</code>.
+                      </>
+                    )}
+                </p>
+              ) : (
+                <>
+                  <Input
+                    type="text"
+                    aria-label="Vertex AI location"
+                    placeholder="Vertex AI location"
+                    value={vertexLocation}
+                    onChange={(event) => setVertexLocation(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    This legacy setting is retained for compatibility with older
+                    regional Gemini models. Curated Gemini 3 requests always use
+                    the <code>global</code> endpoint. Multi-region aliases and
+                    ambient application-default credentials are not configured by
+                    this surface.
+                  </p>
+                </>
+              )}
               <Textarea
                 aria-label="Google service account JSON"
                 className="min-h-28 font-mono text-sm text-foreground"

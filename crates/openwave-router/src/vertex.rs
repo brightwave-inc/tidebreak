@@ -26,9 +26,9 @@ pub struct VertexProvider {
 }
 
 impl VertexProvider {
-    /// Build a Vertex provider from validated resource identity and an explicit
-    /// model-family map. The bearer source is shared so both protocols use the
-    /// same serialized, expiry-aware Google token cache.
+    /// Build a global Vertex provider from validated resource identity and an
+    /// explicit model-family map. The bearer source is shared so both
+    /// protocols use the same serialized, expiry-aware Google token cache.
     pub fn new(
         project_id: impl Into<String>,
         location: impl Into<String>,
@@ -37,6 +37,11 @@ impl VertexProvider {
     ) -> Result<Self> {
         let project_id = project_id.into();
         let location = location.into();
+        if location != "global" {
+            return Err(AgentError::config(
+                "first-class Vertex AI routes require the global location",
+            ));
+        }
         let mut mapped = HashMap::new();
         for (model, family) in models {
             if mapped.insert(model, family).is_some() {
