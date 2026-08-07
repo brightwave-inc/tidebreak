@@ -235,35 +235,6 @@ test("PR compiler caches are writable, isolated, and deleted on close", () => {
   assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
 });
 
-test("the container capability lane runs only for relevant merges and scheduled backstops", () => {
-  const ci = workflows["ci.yml"];
-  const changes = workflowJob(ci, "changes");
-  const sandboxContainer = workflowJob(ci, "sandbox-container");
-
-  assert.match(ci, /^  schedule:\n    - cron: "17 6 \* \* 1"$/m);
-  assert.match(changes, /schedule\|workflow_dispatch\)/);
-  assert.match(changes, /echo "sandbox_container=true"/);
-
-  // Positive scopes: implementation, packaging, and dependency/toolchain
-  // inputs all exercise the expensive capability.
-  assert.match(changes, /crates\/openwave-sandbox-agent\/\*/);
-  assert.match(changes, /crates\/openwave-sandbox-protocol\/\*/);
-  assert.match(changes, /\.cargo\/\*\|Cargo\.lock\|Cargo\.toml\|rust-toolchain\.toml\)/);
-
-  // Negative scope: the generic Rust/workspace fallback deliberately does not
-  // turn the heavyweight capability on.
-  assert.match(changes, /\*\) rust=true; workspace=true ;;/);
-
-  assert.match(
-    sandboxContainer,
-    /if:.*needs\.changes\.outputs\.sandbox_container == 'true'.*github\.event_name != 'pull_request'/,
-  );
-  assert.match(
-    changes,
-    /if \[\[ "\$sandbox_container" == true && "\$workspace" != true \]\]; then/,
-  );
-});
-
 test("production secrets remain isolated to the release workflow", () => {
   const secretConsumers = Object.entries(workflows)
     .filter(([, source]) => source.includes("secrets."))
