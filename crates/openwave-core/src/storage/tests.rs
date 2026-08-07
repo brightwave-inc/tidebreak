@@ -458,6 +458,49 @@ impl Store for MemStore {
         chats.insert(chat.id, chat.clone());
         Ok(chat)
     }
+    async fn create_chat_with_project_defaults_and_settings_scoped(
+        &self,
+        _owner: &crate::model::OwnerId,
+        base: &Chat,
+        setting_updates: &[(String, Value)],
+    ) -> Result<Chat> {
+        if base.attachment_revision != 0 || !base.root_attachments.is_empty() {
+            return Err(AgentError::Store(
+                "chat project defaults must start from an empty revision-zero projection".into(),
+            ));
+        }
+        let mut settings = self.settings.lock().unwrap();
+        let projects = self.projects.lock().unwrap();
+        let mut chat = base.clone();
+        if let Some(project_id) = chat.project_id {
+            let project = projects
+                .get(&project_id)
+                .ok_or_else(|| AgentError::Store("chat project does not exist".into()))?;
+            chat.root_attachments = project
+                .root_attachments
+                .iter()
+                .copied()
+                .map(|root_id| ChatRootAttachment {
+                    root_id,
+                    origin: RootAttachmentOrigin::ProjectDefault,
+                })
+                .collect();
+            if !chat.root_attachments.is_empty() {
+                chat.attachment_revision = 1;
+            }
+        }
+        validate_chat_root_projection(&chat)
+            .map_err(|message| AgentError::Store(message.into()))?;
+        let mut chats = self.chats.lock().unwrap();
+        if chats.contains_key(&chat.id) {
+            return Err(AgentError::Store("chat already exists".into()));
+        }
+        chats.insert(chat.id, chat.clone());
+        for (key, value) in setting_updates {
+            settings.insert(key.clone(), value.clone());
+        }
+        Ok(chat)
+    }
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         Ok(self.chats.lock().unwrap().get(&id).cloned())
     }

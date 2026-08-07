@@ -6,6 +6,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter,
     QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
 };
+use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -122,6 +123,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     store: &DbStore,
     base: &Chat,
     owner: Option<&OwnerId>,
+    settings: &[(String, Value)],
 ) -> Result<Chat> {
     if base.attachment_revision != 0 || !base.root_attachments.is_empty() {
         return Err(AgentError::Store(
@@ -144,6 +146,20 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;
     insert_chat_on(&transaction, &chat, owner).await?;
     insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
+    for (key, value) in settings {
+        entities::setting::Entity::insert(entities::setting::ActiveModel {
+            key: Set(key.clone()),
+            value_json: Set(value.clone()),
+        })
+        .on_conflict(
+            OnConflict::column(entities::setting::Column::Key)
+                .update_column(entities::setting::Column::ValueJson)
+                .to_owned(),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    }
     transaction.commit().await.map_err(store_err)?;
     Ok(chat)
 }

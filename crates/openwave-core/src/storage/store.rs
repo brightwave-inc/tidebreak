@@ -404,6 +404,16 @@ pub trait Store: Send + Sync {
         self.create_chat_with_project_defaults(chat).await
     }
 
+    /// Create `owner`'s chat and apply the supplied settings in one atomic
+    /// operation. Setting updates must not become visible when chat creation
+    /// fails.
+    async fn create_chat_with_project_defaults_and_settings_scoped(
+        &self,
+        owner: &OwnerId,
+        chat: &Chat,
+        settings: &[(String, Value)],
+    ) -> Result<Chat>;
+
     /// Fetch `owner`'s chat by id; `None` when it does not exist **or**
     /// belongs to someone else.
     async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
