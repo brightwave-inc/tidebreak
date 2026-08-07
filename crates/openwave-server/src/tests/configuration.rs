@@ -1360,7 +1360,7 @@ async fn xai_settings_publish_explicit_model_capabilities() {
                             "max_output_tokens": 32768,
                             "input_modalities": ["text", "image"],
                             "supports_reasoning": true,
-                            "reasoning_efforts": ["low", "medium", "high", "xhigh"]
+                            "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
                         }]
                     })
                     .to_string(),
@@ -1396,7 +1396,7 @@ async fn xai_settings_publish_explicit_model_capabilities() {
     );
     assert_eq!(
         model["reasoning_efforts"],
-        serde_json::json!(["low", "medium", "high", "xhigh"])
+        serde_json::json!(["none", "low", "medium", "high", "xhigh"])
     );
     assert!(model["supports_reasoning"].as_bool().unwrap());
     assert!(model["available"].as_bool().unwrap());
@@ -1441,6 +1441,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
                 ],
                 supports_reasoning: true,
                 reasoning_efforts: vec![
+                    openwave_core::ReasoningEffort::None,
                     openwave_core::ReasoningEffort::Low,
                     openwave_core::ReasoningEffort::Medium,
                     openwave_core::ReasoningEffort::High,

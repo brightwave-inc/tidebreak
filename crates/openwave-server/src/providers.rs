@@ -1300,7 +1300,8 @@ fn validate_configured_models_against(
         if model.reasoning_efforts.iter().any(|effort| {
             !matches!(
                 effort,
-                ReasoningEffort::Low
+                ReasoningEffort::None
+                    | ReasoningEffort::Low
                     | ReasoningEffort::Medium
                     | ReasoningEffort::High
                     | ReasoningEffort::XHigh
@@ -2056,6 +2057,7 @@ mod tests {
             input_modalities: vec![InputModality::Text, InputModality::Image],
             supports_reasoning: true,
             reasoning_efforts: vec![
+                ReasoningEffort::None,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,

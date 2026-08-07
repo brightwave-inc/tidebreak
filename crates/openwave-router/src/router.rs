@@ -309,7 +309,7 @@ impl ModelProvider for Router {
         ProviderId::new("router")
     }
 
-    async fn stream(&self, mut req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let Some(kind) = self.select_for(req.provider.as_ref(), &req.model) else {
             return Err(AgentError::config(format!(
                 "provider `{}` is unavailable or cannot serve model `{}`",
@@ -325,8 +325,9 @@ impl ModelProvider for Router {
                 req.model
             )));
         };
-        // The route hint is host policy, not provider wire data.
-        req.provider = None;
+        // The route hint is host policy, not provider wire data, but adapters
+        // retain it for origin-gating provider-native replay. Their encoders
+        // must never serialize it into the provider request body.
         adapter.stream(req).await
     }
 }
@@ -511,7 +512,13 @@ fn fnv1a64(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "xai")]
+    use openwave_core::provider::{ContentBlock, MessageReasoning, ReasoningOrigin};
     use openwave_core::ImageAttachments;
+    #[cfg(feature = "xai")]
+    use openwave_core::{ChatMessage, Role};
+    #[cfg(feature = "xai")]
+    use serde_json::json;
 
     fn route(kind: RouteKind, key: &str, models: &[&str], base: Option<&str>) -> Route {
         Route {
@@ -769,5 +776,80 @@ mod tests {
             Err(err) => assert!(err.to_string().contains("unavailable")),
             Ok(_) => panic!("expected fail-closed error"),
         }
+    }
+
+    #[cfg(feature = "xai")]
+    struct XaiShapingProbe {
+        body: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<serde_json::Value>>>,
+    }
+
+    #[cfg(feature = "xai")]
+    #[async_trait]
+    impl ModelProvider for XaiShapingProbe {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("xai")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let body =
+                crate::openai::build_request_json_for(&req, crate::openai::ResponsesProfile::Xai)?;
+            if let Some(tx) = self.body.lock().unwrap().take() {
+                let _ = tx.send(body);
+            }
+            Ok(Box::pin(futures::stream::empty::<ProviderEvent>()))
+        }
+    }
+
+    #[cfg(feature = "xai")]
+    #[tokio::test]
+    async fn router_preserves_xai_identity_for_reasoning_replay_without_serializing_it() {
+        let reasoning = json!({
+            "id": "rs_previous",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed",
+            "encrypted_content": "opaque-previous",
+        });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut adapters: HashMap<RouteKind, Arc<dyn ModelProvider>> = HashMap::new();
+        adapters.insert(
+            RouteKind::Xai,
+            Arc::new(XaiShapingProbe {
+                body: std::sync::Mutex::new(Some(tx)),
+            }),
+        );
+        let router = Router {
+            adapters,
+            curated: HashMap::from([("xai::grok-test".into(), RouteKind::Xai)]),
+            has_openai_compat: false,
+            fingerprint: String::new(),
+        };
+
+        let _stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("xai")),
+                model: "grok-test".into(),
+                reasoning_model: true,
+                messages: vec![ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "first answer".into(),
+                    }],
+                    reasoning: MessageReasoning::captured(
+                        ReasoningOrigin {
+                            provider: Some(ProviderId::new("xai")),
+                            model: "grok-test".into(),
+                        },
+                        vec![reasoning.clone()],
+                    ),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let body = rx.await.unwrap();
+        assert_eq!(body["input"][0], reasoning);
+        assert!(body.get("provider").is_none());
     }
 }

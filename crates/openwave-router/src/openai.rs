@@ -283,7 +283,7 @@ pub(crate) fn build_request_json_for(
             // context across later turns and tool continuations.
             body["include"] = json!(["reasoning.encrypted_content"]);
         }
-    } else if profile == ResponsesProfile::OpenAi {
+    } else {
         if let Some(temperature) = req.temperature {
             body["temperature"] = json!(temperature);
         }

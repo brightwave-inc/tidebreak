@@ -23,7 +23,8 @@
     "max_output_tokens": 1024,
     "model": "grok-test",
     "store": false,
-    "stream": true
+    "stream": true,
+    "temperature": 0.20000000298023224
   },
   "headers": {
     "authorization": "<redacted>",

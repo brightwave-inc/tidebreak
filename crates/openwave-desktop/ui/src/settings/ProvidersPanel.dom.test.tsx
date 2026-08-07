@@ -134,6 +134,7 @@ describe("ProvidersPanel", () => {
     });
     fireEvent.click(screen.getByRole("checkbox", { name: "Image input" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Reasoning model" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "none" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "low" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "medium" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "high" }));
@@ -154,7 +155,7 @@ describe("ProvidersPanel", () => {
             max_output_tokens: 4_096,
             input_modalities: ["text", "image"],
             supports_reasoning: true,
-            reasoning_efforts: ["low", "medium", "high", "xhigh"],
+            reasoning_efforts: ["none", "low", "medium", "high", "xhigh"],
           },
         ],
       }),

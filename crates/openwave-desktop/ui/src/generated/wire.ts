@@ -1183,12 +1183,12 @@ export type HostRootId = string;
 /**
  * Image formats OpenWave will send to a provider.
  *
- * Deliberately closed. Every variant here is accepted by both the Anthropic
- * and OpenAI image APIs, so a value of this type can always be shaped for the
- * selected provider — adapters never have to reject a media type at send time.
- * Vector and exotic raster formats are excluded rather than passed through:
- * an unsupported type must fail at the trusted ingest boundary, where the user
- * can still act on it, not deep inside a turn.
+ * Deliberately closed. Every variant here is accepted by the baseline
+ * Anthropic and OpenAI image APIs. A provider with a narrower documented set
+ * must refuse its unsupported variants before egress (xAI, for example,
+ * accepts only PNG and JPEG) rather than passing them through to a provider
+ * 400. Vector and exotic raster formats are excluded at the trusted ingest
+ * boundary instead of being passed through at all.
  */
 export type ImageMediaType = "png" | "jpeg" | "webp" | "gif";
 
