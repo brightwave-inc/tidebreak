@@ -64,9 +64,6 @@ where
             options: Set(serde_json::to_value(question.options)?),
             question_type: Set(question.question_type.as_str().into()),
             allow_free_form: Set(question.allow_free_form),
-            answer_option_id: Set(None),
-            answer_free_form: Set(None),
-            answered_at: Set(None),
             answer_selected_option_ids: Set(None),
             answer_custom_answer: Set(None),
             response_recorded_at: Set(None),
@@ -666,24 +663,9 @@ fn stored_answers_match(
             continue;
         }
 
-        // Rows answered before the extension used exactly one of the original
-        // scalar columns. Keep exact retries recoverable after upgrading.
-        let Some(expected_answer) = expected_answer else {
-            return Ok(false);
-        };
-        let legacy_matches = match (
-            &question.answer_option_id,
-            &question.answer_free_form,
-            expected_answer.selected_option_ids.as_slice(),
-            &expected_answer.custom_answer,
-        ) {
-            (Some(stored), None, [expected], None) => stored == expected,
-            (None, Some(stored), [], Some(expected)) => stored == expected,
-            _ => false,
-        };
-        if !legacy_matches || question.answered_at.is_none() {
-            return Ok(false);
-        }
+        // Answering stamps every question row, so an unstamped row means this
+        // request is not the one already recorded.
+        return Ok(false);
     }
     Ok(true)
 }

@@ -7,24 +7,6 @@ use crate::model::{
     AgentRunCancellationReason, AgentRunStatus, AgentRunWaitCondition, TurnAgentRunWaitStatus,
 };
 
-/// The single-row advisory lock that serializes agent-run claiming.
-pub(super) fn agent_run_claim_lock_table() -> TableCreateStatement {
-    Table::create()
-        .table(AgentRunClaimLock::Table)
-        .col(
-            ColumnDef::new(AgentRunClaimLock::Id)
-                .integer()
-                .not_null()
-                .primary_key(),
-        )
-        .check(Expr::col(AgentRunClaimLock::Id).eq(1))
-        .to_owned()
-}
-
-pub(super) fn agent_run_claim_lock_indexes() -> Vec<IndexCreateStatement> {
-    vec![]
-}
-
 /// A claim token is either unbound or fully bound to one run attempt: the
 /// disjunction is what keeps a half-populated lease from existing.
 pub(super) fn agent_run_claim_table() -> TableCreateStatement {
@@ -768,25 +750,6 @@ pub(super) fn agent_run_inbox_indexes() -> Vec<IndexCreateStatement> {
     vec![]
 }
 
-/// The single-row advisory lock that serializes parking and resuming turns
-/// that wait on agent runs.
-pub(super) fn turn_agent_run_wait_lock_table() -> TableCreateStatement {
-    Table::create()
-        .table(TurnAgentRunWaitLock::Table)
-        .col(
-            ColumnDef::new(TurnAgentRunWaitLock::Id)
-                .integer()
-                .not_null()
-                .primary_key(),
-        )
-        .check(Expr::col(TurnAgentRunWaitLock::Id).eq(1))
-        .to_owned()
-}
-
-pub(super) fn turn_agent_run_wait_lock_indexes() -> Vec<IndexCreateStatement> {
-    vec![]
-}
-
 /// A parked turn waiting on a *set* of child runs. The row doubles as the
 /// tool call that will be answered on resume, so it carries the call's
 /// identity, arguments, and journal position alongside the park accounting.
@@ -812,21 +775,6 @@ pub(super) fn turn_agent_run_wait_set_table() -> TableCreateStatement {
         .col(
             ColumnDef::new(TurnAgentRunWaitSet::ChatId)
                 .uuid()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(TurnAgentRunWaitSet::ProviderId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(TurnAgentRunWaitSet::HistoryOrder)
-                .big_integer()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(TurnAgentRunWaitSet::Arguments)
-                .json_binary()
                 .not_null(),
         )
         .col(
@@ -916,11 +864,11 @@ pub(super) fn turn_agent_run_wait_set_table() -> TableCreateStatement {
                 .from_tbl(TurnAgentRunWaitSet::Table)
                 .from_col(TurnAgentRunWaitSet::Id)
                 .from_col(TurnAgentRunWaitSet::ChatId)
-                .from_col(TurnAgentRunWaitSet::HistoryOrder)
+                .from_col(TurnAgentRunWaitSet::TurnId)
                 .to_tbl(ToolCall::Table)
                 .to_col(ToolCall::Id)
                 .to_col(ToolCall::ChatId)
-                .to_col(ToolCall::HistoryOrder)
+                .to_col(ToolCall::TurnId)
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .foreign_key(
@@ -951,12 +899,7 @@ pub(super) fn turn_agent_run_wait_set_table() -> TableCreateStatement {
         )
         .check(Expr::col(TurnAgentRunWaitSet::Condition).eq(AgentRunWaitCondition::All.as_str()))
         .check(Expr::col(TurnAgentRunWaitSet::ExpectedSteerRevision).gte(0))
-        .check(Expr::col(TurnAgentRunWaitSet::HistoryOrder).gt(0))
         .check(Expr::col(TurnAgentRunWaitSet::EventOrdinal).between(2, i32::MAX - 1))
-        .check(
-            Func::char_length(Expr::col(TurnAgentRunWaitSet::ProviderId))
-                .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
-        )
         .check(Expr::col(TurnAgentRunWaitSet::AttemptCount).gte(1))
         .check(
             Expr::col(TurnAgentRunWaitSet::ClaimCount)

@@ -1188,7 +1188,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     blocker
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            "UPDATE agent_run_claim_lock SET id = id WHERE id = 1",
+            "UPDATE advisory_lock SET name = name WHERE name = 'agent_run_claim'",
         ))
         .await
         .unwrap();
@@ -1821,7 +1821,7 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
     transaction
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            "UPDATE agent_run_claim_lock SET id = id WHERE id = 1",
+            "UPDATE advisory_lock SET name = name WHERE name = 'agent_run_claim'",
         ))
         .await
         .unwrap();

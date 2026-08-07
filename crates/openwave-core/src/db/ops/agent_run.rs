@@ -1780,21 +1780,7 @@ pub(in crate::db) async fn acquire_agent_run_claim_lock<C>(conn: &C) -> Result<(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let locked = entities::agent_run_claim_lock::Entity::update_many()
-        .col_expr(
-            entities::agent_run_claim_lock::Column::Id,
-            sea_orm::sea_query::Expr::col(entities::agent_run_claim_lock::Column::Id),
-        )
-        .filter(entities::agent_run_claim_lock::Column::Id.eq(1))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    if locked.rows_affected != 1 {
-        return Err(AgentError::Store(
-            "durable agent-run claim lock is missing".into(),
-        ));
-    }
-    Ok(())
+    super::acquire_advisory_lock(conn, super::AdvisoryLockName::AgentRunClaim).await
 }
 
 async fn find_expired_deadline_on<C>(

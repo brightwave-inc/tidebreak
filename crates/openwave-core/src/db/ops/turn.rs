@@ -884,21 +884,7 @@ async fn acquire_turn_claim_write_lock<C>(conn: &C) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    let locked = entities::turn_claim_lock::Entity::update_many()
-        .col_expr(
-            entities::turn_claim_lock::Column::Id,
-            sea_orm::sea_query::Expr::col(entities::turn_claim_lock::Column::Id),
-        )
-        .filter(entities::turn_claim_lock::Column::Id.eq(1))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    if locked.rows_affected != 1 {
-        return Err(AgentError::Store(
-            "durable turn claim lock is missing".into(),
-        ));
-    }
-    Ok(())
+    super::acquire_advisory_lock(conn, super::AdvisoryLockName::TurnClaim).await
 }
 
 async fn append_claim_scan_terminal_event_on<C>(

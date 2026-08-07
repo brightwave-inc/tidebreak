@@ -23,7 +23,6 @@ pub(super) fn exact_wait_call_request(
         && call.chat_id == wait.chat_id
         && call.turn_id == wait.turn_id
         && call.provider_id == request.provider_id
-        && call.history_order == wait.history_order
         && call.name == WAIT_FOR_AGENTS_TOOL
         && call.arguments == request.arguments
         && call.execution == ToolCallExecution::Orchestration.as_str()
@@ -124,10 +123,7 @@ pub(super) fn exact_pending_wait_call_model(
     call.id == wait.id
         && call.chat_id == wait.chat_id
         && call.turn_id == wait.turn_id
-        && call.provider_id == wait.provider_id
-        && call.history_order == wait.history_order
         && call.name == WAIT_FOR_AGENTS_TOOL
-        && call.arguments == wait.arguments
         && call.execution == ToolCallExecution::Orchestration.as_str()
         && call.status == ToolCallStatus::Pending.as_str()
         && call.created_at == wait.parked_at
@@ -147,10 +143,7 @@ pub(super) fn exact_terminal_wait_call(
     call.id == wait.id
         && call.chat_id == wait.chat_id
         && call.turn_id == wait.turn_id
-        && call.provider_id == wait.provider_id
-        && call.history_order == wait.history_order
         && call.name == WAIT_FOR_AGENTS_TOOL
-        && call.arguments == wait.arguments
         && call.execution == ToolCallExecution::Orchestration.as_str()
         && call.status == status.as_str()
         && call.created_at == wait.parked_at

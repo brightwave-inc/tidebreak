@@ -32,6 +32,63 @@ pub(in crate::db) mod task_plan;
 pub(in crate::db) mod turn;
 pub(in crate::db) mod user_question;
 
+/// The named advisory locks, one row each in `advisory_lock`.
+///
+/// Each serializes a claim path against every other worker taking the same
+/// name. They are separate names rather than one global lock because the paths
+/// are independent: a turn being claimed does not need to exclude an agent run
+/// being claimed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(in crate::db) enum AdvisoryLockName {
+    /// Serializes turn claim allocation across workers.
+    TurnClaim,
+    /// Serializes agent-run claim allocation across workers.
+    AgentRunClaim,
+    /// Serializes parking and resuming turns that wait on agent runs.
+    TurnAgentRunWait,
+}
+
+impl AdvisoryLockName {
+    /// The seeded row's primary key. Must match `SEED_STATEMENTS` in the
+    /// baseline — a name with no row is a hard error at acquire time, not a
+    /// silently unserialized path.
+    pub(in crate::db) const fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnClaim => "turn_claim",
+            Self::AgentRunClaim => "agent_run_claim",
+            Self::TurnAgentRunWait => "turn_agent_run_wait",
+        }
+    }
+}
+
+/// Take one named advisory lock for the rest of the transaction.
+///
+/// The no-op `UPDATE` is what acquires it: every backend we support takes a row
+/// write lock held until commit. The row must exist — a missing seed row would
+/// otherwise read as "acquired" and leave the path unserialized, so it is
+/// reported rather than tolerated.
+pub(in crate::db) async fn acquire_advisory_lock<C>(conn: &C, name: AdvisoryLockName) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let locked = entities::advisory_lock::Entity::update_many()
+        .col_expr(
+            entities::advisory_lock::Column::Name,
+            sea_orm::sea_query::Expr::col(entities::advisory_lock::Column::Name),
+        )
+        .filter(entities::advisory_lock::Column::Name.eq(name.as_str()))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    if locked.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "durable advisory lock {} is missing",
+            name.as_str()
+        )));
+    }
+    Ok(())
+}
+
 /// Acquire the shared cross-backend write lock for one chat row.
 ///
 /// Turn admission and per-chat event sequence allocation use the same lock so
