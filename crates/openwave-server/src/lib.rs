@@ -69,6 +69,7 @@ mod sandbox_container_run_worker;
 /// correlation-tag orphan sweep.
 pub mod sandbox_docker;
 mod sandbox_exec_worker;
+mod sandbox_task_plan_worker;
 mod sandbox_web_search_worker;
 mod scoped_model_token;
 mod scoped_store;
@@ -476,6 +477,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::list_agent_run_activity),
         )
         .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/task-plan",
+            get(routes::get_agent_run_task_plan),
+        )
+        .route(
             "/chats/{chat_id}/agent-runs/{run_id}/progress",
             get(routes::list_agent_run_progress),
         )
@@ -635,6 +640,7 @@ pub struct Server {
     _sandbox_agent_run_worker: AbortTask,
     _sandbox_container_run_worker: Option<AbortTask>,
     _sandbox_web_search_worker: AbortTask,
+    _sandbox_task_plan_worker: AbortTask,
     _sandbox_exec_worker: AbortTask,
     _agent_run_scratch_reaper: AbortTask,
     _blob_retirement_worker: AbortTask,
@@ -1101,6 +1107,11 @@ async fn bind_inner(
             state.sandbox_attempts.clone(),
             sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
         );
+    let sandbox_task_plan_worker = sandbox_task_plan_worker::SandboxTaskPlanWorker::new(
+        state.store.clone(),
+        state.agent_run_wake.clone(),
+        sandbox_task_plan_worker::SandboxTaskPlanWorkerConfig::default(),
+    );
     let sandbox_exec_worker = sandbox_exec_worker::SandboxExecWorker::with_attempts(
         state.store.clone(),
         code_execution.clone(),
@@ -1144,6 +1155,7 @@ async fn bind_inner(
     let sandbox_container_run_worker =
         sandbox_container_run_worker.map(|worker| tokio::spawn(worker.run()));
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
+    let sandbox_task_plan_worker = tokio::spawn(sandbox_task_plan_worker.run());
     let sandbox_exec_worker = tokio::spawn(sandbox_exec_worker.run());
     let agent_run_scratch_reaper = tokio::spawn(agent_run_scratch_reaper.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
@@ -1170,6 +1182,7 @@ async fn bind_inner(
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _sandbox_container_run_worker: sandbox_container_run_worker.map(AbortTask),
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
+        _sandbox_task_plan_worker: AbortTask(sandbox_task_plan_worker),
         _sandbox_exec_worker: AbortTask(sandbox_exec_worker),
         _agent_run_scratch_reaper: AbortTask(agent_run_scratch_reaper),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),

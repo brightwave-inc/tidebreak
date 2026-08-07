@@ -396,6 +396,9 @@ mod tests {
         // A separate endpoint root: the ordered activity history is returned by
         // its own route, so the snapshot walk never reaches it.
         generate::collect_from::<crate::routes::AgentActivityHistoryItem>(&cfg, &mut out);
+        // Its own endpoint root too: the snapshot carries a run's plan progress,
+        // while the full ordered list is fetched per run.
+        generate::collect_from::<openwave_core::AgentRunTaskPlan>(&cfg, &mut out);
         // Likewise its own endpoint root: the live progress stream is paged by
         // its own route rather than embedded in a snapshot.
         generate::collect_from::<crate::routes::AgentRunProgressPage>(&cfg, &mut out);

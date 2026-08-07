@@ -1100,7 +1100,12 @@ fn survives_clamp(value: &str) -> bool {
 ///
 /// This clamp is shared by foreground approval previews and background
 /// activity details, so extending it hardens both renderer surfaces together.
-fn preview_formatting_character(character: char) -> bool {
+///
+/// It is also the admission rule for text a tool boundary stores and a renderer
+/// later shows verbatim — see [`crate::task_plan`]. A surface that clamps on
+/// read and a surface that rejects on write must agree on the character set, or
+/// the writer produces payloads the reader silently drops.
+pub(crate) fn preview_formatting_character(character: char) -> bool {
     character.is_control()
         || matches!(
             character,

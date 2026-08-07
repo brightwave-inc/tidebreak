@@ -45,6 +45,17 @@ pub struct AgentRunSnapshot {
     /// by name; nothing here is host-authored, and a run that submitted nothing
     /// carries an empty list.
     pub submitted_outputs: Vec<SubmittedOutputSnapshot>,
+    /// How far this run's own task plan has got, when it keeps one.
+    ///
+    /// The full list is its own route; the snapshot carries only what a status
+    /// row needs — how many steps are done, and the one step being worked on.
+    ///
+    /// Omitted rather than null when there is no plan, which keeps the wire
+    /// additive: every run before this field existed, and every foreground
+    /// coordinator, reads back in the shape it always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task_plan: Option<AgentRunTaskPlanProgress>,
     /// Bounded terminal display text returned to the parent, if settled.
     pub terminal_text: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
@@ -61,6 +72,7 @@ impl AgentRunSnapshot {
         activity: Option<AgentActivitySnapshot>,
         terminal_text: Option<String>,
         submitted_outputs: Vec<SubmittedOutputSnapshot>,
+        task_plan: Option<AgentRunTaskPlanProgress>,
     ) -> Self {
         Self {
             id: run.id,
@@ -75,6 +87,7 @@ impl AgentRunSnapshot {
             last_error_code: run.last_error_code,
             activity,
             submitted_outputs,
+            task_plan,
             terminal_text,
             created_at: run.created_at,
             updated_at: run.updated_at,
@@ -90,6 +103,47 @@ pub struct SubmittedOutputSnapshot {
     pub filename: String,
 }
 
+/// A run's plan as a status row needs it: the count, and the current step.
+///
+/// Step text is model-authored, like the command and query headlines the
+/// activity history carries. The difference is that those go through the
+/// renderer clamp on the way out and this does not, so the tool boundary
+/// rejects on the way in against the very same predicate: a step longer than
+/// [`openwave_core::MAX_TASK_PLAN_STEP_CHARS`], or carrying any character the
+/// preview clamp would strip — control characters, the line and paragraph
+/// separators, the bidi overrides and isolates — never becomes a stored step.
+/// Copying it as stored is therefore not a gap in the clamp; it is the same
+/// rule enforced one surface earlier.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct AgentRunTaskPlanProgress {
+    pub completed: u32,
+    pub total: u32,
+    /// The one step marked `in_progress`, when there is one.
+    pub current: Option<String>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl AgentRunTaskPlanProgress {
+    fn from_plan(plan: &openwave_core::AgentRunTaskPlan) -> Self {
+        Self {
+            completed: u32::try_from(
+                plan.steps
+                    .iter()
+                    .filter(|step| step.status == openwave_core::TaskPlanStepStatus::Completed)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+            total: u32::try_from(plan.steps.len()).unwrap_or(u32::MAX),
+            current: plan
+                .steps
+                .iter()
+                .find(|step| step.status == openwave_core::TaskPlanStepStatus::InProgress)
+                .map(|step| step.content.clone()),
+            updated_at: plan.updated_at,
+        }
+    }
+}
+
 /// Fixed, renderer-safe names for supported live work.
 ///
 /// Adding a durable tool does not automatically expose it to a renderer: it
@@ -99,6 +153,7 @@ pub struct SubmittedOutputSnapshot {
 pub enum AgentActivityKind {
     Exec,
     WebSearch,
+    UpdateTaskPlan,
     ReadDelegatedFile,
     ListConnectedFolders,
     ListFolder,
@@ -137,6 +192,7 @@ fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> 
     let kind = match call.name.as_str() {
         openwave_core::SANDBOX_EXEC_TOOL => AgentActivityKind::Exec,
         "web_search" => AgentActivityKind::WebSearch,
+        openwave_core::UPDATE_TASK_PLAN_TOOL => AgentActivityKind::UpdateTaskPlan,
         openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => AgentActivityKind::ReadDelegatedFile,
         // Unknown tool names are executor data, not a renderer API contract.
         _ => return None,
@@ -227,6 +283,7 @@ fn sandbox_activity_history_item(
     let kind = match call.name.as_str() {
         openwave_core::SANDBOX_EXEC_TOOL => AgentActivityKind::Exec,
         "web_search" => AgentActivityKind::WebSearch,
+        openwave_core::UPDATE_TASK_PLAN_TOOL => AgentActivityKind::UpdateTaskPlan,
         openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => AgentActivityKind::ReadDelegatedFile,
         // Unknown tool names are executor data, not a renderer API contract.
         _ => return None,
@@ -349,8 +406,16 @@ pub async fn list_agent_runs(
                 .map(|code| format!("Sandbox task failed ({code})")),
             _ => None,
         };
+        let mut task_plan = None;
         let activity = if run.tier == AgentRunTier::Background {
             let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
+            // Only a background run keeps a run-scoped plan. The foreground
+            // coordinator's plan belongs to the chat and has its own route.
+            task_plan = store
+                .get_agent_run_task_plan(run.id)
+                .await?
+                .as_ref()
+                .map(AgentRunTaskPlanProgress::from_plan);
             sandbox_activity(&calls)
         } else if run.tier == AgentRunTier::Foreground {
             foreground_activity(&client_calls, now)
@@ -362,6 +427,7 @@ pub async fn list_agent_runs(
             activity,
             terminal_text,
             submitted_outputs,
+            task_plan,
         ));
     }
     Ok(Json(snapshots))
@@ -429,6 +495,35 @@ pub async fn list_agent_run_activity(
         delegated_file.as_deref(),
         &receipts,
     )))
+}
+
+/// `GET /chats/{chat_id}/agent-runs/{run_id}/task-plan` — the full ordered
+/// checklist one background run keeps, or `null`.
+///
+/// The snapshot carries the count and the current step because that is all a
+/// status row needs; a reader opening the run wants the whole list. The steps
+/// are the run's own model-authored text, bounded and single-line before
+/// storage accepts them. Nothing else about the run crosses here — no
+/// checkpoint arguments, receipts, leases, or diagnostics.
+///
+/// Read-only and bound to the exact chat: a missing, wrong-chat, or foreground
+/// run returns `404`, exactly as the activity history does. A run that never
+/// made a plan is not an error; it answers `null`.
+pub async fn get_agent_run_task_plan(
+    store: ScopedStore,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+) -> Result<Json<Option<openwave_core::AgentRunTaskPlan>>, ServerError> {
+    store.require_chat(chat_id).await?;
+    let run = store
+        .get_agent_run(run_id)
+        .await?
+        .filter(|run| run.chat_id == chat_id && run.tier == AgentRunTier::Background);
+    if run.is_none() {
+        return Err(ServerError::not_found(format!(
+            "agent run {run_id} not found"
+        )));
+    }
+    Ok(Json(store.get_agent_run_task_plan(run_id).await?))
 }
 
 /// One line of live progress a background run published, as the renderer sees

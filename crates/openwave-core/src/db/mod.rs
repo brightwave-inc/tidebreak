@@ -1240,6 +1240,24 @@ impl Store for DbStore {
         ops::sandbox_tool::resolve_sandbox_tool_call(self, id, lease_token, resolution).await
     }
 
+    async fn resolve_sandbox_task_plan_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        steps: &[crate::TaskPlanStep],
+        resolution: &ToolCallResolution,
+    ) -> Result<ResolveSandboxToolCallOutcome> {
+        ops::sandbox_tool::resolve_sandbox_task_plan_call(self, id, lease_token, steps, resolution)
+            .await
+    }
+
+    async fn get_agent_run_task_plan(
+        &self,
+        agent_run_id: AgentRunId,
+    ) -> Result<Option<crate::AgentRunTaskPlan>> {
+        ops::task_plan::get_for_agent_run(self, agent_run_id).await
+    }
+
     async fn get_sandbox_tool_call(&self, id: CallId) -> Result<Option<SandboxToolCall>> {
         ops::sandbox_tool::get_sandbox_tool_call(self, id).await
     }

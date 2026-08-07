@@ -724,6 +724,16 @@ pub(crate) enum TaskPlan {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum AgentRunTaskPlan {
+    Table,
+    AgentRunId,
+    CallId,
+    Steps,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum UserQuestion {
     Table,
     CallId,

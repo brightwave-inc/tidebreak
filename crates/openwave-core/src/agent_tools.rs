@@ -46,14 +46,29 @@ pub const SANDBOX_DONE_TOOL: &str = "done";
 pub const MAX_SANDBOX_AGENT_TASK_CHARS: usize = 16_000;
 /// Maximum number of depth-one children in one foreground wait request.
 pub const MAX_WAIT_FOR_AGENTS_CHILDREN: usize = TurnAgentRunWaitSet::MAX_CHILDREN;
-/// Maximum host-executed tool checkpoints one sandbox run may accumulate.
+/// Maximum host-executed *work* checkpoints one sandbox run may accumulate.
 ///
 /// A sandbox run's checkpoints form a chain the worker replays in full on every
 /// claim, so the count is bounded rather than open-ended: the whole chain rides
 /// each model request. Real delegated work needs a sequence — search, read,
 /// then several commands to produce a file — so the bound is a working budget,
 /// not the one-call fence it replaced.
+///
+/// `update_task_plan` rows are counted against
+/// [`MAX_SANDBOX_TASK_PLAN_CALLS`] instead, so the run's bookkeeping cannot
+/// spend the allowance its actual work needs.
 pub const MAX_SANDBOX_TOOL_CALLS: usize = 16;
+/// Maximum `update_task_plan` checkpoints one sandbox run may accumulate.
+///
+/// Plan rows are budgeted separately from the work budget above, and the reason
+/// is the prompt: a run is told to keep its plan current as steps finish, which
+/// is a call after most real steps. Charged to the same 16 rows, bookkeeping
+/// would starve the exec and search calls the task is actually for — the run
+/// would run out of budget describing work it never got to do. Their own cap
+/// keeps that from happening while still bounding a model that does nothing but
+/// rewrite its checklist. It is smaller than the work budget because a plan is
+/// replaced whole: eight revisions is a generous account of one delegated task.
+pub const MAX_SANDBOX_TASK_PLAN_CALLS: usize = 8;
 /// Maximum tool calls one model step may park as a single batch.
 ///
 /// A step's calls are parked together and replayed together, so this bounds how

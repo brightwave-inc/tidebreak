@@ -53,7 +53,7 @@ export type AgentActivityHistoryItem = { kind: AgentActivityKind, outcome: Agent
  * Adding a durable tool does not automatically expose it to a renderer: it
  * must be deliberately admitted here with a safe label.
  */
-export type AgentActivityKind = "exec" | "web_search" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
+export type AgentActivityKind = "exec" | "web_search" | "update_task_plan" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
 
 /**
  * Coarse, renderer-safe lifecycle for one historical activity entry.
@@ -160,6 +160,17 @@ activity: AgentActivitySnapshot | null,
  */
 submitted_outputs: Array<SubmittedOutputSnapshot>, 
 /**
+ * How far this run's own task plan has got, when it keeps one.
+ *
+ * The full list is its own route; the snapshot carries only what a status
+ * row needs — how many steps are done, and the one step being worked on.
+ *
+ * Omitted rather than null when there is no plan, which keeps the wire
+ * additive: every run before this field existed, and every foreground
+ * coordinator, reads back in the shape it always had.
+ */
+task_plan?: AgentRunTaskPlanProgress, 
+/**
  * Bounded terminal display text returned to the parent, if settled.
  */
 terminal_text: string | null, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
@@ -168,6 +179,42 @@ terminal_text: string | null, created_at: string, updated_at: string, spawn_call
  * Durable lifecycle of an [`AgentRun`].
  */
 export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "waiting" | "retry_wait" | "completed" | "failed" | "cancelled";
+
+/**
+ * Renderer-safe durable projection of one background run's current plan.
+ *
+ * The run-scoped twin of [`TaskPlan`]. It carries no turn: a background run
+ * is one delegated task from start to finish, so the run is the only scope
+ * its plan ever had.
+ */
+export type AgentRunTaskPlan = { run_id: AgentRunId, 
+/**
+ * The steps, in order.
+ */
+steps: Array<TaskPlanStep>, 
+/**
+ * When the last replacement committed.
+ */
+updated_at: string, };
+
+/**
+ * A run's plan as a status row needs it: the count, and the current step.
+ *
+ * Step text is model-authored, like the command and query headlines the
+ * activity history carries. The difference is that those go through the
+ * renderer clamp on the way out and this does not, so the tool boundary
+ * rejects on the way in against the very same predicate: a step longer than
+ * [`openwave_core::MAX_TASK_PLAN_STEP_CHARS`], or carrying any character the
+ * preview clamp would strip — control characters, the line and paragraph
+ * separators, the bidi overrides and isolates — never becomes a stored step.
+ * Copying it as stored is therefore not a gap in the clamp; it is the same
+ * rule enforced one surface earlier.
+ */
+export type AgentRunTaskPlanProgress = { completed: number, total: number, 
+/**
+ * The one step marked `in_progress`, when there is one.
+ */
+current: string | null, updated_at: string, };
 
 /**
  * Run tier of an [`AgentRun`]: who advances the run.

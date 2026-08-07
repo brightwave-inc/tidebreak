@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use openwave_core::{
-    sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_folder_access_proposal_tool_spec,
-    sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
+    parse_update_task_plan_arguments, sandbox_done_tool_spec, sandbox_exec_tool_spec,
+    sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
+    sandbox_update_task_plan_tool_spec, sandbox_web_search_tool_spec,
     validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments, AgentConfig,
     AgentError, AgentRun, ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider,
     ProviderEvent, RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus,
-    StopReason, Store, ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    StopReason, Store, ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TASK_PLAN_CALLS,
+    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL, UPDATE_TASK_PLAN_TOOL,
 };
 
 use super::config::*;
@@ -64,12 +66,13 @@ pub(super) async fn sandbox_request(
     store: &dyn Store,
     delegated_file_available: bool,
 ) -> Result<ChatRequest> {
-    // Two different budgets ride on this list. Rows are what the run has spent
-    // of its durable tool allowance; steps are how many model completions it
-    // has already needed. One step can now hold several rows, so they diverge.
-    let rows = calls.len();
+    // Three different budgets ride on this list. Work rows are what the run has
+    // spent of its durable tool allowance; plan rows are the separate, smaller
+    // allowance its own bookkeeping gets; steps are how many model completions
+    // it has already needed. One step can hold several rows, so they diverge.
+    let SandboxRowBudget { work, plan } = sandbox_row_budget(calls);
     let steps = sandbox_call_steps(calls);
-    if rows > MAX_SANDBOX_TOOL_CALLS {
+    if work > MAX_SANDBOX_TOOL_CALLS || plan > MAX_SANDBOX_TASK_PLAN_CALLS {
         return Err(AgentError::msg("sandbox tool budget exceeded"));
     }
     if config.max_steps == 0 || steps.len().saturating_add(1) > config.max_steps {
@@ -125,40 +128,14 @@ pub(super) async fn sandbox_request(
             config.web_search,
         )),
         messages,
-        // A checkpoint costs one model completion now and one more to consume its
-        // receipt, so tools are only advertised while the remaining step budget
-        // can pay for both — never advertise work the budget cannot consume. The
-        // checkpoint count is bounded separately: the whole chain is replayed on
-        // every claim, so it is a working budget rather than an open loop.
-        tools: if rows < MAX_SANDBOX_TOOL_CALLS && steps.len().saturating_add(2) <= config.max_steps
-        {
-            let mut tools = vec![sandbox_exec_tool_spec()];
-            // The host tool and the provider's own search are one capability
-            // with one name, so the host one is advertised for exactly the runs
-            // the host routed here. A vendor run's searches arrive already
-            // finished and never become checkpoints; an off run is offered no
-            // search at all.
-            if config.web_search == TurnWebSearch::Host {
-                tools.push(sandbox_web_search_tool_spec());
-            }
-            tools.push(sandbox_done_tool_spec());
-            tools.push(sandbox_folder_access_proposal_tool_spec());
-            if delegated_file_available {
-                tools.push(sandbox_read_delegated_file_tool_spec());
-            }
-            tools
-        } else if steps.len().saturating_add(1) <= config.max_steps {
-            // Both of these terminate the run in place of a final answer, so
-            // they need no follow-up completion and stay available to the last
-            // step. Submission especially: a run that spent its budget writing
-            // files must still be able to hand them over.
-            vec![
-                sandbox_done_tool_spec(),
-                sandbox_folder_access_proposal_tool_spec(),
-            ]
-        } else {
-            vec![]
-        },
+        // A checkpoint costs one model completion now and one more to consume
+        // its receipt, so anything that parks is advertised only while the
+        // remaining step budget can pay for both — never advertise work the
+        // budget cannot consume. Each row budget then withdraws its own tools
+        // independently: a run that has spent its work allowance can still
+        // record what it managed to do, and a run that has spent its plan
+        // allowance keeps every tool the task is actually for.
+        tools: sandbox_tools(config, steps.len(), work, plan, delegated_file_available),
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         reasoning_effort: config.reasoning_effort,
@@ -174,6 +151,70 @@ pub(super) async fn sandbox_request(
         images: openwave_core::ImageAttachments::new(),
         ..Default::default()
     })
+}
+
+/// What a run has spent of each durable row allowance.
+///
+/// `update_task_plan` rows are counted apart from the rest deliberately. The
+/// run is told to keep its plan current as steps finish, so charging that to
+/// the work budget would let bookkeeping starve the exec and search calls the
+/// delegated task is actually for. The separate cap still bounds a model that
+/// does nothing but rewrite its checklist. The durable store enforces the same
+/// split, so the two cannot disagree about what a run has left.
+pub(super) struct SandboxRowBudget {
+    pub(super) work: usize,
+    pub(super) plan: usize,
+}
+
+pub(super) fn sandbox_row_budget(calls: &[SandboxToolCall]) -> SandboxRowBudget {
+    let plan = calls
+        .iter()
+        .filter(|call| call.name == UPDATE_TASK_PLAN_TOOL)
+        .count();
+    SandboxRowBudget {
+        work: calls.len() - plan,
+        plan,
+    }
+}
+
+/// The tools one model step is offered, given what it can still afford.
+fn sandbox_tools(
+    config: &AgentConfig,
+    steps: usize,
+    work_rows: usize,
+    plan_rows: usize,
+    delegated_file_available: bool,
+) -> Vec<openwave_core::ToolSpec> {
+    if steps.saturating_add(1) > config.max_steps {
+        return Vec::new();
+    }
+    let can_checkpoint = steps.saturating_add(2) <= config.max_steps;
+    let work_available = can_checkpoint && work_rows < MAX_SANDBOX_TOOL_CALLS;
+    let plan_available = can_checkpoint && plan_rows < MAX_SANDBOX_TASK_PLAN_CALLS;
+    let mut tools = Vec::new();
+    if work_available {
+        tools.push(sandbox_exec_tool_spec());
+        // The host tool and the provider's own search are one capability with
+        // one name, so the host one is advertised for exactly the runs the host
+        // routed here. A vendor run's searches arrive already finished and
+        // never become checkpoints; an off run is offered no search at all.
+        if config.web_search == TurnWebSearch::Host {
+            tools.push(sandbox_web_search_tool_spec());
+        }
+    }
+    if plan_available {
+        tools.push(sandbox_update_task_plan_tool_spec());
+    }
+    // Both of these terminate the run in place of a final answer, so they need
+    // no follow-up completion and stay available to the last step. Submission
+    // especially: a run that spent its budget writing files must still be able
+    // to hand them over.
+    tools.push(sandbox_done_tool_spec());
+    tools.push(sandbox_folder_access_proposal_tool_spec());
+    if work_available && delegated_file_available {
+        tools.push(sandbox_read_delegated_file_tool_spec());
+    }
+    tools
 }
 
 /// One completed model step: the tool checkpoint or terminal outcome it
@@ -228,6 +269,11 @@ pub(super) enum SandboxCompletion {
     Final(String),
     /// The run's own files, offered as the deliverables for the task.
     Done {
+        /// The call the model made, kept so the host can hand this step back
+        /// unfinished instead of accepting it — see the plan reminder in
+        /// [`super::worker`].
+        provider_id: String,
+        arguments: serde_json::Value,
         outputs: Vec<String>,
         summary: String,
     },
@@ -331,6 +377,29 @@ pub(super) fn classify_sandbox_tool_call(
     };
     if parsed.is_none() {
         return Ok(invalid(serde_json::Value::Null));
+    }
+    // The plan validator's message is the correction — the rule it enforces
+    // (one `in_progress` step, whole list every time) is not expressible in the
+    // advertised schema, so a generic "arguments were not valid" would tell the
+    // model nothing it could act on.
+    if name == UPDATE_TASK_PLAN_TOOL {
+        if let Err(correction) = parse_update_task_plan_arguments(&arguments) {
+            return Ok(SandboxToolCallIntent {
+                provider_id,
+                name,
+                arguments,
+                disposition: SandboxToolCallDisposition::Rejected {
+                    error_code: "invalid_arguments",
+                    message: correction,
+                },
+            });
+        }
+        return Ok(SandboxToolCallIntent {
+            provider_id,
+            name,
+            arguments,
+            disposition: SandboxToolCallDisposition::Execute,
+        });
     }
     let valid = match name.as_str() {
         SANDBOX_EXEC_TOOL => validate_sandbox_exec_arguments(&arguments),
@@ -445,7 +514,7 @@ pub(super) async fn complete_sandbox_task(
                         if intent.name == openwave_core::SANDBOX_DONE_TOOL {
                             let arguments =
                                 serde_json::from_value::<openwave_core::SandboxDoneArgs>(
-                                    intent.arguments,
+                                    intent.arguments.clone(),
                                 )
                                 .map_err(|_| {
                                     AgentError::msg("sandbox agent emitted invalid done arguments")
@@ -453,6 +522,8 @@ pub(super) async fn complete_sandbox_task(
                             return Ok(SandboxStep {
                                 narration: String::new(),
                                 completion: SandboxCompletion::Done {
+                                    provider_id: intent.provider_id,
+                                    arguments: intent.arguments,
                                     outputs: arguments.outputs,
                                     summary: arguments.summary,
                                 },
