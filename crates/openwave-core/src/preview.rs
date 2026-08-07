@@ -462,13 +462,11 @@ pub struct ResultEntry {
     /// panel, an [`App`] row the apps library. A kind with nowhere to go
     /// leaves this `None`.
     ///
-    /// Aliased and `default` because retained projections wrote it as
-    /// `output_id`, when a published output was the only place a row could
-    /// point.
+    /// `default` because retained projections predate the field.
     ///
     /// [`Output`]: ResultEntryKind::Output
     /// [`App`]: ResultEntryKind::App
-    #[serde(default, alias = "output_id")]
+    #[serde(default)]
     pub target_id: Option<String>,
     /// The public page this row opens, when it names one.
     ///
@@ -1575,9 +1573,7 @@ mod tests {
         assert_eq!(outputs[1].target_id, None);
         assert_eq!(outputs[1].media_type.as_deref(), Some("image/png"));
 
-        // A pre-outputs journal row deserializes with the field defaulted, and
-        // a row journaled while the target id was still spelled `output_id`
-        // reads back onto the field that replaced it.
+        // A pre-outputs journal row deserializes with the field defaulted.
         let stored: ToolResultPreview = serde_json::from_value(serde_json::json!({
             "tool": "exec",
             "exit_code": 0,
@@ -1591,15 +1587,6 @@ mod tests {
             panic!("stored exec row");
         };
         assert!(outputs.is_empty());
-        let retained: ResultEntry = serde_json::from_value(serde_json::json!({
-            "kind": "output",
-            "label": "report.md",
-            "detail": null,
-            "meta": "v3 · updated",
-            "output_id": "output-report",
-        }))
-        .unwrap();
-        assert_eq!(retained.target_id.as_deref(), Some("output-report"));
     }
 
     #[test]
