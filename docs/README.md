@@ -42,6 +42,9 @@ Project documentation, versioned alongside the code.
   administrator deploys to point OpenWave at a managed model gateway.
 - [Releases and versioning](releases.md) — semantic PR titles, native release
   drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
+- [What comes after v1](deferred.md) — the deliberately parked product scope,
+  the v1 finishing work that remains actionable, and the conditions that bring
+  future capabilities forward.
 
 More to come as the product surfaces land (running locally, API reference, and
 writing tools).

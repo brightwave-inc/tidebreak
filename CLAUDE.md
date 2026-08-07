@@ -14,13 +14,15 @@ React/TypeScript under `crates/openwave-desktop/ui`.
   repository, not this one; use this repository's documented Cargo, pnpm, and
   GitHub commands instead.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
-- **Issues are for deferred or cross-agent work, not for narrating the current
-  task.** Open an issue when work is being set aside for later, or when it needs
-  to be visible to *other* sessions — work another agent might pick up, or a
-  claim on contested scope. Work the user is directing interactively in this
-  session doesn't need an issue; filing one adds tracking overhead without
-  coordinating anyone. If you do pick up substantial parallel-track work, claim
-  its issue **before you start editing** — see below.
+- **Issues are for active or cross-agent work, not for narrating the current
+  task or keeping a someday backlog.** Use an issue when work needs a concrete
+  owner, dependency, or reviewable delivery. Keep deliberately parked product
+  scope in [`docs/deferred.md`](docs/deferred.md), which is the canonical
+  account of what OpenWave does not yet implement and why. Work the user is
+  directing interactively in this session doesn't need an issue; filing one
+  adds tracking overhead without coordinating anyone. If you do pick up
+  substantial parallel-track work, claim its issue **before you start editing**
+  — see below.
 - **Only commit or push when asked.** Don't merge your own PRs unless the request
   was explicitly to merge; default to opening the PR for review.
 
@@ -36,7 +38,6 @@ The workflow labels:
 
 - `in-progress` — claimed; a session is actively working the issue.
 - `blocked` — cannot proceed until a dependency or decision lands.
-- `deferred` — consciously parked; not on any session's active slate.
 
 The conventions:
 
@@ -58,8 +59,11 @@ The conventions:
 - **Reference the issue from the PR** with `Closes #N` so the merge auto-closes
   it.
 - **Keep labels current.** Stale state misleads the team — drop `in-progress`
-  when you park work (and add `deferred` or `blocked` with a comment saying
-  where it stands); treat this as part of the change, not an afterthought.
+  when you park work. If the work is blocked by a concrete dependency, add
+  `blocked` with a comment saying what is needed. If it is deliberately future
+  product scope rather than an active, actionable task, close the issue and
+  update [`docs/deferred.md`](docs/deferred.md) instead; do not add a
+  `deferred` label.
 - **Avoid the GitHub GraphQL API — REST covers this workflow entirely.** All
   agent sessions share one `gh` account, and the GraphQL quota (5000 points/hr)
   is routinely exhausted when sessions run in parallel — REST keeps working
