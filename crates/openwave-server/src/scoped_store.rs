@@ -278,6 +278,14 @@ impl ScopedStore {
         self.store.get_agent_run(id).await
     }
 
+    /// [`Store::get_agent_run_task_plan`].
+    pub async fn get_agent_run_task_plan(
+        &self,
+        id: AgentRunId,
+    ) -> Result<Option<openwave_core::AgentRunTaskPlan>> {
+        self.store.get_agent_run_task_plan(id).await
+    }
+
     /// [`Store::get_agent_run_result`].
     pub async fn get_agent_run_result(&self, id: AgentRunId) -> Result<Option<AgentRunResult>> {
         self.store.get_agent_run_result(id).await

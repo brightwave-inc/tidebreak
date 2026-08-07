@@ -27,6 +27,7 @@ pub(super) const SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE: &str =
 pub(super) const SANDBOX_PROMPT_WEB_SEARCH_CLAUSE: &str =
     "web_search when current public-web information is necessary";
 pub(super) const SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE: &str = "request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker";
+pub(super) const SANDBOX_PROMPT_TASK_PLAN_CLAUSE: &str = "update_task_plan to keep an ordered checklist when the task takes several steps — send the whole list every time, keep exactly one step in_progress, and update it as steps finish rather than all at the end";
 pub(super) const SANDBOX_PROMPT_CLOSING: &str = "Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
 
 /// Compose the run's instructions for the surface it actually has.
@@ -38,13 +39,14 @@ pub(super) fn sandbox_system_prompt(
     delegated_file_available: bool,
     web_search: TurnWebSearch,
 ) -> String {
-    let mut clauses = Vec::with_capacity(3);
+    let mut clauses = Vec::with_capacity(4);
     if delegated_file_available {
         clauses.push(SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE);
     }
     if web_search != TurnWebSearch::Off {
         clauses.push(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE);
     }
+    clauses.push(SANDBOX_PROMPT_TASK_PLAN_CLAUSE);
     clauses.push(SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE);
     let last = clauses
         .pop()

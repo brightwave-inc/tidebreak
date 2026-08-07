@@ -245,9 +245,9 @@ pub use storage::{
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
-    parse_update_task_plan_arguments, task_plan_summary, update_task_plan_tool_spec, TaskPlan,
-    TaskPlanStep, TaskPlanStepStatus, UpdateTaskPlanArgs, MAX_TASK_PLAN_STEPS,
-    MAX_TASK_PLAN_STEP_CHARS, UPDATE_TASK_PLAN_TOOL,
+    open_task_plan_steps, parse_update_task_plan_arguments, task_plan_summary,
+    update_task_plan_tool_spec, AgentRunTaskPlan, TaskPlan, TaskPlanStep, TaskPlanStepStatus,
+    UpdateTaskPlanArgs, MAX_TASK_PLAN_STEPS, MAX_TASK_PLAN_STEP_CHARS, UPDATE_TASK_PLAN_TOOL,
 };
 pub use tool::{
     input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, ScratchPriorContents,

@@ -196,6 +196,19 @@ read before claim, at the final pre-dispatch heartbeat, or at resolution; if
 content arrived after authority was lost, it is discarded rather than returned
 to the model.
 
+A background run also keeps an ordered checklist of its own. `update_task_plan`
+is a checkpoint like the others, not a local note: the row lives in the host's
+database, so the call parks, the host resolves it, and the run reads the result
+back on its next step. Each call replaces the whole list, and the plan is keyed
+by the run rather than by the chat — four siblings delegated in one message are
+working four different tasks, and a chat-keyed row would have them overwriting
+each other and the conversation's own plan. When a run calls `done` with steps
+still open, the host hands that call back once with the open steps named, the
+same way it answers a terminal tool that arrived with company. It is a
+reminder, not a gate: the second `done` submits, the push-back is withheld
+when the run cannot afford the row and step it costs, and a run that never made
+a plan is never interrupted.
+
 The sandbox boundary should remain useful outside the desktop product. A local
 process sandbox is the first execution adapter; self-hosted and managed profiles
 may later supply stronger isolation behind the same contract.
@@ -323,6 +336,15 @@ results, folder/root identities, relative paths, filenames, host paths, grants,
 provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
 activity projection.
+
+A snapshot of a background run may also carry how far its own task plan has
+got: how many steps are completed, out of how many, and the one step marked
+`in_progress`. That last field is the exception to the fixed-vocabulary rule
+above, and it is the same exception the activity headlines already make — the
+text is the run's own, bounded and single-line before storage accepts it. The
+whole ordered list is a separate read,
+`GET /chats/{chat_id}/agent-runs/{run_id}/task-plan`, bound to the exact chat
+and run like the two below it; a run that made no plan answers `null`.
 
 `GET /chats/{chat_id}/agent-runs/{run_id}/activity` rebuilds the background
 run's ordered history from those durable checkpoints. Each item keeps the fixed

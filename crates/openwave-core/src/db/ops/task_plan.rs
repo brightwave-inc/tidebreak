@@ -4,7 +4,10 @@ use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::storage::TurnLeaseFence;
-use crate::{CallId, ChatId, TaskPlan, TaskPlanStep, TurnId, UPDATE_TASK_PLAN_TOOL};
+use crate::{
+    AgentRunId, AgentRunTaskPlan, CallId, ChatId, TaskPlan, TaskPlanStep, TurnId,
+    UPDATE_TASK_PLAN_TOOL,
+};
 
 use super::super::{entities, store_err, DbStore};
 use super::turn::{canonical_db_timestamp, turn_lease_is_current_on};
@@ -168,4 +171,90 @@ fn projection(row: &entities::task_plan::Model) -> Result<TaskPlan> {
         steps: serde_json::from_str(&row.steps)?,
         updated_at: row.updated_at,
     })
+}
+
+/// Replace one background run's task plan inside its resolving transaction.
+///
+/// The caller is the sandbox checkpoint resolution, which already holds the
+/// executor lease and the claim lock, so this takes no fence of its own: a
+/// write that reaches here has already proven it owns the call. Committing the
+/// plan and the checkpoint's receipt together is the point — a run must never
+/// read "plan updated" back from a receipt whose plan write did not land.
+///
+/// A replayed resolution recognizes its own row by `call_id` and leaves it
+/// alone, the same way the chat-scoped plan does.
+pub(in crate::db) async fn upsert_for_agent_run_on<C>(
+    connection: &C,
+    agent_run_id: AgentRunId,
+    call_id: CallId,
+    steps: &[TaskPlanStep],
+    now: DateTime<Utc>,
+) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let encoded = serde_json::to_string(steps)?;
+    let existing = entities::agent_run_task_plan::Entity::find_by_id(agent_run_id.0)
+        .one(connection)
+        .await
+        .map_err(store_err)?;
+    match existing {
+        Some(existing) if existing.call_id == call_id.0 => Ok(()),
+        Some(existing) => {
+            // A retried write must never move `updated_at` behind the row's
+            // own creation, which the table's check constraint forbids.
+            let updated_at = now.max(existing.created_at);
+            let mut row: entities::agent_run_task_plan::ActiveModel = existing.into();
+            row.call_id = Set(call_id.0);
+            row.steps = Set(encoded);
+            row.updated_at = Set(updated_at);
+            row.update(connection).await.map_err(store_err)?;
+            Ok(())
+        }
+        None => {
+            entities::agent_run_task_plan::ActiveModel {
+                agent_run_id: Set(agent_run_id.0),
+                call_id: Set(call_id.0),
+                steps: Set(encoded),
+                created_at: Set(now),
+                updated_at: Set(now),
+            }
+            .insert(connection)
+            .await
+            .map_err(store_err)?;
+            Ok(())
+        }
+    }
+}
+
+/// One background run's current plan, or `None` when it never made one.
+pub(in crate::db) async fn get_for_agent_run(
+    store: &DbStore,
+    agent_run_id: AgentRunId,
+) -> Result<Option<AgentRunTaskPlan>> {
+    let Some(row) = entities::agent_run_task_plan::Entity::find_by_id(agent_run_id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    // An unreadable plan is one unreadable checklist, not a run the reader can
+    // no longer open. Reporting "no plan" keeps every other surface working and
+    // lets the run's next call replace it.
+    match serde_json::from_str(&row.steps) {
+        Ok(steps) => Ok(Some(AgentRunTaskPlan {
+            run_id: agent_run_id,
+            steps,
+            updated_at: row.updated_at,
+        })),
+        Err(error) => {
+            tracing::warn!(
+                agent_run_id = %agent_run_id,
+                %error,
+                "stored sandbox task plan could not be read; reporting no plan"
+            );
+            Ok(None)
+        }
+    }
 }

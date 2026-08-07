@@ -1,4 +1,4 @@
-//! The foreground agent's durable task plan.
+//! An agent's durable task plan.
 //!
 //! A plan is a short ordered checklist the agent keeps for itself while it
 //! works through a request with several dependent steps. It is not a
@@ -10,13 +10,21 @@
 //! makes the durable row a projection of one call rather than a fold over a
 //! history of edits: nothing has to reconcile a partial update against what an
 //! interrupted earlier call did or did not commit.
+//!
+//! Two agents keep plans and they are scoped differently. A foreground plan is
+//! the conversation's, so it is keyed by chat and outlives the turn that wrote
+//! it ([`TaskPlan`]). A background agent's plan belongs to the one delegated
+//! task it was created for, and a chat may have many of those running at once,
+//! so it is keyed by the run ([`AgentRunTaskPlan`]). Sharing one chat-keyed row
+//! between them would let four sandbox siblings overwrite each other and the
+//! conversation's own plan.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ToolSpec, TurnId};
+use crate::{AgentRunId, ToolSpec, TurnId};
 
 /// Stable foreground-only tool name.
 pub const UPDATE_TASK_PLAN_TOOL: &str = "update_task_plan";
@@ -68,6 +76,33 @@ pub struct TaskPlan {
     pub steps: Vec<TaskPlanStep>,
     /// When the last replacement committed.
     pub updated_at: DateTime<Utc>,
+}
+
+/// Renderer-safe durable projection of one background run's current plan.
+///
+/// The run-scoped twin of [`TaskPlan`]. It carries no turn: a background run
+/// is one delegated task from start to finish, so the run is the only scope
+/// its plan ever had.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct AgentRunTaskPlan {
+    pub run_id: AgentRunId,
+    /// The steps, in order.
+    pub steps: Vec<TaskPlanStep>,
+    /// When the last replacement committed.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Steps a plan has not finished, in order, for a reminder the model reads.
+///
+/// Empty when every step is `completed`, which is the only state in which a
+/// run has nothing left to close out.
+#[must_use]
+pub fn open_task_plan_steps(steps: &[TaskPlanStep]) -> Vec<&str> {
+    steps
+        .iter()
+        .filter(|step| step.status != TaskPlanStepStatus::Completed)
+        .map(|step| step.content.as_str())
+        .collect()
 }
 
 /// Parse and check one call's arguments, or say exactly what to fix.

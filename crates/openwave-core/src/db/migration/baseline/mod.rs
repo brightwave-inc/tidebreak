@@ -176,6 +176,10 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             sandbox::sandbox_spawn_checkpoint_indexes(),
         ),
         entry(
+            sandbox::agent_run_task_plan_table(),
+            sandbox::agent_run_task_plan_indexes(),
+        ),
+        entry(
             sandbox::exec_file_snapshot_table(),
             sandbox::exec_file_snapshot_indexes(),
         ),

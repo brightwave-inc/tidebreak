@@ -614,6 +614,21 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    // A background run's plan restricts against both the run and the checkpoint
+    // that wrote it, so it goes before the sandbox call rows and the runs.
+    entities::agent_run_task_plan::Entity::delete_many()
+        .filter(
+            entities::agent_run_task_plan::Column::AgentRunId.in_subquery(
+                entities::agent_run::Entity::find()
+                    .select_only()
+                    .column(entities::agent_run::Column::Id)
+                    .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+                    .into_query(),
+            ),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
     entities::sandbox_tool_call_receipt::Entity::delete_many()
         .filter(
             entities::sandbox_tool_call_receipt::Column::CallId.in_subquery(

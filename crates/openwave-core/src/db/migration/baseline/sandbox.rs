@@ -788,3 +788,62 @@ pub(super) fn exec_file_rejection_indexes() -> Vec<IndexCreateStatement> {
         .col(ExecFileRejection::TurnId)
         .to_owned()]
 }
+
+/// A background agent's durable task plan: one row per run, replaced whole by
+/// each `update_task_plan` checkpoint that run resolves.
+///
+/// Keyed by the run rather than the chat, unlike the foreground `task_plan`.
+/// One conversation can have several sandbox children working at once, and
+/// each is doing a different delegated task; a chat-keyed row would make four
+/// siblings overwrite each other's checklists and the conversation's own.
+///
+/// The steps ride as a JSON array for the same reasons the foreground table
+/// does: they are bounded and validated at the tool boundary before anything
+/// is written, nothing queries an individual step, and a whole-list
+/// replacement is one row write rather than an ordered delete-and-reinsert.
+///
+/// `call_id` names the checkpoint whose resolution last wrote the row, which
+/// is what lets a replayed resolution recognize its own write instead of
+/// committing a second one.
+pub(super) fn agent_run_task_plan_table() -> TableCreateStatement {
+    Table::create()
+        .table(AgentRunTaskPlan::Table)
+        .col(
+            ColumnDef::new(AgentRunTaskPlan::AgentRunId)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(AgentRunTaskPlan::CallId).uuid().not_null())
+        .col(ColumnDef::new(AgentRunTaskPlan::Steps).text().not_null())
+        .col(
+            ColumnDef::new(AgentRunTaskPlan::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AgentRunTaskPlan::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_agent_run_task_plan_run")
+                .from(AgentRunTaskPlan::Table, AgentRunTaskPlan::AgentRunId)
+                .to(AgentRun::Table, AgentRun::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_agent_run_task_plan_call")
+                .from(AgentRunTaskPlan::Table, AgentRunTaskPlan::CallId)
+                .to(SandboxToolCall::Table, SandboxToolCall::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(AgentRunTaskPlan::UpdatedAt).gte(Expr::col(AgentRunTaskPlan::CreatedAt)))
+        .to_owned()
+}
+
+pub(super) fn agent_run_task_plan_indexes() -> Vec<IndexCreateStatement> {
+    Vec::new()
+}

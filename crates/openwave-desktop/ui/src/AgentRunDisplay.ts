@@ -58,6 +58,7 @@ export function agentRunStatusDetail(run: AgentRun): string {
     const activity = {
       exec: { running: "Running a command", waiting: "Waiting to run a command" },
       web_search: { running: "Searching the web", waiting: "Waiting to search" },
+      update_task_plan: { running: "Updating its plan", waiting: "Waiting to update its plan" },
       read_delegated_file: {
         running: "Reading a delegated file",
         waiting: "Waiting to read a delegated file",
@@ -118,6 +119,13 @@ const ACTIVITY_HISTORY_LABELS: Record<
     completed: "Searched the web",
     failed: "Web search failed",
     cancelled: "Web search stopped",
+  },
+  update_task_plan: {
+    waiting: "Waiting to update its plan",
+    running: "Updating its plan",
+    completed: "Updated its plan",
+    failed: "Could not update its plan",
+    cancelled: "Plan update stopped",
   },
   read_delegated_file: {
     waiting: "Waiting to read a delegated file",

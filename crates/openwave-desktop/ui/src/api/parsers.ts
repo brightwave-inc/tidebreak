@@ -436,6 +436,7 @@ function forbiddenPreviewCharacter(character: string): boolean {
 const AGENT_ACTIVITY_KINDS = new Set<AgentActivityKind>([
   "exec",
   "web_search",
+  "update_task_plan",
   "read_delegated_file",
   "list_connected_folders",
   "list_folder",

@@ -747,6 +747,34 @@ pub(in crate::db) async fn resolve_sandbox_tool_call(
     lease_token: uuid::Uuid,
     resolution: &ToolCallResolution,
 ) -> Result<ResolveSandboxToolCallOutcome> {
+    resolve_sandbox_tool_call_with_plan(store, id, lease_token, resolution, None).await
+}
+
+/// Resolve one `update_task_plan` checkpoint and commit the plan it recorded in
+/// the same transaction.
+///
+/// The plan write and the receipt the model reads back must land together. If
+/// they were two transactions, an interrupted executor could hand the run
+/// "Task plan updated" for a plan nobody stored, or store a plan whose
+/// checkpoint never settled — and the run replays its whole chain on every
+/// claim, so it would keep reading the lie.
+pub(in crate::db) async fn resolve_sandbox_task_plan_call(
+    store: &DbStore,
+    id: CallId,
+    lease_token: uuid::Uuid,
+    steps: &[crate::TaskPlanStep],
+    resolution: &ToolCallResolution,
+) -> Result<ResolveSandboxToolCallOutcome> {
+    resolve_sandbox_tool_call_with_plan(store, id, lease_token, resolution, Some(steps)).await
+}
+
+async fn resolve_sandbox_tool_call_with_plan(
+    store: &DbStore,
+    id: CallId,
+    lease_token: uuid::Uuid,
+    resolution: &ToolCallResolution,
+    plan_steps: Option<&[crate::TaskPlanStep]>,
+) -> Result<ResolveSandboxToolCallOutcome> {
     validate_resolution(resolution)?;
     if id.0.is_nil() || lease_token.is_nil() {
         return Err(AgentError::Store(
@@ -794,6 +822,23 @@ pub(in crate::db) async fn resolve_sandbox_tool_call(
     if run.chat_id != call.chat_id || run.status != AgentRunStatus::Waiting.as_str() {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ResolveSandboxToolCallOutcome::LeaseLost);
+    }
+    if let Some(steps) = plan_steps {
+        // The name is proven from the durable row, not from what the executor
+        // lane believed it claimed: only an `update_task_plan` checkpoint may
+        // move a run's plan.
+        if call.name != crate::UPDATE_TASK_PLAN_TOOL {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(ResolveSandboxToolCallOutcome::LeaseLost);
+        }
+        super::task_plan::upsert_for_agent_run_on(
+            &transaction,
+            AgentRunId(call.agent_run_id),
+            id,
+            steps,
+            now,
+        )
+        .await?;
     }
     let status = resolution_status(resolution);
     let (error_code, error_detail) = resolution_error(resolution);

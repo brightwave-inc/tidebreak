@@ -27,6 +27,17 @@
 //!   [`list_dir`](crate::fs)** — path-validated filesystem access within the
 //!   agent's workspace directory.
 //!
+//! # Host-side tools are not registry entries
+//!
+//! This registry names the tools the loop runs *locally*. A background agent's
+//! host-side surface — submission, public web search, the task plan — is not
+//! here and must not be added here: those calls write to the host's database or
+//! leave the host's network, and executing them in the container would either
+//! be impossible or would hand container-resident model output the authority
+//! the container exists to withhold. They reach the host over durable
+//! checkpoints instead. Routing one into the container would need a new reverse
+//! capability, which is the separate design this module's gate is about.
+//!
 //! # NOT YET FOR CREDENTIAL-BEARING WORK
 //!
 //! `exec` can make network calls. Egress is meant to be routed through the

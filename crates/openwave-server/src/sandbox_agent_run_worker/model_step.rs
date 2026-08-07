@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use openwave_core::{
-    sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_folder_access_proposal_tool_spec,
-    sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
-    validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments, AgentConfig,
-    AgentError, AgentRun, ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider,
-    ProviderEvent, RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus,
-    StopReason, Store, ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    parse_update_task_plan_arguments, sandbox_done_tool_spec, sandbox_exec_tool_spec,
+    sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
+    sandbox_web_search_tool_spec, update_task_plan_tool_spec, validate_sandbox_exec_arguments,
+    validate_sandbox_read_delegated_file_arguments, AgentConfig, AgentError, AgentRun, ChatMessage,
+    ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
+    RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus, StopReason,
+    Store, ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
+    UPDATE_TASK_PLAN_TOOL,
 };
 
 use super::config::*;
@@ -141,6 +143,10 @@ pub(super) async fn sandbox_request(
             if config.web_search == TurnWebSearch::Host {
                 tools.push(sandbox_web_search_tool_spec());
             }
+            // The plan is a checkpoint like any other: the row it writes lives
+            // in the host's database, so the call round-trips and costs the
+            // same budget its siblings do.
+            tools.push(update_task_plan_tool_spec());
             tools.push(sandbox_done_tool_spec());
             tools.push(sandbox_folder_access_proposal_tool_spec());
             if delegated_file_available {
@@ -228,6 +234,11 @@ pub(super) enum SandboxCompletion {
     Final(String),
     /// The run's own files, offered as the deliverables for the task.
     Done {
+        /// The call the model made, kept so the host can hand this step back
+        /// unfinished instead of accepting it — see the plan reminder in
+        /// [`super::worker`].
+        provider_id: String,
+        arguments: serde_json::Value,
         outputs: Vec<String>,
         summary: String,
     },
@@ -331,6 +342,29 @@ pub(super) fn classify_sandbox_tool_call(
     };
     if parsed.is_none() {
         return Ok(invalid(serde_json::Value::Null));
+    }
+    // The plan validator's message is the correction — the rule it enforces
+    // (one `in_progress` step, whole list every time) is not expressible in the
+    // advertised schema, so a generic "arguments were not valid" would tell the
+    // model nothing it could act on.
+    if name == UPDATE_TASK_PLAN_TOOL {
+        if let Err(correction) = parse_update_task_plan_arguments(&arguments) {
+            return Ok(SandboxToolCallIntent {
+                provider_id,
+                name,
+                arguments,
+                disposition: SandboxToolCallDisposition::Rejected {
+                    error_code: "invalid_arguments",
+                    message: correction,
+                },
+            });
+        }
+        return Ok(SandboxToolCallIntent {
+            provider_id,
+            name,
+            arguments,
+            disposition: SandboxToolCallDisposition::Execute,
+        });
     }
     let valid = match name.as_str() {
         SANDBOX_EXEC_TOOL => validate_sandbox_exec_arguments(&arguments),
@@ -445,7 +479,7 @@ pub(super) async fn complete_sandbox_task(
                         if intent.name == openwave_core::SANDBOX_DONE_TOOL {
                             let arguments =
                                 serde_json::from_value::<openwave_core::SandboxDoneArgs>(
-                                    intent.arguments,
+                                    intent.arguments.clone(),
                                 )
                                 .map_err(|_| {
                                     AgentError::msg("sandbox agent emitted invalid done arguments")
@@ -453,6 +487,8 @@ pub(super) async fn complete_sandbox_task(
                             return Ok(SandboxStep {
                                 narration: String::new(),
                                 completion: SandboxCompletion::Done {
+                                    provider_id: intent.provider_id,
+                                    arguments: intent.arguments,
                                     outputs: arguments.outputs,
                                     summary: arguments.summary,
                                 },

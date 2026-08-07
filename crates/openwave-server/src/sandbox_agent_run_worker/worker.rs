@@ -437,10 +437,33 @@ impl SandboxAgentRunWorker {
                 self.park_sandbox_tool_calls(run, lease_token, intents, previous_rows, &narration)
                     .await
             }
-            SandboxCompletion::Done { outputs, summary } => {
-                self.submit_submission(&run, lease_token, &outputs, &summary)
-                    .await
-            }
+            SandboxCompletion::Done {
+                provider_id,
+                arguments,
+                outputs,
+                summary,
+            } => match self
+                .done_plan_reminder(&run, &previous_calls, depth, agent_config.max_steps)
+                .await?
+            {
+                Some(message) => {
+                    let intent = SandboxToolCallIntent {
+                        provider_id,
+                        name: openwave_core::SANDBOX_DONE_TOOL.to_owned(),
+                        arguments,
+                        disposition: SandboxToolCallDisposition::Rejected {
+                            error_code: "task_plan_incomplete",
+                            message,
+                        },
+                    };
+                    self.park_sandbox_tool_calls(run, lease_token, vec![intent], previous_rows, "")
+                        .await
+                }
+                None => {
+                    self.submit_submission(&run, lease_token, &outputs, &summary)
+                        .await
+                }
+            },
             SandboxCompletion::FolderAccessProposal { request } => {
                 self.submit_folder_access_proposal(run.id, lease_token, request)
                     .await
@@ -677,6 +700,57 @@ impl SandboxAgentRunWorker {
             .await?
             .iter()
             .any(|revision| revision.producing_run_id == Some(run_id)))
+    }
+
+    /// Whether a run calling `done` should be handed its unfinished plan back
+    /// once before the submission is accepted.
+    ///
+    /// A plan the run itself wrote and then abandoned mid-list is the clearest
+    /// signal available that it stopped early, and the cheapest correction is
+    /// to say so and let it decide. It is deliberately soft on every axis:
+    ///
+    /// - it is a rejected tool call, the same feedback shape a call that
+    ///   arrived with company already gets, so the run reads it as an ordinary
+    ///   error result and keeps its attempt;
+    /// - it happens at most once per run. `done` is terminal, so the only way a
+    ///   `done` row exists at all is that the host already handed one back, and
+    ///   a second refusal would trap a run whose model will not close its list;
+    /// - it is withheld unless the run can afford the row it parks into and the
+    ///   model step that consumes it, so the reminder never converts a run that
+    ///   was about to finish into a budget failure.
+    ///
+    /// A run with no plan, or one whose steps are all `completed`, is never
+    /// interrupted.
+    async fn done_plan_reminder(
+        &self,
+        run: &AgentRun,
+        previous_calls: &[openwave_core::SandboxToolCall],
+        depth: usize,
+        max_steps: usize,
+    ) -> Result<Option<String>> {
+        if previous_calls
+            .iter()
+            .any(|call| call.name == openwave_core::SANDBOX_DONE_TOOL)
+        {
+            return Ok(None);
+        }
+        if previous_calls.len() >= MAX_SANDBOX_TOOL_CALLS || depth.saturating_add(2) > max_steps {
+            return Ok(None);
+        }
+        let Some(plan) = self.store.get_agent_run_task_plan(run.id).await? else {
+            return Ok(None);
+        };
+        let open = openwave_core::open_task_plan_steps(&plan.steps);
+        if open.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "Your task plan still has {count} step(s) that are not completed: {steps}. Finish \
+             them, or update the plan to say what you actually did, then call done again. Calling \
+             done again without changing anything will submit what you have.",
+            count = open.len(),
+            steps = open.join("; "),
+        )))
     }
 
     async fn submit_folder_access_proposal(

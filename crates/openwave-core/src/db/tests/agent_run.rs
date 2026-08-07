@@ -2779,3 +2779,175 @@ async fn a_pre_resolved_sandbox_park_lands_terminal_and_reschedules_the_run() {
         ParkSandboxToolCallOutcome::Existing { .. }
     ));
 }
+
+/// A background run's plan is its own, replaced whole, and erased with the
+/// conversation.
+///
+/// The three properties that matter are all durable ones. The plan is keyed by
+/// the run, so a sibling working a different task cannot overwrite it. The plan
+/// row and the checkpoint's receipt commit in one transaction, so a run never
+/// reads "plan updated" back from a receipt whose write did not land. And the
+/// row restricts against both the run and the checkpoint that wrote it, which
+/// is exactly the shape that made a chat undeletable the last time a plan table
+/// was added without teaching `delete_chat` about it.
+#[tokio::test]
+async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, _turn_lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+    let sibling = admit_sandbox_for_test(&store, chat.id, "a different delegated task").await;
+
+    let plan = |content: &str, status| {
+        vec![crate::TaskPlanStep {
+            content: content.into(),
+            status,
+        }]
+    };
+    let record = |run: &AgentRun, provider_id: &str, steps: Vec<crate::TaskPlanStep>| {
+        let run_id = run.id;
+        let provider_id = provider_id.to_owned();
+        let store = &store;
+        async move {
+            let worker_lease = uuid::Uuid::new_v4();
+            let claimed = store
+                .claim_agent_run(worker_lease, Duration::minutes(5), 8, 8)
+                .await
+                .unwrap()
+                .expect("a queued sandbox run claims");
+            assert_eq!(claimed.id, run_id);
+            let request = SandboxToolCallRequest {
+                id: CallId::new(),
+                agent_run_id: run_id,
+                chat_id: chat.id,
+                provider_id,
+                name: crate::UPDATE_TASK_PLAN_TOOL.into(),
+                arguments: serde_json::json!({"steps": []}),
+            };
+            store
+                .park_agent_run_for_sandbox_tool_calls(
+                    run_id,
+                    worker_lease,
+                    &[super::dispatchable(&request)],
+                )
+                .await
+                .unwrap();
+            let executor_lease = uuid::Uuid::new_v4();
+            store
+                .claim_sandbox_tool_call(request.id, executor_lease, Duration::minutes(2))
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .resolve_sandbox_task_plan_call(
+                        request.id,
+                        executor_lease,
+                        &steps,
+                        &ToolCallResolution::Completed {
+                            result: crate::task_plan_summary(&steps),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                ResolveSandboxToolCallOutcome::Resolved
+            );
+            // The receipt the model reads back and the plan it names commit
+            // together, so the summary is never a claim about a row that is
+            // not there.
+            let receipt = store
+                .get_sandbox_tool_call_receipt(request.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(receipt.result.contains("Task plan updated"));
+            request.id
+        }
+    };
+
+    record(
+        &sandbox,
+        "call-1",
+        plan("draft the outline", crate::TaskPlanStepStatus::InProgress),
+    )
+    .await;
+    assert_eq!(
+        store
+            .get_agent_run_task_plan(sandbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .steps,
+        plan("draft the outline", crate::TaskPlanStepStatus::InProgress)
+    );
+    // A sibling delegated a different task writes its own row and leaves the
+    // first alone. One chat-keyed row would have made these two overwrite each
+    // other, which is the whole reason this table is keyed by the run.
+    record(
+        &sibling,
+        "call-2",
+        plan("read the source", crate::TaskPlanStepStatus::Completed),
+    )
+    .await;
+    // The second call replaces the whole list rather than merging into it.
+    record(
+        &sandbox,
+        "call-3",
+        plan("draft the outline", crate::TaskPlanStepStatus::Completed),
+    )
+    .await;
+    let current = store
+        .get_agent_run_task_plan(sandbox.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.run_id, sandbox.id);
+    assert_eq!(
+        current.steps,
+        plan("draft the outline", crate::TaskPlanStepStatus::Completed)
+    );
+    assert_eq!(
+        store
+            .get_agent_run_task_plan(sibling.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .steps,
+        plan("read the source", crate::TaskPlanStepStatus::Completed)
+    );
+
+    for run in [sandbox.id, sibling.id] {
+        assert!(matches!(
+            store.request_agent_run_cancellation(run).await.unwrap(),
+            Some(RequestAgentRunCancellationOutcome::Cancelled(_))
+        ));
+    }
+    let turn = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    store
+        .request_turn_cancellation_and_append_event(turn.id, turn.updated_at + Duration::seconds(1))
+        .await
+        .unwrap();
+    // The spawning turn is quiesced the same way a worker acknowledgement
+    // would leave it; deletion is what this half of the test is about, not the
+    // turn state machine.
+    let mut settled: crate::db::entities::turn_run::ActiveModel =
+        crate::db::entities::turn_run::Entity::find_by_id(turn.id.0)
+            .one(&store.conn)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    settled.status = Set(TurnRunStatus::Cancelled.as_str().into());
+    settled.lease_token = Set(None);
+    settled.lease_expires_at = Set(None);
+    settled.finished_at = Set(Some(Utc::now()));
+    settled.update(&store.conn).await.unwrap();
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        crate::DeleteChatOutcome::Deleted
+    );
+    assert_eq!(
+        store.get_agent_run_task_plan(sandbox.id).await.unwrap(),
+        None
+    );
+}

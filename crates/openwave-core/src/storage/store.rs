@@ -1342,6 +1342,30 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Resolve one `update_task_plan` checkpoint and commit the plan it
+    /// recorded in the same transaction.
+    ///
+    /// Steps must already be validated at the tool boundary; storage records
+    /// what it is given. The plan is keyed by the checkpoint's own run, so
+    /// sandbox siblings never overwrite each other or the chat's plan.
+    async fn resolve_sandbox_task_plan_call(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _steps: &[crate::TaskPlanStep],
+        _resolution: &ToolCallResolution,
+    ) -> Result<ResolveSandboxToolCallOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// One background run's current task plan, or `None` when it made none.
+    async fn get_agent_run_task_plan(
+        &self,
+        _agent_run_id: AgentRunId,
+    ) -> Result<Option<crate::AgentRunTaskPlan>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Fetch a sandbox tool checkpoint by its stable model-visible identity.
     async fn get_sandbox_tool_call(
         &self,
