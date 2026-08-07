@@ -270,9 +270,11 @@ impl ProviderKind {
 
     /// Whether this provider can use `credential` today.
     fn accepts_credential(self, credential: &ProviderCredential) -> bool {
-        matches!(credential, ProviderCredential::ApiKey { .. })
-            || (self == ProviderKind::Gemini
-                && matches!(credential, ProviderCredential::ServiceAccount { .. }))
+        match credential {
+            ProviderCredential::ApiKey { .. } => true,
+            ProviderCredential::Oauth {} => self == ProviderKind::Openai,
+            ProviderCredential::ServiceAccount { .. } => self == ProviderKind::Gemini,
+        }
     }
 }
 
@@ -739,8 +741,22 @@ pub struct ProviderInfo {
     pub vertex_location: Option<String>,
     /// Whether a credential is stored (never the credential itself).
     pub has_credential: bool,
+    /// How OpenAI (or similarly dual-mode providers) is authenticated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auth_mode: Option<ProviderAuthMode>,
     /// Explicit custom model entries for this endpoint.
     pub models: Vec<CustomModelConfig>,
+}
+
+/// How a provider's credential was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthMode {
+    /// Pasted / env API key.
+    ApiKey,
+    /// ChatGPT subscription OAuth.
+    Chatgpt,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`;
@@ -827,6 +843,17 @@ pub async fn write_credential(
     credential: &ProviderCredential,
 ) -> std::result::Result<(), ServerError> {
     credential.validate()?;
+    if !kind.accepts_credential(credential) {
+        return Err(ServerError::bad_request(format!(
+            "{kind} does not support this credential type"
+        )));
+    }
+    // Mutual exclusivity for OpenAI: an API key replaces ChatGPT OAuth.
+    if kind == ProviderKind::Openai && matches!(credential, ProviderCredential::ApiKey { .. }) {
+        let _ = secrets
+            .delete_secret(openwave_connectors::CHATGPT_SECRET_KEY)
+            .await;
+    }
     let raw = serde_json::to_string(credential)
         .map_err(|_| ServerError::internal("failed to serialize provider credential"))?;
     secrets
@@ -841,6 +868,11 @@ pub async fn delete_credential(secrets: &dyn SecretProvider, kind: ProviderKind)
     if kind == ProviderKind::Anthropic {
         secrets.delete_secret(LEGACY_ANTHROPIC_API_KEY).await?;
     }
+    if kind == ProviderKind::Openai {
+        let _ = secrets
+            .delete_secret(openwave_connectors::CHATGPT_SECRET_KEY)
+            .await;
+    }
     Ok(())
 }
 
@@ -849,11 +881,20 @@ pub async fn delete_credential(secrets: &dyn SecretProvider, kind: ProviderKind)
 pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) -> bool {
     match read_credential(secrets, kind).await {
         Ok(Some(credential)) => {
-            return credential.as_api_key().is_some_and(|key| !key.is_empty())
-                || (kind == ProviderKind::Gemini
-                    && credential.as_service_account().is_some_and(|json| {
-                        openwave_router::GoogleServiceAccount::from_json(json).is_ok()
-                    }));
+            if credential.as_api_key().is_some_and(|key| !key.is_empty()) {
+                return true;
+            }
+            if kind == ProviderKind::Gemini
+                && credential.as_service_account().is_some_and(|json| {
+                    openwave_router::GoogleServiceAccount::from_json(json).is_ok()
+                })
+            {
+                return true;
+            }
+            if kind == ProviderKind::Openai && matches!(credential, ProviderCredential::Oauth {}) {
+                return openwave_connectors::has_stored_chatgpt_credentials(secrets).await;
+            }
+            return false;
         }
         Err(_) => return false,
         Ok(None) => {}
@@ -863,6 +904,27 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
         return openwave_connectors::has_stored_credentials(secrets).await;
     }
     env_api_key(kind).is_some()
+}
+
+async fn auth_mode_for(
+    secrets: &dyn SecretProvider,
+    kind: ProviderKind,
+) -> Option<ProviderAuthMode> {
+    if kind != ProviderKind::Openai {
+        return None;
+    }
+    match read_credential(secrets, kind).await.ok().flatten() {
+        Some(ProviderCredential::Oauth {})
+            if openwave_connectors::has_stored_chatgpt_credentials(secrets).await =>
+        {
+            Some(ProviderAuthMode::Chatgpt)
+        }
+        Some(ProviderCredential::ApiKey { key }) if !key.is_empty() => {
+            Some(ProviderAuthMode::ApiKey)
+        }
+        None if env_api_key(kind).is_some() => Some(ProviderAuthMode::ApiKey),
+        _ => None,
+    }
 }
 
 /// Build the public [`ProviderInfo`] for every known kind.
@@ -894,6 +956,7 @@ pub async fn list_providers(
                     }
                     None => false,
                 },
+                auth_mode: None,
                 models: gateway_models(store, policy).await?,
             });
             continue;
@@ -905,6 +968,7 @@ pub async fn list_providers(
             base_url: config.base_url.clone(),
             vertex_location: config.vertex_location.clone(),
             has_credential: has_credential(secrets, kind).await,
+            auth_mode: auth_mode_for(secrets, kind).await,
             models: config.models,
         });
     }
@@ -1000,11 +1064,6 @@ pub async fn update_provider(
 
     if let Some(credential) = update.credential {
         if let Some(json) = credential.as_service_account() {
-            if !kind.accepts_credential(&credential) {
-                return Err(ServerError::bad_request(format!(
-                    "{kind} does not support service_account credentials"
-                )));
-            }
             openwave_router::GoogleServiceAccount::from_json(json).map_err(|_| {
                 ServerError::bad_request("invalid Google service-account credential")
             })?;
@@ -1020,6 +1079,7 @@ pub async fn update_provider(
         base_url: config.base_url.clone(),
         vertex_location: config.vertex_location.clone(),
         has_credential: has_credential(secrets, kind).await,
+        auth_mode: auth_mode_for(secrets, kind).await,
         models: config.models,
     })
 }
@@ -1151,8 +1211,9 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
 /// Collect enabled, credentialed routes for the composite router.
 ///
 /// A kind with no usable credential is skipped. Gemini service accounts become
-/// Vertex routes; API keys remain Developer API routes. Store-read failures for
-/// a single kind skip that kind (fail closed for it) rather than aborting the
+/// Vertex routes; API keys remain Developer API routes. OpenAI ChatGPT OAuth
+/// becomes a Codex-backend route via `chatgpt`. Store-read failures for a
+/// single kind skip that kind (fail closed for it) rather than aborting the
 /// whole list.
 ///
 /// On a managed profile only the gateway route is offered: BYOK kinds are
@@ -1165,6 +1226,10 @@ pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     gateway_tokens: Option<std::sync::Arc<dyn openwave_router::BearerTokenSource>>,
+    chatgpt: Option<(
+        std::sync::Arc<dyn openwave_router::BearerTokenSource>,
+        String,
+    )>,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Vec<openwave_router::Route> {
     let mut routes = Vec::new();
@@ -1192,6 +1257,7 @@ pub async fn collect_routes(
                 curated_models: models.into_iter().map(|model| model.id).collect(),
                 token_source: Some(source),
                 vertex: None,
+                chatgpt_account_id: None,
             });
             continue;
         }
@@ -1210,6 +1276,25 @@ pub async fn collect_routes(
             Ok(credential) => credential,
             Err(_) => continue,
         };
+        if kind == ProviderKind::Openai
+            && matches!(stored_credential, Some(ProviderCredential::Oauth {}))
+        {
+            let Some((source, account_id)) = chatgpt.clone() else {
+                continue;
+            };
+            routes.push(openwave_router::Route {
+                kind: route_kind(kind),
+                api_key: String::new(),
+                base_url: Some(openwave_connectors::CODEX_BASE_URL.to_string()),
+                curated_models: model_registry::models_for(kind)
+                    .map(|spec| spec.id.to_string())
+                    .collect(),
+                token_source: Some(source),
+                vertex: None,
+                chatgpt_account_id: Some(account_id),
+            });
+            continue;
+        }
         if kind == ProviderKind::Gemini {
             if let Some(ProviderCredential::ServiceAccount { json }) = stored_credential.as_ref() {
                 let Ok(account) = openwave_router::GoogleServiceAccount::from_json(json) else {
@@ -1239,6 +1324,7 @@ pub async fn collect_routes(
                         location,
                         credential_fingerprint,
                     )),
+                    chatgpt_account_id: None,
                 });
                 continue;
             }
@@ -1273,6 +1359,7 @@ pub async fn collect_routes(
                 .collect(),
             token_source: None,
             vertex: None,
+            chatgpt_account_id: None,
         });
     }
     routes
@@ -1545,8 +1632,9 @@ mod tests {
                 ProviderKind::Anthropic,
                 ProviderCredential::api_key("existing-api-key"),
             ),
+            (ProviderKind::Openai, ProviderCredential::Oauth {}),
             (
-                ProviderKind::Openai,
+                ProviderKind::Gemini,
                 ProviderCredential::ServiceAccount {
                     json: r#"{"type":"service_account","client_email":"service-account@example.test","private_key":"test-private-key","project_id":"test-project"}"#.to_owned(),
                 },

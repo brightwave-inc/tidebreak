@@ -227,6 +227,23 @@ pub async fn put_provider(
 ) -> Result<Json<ProviderInfo>, ServerError> {
     let kind = ProviderKind::parse(&kind)
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    if kind == ProviderKind::Openai
+        && matches!(
+            body.credential,
+            Some(providers::ProviderCredential::ApiKey { .. })
+        )
+    {
+        // Switching to a key retires the subscription session. Sign out
+        // rather than letting the write clear the vault on its own: that
+        // cancels a sign-in still in flight (it would otherwise land after
+        // the write and replace the key) and revokes the refresh token
+        // instead of dropping it locally while it stays live at OpenAI.
+        state.chatgpt.sign_out().await?;
+    } else if kind == ProviderKind::Openai && body.enabled == Some(false) {
+        // Completing sign-in forces enabled=true. Drop an in-flight attempt
+        // so it cannot overwrite an explicit disable that landed first.
+        state.chatgpt.cancel_pending().await;
+    }
     let info = providers::update_provider(
         &*state.store,
         &*state.secrets,
@@ -246,8 +263,42 @@ pub async fn delete_provider_credential(
     let kind = ProviderKind::parse(&kind)
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
     refuse_credential_writes_when_managed(&state).await?;
+    if kind == ProviderKind::Openai {
+        // Revoke through the runtime first so an in-flight sign-in is
+        // cancelled; the delete below still has to run because the stored
+        // credential may be an API key rather than the OAuth marker.
+        state.chatgpt.sign_out().await?;
+    }
     providers::delete_credential(&*state.secrets, kind).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /providers/openai/chatgpt/sign-in` — start ChatGPT OAuth; returns the
+/// browser URL. Completion is asynchronous; poll `GET /providers`.
+pub async fn post_openai_chatgpt_sign_in(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    refuse_credential_writes_when_managed(&state).await?;
+    let authorization_url = state.chatgpt.begin_sign_in().await?;
+    Ok(Json(
+        serde_json::json!({ "authorization_url": authorization_url }),
+    ))
+}
+
+/// `POST /providers/openai/chatgpt/sign-out` — revoke and clear ChatGPT OAuth.
+pub async fn post_openai_chatgpt_sign_out(
+    State(state): State<AppState>,
+) -> Result<StatusCode, ServerError> {
+    refuse_credential_writes_when_managed(&state).await?;
+    state.chatgpt.sign_out().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /providers/openai/chatgpt/status` — pending / signed-in / error.
+pub async fn get_openai_chatgpt_status(
+    State(state): State<AppState>,
+) -> Result<Json<crate::chatgpt_runtime::ChatGptSignInStatus>, ServerError> {
+    Ok(Json(state.chatgpt.status().await))
 }
 
 pub async fn get_voice_transcription(

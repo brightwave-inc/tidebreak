@@ -139,6 +139,10 @@ pub struct AppState {
     /// through — see [`Self::with_gateway_runtime`] for why the process
     /// must hold exactly one.
     pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    /// ChatGPT subscription OAuth for the OpenAI provider (sign-in, sign-out,
+    /// per-request tokens). Shared with the resolver for the reason given in
+    /// [`Self::with_gateway_runtime`].
+    pub(crate) chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
     /// The OS-managed policy reader for managed-mode resolution. Directly
     /// assembled state (tests, custom hosts) gets the source that asserts
     /// nothing, so it reads nothing from the host OS; the production
@@ -257,6 +261,10 @@ impl AppState {
             secrets.clone(),
             os_policy.clone(),
         );
+        let chatgpt = Arc::new(crate::chatgpt_runtime::ChatGptRuntime::new(
+            store.clone(),
+            secrets.clone(),
+        )?);
         Self::with_gateway_runtime(
             config,
             store,
@@ -266,6 +274,7 @@ impl AppState {
             agent_config,
             client_executor_id,
             gateway,
+            chatgpt,
             os_policy,
         )
     }
@@ -282,6 +291,11 @@ impl AppState {
     /// Refresh rotation is likewise serialized per instance; two instances
     /// over the same keychain entry can race a stale refresh token into the
     /// gateway's reuse detection (a spurious full sign-out).
+    ///
+    /// `chatgpt` is shared for the same reason: the resolver's per-request
+    /// token source and the `/providers/openai/chatgpt` routes refresh and
+    /// revoke the one stored subscription session, and only a shared instance
+    /// serializes them.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_gateway_runtime(
         config: Config,
@@ -292,6 +306,7 @@ impl AppState {
         agent_config: AgentConfig,
         client_executor_id: Uuid,
         gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+        chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Result<Self> {
         if client_executor_id.is_nil() {
@@ -335,6 +350,7 @@ impl AppState {
             rest_dispatch,
             view_frames: Arc::default(),
             gateway,
+            chatgpt,
             os_policy,
             turn_job_wake: Arc::new(Notify::new()),
             agent_run_wake: Arc::new(Notify::new()),

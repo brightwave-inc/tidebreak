@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type {
   ApiClient,
@@ -6,6 +6,7 @@ import type {
   ProviderInfo,
   ProviderKind,
 } from "../api";
+import { openSignInPage } from "../openSignInPage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -20,6 +21,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { providerLabel } from "../ModelSelection";
+
+const CHATGPT_SIGN_IN_POLL_MS = 2_000;
+// Matches the server's sign-in window; polling past it can only report a
+// timeout the server has already recorded.
+const CHATGPT_SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function ProvidersPanel({
   providers,
@@ -169,7 +175,7 @@ function ProviderRow({
         <div className="flex-1">
           <p className="text-sm font-bold">Enabled</p>
           <p className="text-xs text-muted-foreground">
-            {info.has_credential ? "Credential set" : "No credential"}
+            {credentialStatusLabel(info)}
           </p>
         </div>
         <Switch
@@ -313,6 +319,21 @@ function ProviderRow({
           </div>
         </>
       )}
+      {info.kind === "openai" ? (
+        <OpenAiCredentialSection
+          info={info}
+          client={client}
+          saving={saving}
+          setSaving={setSaving}
+          setError={setError}
+          onChanged={onChanged}
+          apiKey={key}
+          setApiKey={setKey}
+          onSaveApiKey={() => void save(true)}
+          onClear={() => void clearCredential()}
+        />
+      ) : (
+        <>
       {info.kind === "gemini" && (
         <label className="grid gap-1 text-xs text-muted-foreground">
           Credential type
@@ -400,8 +421,249 @@ function ProviderRow({
           </Button>
         )}
       </div>
+        </>
+      )}
       {error && <SettingsError>{error}</SettingsError>}
       {dialog}
     </SettingsSection>
+  );
+}
+
+function credentialStatusLabel(info: ProviderInfo): string {
+  if (!info.has_credential) return "No credential";
+  if (info.kind === "openai" && info.auth_mode === "chatgpt") {
+    return "Signed in with ChatGPT";
+  }
+  if (info.kind === "openai" && info.auth_mode === "api_key") {
+    return "API key set";
+  }
+  return "Credential set";
+}
+
+function OpenAiCredentialSection({
+  info,
+  client,
+  saving,
+  setSaving,
+  setError,
+  onChanged,
+  apiKey,
+  setApiKey,
+  onSaveApiKey,
+  onClear,
+}: {
+  info: ProviderInfo;
+  client: ApiClient;
+  saving: boolean;
+  setSaving: (value: boolean) => void;
+  setError: (value: string | null) => void;
+  onChanged: () => void;
+  apiKey: string;
+  setApiKey: (value: string) => void;
+  onSaveApiKey: () => void;
+  onClear: () => void;
+}) {
+  const signedInWithChatgpt = info.auth_mode === "chatgpt" && info.has_credential;
+  const [pendingUrl, setPendingUrl] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+  const pollDeadlineRef = useRef<number | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (pollDeadlineRef.current !== null) {
+      window.clearTimeout(pollDeadlineRef.current);
+      pollDeadlineRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => stopPolling, [stopPolling]);
+
+  const startPolling = useCallback(
+    (authorizationUrl: string | null) => {
+      stopPolling();
+      setPendingUrl(authorizationUrl);
+      // The server dropped the attempt — an API key saved, credentials
+      // cleared, or a newer sign-in started. Nothing failed, so stop without
+      // reporting anything.
+      const stopQuietly = () => {
+        stopPolling();
+        setPendingUrl(null);
+      };
+      const settle = (signedIn: boolean, failure?: string) => {
+        stopQuietly();
+        if (signedIn) {
+          onChanged();
+          toast.success("Signed in with ChatGPT");
+          return;
+        }
+        setError(failure ?? "ChatGPT sign-in did not complete. Try again.");
+        toast.error("ChatGPT sign-in failed");
+      };
+      pollRef.current = window.setInterval(() => {
+        void client
+          .getOpenaiChatgptStatus()
+          .then((status) => {
+            // Prefer a recorded failure over vault-only tokens: `signed_in`
+            // requires the Oauth marker, but a half-finished persist can still
+            // leave tokens while progress is Failed.
+            if (status.error) settle(false, status.error);
+            else if (status.signed_in) settle(true);
+            else if (!status.pending_authorization_url) stopQuietly();
+          })
+          .catch(() => {
+            /* transient; keep polling until the deadline below */
+          });
+      }, CHATGPT_SIGN_IN_POLL_MS);
+      pollDeadlineRef.current = window.setTimeout(() => {
+        stopPolling();
+        // The server's own window has closed by now, so read the outcome it
+        // recorded instead of leaving the row waiting on nothing.
+        void client
+          .getOpenaiChatgptStatus()
+          .then((status) => {
+            if (status.error) settle(false, status.error);
+            else settle(status.signed_in);
+          })
+          .catch(() => settle(false));
+      }, CHATGPT_SIGN_IN_TIMEOUT_MS);
+    },
+    [client, onChanged, setError, stopPolling],
+  );
+
+  // The sign-in runs on the server, so one started before this panel mounted —
+  // or left behind when the user navigated away — is still waiting on the
+  // browser. Pick it back up rather than sitting on a stale "no credential".
+  const resumeChecked = useRef(false);
+  useEffect(() => {
+    if (resumeChecked.current || signedInWithChatgpt) return;
+    resumeChecked.current = true;
+    let dropped = false;
+    void client
+      .getOpenaiChatgptStatus()
+      .then((status) => {
+        if (dropped) return;
+        if (status.error) {
+          setError(status.error);
+          return;
+        }
+        if (status.pending_authorization_url) {
+          startPolling(status.pending_authorization_url);
+        }
+      })
+      .catch(() => {
+        /* the row still works without a resumed sign-in */
+      });
+    return () => {
+      dropped = true;
+    };
+  }, [client, setError, signedInWithChatgpt, startPolling]);
+
+  async function signInWithChatgpt() {
+    setSaving(true);
+    setError(null);
+    try {
+      const { authorization_url } = await client.openaiChatgptSignIn();
+      await openSignInPage(authorization_url);
+      toast.message("Finish signing in with ChatGPT in your browser");
+      startPolling(authorization_url);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function signOutChatgpt() {
+    setSaving(true);
+    setError(null);
+    try {
+      await client.openaiChatgptSignOut();
+      onChanged();
+      toast.success("Signed out of ChatGPT");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (signedInWithChatgpt) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="destructive"
+          disabled={saving}
+          onClick={() => void signOutChatgpt()}
+        >
+          Sign out of ChatGPT
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">
+        Use a ChatGPT subscription (Plus / Pro) or an OpenAI Platform API key.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          disabled={saving}
+          onClick={() => void signInWithChatgpt()}
+        >
+          Sign in with ChatGPT
+        </Button>
+      </div>
+      {pendingUrl && (
+        <p className="text-xs text-muted-foreground">
+          Waiting for the browser to finish signing in.{" "}
+          <a
+            href={pendingUrl}
+            className="underline"
+            onClick={(event) => {
+              // No target="_blank": the shell plugin's injected click handler
+              // opens such links itself without honoring preventDefault, which
+              // doubles the tab. Route through the native opener and keep the
+              // href for hover/copy.
+              event.preventDefault();
+              void openSignInPage(pendingUrl);
+            }}
+          >
+            Open the sign-in page again
+          </a>
+        </p>
+      )}
+      <Input
+        type="password"
+        placeholder="Or paste an API key"
+        value={apiKey}
+        onChange={(e) => setApiKey(e.target.value)}
+        autoComplete="off"
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          disabled={saving || (!info.has_credential && !apiKey.trim())}
+          onClick={onSaveApiKey}
+        >
+          Save configuration
+        </Button>
+        {info.has_credential && (
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={saving}
+            onClick={onClear}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
+    </>
   );
 }

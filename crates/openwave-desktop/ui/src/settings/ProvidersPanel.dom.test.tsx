@@ -127,6 +127,102 @@ describe("ProvidersPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("starts ChatGPT OAuth from the OpenAI provider row", async () => {
+    const openai: ProviderInfo = {
+      kind: "openai",
+      enabled: false,
+      has_credential: false,
+      models: [],
+    };
+    const openaiChatgptSignIn = vi.fn().mockResolvedValue({
+      authorization_url: "https://auth.openai.com/oauth/authorize?x=1",
+    });
+    const getOpenaiChatgptStatus = vi
+      .fn()
+      .mockResolvedValue({ signed_in: false });
+    const client = {
+      openaiChatgptSignIn,
+      getOpenaiChatgptStatus,
+      putProvider: vi.fn(),
+    } as unknown as ApiClient;
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    const user = userEvent.setup();
+
+    render(
+      <ProvidersPanel
+        providers={[openai]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("No credential")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Sign in with ChatGPT" }),
+    );
+    await waitFor(() => expect(openaiChatgptSignIn).toHaveBeenCalled());
+    expect(open).toHaveBeenCalledWith(
+      "https://auth.openai.com/oauth/authorize?x=1",
+      "_blank",
+      "noreferrer,noopener",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("resumes a ChatGPT sign-in that started before the panel mounted", async () => {
+    const getOpenaiChatgptStatus = vi
+      .fn()
+      .mockResolvedValueOnce({
+        signed_in: false,
+        pending_authorization_url: "https://auth.openai.com/oauth/authorize",
+      })
+      .mockResolvedValue({ signed_in: true });
+    const onChanged = vi.fn();
+
+    render(
+      <ProvidersPanel
+        providers={[
+          { kind: "openai", enabled: false, has_credential: false, models: [] },
+        ]}
+        client={{ getOpenaiChatgptStatus } as unknown as ApiClient}
+        onChanged={onChanged}
+      />,
+    );
+
+    // No click here: the sign-in belongs to the server, and the panel has to
+    // pick its completion up on its own.
+    await waitFor(() => expect(onChanged).toHaveBeenCalled(), {
+      timeout: 5_000,
+    });
+  });
+
+  it("shows ChatGPT sign-out when OpenAI is signed in via subscription", () => {
+    render(
+      <ProvidersPanel
+        providers={[
+          {
+            kind: "openai",
+            enabled: true,
+            has_credential: true,
+            auth_mode: "chatgpt",
+            models: [],
+          },
+        ]}
+        client={{} as ApiClient}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Signed in with ChatGPT")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Sign out of ChatGPT" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sign in with ChatGPT" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("configures Gemini service-account auth without projecting the secret", async () => {
     const gemini: ProviderInfo = {
       kind: "gemini",

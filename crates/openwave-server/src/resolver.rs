@@ -50,24 +50,30 @@ pub struct ConfiguredResolver {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     cached: Mutex<CachedProvider>,
 }
 
 impl ConfiguredResolver {
     /// A resolver that reads provider config from `store` and credentials from
-    /// `secrets`, with `gateway` supplying the model-gateway token source and
-    /// `os_policy` the OS authority for managed-mode resolution.
+    /// `secrets`, with `gateway` and `chatgpt` supplying their OAuth token
+    /// sources and `os_policy` the OS authority for managed-mode resolution.
+    ///
+    /// Both OAuth runtimes must be the same instances the rest of the process
+    /// holds — see [`crate::state::AppState::with_gateway_runtime`].
     pub fn new(
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
         gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+        chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
         Self {
             store,
             secrets,
             gateway,
+            chatgpt,
             os_policy,
             cached: Mutex::new(None),
         }
@@ -87,8 +93,15 @@ impl ProviderResolver for ConfiguredResolver {
             return Arc::new(UnconfiguredProvider);
         };
         let gateway_tokens = self.gateway.route_token_source().await;
-        let routes =
-            providers::collect_routes(&*self.store, &*self.secrets, gateway_tokens, &policy).await;
+        let chatgpt = self.chatgpt.route_auth().await;
+        let routes = providers::collect_routes(
+            &*self.store,
+            &*self.secrets,
+            gateway_tokens,
+            chatgpt,
+            &policy,
+        )
+        .await;
         let router = Router::build(routes);
         let fingerprint = router.fingerprint().to_string();
 

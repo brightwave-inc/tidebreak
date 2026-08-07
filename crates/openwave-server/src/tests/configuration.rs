@@ -1323,6 +1323,10 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
+            ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
@@ -1468,6 +1472,10 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                 store.clone(),
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
@@ -1848,6 +1856,9 @@ async fn resolver_builds_a_router_from_enabled_providers() {
             secrets.clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
     let resolved = resolver.resolve().await;
@@ -1933,7 +1944,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
-        let routes = providers::collect_routes(&*store, &*secrets, None, &policy).await;
+        let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, route_kind);
 
@@ -1944,6 +1955,10 @@ async fn resolver_includes_configured_curated_api_key_providers() {
                 store.clone(),
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
@@ -2003,9 +2018,11 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
     )
     .await
     .unwrap());
-    assert!(providers::collect_routes(&*store, &*secrets, None, &policy)
-        .await
-        .is_empty());
+    assert!(
+        providers::collect_routes(&*store, &*secrets, None, None, &policy)
+            .await
+            .is_empty()
+    );
     assert!(providers::catalog_models(&*store, &*secrets, &policy)
         .await
         .unwrap()
@@ -2049,7 +2066,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
     let router = openwave_router::Router::build(routes);
     assert_eq!(
         router.select("llama-3-local"),
@@ -2150,7 +2167,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
         .await
         .unwrap();
     let kinds: Vec<_> =
-        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), &policy)
+        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy)
             .await
             .into_iter()
             .map(|route| route.kind)
@@ -2167,7 +2184,8 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
         .await
         .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), &policy).await;
+    let routes =
+        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
     assert_eq!(
@@ -2194,7 +2212,7 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     )
     .await
     .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
 }
@@ -2239,6 +2257,9 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
             store.clone(),
             secrets.clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
+        ),
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
         ),
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
@@ -2299,6 +2320,10 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
                 store.clone(),
                 secrets.clone(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
             ),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),

@@ -1,6 +1,7 @@
 //! Native OpenAI Responses API provider.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -20,9 +21,12 @@ use crate::sse::{
     classify_in_band_error, classify_provider_error, drain_frames, frame_data,
     read_bounded_error_body,
 };
+use crate::BearerTokenSource;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+const CHATGPT_BETA_HEADER: &str = "responses=v1";
+const DEFAULT_CHATGPT_ORIGINATOR: &str = "openwave";
 
 /// A [`ModelProvider`] for OpenAI's native Responses API.
 #[derive(Clone)]
@@ -30,6 +34,14 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
+    /// Per-request credential supplier for ChatGPT OAuth (and similar)
+    /// short-lived tokens. Takes precedence over `api_key` when present.
+    token_source: Option<Arc<dyn BearerTokenSource>>,
+    /// When set, inference is ChatGPT-subscription shaped: send the account
+    /// id and Codex originator headers expected by the ChatGPT backend.
+    chatgpt_account_id: Option<String>,
+    /// `originator` header value when [`Self::chatgpt_account_id`] is set.
+    chatgpt_originator: String,
 }
 
 impl OpenAiProvider {
@@ -38,12 +50,39 @@ impl OpenAiProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            token_source: None,
+            chatgpt_account_id: None,
+            chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
         }
     }
 
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Fetch the credential from `source` at each request instead of using a
+    /// static key. For ChatGPT OAuth whose access tokens rotate under the
+    /// adapter.
+    #[must_use]
+    pub fn with_token_source(mut self, source: Arc<dyn BearerTokenSource>) -> Self {
+        self.token_source = Some(source);
+        self
+    }
+
+    /// Mark this provider as ChatGPT-subscription auth: attach the account id
+    /// and Codex-compatible headers on every request.
+    #[must_use]
+    pub fn with_chatgpt_account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.chatgpt_account_id = Some(account_id.into());
+        self
+    }
+
+    /// Override the `originator` header sent in ChatGPT mode.
+    #[must_use]
+    pub fn with_chatgpt_originator(mut self, originator: impl Into<String>) -> Self {
+        self.chatgpt_originator = originator.into();
         self
     }
 }
@@ -57,11 +96,22 @@ impl ModelProvider for OpenAiProvider {
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let body = build_request_json(&req)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let response = self
+        let api_key = match &self.token_source {
+            Some(source) => source.bearer_token_for(req.conversation).await?,
+            None => self.api_key.clone(),
+        };
+        let mut request = self
             .client
             .post(url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
+            .bearer_auth(&api_key)
+            .header("content-type", "application/json");
+        if let Some(account_id) = &self.chatgpt_account_id {
+            request = request
+                .header("ChatGPT-Account-ID", account_id)
+                .header("OpenAI-Beta", CHATGPT_BETA_HEADER)
+                .header("originator", &self.chatgpt_originator);
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -1357,5 +1407,101 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_oauth_sends_bearer_account_and_originator_headers() {
+        use std::sync::Arc;
+
+        use axum::extract::{Request, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+        use tokio::sync::oneshot;
+
+        use crate::BearerTokenSource;
+
+        struct StaticSource;
+
+        #[async_trait]
+        impl BearerTokenSource for StaticSource {
+            async fn bearer_token(&self) -> Result<String> {
+                Ok("chatgpt-access".into())
+            }
+        }
+
+        #[derive(Default)]
+        struct Captured {
+            authorization: Option<String>,
+            account: Option<String>,
+            beta: Option<String>,
+            originator: Option<String>,
+        }
+
+        async fn capture(
+            State(tx): State<Arc<std::sync::Mutex<Option<oneshot::Sender<Captured>>>>>,
+            request: Request,
+        ) -> impl IntoResponse {
+            let headers = request.headers();
+            let captured = Captured {
+                authorization: headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                account: headers
+                    .get("chatgpt-account-id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                beta: headers
+                    .get("openai-beta")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                originator: headers
+                    .get("originator")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+            };
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(captured);
+            }
+            (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+                ),
+            )
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let state = Arc::new(std::sync::Mutex::new(Some(tx)));
+        let app = Router::new().fallback(post(capture)).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiProvider::new(String::new())
+            .with_base_url(format!("http://{address}/codex"))
+            .with_token_source(Arc::new(StaticSource))
+            .with_chatgpt_account_id("acct-xyz");
+        let stream = provider
+            .stream(ChatRequest {
+                model: "gpt-5.6-sol".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let _events: Vec<_> = stream.collect().await;
+        let captured = rx.await.unwrap();
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer chatgpt-access")
+        );
+        assert_eq!(captured.account.as_deref(), Some("acct-xyz"));
+        assert_eq!(captured.beta.as_deref(), Some("responses=v1"));
+        assert_eq!(captured.originator.as_deref(), Some("openwave"));
     }
 }

@@ -20,6 +20,7 @@ mod blob_orphan_auditor;
 mod blob_retirement_worker;
 mod bus;
 mod chat_titling;
+mod chatgpt_runtime;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod connected_apps;
@@ -433,6 +434,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/providers/{kind}/credential",
             axum::routing::delete(routes::delete_provider_credential),
+        )
+        .route(
+            "/providers/openai/chatgpt/sign-in",
+            post(routes::post_openai_chatgpt_sign_in),
+        )
+        .route(
+            "/providers/openai/chatgpt/sign-out",
+            post(routes::post_openai_chatgpt_sign_out),
+        )
+        .route(
+            "/providers/openai/chatgpt/status",
+            get(routes::get_openai_chatgpt_status),
         )
         .merge(public_document_api)
         .merge(renderer_document_api)
@@ -909,10 +922,15 @@ async fn bind_inner(
     }
     let gateway =
         gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+    let chatgpt = Arc::new(chatgpt_runtime::ChatGptRuntime::new(
+        store.clone(),
+        secrets.clone(),
+    )?);
     let resolver = Arc::new(KeyedResolver::new(
         store.clone(),
         secrets.clone(),
         gateway.clone(),
+        chatgpt.clone(),
         os_policy.clone(),
     ));
     let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
@@ -970,6 +988,7 @@ async fn bind_inner(
         agent_config,
         client_executor_id.unwrap_or_else(Uuid::new_v4),
         gateway,
+        chatgpt,
         os_policy,
     )?;
     // Without a restart-stable native executor identity, durable

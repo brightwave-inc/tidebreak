@@ -1350,6 +1350,7 @@ mod tests {
             &*store,
             &*runtime.secrets,
             runtime.route_token_source().await,
+            None,
             &policy,
         )
         .await;
@@ -1685,10 +1686,14 @@ mod tests {
         let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
             Arc::new(crate::managed_policy::NoOsPolicy);
         let runtime = GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+        let chatgpt = Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        );
         let resolver = Arc::new(crate::resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
             runtime.clone(),
+            chatgpt.clone(),
             os_policy.clone(),
         ));
         let state = crate::state::AppState::with_gateway_runtime(
@@ -1700,6 +1705,7 @@ mod tests {
             openwave_core::AgentConfig::default(),
             uuid::Uuid::new_v4(),
             runtime,
+            chatgpt,
             os_policy,
         )
         .unwrap();
@@ -1982,7 +1988,8 @@ mod tests {
         let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
             .await
             .unwrap();
-        let routes = providers::collect_routes(&*store, &*runtime.secrets, None, &policy).await;
+        let routes =
+            providers::collect_routes(&*store, &*runtime.secrets, None, None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));
@@ -2079,7 +2086,8 @@ mod tests {
         // token source in hand, the gateway route is not built.
         assert!(runtime.route_token_source().await.is_none());
         let tokens: Arc<dyn BearerTokenSource> = Arc::new(StaticTokens);
-        let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+        let routes =
+            providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));

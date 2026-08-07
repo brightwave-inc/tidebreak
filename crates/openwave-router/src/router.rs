@@ -152,6 +152,9 @@ pub struct Route {
     /// Vertex resource/auth metadata. Present only for a Gemini route backed
     /// by a Google service account.
     pub vertex: Option<VertexRoute>,
+    /// ChatGPT account id for OpenAI routes authenticated via ChatGPT OAuth.
+    /// Baked into the adapter (only the bearer rotates).
+    pub chatgpt_account_id: Option<String>,
 }
 
 impl std::fmt::Debug for Route {
@@ -163,6 +166,7 @@ impl std::fmt::Debug for Route {
             .field("curated_models", &self.curated_models)
             .field("token_source", &self.token_source.is_some())
             .field("vertex", &self.vertex)
+            .field("chatgpt_account_id", &self.chatgpt_account_id)
             .finish()
     }
 }
@@ -331,7 +335,20 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
 
         #[cfg(feature = "openai")]
         RouteKind::Openai => {
-            let mut p = OpenAiProvider::new(route.api_key.clone());
+            let mut p = if let Some(source) = route.token_source.clone() {
+                let mut provider = OpenAiProvider::new(String::new()).with_token_source(source);
+                if let Some(account_id) = &route.chatgpt_account_id {
+                    provider = provider.with_chatgpt_account_id(account_id.clone());
+                }
+                provider
+            } else {
+                // A ChatGPT account id without a live token source is not a
+                // usable Platform API-key route.
+                if route.chatgpt_account_id.is_some() {
+                    return None;
+                }
+                OpenAiProvider::new(route.api_key.clone())
+            };
             if let Some(base) = &route.base_url {
                 p = p.with_base_url(base.clone());
             }
@@ -387,7 +404,7 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}",
                 r.kind.as_str(),
                 // A rotating token must not thrash the cached router; the
                 // fingerprint tracks *whether* a live source exists, and the
@@ -410,7 +427,8 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>();
                     format!("{}:{credential}", vertex.location)
-                })
+                }),
+                r.chatgpt_account_id.as_deref().unwrap_or("")
             )
         })
         .collect();
@@ -442,6 +460,7 @@ mod tests {
             curated_models: models.iter().map(|m| (*m).to_string()).collect(),
             token_source: None,
             vertex: None,
+            chatgpt_account_id: None,
         }
     }
 

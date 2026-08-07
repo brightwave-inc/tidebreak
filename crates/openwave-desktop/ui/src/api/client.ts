@@ -47,6 +47,7 @@ import {
   type PromptBody,
   type ProviderInfo,
   type ProviderKind,
+  type ChatGptSignInStatus,
   type ReasoningEffort,
   type RestCredentialUpdate,
   type RuntimeSettings,
@@ -203,6 +204,26 @@ export class ApiClient {
   deleteCredential(kind: ProviderKind): Promise<void> {
     return this.json(`/providers/${kind}/credential`, {
       method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  openaiChatgptSignIn(): Promise<{ authorization_url: string }> {
+    return this.json("/providers/openai/chatgpt/sign-in", {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  openaiChatgptSignOut(): Promise<void> {
+    return this.json("/providers/openai/chatgpt/sign-out", {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  getOpenaiChatgptStatus(): Promise<ChatGptSignInStatus> {
+    return this.json("/providers/openai/chatgpt/status", {
       headers: this.headers(),
     });
   }

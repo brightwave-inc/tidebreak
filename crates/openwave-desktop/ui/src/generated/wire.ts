@@ -435,6 +435,8 @@ root_attachments: Array<ChatRootAttachment>,
  */
 created_at: string, };
 
+export type ChatGptSignInStatus = { signed_in: boolean, pending_authorization_url?: string, error?: string, };
+
 /**
  * Identifies a persistent conversation.
  */
@@ -1750,6 +1752,11 @@ body: string, };
 export type PromptOrigin = "builtin" | "user";
 
 /**
+ * How a provider's credential was established.
+ */
+export type ProviderAuthMode = "api_key" | "chatgpt";
+
+/**
  * Public view of a provider — never includes the credential itself.
  */
 export type ProviderInfo = { 
@@ -1773,6 +1780,10 @@ vertex_location?: string,
  * Whether a credential is stored (never the credential itself).
  */
 has_credential: boolean, 
+/**
+ * How OpenAI (or similarly dual-mode providers) is authenticated.
+ */
+auth_mode?: ProviderAuthMode, 
 /**
  * Explicit custom model entries for this endpoint.
  */
