@@ -120,6 +120,36 @@ fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("resolve home dir: {e}"))
 }
 
+/// Resolve the directory Tauri stages bundle resources into.
+///
+/// Packaged builds use Tauri's normal resource path (`Contents/Resources` on
+/// macOS, etc.). Dev builds usually resolve to the Cargo output directory next
+/// to the binary, but Tauri only recognizes that layout when a path component
+/// is literally named `target`. Custom `CARGO_TARGET_DIR` values such as
+/// `~/.cache/openwave-target` fail that check, so `resource_dir()` returns
+/// `unknown path` even though Tauri already staged `exec-scripts/`, `skills/`,
+/// and `plugins/` beside the binary. Fall back to the executable directory
+/// when it carries Cargo's `.cargo-lock` marker.
+fn app_resource_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    match app.path().resource_dir() {
+        Ok(dir) => Ok(dir),
+        Err(error) => cargo_dev_resource_dir().ok_or_else(|| format!("app resource dir: {error}")),
+    }
+}
+
+fn cargo_dev_resource_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    cargo_dev_resource_dir_from(exe_dir)
+}
+
+fn cargo_dev_resource_dir_from(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .join(".cargo-lock")
+        .is_file()
+        .then(|| exe_dir.to_path_buf())
+}
+
 fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     const REQUIRED_HELPERS: [&str; 13] = [
         "_openwave_preview.py",
@@ -136,11 +166,7 @@ fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         "xlsx_recalc.py",
         "docx_clean.py",
     ];
-    let directory = app
-        .path()
-        .resource_dir()
-        .map_err(|error| format!("app resource dir: {error}"))?
-        .join("exec-scripts");
+    let directory = app_resource_dir(app)?.join("exec-scripts");
     for name in REQUIRED_HELPERS {
         if !directory.join(name).is_file() {
             return Err(format!("bundled exec document helper is missing: {name}"));
@@ -166,11 +192,7 @@ const REQUIRED_SKILLS: [&str; 5] = [
 const REQUIRED_PLUGINS: [&str; 3] = ["charts", "documents", "spreadsheets"];
 
 fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let directory = app
-        .path()
-        .resource_dir()
-        .map_err(|error| format!("app resource dir: {error}"))?
-        .join("skills");
+    let directory = app_resource_dir(app)?.join("skills");
     for name in REQUIRED_SKILLS {
         if !directory.join(name).join("SKILL.md").is_file() {
             return Err(format!("bundled document skill is missing: {name}"));
@@ -180,11 +202,7 @@ fn exec_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn exec_plugins_dir(app: &tauri::AppHandle, skills_dir: &Path) -> Result<PathBuf, String> {
-    let directory = app
-        .path()
-        .resource_dir()
-        .map_err(|error| format!("app resource dir: {error}"))?
-        .join("plugins");
+    let directory = app_resource_dir(app)?.join("plugins");
     verify_required_plugins(skills_dir, &directory)?;
     Ok(directory)
 }
@@ -473,6 +491,41 @@ async fn boot_server(
         .await;
     });
     server.serve().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod resource_dir_tests {
+    use super::cargo_dev_resource_dir_from;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("openwave-resource-dir-{label}-{nanos}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn cargo_dev_fallback_accepts_custom_target_dir_with_lock() {
+        let dir = temp_dir("with-lock");
+        fs::write(dir.join(".cargo-lock"), []).expect("lock");
+        assert_eq!(
+            cargo_dev_resource_dir_from(&dir).as_deref(),
+            Some(dir.as_path())
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cargo_dev_fallback_rejects_directories_without_cargo_lock() {
+        let dir = temp_dir("without-lock");
+        assert_eq!(cargo_dev_resource_dir_from(&dir), None);
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
