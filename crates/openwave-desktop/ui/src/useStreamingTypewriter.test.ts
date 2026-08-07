@@ -52,4 +52,21 @@ describe("useStreamingTypewriter", () => {
 
     expect(result.current).toBe("Searched the web and 1 other task");
   });
+
+  // A reconnect replays the active turn's whole journal in a burst (#1716);
+  // the animation must not re-type prose the reader already watched stream.
+  it("snaps instead of animating when catch-up puts it far behind", async () => {
+    vi.useFakeTimers();
+    const { result, rerender } = renderHook(
+      ({ text, live }) => useStreamingTypewriter(text, live),
+      { initialProps: { text: "", live: true } },
+    );
+
+    const replayed = "already-streamed prose ".repeat(50).trim();
+    rerender({ text: replayed, live: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current).toBe(replayed);
+  });
 });
