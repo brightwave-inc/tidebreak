@@ -12,7 +12,6 @@ use futures_timer::Delay;
 use crate::approval::{ApprovalGate, RefuseGate, StandingGrants};
 use crate::cancel::CancelToken;
 use crate::citation::{parse_assistant_citations, AssistantCitationInput};
-use crate::compaction::CompactionTokenTracker;
 use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
@@ -343,21 +342,14 @@ impl Agent {
             .await?;
         let mut checkpoint_boundary = loaded.checkpoint_boundary;
         let source_boundaries = loaded.source_boundaries;
-        let mut token_tracker = CompactionTokenTracker::new(loaded.token_baseline);
         let user_texts = loaded.user_texts;
         let mut transcript = loaded.messages;
         if let Some(instruction) = self.continuation_instruction.as_ref() {
             transcript.push(ChatMessage::text(Role::System, instruction.clone()));
         }
         let mut total_usage = Usage::default();
-        self.resume_pending_server_calls(
-            chat,
-            turn_id,
-            events,
-            &mut transcript,
-            &mut token_tracker,
-        )
-        .await?;
+        self.resume_pending_server_calls(chat, turn_id, events, &mut transcript)
+            .await?;
         let mut reduction_level: u32 = 0;
         let mut checkpoint_attempt_boundary = None;
         // The current run of consecutive identical plain server calls — the
@@ -423,7 +415,6 @@ impl Agent {
                             transcript: &transcript,
                             source_boundaries: &source_boundaries,
                             user_texts: &user_texts,
-                            token_tracker: &token_tracker,
                             current: checkpoint.as_ref(),
                             attempted_boundary: &mut checkpoint_attempt_boundary,
                             events,
@@ -1219,11 +1210,9 @@ impl Agent {
                     .zip(outputs)
                     .flat_map(|(call, output)| {
                         output.map_or_else(Vec::new, |output| {
-                            let result = self.tool_result_for_model(&output.content, call.call_id);
-                            token_tracker.note_capped_tool_result(&output.content, &result);
                             tool_result_blocks(
                                 call.provider_id.clone(),
-                                result,
+                                self.tool_result_for_model(&output.content, call.call_id),
                                 output.is_error,
                                 &output.images,
                                 self.config.image_input,

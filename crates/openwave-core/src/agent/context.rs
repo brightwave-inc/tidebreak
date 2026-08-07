@@ -6,7 +6,6 @@ use futures::StreamExt;
 
 use crate::compaction::{
     self, select_compaction_boundary, CompactionSelection, CompactionSourceBoundary,
-    CompactionTokenBaseline, CompactionTokenTracker,
 };
 use crate::context;
 use crate::error::{AgentError, Result};
@@ -32,7 +31,6 @@ pub(crate) struct CreateContextCheckpoint<'a> {
     pub transcript: &'a [ChatMessage],
     pub source_boundaries: &'a [TranscriptSourceBoundary],
     pub user_texts: &'a [(MessageId, String)],
-    pub token_tracker: &'a CompactionTokenTracker,
     pub current: Option<&'a ContextCheckpoint>,
     pub attempted_boundary: &'a mut Option<usize>,
     pub events: &'a super::events::EventSink<'a>,
@@ -77,18 +75,6 @@ impl Agent {
         }
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
-        // Trigger accounting must not under-count because tool results were
-        // abridged for the provider body. Rebuild once uncapped for the token
-        // estimate, then again at the configured cap for the live transcript.
-        let (unabridged, _, _) = rebuild_transcript_with_boundary(
-            &messages,
-            &tool_calls,
-            &attachments,
-            usize::MAX,
-            self.config.image_input,
-            checkpoint_source,
-        );
-        let unabridged_history_tokens = context::estimate_transcript_tokens(&unabridged);
         let user_texts: Vec<(MessageId, String)> = messages
             .iter()
             .filter(|message| message.role == Role::User)
@@ -103,21 +89,47 @@ impl Agent {
                 self.config.image_input,
                 checkpoint_source,
             );
-        let token_baseline = CompactionTokenBaseline {
-            unabridged_history_tokens,
-            loaded_transcript_tokens: context::estimate_transcript_tokens(&provider_messages),
-        };
         Ok(LoadedTranscript {
             messages: provider_messages,
             checkpoint_boundary,
             source_boundaries,
-            token_baseline,
             user_texts,
         })
     }
 
+    /// What this transcript costs the model right now: the projected
+    /// checkpoint plus the history after its boundary, or the whole transcript
+    /// when nothing is projectable.
+    ///
+    /// Every compaction number is measured here, on the messages that actually
+    /// go on the wire. Counting the covered prefix a checkpoint already stands
+    /// in for would leave the trigger permanently hot after the first
+    /// compaction — the opposite of the infrequent, hard cadence the policy
+    /// describes — and counting tool results at a size no request carries
+    /// would put the trigger and [`select_compaction_boundary`]'s target on
+    /// different scales.
+    fn model_view_tokens(
+        &self,
+        transcript: &[ChatMessage],
+        checkpoint: Option<&ContextCheckpoint>,
+        boundary: Option<usize>,
+    ) -> usize {
+        match (checkpoint, boundary) {
+            (Some(checkpoint), Some(boundary))
+                if boundary > 0
+                    && boundary <= transcript.len()
+                    && checkpoint_is_projectable(checkpoint, checkpoint.chat_id) =>
+            {
+                context::estimate_transcript_tokens(&transcript[boundary..]).saturating_add(
+                    context::estimate_message_tokens(&project_checkpoint(checkpoint)),
+                )
+            }
+            _ => context::estimate_transcript_tokens(transcript),
+        }
+    }
+
     /// Create the next semantic checkpoint when compaction policy says the
-    /// unabridged transcript is over threshold.
+    /// model's view of this chat is over threshold.
     ///
     /// The call is maintenance work: it runs on the host's utility model rather
     /// than the conversation's, it receives no foreground tools or
@@ -139,7 +151,6 @@ impl Agent {
             transcript,
             source_boundaries,
             user_texts,
-            token_tracker,
             current,
             attempted_boundary,
             events,
@@ -152,9 +163,6 @@ impl Agent {
             .config
             .compaction
             .resolve_token_bounds(self.config.context_window);
-        if token_tracker.trigger_tokens(transcript) <= bounds.threshold {
-            return Ok(None);
-        }
 
         let sources: Vec<CompactionSourceBoundary> = source_boundaries
             .iter()
@@ -170,6 +178,11 @@ impl Agent {
                 .find(|source| source.message_id == checkpoint.source_message_id)
                 .map(|source| source.provider_boundary)
         });
+        if self.model_view_tokens(transcript, current, current_provider_boundary)
+            <= bounds.threshold
+        {
+            return Ok(None);
+        }
         let Some(CompactionSelection {
             message_id: candidate_message_id,
             provider_boundary: candidate_boundary,

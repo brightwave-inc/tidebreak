@@ -51,7 +51,6 @@ use serde_json::Value;
 use crate::approval::{ApprovalGate, StandingGrants};
 use crate::cancel::CancelToken;
 use crate::citation::AssistantCitationInput;
-use crate::compaction::CompactionTokenBaseline;
 use crate::error::ProviderErrorInfo;
 use crate::id::{CallId, ChatId, MessageId, TurnId};
 use crate::model::{Message, Role, ToolCallRecord};
@@ -147,8 +146,6 @@ pub(crate) struct LoadedTranscript {
     messages: Vec<ChatMessage>,
     checkpoint_boundary: Option<usize>,
     source_boundaries: Vec<TranscriptSourceBoundary>,
-    /// Trigger accounting for this load, uncapped and growth-aware.
-    token_baseline: CompactionTokenBaseline,
     /// Durable user texts for `original_requests` carry-forward.
     user_texts: Vec<(MessageId, String)>,
 }

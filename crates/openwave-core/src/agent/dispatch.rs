@@ -6,7 +6,6 @@ use crate::approval::{
     ApprovalDecision, ApprovalJournalIdentity, ApprovalRequest, ApprovalRequiredPublication,
     GrantScope, ToolApprovalKind,
 };
-use crate::compaction::CompactionTokenTracker;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{AgentRunId, CallId, ChatId, TurnId};
@@ -1118,7 +1117,6 @@ impl Agent {
         turn_id: TurnId,
         events: &EventSink<'_>,
         transcript: &mut Vec<ChatMessage>,
-        token_tracker: &mut CompactionTokenTracker,
     ) -> Result<()> {
         let pending = self
             .store
@@ -1287,14 +1285,12 @@ impl Agent {
                 action: call_action_preview(&call),
                 result: preview,
             });
-            let result = self.tool_result_for_model(&output.content, call.call_id);
-            token_tracker.note_capped_tool_result(&output.content, &result);
             transcript.push(ChatMessage {
                 role: Role::User,
                 reasoning: MessageReasoning::default(),
                 content: tool_result_blocks(
                     call.provider_id,
-                    result,
+                    self.tool_result_for_model(&output.content, call.call_id),
                     output.is_error,
                     &output.images,
                     self.config.image_input,
