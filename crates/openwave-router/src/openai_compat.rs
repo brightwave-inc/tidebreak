@@ -43,6 +43,9 @@ pub struct OpenAiCompatProvider {
     /// Off for ordinary compatible endpoints, which are not parties to the
     /// host's chat organization.
     conversation_attribution: bool,
+    /// Whether to ask the endpoint to include usage in its streaming response.
+    /// Off for arbitrary compatible endpoints, which may reject this option.
+    streaming_usage: bool,
     /// Stable id reported by [`ModelProvider::id`] — `"openai"` or
     /// `"openai_compatible"` depending on how the caller configured it.
     provider_id: String,
@@ -60,6 +63,7 @@ impl OpenAiCompatProvider {
             base_url: DEFAULT_BASE_URL.to_string(),
             token_source: None,
             conversation_attribution: false,
+            streaming_usage: true,
             provider_id: "openai".to_string(),
         }
     }
@@ -72,6 +76,7 @@ impl OpenAiCompatProvider {
             base_url: base_url.into(),
             token_source: None,
             conversation_attribution: false,
+            streaming_usage: false,
             provider_id: "openai_compatible".to_string(),
         }
     }
@@ -108,6 +113,13 @@ impl OpenAiCompatProvider {
         self.conversation_attribution = true;
         self
     }
+
+    /// Ask the endpoint to include usage in its streaming response.
+    #[must_use]
+    pub(crate) fn with_streaming_usage(mut self) -> Self {
+        self.streaming_usage = true;
+        self
+    }
 }
 
 #[async_trait]
@@ -118,10 +130,10 @@ impl ModelProvider for OpenAiCompatProvider {
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let mut body = build_request_json(&req)?;
-        // Native OpenAI omits usage on streaming chunks unless asked. Local
-        // openai_compatible servers often reject unknown fields, so only set
-        // this for the openai provider id.
-        if self.provider_id == "openai" {
+        // Chat Completions omits usage on streaming chunks unless asked. Local
+        // openai_compatible servers often reject unknown fields, so callers
+        // opt in only for endpoints known to implement this option.
+        if self.streaming_usage {
             body["stream_options"] = json!({ "include_usage": true });
         }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -1311,23 +1323,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_gateway_request_uses_the_rotating_conversation_token_and_attribution_header() {
-        use axum::extract::{Request, State};
+    async fn a_gateway_request_uses_conversation_credentials_and_requests_streaming_usage() {
+        use axum::body::Bytes;
+        use axum::extract::State;
         use axum::http::{header, HeaderMap, StatusCode};
         use axum::response::IntoResponse;
         use axum::routing::post;
         use axum::Router;
         use std::sync::{Arc, Mutex};
 
-        #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<(String, HeaderMap)>>>);
+        struct CapturedRequest {
+            path: String,
+            headers: HeaderMap,
+            body: Value,
+        }
 
-        async fn capture(State(capture): State<Capture>, request: Request) -> impl IntoResponse {
-            capture
-                .0
-                .lock()
-                .unwrap()
-                .push((request.uri().path().to_owned(), request.headers().clone()));
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<CapturedRequest>>>);
+
+        async fn capture(
+            State(capture): State<Capture>,
+            headers: HeaderMap,
+            uri: axum::http::Uri,
+            body: Bytes,
+        ) -> impl IntoResponse {
+            capture.0.lock().unwrap().push(CapturedRequest {
+                path: uri.path().to_owned(),
+                headers,
+                body: serde_json::from_slice(&body).expect("request body is JSON"),
+            });
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/event-stream")],
@@ -1361,15 +1385,19 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let source = Arc::new(RecordingTokenSource(Mutex::new(Vec::new())));
-        let provider = OpenAiCompatProvider::compatible(
-            "unused",
-            format!("http://{address}/compat/openai/v1"),
-        )
-        .with_token_source(source.clone())
-        .with_conversation_attribution();
+        let provider = crate::Router::build(vec![crate::Route {
+            kind: crate::RouteKind::ModelGatewayOpenai,
+            api_key: String::new(),
+            base_url: Some(format!("http://{address}/compat/openai/v1")),
+            curated_models: vec!["gpt-fable-5".to_string()],
+            token_source: Some(source.clone()),
+            vertex: None,
+            chatgpt_account_id: None,
+        }]);
         let conversation = openwave_core::id::ChatId::new();
         let stream = provider
             .stream(ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
                 model: "gpt-fable-5".into(),
                 conversation: Some(conversation),
                 messages: vec![ChatMessage::text(Role::User, "hi")],
@@ -1400,26 +1428,31 @@ mod tests {
         assert_eq!(source.0.lock().unwrap().as_slice(), &[Some(conversation)]);
         let requests = capture_state.0.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].0, "/compat/openai/v1/chat/completions");
+        assert_eq!(requests[0].path, "/compat/openai/v1/chat/completions");
         assert_eq!(
-            requests[0].1.get(header::AUTHORIZATION).unwrap(),
+            requests[0].headers.get(header::AUTHORIZATION).unwrap(),
             "Bearer mg_at_rotating"
         );
         assert_eq!(
             requests[0]
-                .1
+                .headers
                 .get(crate::router::GATEWAY_CONVERSATION_HEADER)
                 .unwrap(),
             conversation.to_string().as_str()
         );
         assert_eq!(
-            requests[1].1.get(header::AUTHORIZATION).unwrap(),
+            requests[0].body["stream_options"],
+            json!({ "include_usage": true })
+        );
+        assert_eq!(
+            requests[1].headers.get(header::AUTHORIZATION).unwrap(),
             "Bearer direct-key"
         );
         assert!(requests[1]
-            .1
+            .headers
             .get(crate::router::GATEWAY_CONVERSATION_HEADER)
             .is_none());
+        assert!(requests[1].body.get("stream_options").is_none());
         server.abort();
     }
 }

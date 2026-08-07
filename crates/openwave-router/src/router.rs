@@ -373,7 +373,8 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             Some(Arc::new(
                 OpenAiCompatProvider::compatible(String::new(), base.to_string())
                     .with_token_source(source)
-                    .with_conversation_attribution(),
+                    .with_conversation_attribution()
+                    .with_streaming_usage(),
             ))
         }
         #[cfg(not(feature = "openai-compat"))]
