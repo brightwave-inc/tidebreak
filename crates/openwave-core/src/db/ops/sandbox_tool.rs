@@ -45,8 +45,8 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
             "invalid sandbox tool checkpoint request".into(),
         ));
     }
-    // Both are the batch's own identity keys: the ids key the rows and their
-    // receipts, and the provider ids key the replayed tool-use blocks the model
+    // Both are the batch's own identity keys: the ids key the rows, and the
+    // provider ids key the replayed tool-use blocks the model
     // reads back. A repeat of either would make the transcript ambiguous.
     let mut seen_ids = std::collections::HashSet::new();
     let mut seen_provider_ids = std::collections::HashSet::new();
@@ -105,8 +105,8 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
         .is_some()
     {
         // The batch commits as one transaction, so a recovered commit is this
-        // exact park only when every row — and every synthetic receipt it
-        // committed alongside — is present and matches.
+        // exact park only when every row — including the outcome any
+        // already-resolved entry carried in with it — is present and matches.
         let mut recovered = Vec::with_capacity(entries.len());
         let mut exact = true;
         for (ordinal, entry) in entries.iter().enumerate() {
@@ -118,16 +118,13 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
                 exact = false;
                 break;
             };
-            let receipt = entities::sandbox_tool_call_receipt::Entity::find_by_id(entry.call.id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
             if !request_matches(&existing, &entry.call)
                 || existing.park_lease_token != lease_token
                 || existing.batch_ordinal != ordinal_of(ordinal)?
-                || !entry.resolution.as_ref().is_none_or(|resolution| {
-                    receipt.is_some_and(|row| receipt_matches(&row, resolution))
-                })
+                || !entry
+                    .resolution
+                    .as_ref()
+                    .is_none_or(|resolution| resolution_matches(&existing, resolution))
             {
                 exact = false;
                 break;
@@ -221,6 +218,9 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
                 resolution_status(resolution)
             });
         any_live |= resolution.is_none();
+        let (error_code, error_detail) = resolution
+            .as_ref()
+            .map_or((None, None), |resolution| resolution_error(resolution));
         entities::sandbox_tool_call::ActiveModel {
             id: Set(call.id.0),
             agent_run_id: Set(agent_run_id.0),
@@ -237,30 +237,21 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
             executor_lease_token: Set(None),
             executor_lease_expires_at: Set(None),
             retry_at: Set(None),
+            // No executor ever held a call that arrives already resolved, so
+            // its own park lease stands in as the producing authority — the
+            // convention terminalization on the host side already uses.
+            resolution_lease_token: Set(resolution.as_ref().map(|_| lease_token)),
+            result: Set(resolution
+                .as_ref()
+                .map(|resolution| resolution.result().to_owned())),
+            error_code: Set(error_code),
+            error_detail: Set(error_detail),
             created_at: Set(now),
             resolved_at: Set(resolution.as_ref().map(|_| now)),
         }
         .insert(&transaction)
         .await
         .map_err(store_err)?;
-        if let Some(resolution) = resolution {
-            let (error_code, error_detail) = resolution_error(resolution);
-            entities::sandbox_tool_call_receipt::ActiveModel {
-                call_id: Set(call.id.0),
-                // No executor ever held this call, so its own park lease stands
-                // in as the producing authority — the convention terminalization
-                // on the host side already uses.
-                executor_lease_token: Set(lease_token),
-                status: Set(status.as_str().into()),
-                result: Set(resolution.result().to_owned()),
-                error_code: Set(error_code),
-                error_detail: Set(error_detail),
-                resolved_at: Set(now),
-            }
-            .insert(&transaction)
-            .await
-            .map_err(store_err)?;
-        }
     }
     let mut update = entities::agent_run::Entity::update_many();
     if any_live {
@@ -802,20 +793,6 @@ async fn resolve_sandbox_tool_call_with_plan(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
     let now = database_now(&transaction).await?;
-    if let Some(receipt) = entities::sandbox_tool_call_receipt::Entity::find_by_id(id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-    {
-        let exact =
-            receipt.executor_lease_token == lease_token && receipt_matches(&receipt, resolution);
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(if exact {
-            ResolveSandboxToolCallOutcome::Existing
-        } else {
-            ResolveSandboxToolCallOutcome::AlreadyTerminal
-        });
-    }
     let Some(call) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
@@ -824,6 +801,16 @@ async fn resolve_sandbox_tool_call_with_plan(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ResolveSandboxToolCallOutcome::NotFound);
     };
+    if call.result.is_some() {
+        let exact = call.resolution_lease_token == Some(lease_token)
+            && resolution_matches(&call, resolution);
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(if exact {
+            ResolveSandboxToolCallOutcome::Existing
+        } else {
+            ResolveSandboxToolCallOutcome::AlreadyTerminal
+        });
+    }
     if call.status != SandboxToolCallStatus::Claimed.as_str()
         || call.executor_lease_token != Some(lease_token)
         || call
@@ -860,26 +847,18 @@ async fn resolve_sandbox_tool_call_with_plan(
     }
     let status = resolution_status(resolution);
     let (error_code, error_detail) = resolution_error(resolution);
-    entities::sandbox_tool_call_receipt::ActiveModel {
-        call_id: Set(id.0),
-        executor_lease_token: Set(lease_token),
-        status: Set(status.as_str().into()),
-        result: Set(resolution.result().to_owned()),
-        error_code: Set(error_code),
-        error_detail: Set(error_detail),
-        resolved_at: Set(now),
-    }
-    .insert(&transaction)
-    .await
-    .map_err(store_err)?;
     let mut call_active: entities::sandbox_tool_call::ActiveModel = call.into();
     call_active.status = Set(status.as_str().into());
     call_active.executor_lease_token = Set(None);
     call_active.executor_lease_expires_at = Set(None);
+    call_active.resolution_lease_token = Set(Some(lease_token));
+    call_active.result = Set(Some(resolution.result().to_owned()));
+    call_active.error_code = Set(error_code);
+    call_active.error_detail = Set(error_detail);
     call_active.resolved_at = Set(Some(now));
     call_active.update(&transaction).await.map_err(store_err)?;
-    // The receipt and the call's own transition commit either way: a step whose
-    // other calls are still running simply has nothing to resume yet.
+    // The call's own transition commits either way: a step whose other calls
+    // are still running simply has nothing to resume yet.
     resume_waiting_run_if_batch_settled_on(&transaction, AgentRunId(run.id), now).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(ResolveSandboxToolCallOutcome::Resolved)
@@ -906,15 +885,6 @@ pub(in crate::db) async fn retry_sandbox_tool_call(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
     let now = database_now(&transaction).await?;
-    if entities::sandbox_tool_call_receipt::Entity::find_by_id(id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some()
-    {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
-    }
     let Some(call) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
@@ -923,6 +893,10 @@ pub(in crate::db) async fn retry_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(RetrySandboxToolCallOutcome::LeaseLost);
     };
+    if call.result.is_some() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RetrySandboxToolCallOutcome::LeaseLost);
+    }
     if call.status != SandboxToolCallStatus::Claimed.as_str()
         || call.executor_lease_token != Some(lease_token)
         || call
@@ -992,13 +966,14 @@ pub(in crate::db) async fn resolve_delegated_file_read(
     }
     // Exact terminal recovery precedes mutable attachment state. A committed
     // response stays recoverable even if the root is detached afterwards.
-    if let Some(receipt) = entities::sandbox_tool_call_receipt::Entity::find_by_id(id.0)
+    if let Some(resolved) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
+        .filter(|call| call.result.is_some())
     {
-        let exact =
-            receipt.executor_lease_token == lease_token && receipt_matches(&receipt, resolution);
+        let exact = resolved.resolution_lease_token == Some(lease_token)
+            && resolution_matches(&resolved, resolution);
         transaction.commit().await.map_err(store_err)?;
         return Ok(if exact {
             ResolveSandboxToolCallOutcome::Existing
@@ -1036,13 +1011,9 @@ pub(in crate::db) async fn resolve_delegated_file_read(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ResolveSandboxToolCallOutcome::NotFound);
     }
-    if let Some(receipt) = entities::sandbox_tool_call_receipt::Entity::find_by_id(id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-    {
-        let exact =
-            receipt.executor_lease_token == lease_token && receipt_matches(&receipt, resolution);
+    if call.result.is_some() {
+        let exact = call.resolution_lease_token == Some(lease_token)
+            && resolution_matches(&call, resolution);
         transaction.commit().await.map_err(store_err)?;
         return Ok(if exact {
             ResolveSandboxToolCallOutcome::Existing
@@ -1093,26 +1064,18 @@ pub(in crate::db) async fn resolve_delegated_file_read(
     }
     let status = resolution_status(resolution);
     let (error_code, error_detail) = resolution_error(resolution);
-    entities::sandbox_tool_call_receipt::ActiveModel {
-        call_id: Set(id.0),
-        executor_lease_token: Set(lease_token),
-        status: Set(status.as_str().into()),
-        result: Set(resolution.result().to_owned()),
-        error_code: Set(error_code),
-        error_detail: Set(error_detail),
-        resolved_at: Set(now),
-    }
-    .insert(&transaction)
-    .await
-    .map_err(store_err)?;
     let mut call_active: entities::sandbox_tool_call::ActiveModel = call.into();
     call_active.status = Set(status.as_str().into());
     call_active.executor_lease_token = Set(None);
     call_active.executor_lease_expires_at = Set(None);
+    call_active.resolution_lease_token = Set(Some(lease_token));
+    call_active.result = Set(Some(resolution.result().to_owned()));
+    call_active.error_code = Set(error_code);
+    call_active.error_detail = Set(error_detail);
     call_active.resolved_at = Set(Some(now));
     call_active.update(&transaction).await.map_err(store_err)?;
-    // The receipt and the call's own transition commit either way: a step whose
-    // other calls are still running simply has nothing to resume yet.
+    // The call's own transition commits either way: a step whose other calls
+    // are still running simply has nothing to resume yet.
     resume_waiting_run_if_batch_settled_on(&transaction, AgentRunId(run.id), now).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(ResolveSandboxToolCallOutcome::Resolved)
@@ -1134,12 +1097,14 @@ pub(in crate::db) async fn get_sandbox_tool_call_receipt(
     store: &DbStore,
     id: CallId,
 ) -> Result<Option<SandboxToolCallReceipt>> {
-    entities::sandbox_tool_call_receipt::Entity::find_by_id(id.0)
+    let Some(call) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .map(receipt_from_model)
-        .transpose()
+    else {
+        return Ok(None);
+    };
+    receipt_from_model(call)
 }
 
 pub(in crate::db) async fn list_sandbox_tool_calls_for_agent_run(
@@ -1247,7 +1212,7 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates_named(
 }
 
 /// Terminalize accepted or expired claimed work in the same transaction that
-/// fences its waiting sandbox. A late executor cannot overwrite this receipt.
+/// fences its waiting sandbox. A late executor cannot overwrite this outcome.
 pub(in crate::db) async fn cancel_sandbox_tool_call_for_run_on<C>(
     conn: &C,
     agent_run_id: AgentRunId,
@@ -1301,30 +1266,19 @@ where
     } else {
         format!("Sandbox tool call failed ({error_code}).")
     };
-    entities::sandbox_tool_call_receipt::ActiveModel {
-        call_id: Set(call.id),
-        executor_lease_token: Set(executor_lease_token),
-        status: Set(if error_code == "cancelled" {
-            SandboxToolCallStatus::Cancelled.as_str().into()
-        } else {
-            SandboxToolCallStatus::Failed.as_str().into()
-        }),
-        result: Set(result),
-        error_code: Set((error_code != "cancelled").then(|| error_code.to_owned())),
-        error_detail: Set(None),
-        resolved_at: Set(now),
-    }
-    .insert(conn)
-    .await
-    .map_err(store_err)?;
-    let mut active: entities::sandbox_tool_call::ActiveModel = call.into();
-    active.status = Set(if error_code == "cancelled" {
-        SandboxToolCallStatus::Cancelled.as_str().into()
+    let status = if error_code == "cancelled" {
+        SandboxToolCallStatus::Cancelled
     } else {
-        SandboxToolCallStatus::Failed.as_str().into()
-    });
+        SandboxToolCallStatus::Failed
+    };
+    let mut active: entities::sandbox_tool_call::ActiveModel = call.into();
+    active.status = Set(status.as_str().into());
     active.executor_lease_token = Set(None);
     active.executor_lease_expires_at = Set(None);
+    active.resolution_lease_token = Set(Some(executor_lease_token));
+    active.result = Set(Some(result));
+    active.error_code = Set((error_code != "cancelled").then(|| error_code.to_owned()));
+    active.error_detail = Set(None);
     active.resolved_at = Set(Some(now));
     active.update(conn).await.map_err(store_err)?;
     Ok(())
@@ -1566,15 +1520,19 @@ fn validate_resolution(resolution: &ToolCallResolution) -> Result<()> {
     Ok(())
 }
 
-fn receipt_matches(
-    receipt: &entities::sandbox_tool_call_receipt::Model,
+/// Whether a call's recorded outcome is the one this resolution would write.
+///
+/// A resolved call carries its whole outcome inline, so a replayed resolution
+/// is the same one exactly when every recorded field already agrees.
+fn resolution_matches(
+    call: &entities::sandbox_tool_call::Model,
     resolution: &ToolCallResolution,
 ) -> bool {
     let (error_code, error_detail) = resolution_error(resolution);
-    receipt.status == resolution_status(resolution).as_str()
-        && receipt.result == resolution.result()
-        && receipt.error_code == error_code
-        && receipt.error_detail == error_detail
+    call.status == resolution_status(resolution).as_str()
+        && call.result.as_deref() == Some(resolution.result())
+        && call.error_code == error_code
+        && call.error_detail == error_detail
 }
 
 fn call_from_model(model: entities::sandbox_tool_call::Model) -> Result<SandboxToolCall> {
@@ -1599,17 +1557,24 @@ fn call_from_model(model: entities::sandbox_tool_call::Model) -> Result<SandboxT
 }
 
 fn receipt_from_model(
-    model: entities::sandbox_tool_call_receipt::Model,
-) -> Result<SandboxToolCallReceipt> {
-    Ok(SandboxToolCallReceipt {
-        call_id: CallId(model.call_id),
-        executor_lease_token: model.executor_lease_token,
+    model: entities::sandbox_tool_call::Model,
+) -> Result<Option<SandboxToolCallReceipt>> {
+    let (Some(executor_lease_token), Some(result), Some(resolved_at)) = (
+        model.resolution_lease_token,
+        model.result,
+        model.resolved_at,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(SandboxToolCallReceipt {
+        call_id: CallId(model.id),
+        executor_lease_token,
         status: status_from_db(&model.status)?,
-        result: model.result,
+        result,
         error_code: model.error_code,
         error_detail: model.error_detail,
-        resolved_at: model.resolved_at,
-    })
+        resolved_at,
+    }))
 }
 
 fn status_from_db(value: &str) -> Result<SandboxToolCallStatus> {

@@ -370,19 +370,11 @@ pub(crate) enum SandboxToolCall {
     ExecutorLeaseToken,
     ExecutorLeaseExpiresAt,
     RetryAt,
-    CreatedAt,
-    ResolvedAt,
-}
-
-#[derive(DeriveIden)]
-pub(crate) enum SandboxToolCallReceipt {
-    Table,
-    CallId,
-    ExecutorLeaseToken,
-    Status,
+    ResolutionLeaseToken,
     Result,
     ErrorCode,
     ErrorDetail,
+    CreatedAt,
     ResolvedAt,
 }
 

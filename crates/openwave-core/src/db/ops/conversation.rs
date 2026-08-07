@@ -783,19 +783,6 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::sandbox_tool_call_receipt::Entity::delete_many()
-        .filter(
-            entities::sandbox_tool_call_receipt::Column::CallId.in_subquery(
-                entities::sandbox_tool_call::Entity::find()
-                    .select_only()
-                    .column(entities::sandbox_tool_call::Column::Id)
-                    .filter(entities::sandbox_tool_call::Column::ChatId.eq(chat_id.0))
-                    .into_query(),
-            ),
-        )
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
     entities::sandbox_tool_call::Entity::delete_many()
         .filter(entities::sandbox_tool_call::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)

@@ -201,7 +201,8 @@ pub(super) fn sandbox_agent_admission_indexes() -> Vec<IndexCreateStatement> {
 /// A tool call a sandboxed agent run issued, parked against the claim that
 /// owns the run and leased out to whichever executor picks it up.
 /// `retry_wait` parks one classified-transient failure until its single
-/// bounded retry becomes claimable.
+/// bounded retry becomes claimable. The terminal outcome the executor reported
+/// lands on the row itself, in the transaction that fences the lease.
 pub(super) fn sandbox_tool_call_table() -> TableCreateStatement {
     Table::create()
         .table(SandboxToolCall::Table)
@@ -261,6 +262,14 @@ pub(super) fn sandbox_tool_call_table() -> TableCreateStatement {
         .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseToken).uuid())
         .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseExpiresAt).timestamp_with_time_zone())
         .col(ColumnDef::new(SandboxToolCall::RetryAt).timestamp_with_time_zone())
+        // The terminal outcome, written in the same transaction that moves the
+        // call to a terminal status. `resolution_lease_token` records which
+        // lease produced it — the live executor lease is cleared on resolution,
+        // so it cannot answer that afterwards.
+        .col(ColumnDef::new(SandboxToolCall::ResolutionLeaseToken).uuid())
+        .col(ColumnDef::new(SandboxToolCall::Result).text())
+        .col(ColumnDef::new(SandboxToolCall::ErrorCode).text())
+        .col(ColumnDef::new(SandboxToolCall::ErrorDetail).text())
         .col(
             ColumnDef::new(SandboxToolCall::CreatedAt)
                 .timestamp_with_time_zone()
@@ -316,6 +325,29 @@ pub(super) fn sandbox_tool_call_table() -> TableCreateStatement {
                 .or(Expr::col(SandboxToolCall::ResolvedAt)
                     .gte(Expr::col(SandboxToolCall::CreatedAt))),
         )
+        // A resolution lands whole or not at all: a call either carries its
+        // outcome, its producing lease, and the moment it settled, or none of
+        // the three.
+        .check(
+            Expr::col(SandboxToolCall::Result)
+                .is_null()
+                .and(Expr::col(SandboxToolCall::ResolutionLeaseToken).is_null())
+                .and(Expr::col(SandboxToolCall::ResolvedAt).is_null())
+                .or(Expr::col(SandboxToolCall::Result)
+                    .is_not_null()
+                    .and(Expr::col(SandboxToolCall::ResolutionLeaseToken).is_not_null())
+                    .and(Expr::col(SandboxToolCall::ResolvedAt).is_not_null())),
+        )
+        // Only a failure carries an error, and a failure always carries a code.
+        .check(
+            Expr::col(SandboxToolCall::Status)
+                .eq(SandboxToolCallStatus::Failed.as_str())
+                .and(Expr::col(SandboxToolCall::ErrorCode).is_not_null())
+                .or(Expr::col(SandboxToolCall::Status)
+                    .is_not_in([SandboxToolCallStatus::Failed.as_str()])
+                    .and(Expr::col(SandboxToolCall::ErrorCode).is_null())
+                    .and(Expr::col(SandboxToolCall::ErrorDetail).is_null())),
+        )
         .to_owned()
 }
 
@@ -347,66 +379,6 @@ pub(super) fn sandbox_tool_call_indexes() -> Vec<IndexCreateStatement> {
             .unique()
             .to_owned(),
     ]
-}
-
-/// The terminal outcome an executor reported for one sandbox tool call. One
-/// row per call, written under the executor lease that produced it.
-pub(super) fn sandbox_tool_call_receipt_table() -> TableCreateStatement {
-    Table::create()
-        .table(SandboxToolCallReceipt::Table)
-        .col(
-            ColumnDef::new(SandboxToolCallReceipt::CallId)
-                .uuid()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(SandboxToolCallReceipt::ExecutorLeaseToken)
-                .uuid()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(SandboxToolCallReceipt::Status)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(SandboxToolCallReceipt::Result)
-                .text()
-                .not_null(),
-        )
-        .col(ColumnDef::new(SandboxToolCallReceipt::ErrorCode).text())
-        .col(ColumnDef::new(SandboxToolCallReceipt::ErrorDetail).text())
-        .col(
-            ColumnDef::new(SandboxToolCallReceipt::ResolvedAt)
-                .timestamp_with_time_zone()
-                .not_null(),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_sandbox_tool_receipt_call")
-                .from(
-                    SandboxToolCallReceipt::Table,
-                    SandboxToolCallReceipt::CallId,
-                )
-                .to(SandboxToolCall::Table, SandboxToolCall::Id)
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        // Only a failure carries an error, and a failure always carries a code.
-        .check(
-            Expr::col(SandboxToolCallReceipt::Status)
-                .eq(SandboxToolCallStatus::Failed.as_str())
-                .and(Expr::col(SandboxToolCallReceipt::ErrorCode).is_not_null())
-                .or(Expr::col(SandboxToolCallReceipt::Status)
-                    .is_not_in([SandboxToolCallStatus::Failed.as_str()])
-                    .and(Expr::col(SandboxToolCallReceipt::ErrorCode).is_null())
-                    .and(Expr::col(SandboxToolCallReceipt::ErrorDetail).is_null())),
-        )
-        .to_owned()
-}
-
-pub(super) fn sandbox_tool_call_receipt_indexes() -> Vec<IndexCreateStatement> {
-    vec![]
 }
 
 /// The single fenced commit of a spawn tool call: the admitted child run, the
