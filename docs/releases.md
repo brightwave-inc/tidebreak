@@ -438,9 +438,17 @@ first five run on an ordinary pull request; the compile-heavy lanes (`clippy`,
 behind the `full-ci` label and otherwise report a successful skip, which is what
 lets a required check pass without running. That is the deliberate fast gate
 described in [`CLAUDE.md`](../CLAUDE.md), backed by full validation on every
-push to `main` and on the weekly scheduled run — not a claim that PostgreSQL
-state-machine coverage gates every merge. Keep both sets required so the
-skip-reporting stays wired up, and add any new always-running lane to the list.
+Rust-scoped push to `main` and on the weekly scheduled run — not a claim that
+PostgreSQL state-machine coverage gates every merge. Keep both sets required so
+the skip-reporting stays wired up, and add any new always-running lane to the
+list.
+
+`Windows cargo check` is intentionally separate from the required contexts and
+from `full-ci`. It runs automatically for Rust-scoped pushes to `main`, weekly
+schedules, and manual dispatches, while pull requests opt in with `windows-ci`
+when they touch a native Windows boundary. Keep it non-required so ordinary and
+`full-ci` pull requests do not wait for long-running native platform coverage;
+the post-merge and scheduled runs remain the backstop.
 
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.
