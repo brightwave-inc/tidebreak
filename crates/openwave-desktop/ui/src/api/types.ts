@@ -723,10 +723,14 @@ export type PendingFolderAccessRequest = {
   claimedByDesktop: boolean;
 };
 
-/** Renderer-safe replacement prompt. Canonical output, root, and path stay native. */
+/** How a write-back means to land in the connected folder. */
+export type OutputWriteMode = "create" | "replace";
+
+/** Renderer-safe write-back prompt. Canonical output, root, and path stay native. */
 export type PendingOutputWritebackRequest = {
   callId: string;
   turnId: string;
+  mode: OutputWriteMode;
   claimedByDesktop: boolean;
 };
 

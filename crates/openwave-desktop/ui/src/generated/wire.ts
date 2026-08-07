@@ -1529,6 +1529,11 @@ export type NetworkPolicy = { "mode": "off" } | { "mode": "package_managers" } |
 export type OutputId = string;
 
 /**
+ * Whether connected-folder publication may replace an existing regular file.
+ */
+export type OutputWriteMode = "create" | "replace";
+
+/**
  * Closed renderer-safe pending approval projection. Canonical arguments,
  * model-authored summaries, and unknown tool names never cross this boundary;
  * only a tool's own closed preview of the action under review does.
@@ -1561,10 +1566,12 @@ auto_judge_status?: AutoJudgeStatus, };
 export type PendingFolderAccessRequest = { call_id: CallId, turn_id: TurnId, reason: string, folder_hint: RequestedFolderHint | null, claimed: boolean, };
 
 /**
- * Renderer-safe replacement approval. Canonical output, root, and destination
- * identities remain native-only; the card can approve or decline this exact call.
+ * Renderer-safe write-back approval. Canonical output, root, and destination
+ * identities remain native-only; the card can approve or decline this exact
+ * call. The mode is carried so the card can name what is being decided —
+ * creating a new file reads very differently from destroying an existing one.
  */
-export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, claimed: boolean, };
+export type PendingOutputWritebackRequest = { call_id: CallId, turn_id: TurnId, mode: OutputWriteMode, claimed: boolean, };
 
 /**
  * Renderer-safe, durable card projection of a proposed plan.
@@ -1596,6 +1603,14 @@ export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions
  * on it: `Plan < Ask < Auto < Allow`, matching [`Self::ALL`]. Managed-policy
  * ceilings compare modes with it, so a new variant must slot into this
  * scale, not just onto the end of the list.
+ *
+ * The mode governs the server-side approval gate, which is where all but one
+ * mutating call lives. Client-executed tools run in the trusted desktop under
+ * their own consent — a folder grant the reader picked, a card the native side
+ * raises — and do not re-enter that gate. The one client call that mutates
+ * something the reader owns, publishing an output into a connected folder,
+ * consults the mode itself: see
+ * [`crate::OutputWriteMode::requires_user_decision`].
  */
 export type PermissionMode = "plan" | "ask" | "auto" | "allow";
 

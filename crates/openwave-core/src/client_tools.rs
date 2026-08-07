@@ -252,7 +252,7 @@ pub struct ImportConnectedFileArgs {
 }
 
 /// Whether connected-folder publication may replace an existing regular file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[schemars(description = "", transform = preserve_enum_wire_shape)]
 pub enum OutputWriteMode {
@@ -262,6 +262,32 @@ pub enum OutputWriteMode {
     /// Replace one existing regular file after a fresh native approval.
     #[schemars(description = "")]
     Replace,
+}
+
+impl OutputWriteMode {
+    /// Whether publishing an output this way needs a fresh user decision in a
+    /// chat running under `mode`.
+    ///
+    /// This is the one client-executed write that leaves the sandbox and lands
+    /// in a real folder the reader owns, so it is the one client call the
+    /// chat's permission mode governs. `Ask` promises that workspace mutations
+    /// ask, and a create is a workspace mutation; `Auto` and `Allow` are
+    /// standing answers to exactly that question and let it through. `Plan`
+    /// never checkpoints the call at all, but a mode flipped while one is
+    /// parked resolves the conservative way.
+    ///
+    /// Replacement always asks, in every mode: it destroys bytes the agent did
+    /// not write, and no mode advertises consent for that.
+    #[must_use]
+    pub fn requires_user_decision(self, mode: Option<crate::PermissionMode>) -> bool {
+        match self {
+            Self::Replace => true,
+            Self::Create => matches!(
+                mode.unwrap_or(crate::PermissionMode::Ask),
+                crate::PermissionMode::Ask | crate::PermissionMode::Plan
+            ),
+        }
+    }
 }
 
 /// Model proposal for writing one published output to an attached root.
@@ -465,7 +491,7 @@ pub fn import_connected_file_tool_spec() -> ToolSpec {
 pub fn write_output_to_connected_folder_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<WriteOutputToConnectedFolderProposal>(
         WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
-        "Copy an output already published in this conversation into a folder already connected to this conversation. Provide only the output's filename exactly as reported when it was published, the opaque root_id, a bounded root-relative destination, and explicit create or replace intent. Create refuses an existing entry. Replace requires fresh user approval; never provide output bytes or an absolute path.",
+        "Copy an output already published in this conversation into a folder already connected to this conversation. Provide only the output's filename exactly as reported when it was published, the opaque root_id, a bounded root-relative destination, and explicit create or replace intent. Create refuses an existing entry, and may still need user approval depending on the conversation's permission mode. Replace always requires fresh user approval; never provide output bytes or an absolute path.",
     )
 }
 
@@ -758,6 +784,31 @@ mod tests {
         assert!(!spec.description.contains("output_id"));
         assert!(spec.description.contains("never provide output bytes"));
         assert!(!spec.description.contains("scratch"));
+    }
+
+    /// The one client-executed write that leaves the sandbox is the one place
+    /// the chat's permission mode reaches client execution. `Ask` advertises
+    /// that workspace mutations ask, and a create into a real folder is one;
+    /// replacement asks everywhere, because no mode consents to destroying
+    /// bytes the agent did not write.
+    #[test]
+    fn a_connected_folder_write_asks_exactly_where_the_mode_promises() {
+        use crate::PermissionMode;
+
+        for mode in [
+            None,
+            Some(PermissionMode::Plan),
+            Some(PermissionMode::Ask),
+            Some(PermissionMode::Auto),
+            Some(PermissionMode::Allow),
+        ] {
+            assert!(OutputWriteMode::Replace.requires_user_decision(mode));
+        }
+        assert!(OutputWriteMode::Create.requires_user_decision(None));
+        assert!(OutputWriteMode::Create.requires_user_decision(Some(PermissionMode::Ask)));
+        assert!(OutputWriteMode::Create.requires_user_decision(Some(PermissionMode::Plan)));
+        assert!(!OutputWriteMode::Create.requires_user_decision(Some(PermissionMode::Auto)));
+        assert!(!OutputWriteMode::Create.requires_user_decision(Some(PermissionMode::Allow)));
     }
 
     #[test]

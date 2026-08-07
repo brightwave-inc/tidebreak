@@ -127,6 +127,14 @@ impl ReasoningEffort {
 /// on it: `Plan < Ask < Auto < Allow`, matching [`Self::ALL`]. Managed-policy
 /// ceilings compare modes with it, so a new variant must slot into this
 /// scale, not just onto the end of the list.
+///
+/// The mode governs the server-side approval gate, which is where all but one
+/// mutating call lives. Client-executed tools run in the trusted desktop under
+/// their own consent — a folder grant the reader picked, a card the native side
+/// raises — and do not re-enter that gate. The one client call that mutates
+/// something the reader owns, publishing an output into a connected folder,
+/// consults the mode itself: see
+/// [`crate::OutputWriteMode::requires_user_decision`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
@@ -135,15 +143,19 @@ pub enum PermissionMode {
     /// card — so a plan turn cannot change anything no matter what the
     /// reader approves.
     Plan,
-    /// Every uncovered mutating call parks on the approval card. The default,
-    /// and the only mode where `Workspace`-class tools ask.
+    /// Every uncovered mutating call parks on the approval card, including the
+    /// one client-executed write that leaves the sandbox. The default, and the
+    /// only mode where `Workspace`-class tools ask.
     Ask,
     /// The agent proceeds through `Workspace` writes on its own; uncovered
     /// `Sensitive` calls still ask. This is a standing "yes" to workspace
-    /// edits stated as a mode instead of a per-tool grant.
+    /// edits stated as a mode instead of a per-tool grant. Replacing an
+    /// existing file in a connected folder still asks: no mode advertises
+    /// consent for destroying bytes the agent did not write.
     Auto,
-    /// Nothing asks. An explicit per-chat opt-in to full autonomy; the
-    /// approval gate is bypassed for every class.
+    /// Nothing asks, with the same replacement exception `Auto` carries. An
+    /// explicit per-chat opt-in to full autonomy; the approval gate is
+    /// bypassed for every class.
     Allow,
 }
 

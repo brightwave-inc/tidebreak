@@ -19,12 +19,23 @@ export function OutputWritebackCard({
   onCancel: () => void;
 }) {
   const actionable = nativeHost && !request.claimedByDesktop && !working;
+  const replacing = request.mode === "replace";
+  const title = replacing
+    ? "Replace an existing file?"
+    : "Write a file to a connected folder?";
+  const subtitle = replacing
+    ? "The agent wants to replace a file in a folder connected to this chat. The native desktop will verify the connected folder, destination, and current output revision before writing."
+    : "The agent wants to write one of this chat's outputs into a folder connected to this chat. The native desktop will verify the connected folder, destination, and current output revision before writing.";
+  const allowLabel = replacing ? "Allow replacement" : "Allow write";
+  const unavailable = replacing
+    ? "File replacement is unavailable in browser-only mode."
+    : "Writing to connected folders is unavailable in browser-only mode.";
 
   return (
     <AttentionCard
-      title="Replace an existing file?"
+      title={title}
       titleId={`output-writeback-${request.callId}`}
-      subtitle="The agent wants to replace a file in a folder connected to this chat. The native desktop will verify the connected folder, destination, and current output revision before writing."
+      subtitle={subtitle}
       busy={working}
       error={error}
     >
@@ -34,7 +45,9 @@ export function OutputWritebackCard({
           role="status"
           aria-live="polite"
         >
-          Resolving the replacement request…
+          {replacing
+            ? "Resolving the replacement request…"
+            : "Resolving the write request…"}
         </p>
       ) : request.claimedByDesktop ? (
         <p
@@ -46,9 +59,7 @@ export function OutputWritebackCard({
         </p>
       ) : !nativeHost ? (
         <>
-          <p className="text-muted-foreground text-sm">
-            File replacement is unavailable in browser-only mode.
-          </p>
+          <p className="text-muted-foreground text-sm">{unavailable}</p>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={onCancel}>
               Cancel turn
@@ -57,8 +68,12 @@ export function OutputWritebackCard({
         </>
       ) : (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={!actionable} onClick={() => onDecision("allow")}>
-            Allow replacement
+          <Button
+            size="sm"
+            disabled={!actionable}
+            onClick={() => onDecision("allow")}
+          >
+            {allowLabel}
           </Button>
           <Button
             variant="outline"

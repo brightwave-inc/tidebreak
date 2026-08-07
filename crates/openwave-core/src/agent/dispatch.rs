@@ -446,9 +446,12 @@ impl Agent {
             return Err("not run: that user continuation is available only from a durably claimed foreground turn. Continue without it.");
         }
         // Plan turns advertise only read-only client tools, and a call that
-        // slipped past advertisement is refused here for the same reason
-        // server-side mutations are: client execution is ungated by design,
-        // so the only write gate a plan turn has is never issuing the request.
+        // slipped past advertisement is refused here. The class/mode gate is
+        // server-side, and a client call does not re-enter it: the trusted
+        // desktop carries its own consent, and the one client write that leaves
+        // the sandbox consults the mode where it executes
+        // (`OutputWriteMode::requires_user_decision`). Never issuing the
+        // request is what keeps a plan turn from changing anything.
         if matches!(chat.permission_mode, Some(PermissionMode::Plan))
             && self.tools.registered_class(&call.name) != Some(ApprovalClass::ReadOnly)
         {

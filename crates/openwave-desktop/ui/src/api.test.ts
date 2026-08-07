@@ -204,22 +204,33 @@ describe("pending chat prompt summaries", () => {
 });
 
 describe("parseOutputWritebackRequest", () => {
-  it("accepts only opaque identities and claimed state", () => {
+  it("accepts only opaque identities, mode, and claimed state", () => {
     expect(
       parseOutputWritebackRequest({
         call_id: "call-1",
         turn_id: "turn-1",
+        mode: "create",
         claimed: false,
       }),
     ).toEqual({
       callId: "call-1",
       turnId: "turn-1",
+      mode: "create",
       claimedByDesktop: false,
     });
     expect(
       parseOutputWritebackRequest({
         call_id: "call-1",
         turn_id: "turn-1",
+        mode: "append",
+        claimed: false,
+      }),
+    ).toBeNull();
+    expect(
+      parseOutputWritebackRequest({
+        call_id: "call-1",
+        turn_id: "turn-1",
+        mode: "replace",
         claimed: false,
         path: "private/file.txt",
       }),

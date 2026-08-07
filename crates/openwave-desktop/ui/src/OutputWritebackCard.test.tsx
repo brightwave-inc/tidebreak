@@ -2,18 +2,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { OutputWritebackCard } from "./OutputWritebackCard";
+import type { PendingOutputWritebackRequest } from "./api";
 
-const request = {
-  callId: "call-1",
-  turnId: "turn-1",
-  claimedByDesktop: false,
-};
+function request(
+  mode: PendingOutputWritebackRequest["mode"],
+): PendingOutputWritebackRequest {
+  return { callId: "call-1", turnId: "turn-1", mode, claimedByDesktop: false };
+}
 
 describe("OutputWritebackCard", () => {
   it("names the replacement without rendering destination data", () => {
     const html = renderToStaticMarkup(
       <OutputWritebackCard
-        request={request}
+        request={request("replace")}
         nativeHost
         working={false}
         error={undefined}
@@ -29,10 +30,27 @@ describe("OutputWritebackCard", () => {
     expect(html).not.toContain("Documents/");
   });
 
+  it("asks about a create as a write rather than a replacement", () => {
+    const html = renderToStaticMarkup(
+      <OutputWritebackCard
+        request={request("create")}
+        nativeHost
+        working={false}
+        error={undefined}
+        onDecision={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("Write a file to a connected folder?");
+    expect(html).toContain("Allow write");
+    expect(html).not.toContain("Replace an existing file?");
+  });
+
   it("fails closed in browser-only mode", () => {
     const html = renderToStaticMarkup(
       <OutputWritebackCard
-        request={request}
+        request={request("replace")}
         nativeHost={false}
         working={false}
         error={undefined}

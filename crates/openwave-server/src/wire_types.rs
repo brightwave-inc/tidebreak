@@ -631,6 +631,7 @@ mod tests {
         let output_writeback = crate::routes::client_execution::PendingOutputWritebackRequest {
             call_id: openwave_core::CallId(id(6)),
             turn_id: openwave_core::TurnId(id(7)),
+            mode: openwave_core::OutputWriteMode::Replace,
             claimed: false,
         };
 
