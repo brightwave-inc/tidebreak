@@ -2,8 +2,6 @@
   <img src="assets/openwave-logo.png" alt="OpenWave" width="380">
 </p>
 
-<h1 align="center">OpenWave</h1>
-
 <p align="center">
   <strong>An open, local-first agent runtime for real work.</strong><br>
   The engine behind a production research platform, rebuilt in Rust to run on your machine with your own model keys.
