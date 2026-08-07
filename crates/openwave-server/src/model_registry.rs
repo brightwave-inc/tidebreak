@@ -365,7 +365,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
     },
     ModelSpec {
         id: "anthropic.claude-sonnet-5",
@@ -377,7 +377,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         supports_vendor_web_search: false,
-        reasoning_efforts: EFFORT_LOW_TO_MAX,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
     },
     ModelSpec {
         id: "gpt-5.6-sol",

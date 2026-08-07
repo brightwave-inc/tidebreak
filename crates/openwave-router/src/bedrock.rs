@@ -330,6 +330,8 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openwave_core::provider::ChatMessage;
+    use openwave_core::Role;
 
     #[test]
     fn protocol_selection_keeps_claude_on_messages_and_text_models_on_responses() {
@@ -392,5 +394,34 @@ mod tests {
         assert!(!valid_aws_region("../us-east-1"));
         assert!(!valid_aws_region("US-EAST-1"));
         assert!(!valid_aws_region("us-east-1.example.com"));
+    }
+
+    #[tokio::test]
+    async fn messages_transport_failures_are_attributed_to_bedrock() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+
+        let provider = BedrockProvider::new("us-east-1", BedrockAuth::ApiKey("secret".into()))
+            .unwrap()
+            .with_base_url(format!("http://{address}"));
+        let error = provider
+            .stream(ChatRequest {
+                model: "anthropic.claude-sonnet-5".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .err()
+            .expect("the dropped connection must fail before a response");
+        server.await.unwrap();
+
+        assert!(matches!(
+            error,
+            AgentError::Provider(message) if message == "bedrock request failed"
+        ));
     }
 }

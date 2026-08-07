@@ -110,7 +110,8 @@ function ProviderRow({
     info.vertex_location ?? "global",
   );
   const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
-  const [awsRegion, setAwsRegion] = useState(info.aws_region ?? "us-east-1");
+  const [awsRegion, setAwsRegion] = useState(info.aws_region ?? "");
+  const [awsRegionTouched, setAwsRegionTouched] = useState(false);
   const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
   const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
   const [awsSessionToken, setAwsSessionToken] = useState("");
@@ -174,7 +175,9 @@ function ProviderRow({
         }
       }
       if (info.kind === "bedrock") {
-        body.aws_region = awsRegion.trim() || null;
+        if (awsRegionTouched) {
+          body.aws_region = awsRegion.trim() || null;
+        }
         if (
           credentialType === "aws_credentials" &&
           awsAccessKeyId.trim() &&
@@ -196,6 +199,7 @@ function ProviderRow({
       setAwsAccessKeyId("");
       setAwsSecretAccessKey("");
       setAwsSessionToken("");
+      setAwsRegionTouched(false);
       onChanged();
       toast.success(`Saved ${providerLabel(info.kind)} settings`);
     } catch (err) {

@@ -952,9 +952,9 @@ pub struct ProviderInfo {
     pub auth_mode: Option<ProviderAuthMode>,
     /// Explicit configured model entries for this endpoint.
     pub models: Vec<CustomModelConfig>,
-    // Public non-secret routing metadata. Kept after the documented fields so
-    // ts-rs emits it on the declaration's closing line without adding generated
-    // trailing whitespace.
+    // Effective AWS region from stored config or the AWS environment fallback.
+    // Kept after the documented fields so ts-rs emits it on the declaration's
+    // closing line without adding generated trailing whitespace.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub aws_region: Option<String>,
@@ -1194,6 +1194,11 @@ pub async fn list_providers(
             continue;
         }
         let config = read_config(store, kind).await?;
+        let aws_region = if kind == ProviderKind::Bedrock {
+            resolved_aws_region(&config)
+        } else {
+            None
+        };
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
@@ -1202,7 +1207,7 @@ pub async fn list_providers(
                 .map(str::to_owned)
                 .or_else(|| config.base_url.clone()),
             vertex_location: config.vertex_location.clone(),
-            aws_region: config.aws_region.clone(),
+            aws_region,
             has_credential: has_credential(secrets, kind).await,
             auth_mode: auth_mode_for(secrets, kind).await,
             models: config.models,
@@ -1366,6 +1371,11 @@ pub async fn update_provider(
 
     write_config(store, kind, &config).await?;
 
+    let aws_region = if kind == ProviderKind::Bedrock {
+        resolved_aws_region(&config)
+    } else {
+        None
+    };
     Ok(ProviderInfo {
         kind,
         enabled: config.enabled,
@@ -1374,7 +1384,7 @@ pub async fn update_provider(
             .map(str::to_owned)
             .or_else(|| config.base_url.clone()),
         vertex_location: config.vertex_location.clone(),
-        aws_region: config.aws_region.clone(),
+        aws_region,
         has_credential: has_credential(secrets, kind).await,
         auth_mode: auth_mode_for(secrets, kind).await,
         models: config.models,
@@ -1393,7 +1403,29 @@ fn validate_configured_models(
 ) -> std::result::Result<(), ServerError> {
     validate_configured_models_against(kind, models, |id| {
         model_registry::find_for(kind, id).is_some()
-    })
+    })?;
+    if kind == ProviderKind::Bedrock
+        && models
+            .iter()
+            .any(|model| is_application_inference_profile_arn(&model.id))
+    {
+        return Err(ServerError::bad_request(
+            "Bedrock application-inference-profile ARNs are not supported until their target model can be resolved",
+        ));
+    }
+    Ok(())
+}
+
+fn is_application_inference_profile_arn(id: &str) -> bool {
+    let mut fields = id.splitn(6, ':');
+    fields.next() == Some("arn")
+        && fields.next().is_some()
+        && fields.next() == Some("bedrock")
+        && fields.next().is_some()
+        && fields.next().is_some()
+        && fields
+            .next()
+            .is_some_and(|resource| resource.starts_with("application-inference-profile/"))
 }
 
 fn validate_configured_models_against(

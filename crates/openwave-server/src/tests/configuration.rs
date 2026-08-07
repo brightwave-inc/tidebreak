@@ -1308,6 +1308,92 @@ async fn vertex_provider_accepts_only_derived_google_endpoints_and_service_accou
 }
 
 #[tokio::test]
+async fn bedrock_enable_preserves_an_environment_resolved_region() {
+    let _env = ENV_LOCK.lock().await;
+    let _aws_region = ScopedEnv::set("AWS_REGION", "eu-west-1");
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/providers")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = json_body(response).await;
+    let bedrock = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["kind"] == "bedrock")
+        .unwrap();
+    assert_eq!(bedrock["aws_region"], "eu-west-1");
+
+    let enabled = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(enabled).await;
+    assert_eq!(info["aws_region"], "eu-west-1");
+
+    let stored = providers::read_config(&*store, providers::ProviderKind::Bedrock)
+        .await
+        .unwrap();
+    assert!(stored.enabled);
+    assert_eq!(stored.aws_region, None);
+}
+
+#[tokio::test]
+async fn bedrock_rejects_application_inference_profile_custom_models() {
+    let (router, token, store, _dir) = test_app().await;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/bedrock")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "models": [{
+                            "id": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/my-claude-profile",
+                            "context_window": 200000,
+                            "max_output_tokens": 64000
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "bad_request");
+    assert!(error.message.contains("application-inference-profile"));
+
+    let stored = providers::read_config(&*store, providers::ProviderKind::Bedrock)
+        .await
+        .unwrap();
+    assert!(stored.models.is_empty());
+}
+
+#[tokio::test]
 async fn openai_compatible_requires_base_url_when_enabled() {
     let (router, token, _store, _dir) = test_app().await;
     let response = router

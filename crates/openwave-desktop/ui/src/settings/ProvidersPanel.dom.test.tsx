@@ -475,6 +475,39 @@ describe("ProvidersPanel", () => {
     );
   });
 
+  it("does not persist an untouched environment-resolved Bedrock region", async () => {
+    const bedrock: ProviderInfo = {
+      kind: "bedrock",
+      enabled: false,
+      has_credential: true,
+      aws_region: "eu-west-1",
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue({
+      ...bedrock,
+      enabled: true,
+    });
+    const client = { putProvider } as unknown as ApiClient;
+
+    render(
+      <ProvidersPanel
+        providers={[bedrock]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("AWS region")).toHaveValue("eu-west-1");
+    fireEvent.click(screen.getByRole("switch", { name: "Enabled" }));
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("bedrock", {
+        enabled: true,
+        models: [],
+      }),
+    );
+  });
+
   it("offers no credential editing on a managed profile", () => {
     const putProvider = vi.fn();
     const client = { putProvider } as unknown as ApiClient;
