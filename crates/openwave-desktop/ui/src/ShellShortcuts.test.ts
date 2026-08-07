@@ -59,6 +59,31 @@ describe("shell shortcut resolution", () => {
     }
   });
 
+  it("provides Alt+Arrow history navigation from editable fields", () => {
+    expect(
+      resolveShellShortcut(
+        keyEvent({
+          key: "ArrowLeft",
+          code: "ArrowLeft",
+          metaKey: false,
+          altKey: true,
+        }),
+        context(),
+      )?.id,
+    ).toBe("history-back");
+    expect(
+      resolveShellShortcut(
+        keyEvent({
+          key: "ArrowRight",
+          code: "ArrowRight",
+          metaKey: false,
+          altKey: true,
+        }),
+        context({ command: false }),
+      )?.id,
+    ).toBe("history-forward");
+  });
+
   it("keeps letter shortcuts under the same physical keys on any layout", () => {
     // Dvorak puts "l" where QWERTY puts N. The shortcut belongs to the key
     // position the reader's muscle memory knows, not to the character that

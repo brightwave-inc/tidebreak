@@ -33,6 +33,19 @@ describe("toolActivityGroupPresentation", () => {
     expect(presentation.inProgress).toBe(true);
   });
 
+  it("narrows a live phase label to the latest assistant snapshot", () => {
+    const activities = [
+      { name: "web_search", status: "running" as const },
+      { name: "read_file", status: "completed" as const },
+    ];
+    const presentation = toolActivityGroupPresentation(activities, [
+      activities[0]!,
+    ]);
+
+    expect(presentation.label).toBe("Searching the web");
+    expect(presentation.phase).toBe("active");
+  });
+
   it("aggregates delegation by count and waiting without one", () => {
     expect(
       labelOf([
@@ -60,7 +73,7 @@ describe("toolActivityGroupPresentation", () => {
         { name: "web_search", status: "completed" },
       ]),
     ).toBe(
-      "Searched the web, 2 other tasks, delegated 1 task, and waited for background agents",
+      "Searched the web, waited for background agents, delegated 1 task, and 2 other tasks",
     );
   });
 

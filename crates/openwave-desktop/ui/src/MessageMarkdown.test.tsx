@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { stripCitationDirectives } from "./citationDirectives";
 import {
+  decodeUnicodeEscapes,
   MessageMarkdown,
   preserveLineBreaks,
   safeMarkdownUrl,
@@ -59,6 +60,16 @@ describe("safeMarkdownUrl", () => {
 });
 
 describe("MessageMarkdown", () => {
+  it("decodes literal Unicode escapes left by a double-serialized payload", () => {
+    expect(decodeUnicodeEscapes("Done \\u2022 \\uD83D\\uDE80")).toBe(
+      "Done • 🚀",
+    );
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"Done \\u2022 \\uD83D\\uDE80"}</MessageMarkdown>,
+    );
+    expect(markup).toContain("Done • 🚀");
+  });
+
   it("renders useful Markdown without emitting embeds or unsafe links", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>

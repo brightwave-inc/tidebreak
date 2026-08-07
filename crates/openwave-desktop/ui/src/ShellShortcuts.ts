@@ -9,6 +9,8 @@ import { useEffect, useRef } from "react";
  * the listener acts on and stay honest about what the keys actually do.
  */
 export type ShellShortcutAction =
+  | "history-back"
+  | "history-forward"
   | "toggle-sidebar"
   | "new-chat"
   | "focus-composer"
@@ -18,10 +20,11 @@ export type ShellShortcutAction =
   | "show-shortcuts";
 
 /** The heading a shortcut sits under in the help dialog. */
-export type ShellShortcutGroup = "Chat" | "View" | "Help";
+export type ShellShortcutGroup = "Navigation" | "Chat" | "View" | "Help";
 
 /** Group headings in the order the help dialog lists them. */
 export const SHELL_SHORTCUT_GROUPS: readonly ShellShortcutGroup[] = [
+  "Navigation",
   "Chat",
   "View",
   "Help",
@@ -58,6 +61,8 @@ export type ShellShortcutDef = ShellShortcutBinding & {
   id: ShellShortcutAction;
   /** Requires the platform command modifier — Cmd on macOS, Ctrl elsewhere. */
   mod: boolean;
+  /** Requires Alt/Option; defaults to must-not. */
+  alt?: boolean;
   /**
    * Whether shift must be held (defaults to must-not). `"any"` for shortcuts
    * whose key is reachable both ways.
@@ -76,6 +81,24 @@ export type ShellShortcutDef = ShellShortcutBinding & {
 };
 
 export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
+  {
+    id: "history-back",
+    keys: ["arrowleft"],
+    mod: false,
+    alt: true,
+    description: "Go back",
+    group: "Navigation",
+    allowInEditable: true,
+  },
+  {
+    id: "history-forward",
+    keys: ["arrowright"],
+    mod: false,
+    alt: true,
+    description: "Go forward",
+    group: "Navigation",
+    allowInEditable: true,
+  },
   {
     id: "new-chat",
     codes: ["KeyN"],
@@ -171,6 +194,7 @@ export function shortcutKeycaps(
 ): string[] {
   const caps: string[] = [];
   if (def.mod) caps.push(command ? "⌘" : "Ctrl");
+  if (def.alt) caps.push(command ? "⌥" : "Alt");
   if (def.shift === true) caps.push(command ? "⇧" : "Shift");
   caps.push(shortcutKeyLabel(def));
   return caps;
@@ -184,6 +208,8 @@ function shortcutKeyLabel(def: ShellShortcutDef): string {
     return label.length === 1 ? label.toUpperCase() : code;
   }
   const key = def.keys[0] ?? "";
+  if (key === "arrowleft") return "←";
+  if (key === "arrowright") return "→";
   return key.length === 1 ? key.toUpperCase() : key;
 }
 
@@ -226,7 +252,7 @@ export function matchesShellShortcut(
   def: ShellShortcutDef,
   command: boolean,
 ): boolean {
-  if (event.altKey) return false;
+  if (event.altKey !== (def.alt ?? false)) return false;
   const hit = def.codes
     ? def.codes.includes(event.code)
     : def.keys.includes(event.key.toLowerCase());

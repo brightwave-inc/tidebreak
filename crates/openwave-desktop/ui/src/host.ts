@@ -148,7 +148,8 @@ export function resolveOutputWritebackRequest(
 /**
  * The native macOS window uses an overlay titlebar (traffic lights over app
  * chrome), so the app renders its own drag strip with controls beside them.
- * Windows/Linux keep standard decorations; the browser has its own chrome.
+ * Windows/Linux also render the app titlebar for history controls, but do not
+ * need the traffic-light inset this predicate describes.
  */
 export function hasMacOverlayTitlebar(): boolean {
   return hasNativeHost() && navigator.userAgent.includes("Mac OS");

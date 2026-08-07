@@ -26,11 +26,12 @@ export async function renderWithRouter(
     path: "/c/$chatId",
     validateSearch: (
       search: Record<string, unknown>,
-    ): PanelSearch & { focus?: string } => ({
+    ): PanelSearch & { focus?: string; at?: string } => ({
       left: typeof search.left === "string" ? search.left : undefined,
       right: typeof search.right === "string" ? search.right : undefined,
       fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
       focus: typeof search.focus === "string" ? search.focus : undefined,
+      at: typeof search.at === "string" ? search.at : undefined,
     }),
     component: () => <>{ui}</>,
   });

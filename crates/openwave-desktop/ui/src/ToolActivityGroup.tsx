@@ -33,6 +33,10 @@ export type ToolActivity = {
 
 type ToolActivityGroupProps = {
   activities: ToolActivity[];
+  /** Latest assistant snapshot, used only for a live phase's collapsed label. */
+  labelActivities?: ToolActivity[];
+  /** Transcript message ids that navigation may land on at this phase. */
+  anchorIds?: readonly string[];
   groupIndex: number;
   /** Whether this active phase arrived live rather than from socket replay. */
   animate?: boolean;
@@ -54,6 +58,8 @@ type ToolActivityGroupProps = {
  */
 export function ToolActivityGroup({
   activities,
+  labelActivities,
+  anchorIds = [],
   groupIndex,
   animate = true,
   children,
@@ -74,6 +80,7 @@ export function ToolActivityGroup({
       >
         <ToolActivityRail
           activities={safeActivities}
+          labelActivities={normalizeActivities(labelActivities ?? activities)}
           groupIndex={groupIndex}
           animate={animate}
         />
@@ -93,6 +100,14 @@ export function ToolActivityGroup({
 
   return (
     <div className="w-full self-start">
+      {anchorIds.map((anchorId) => (
+        <span
+          key={anchorId}
+          className="transcript-anchor"
+          data-transcript-anchor={anchorId}
+          aria-hidden="true"
+        />
+      ))}
       {rail}
       <div
         className={cn(
@@ -111,10 +126,12 @@ export function ToolActivityGroup({
  */
 function ToolActivityRail({
   activities: safeActivities,
+  labelActivities: safeLabelActivities,
   groupIndex,
   animate,
 }: {
   activities: (ToolActivity | null)[];
+  labelActivities: (ToolActivity | null)[];
   groupIndex: number;
   animate: boolean;
 }) {
@@ -124,6 +141,9 @@ function ToolActivityRail({
   // one is a gap in the rail, not a claim about what the agent did.
   const summary = toolActivityGroupPresentation(
     safeActivities.filter(
+      (activity): activity is ToolActivity => activity !== null,
+    ),
+    safeLabelActivities.filter(
       (activity): activity is ToolActivity => activity !== null,
     ),
   );
@@ -333,7 +353,7 @@ const CATEGORY_SPECS: Record<
   },
 };
 
-const CATEGORY_ORDER: Category[] = ["other", "spawn", "wait"];
+const CATEGORY_ORDER: Category[] = ["wait", "spawn", "other"];
 
 function categoryOf(name: string): Category {
   if (name === "spawn_sandbox_agent") return "spawn";
@@ -353,6 +373,7 @@ function categoryOf(name: string): Category {
  */
 export function toolActivityGroupPresentation(
   activities: readonly ToolActivity[],
+  labelActivities: readonly ToolActivity[] = activities,
 ): ToolActivityGroupPresentation {
   if (activities.length === 0) {
     return {
@@ -371,12 +392,18 @@ export function toolActivityGroupPresentation(
   const inProgress = presentations.some(
     ({ tone }) => tone === "running" || tone === "waiting_approval",
   );
+  const labelPresentations = (
+    inProgress && labelActivities.length > 0 ? labelActivities : activities
+  ).map((activity) => ({
+    activity,
+    ...toolCallPresentation(activity.name, activity.status),
+  }));
   const counts: Record<Category, number> = { wait: 0, spawn: 0, other: 0 };
-  for (const { activity } of presentations) {
+  for (const { activity } of labelPresentations) {
     counts[categoryOf(activity.name)] += 1;
   }
 
-  const latest = presentations[presentations.length - 1]!;
+  const latest = labelPresentations[labelPresentations.length - 1]!;
   const leadCategory = categoryOf(latest.activity.name);
   const leadPhrase =
     leadCategory === "other"

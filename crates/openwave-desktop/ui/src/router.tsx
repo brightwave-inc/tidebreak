@@ -26,7 +26,7 @@ const rootRoute = createRootRoute({ component: AppShell });
  * A conversation's URL carries its layout and, when arrived at from the inbox,
  * the parked call the transcript should reveal.
  */
-type ChatSearch = PanelSearch & { focus?: string };
+type ChatSearch = PanelSearch & { focus?: string; at?: string };
 
 /**
  * The layout params, kept as strings for the panel parser to make sense of.
@@ -124,6 +124,10 @@ const chatRoute = createRoute({
     // addressing state like they are, and it is dropped from the URL as soon
     // as it has been honored so a reload does not re-scroll.
     focus: typeof search.focus === "string" ? search.focus : undefined,
+    // Hash history already owns the fragment, so transcript anchoring travels
+    // as query state. Unlike `focus`, it remains until the reader returns to
+    // the live tail, which makes an anchored reload land in the same place.
+    at: typeof search.at === "string" ? search.at : undefined,
   }),
   component: ChatRouteComponent,
 });

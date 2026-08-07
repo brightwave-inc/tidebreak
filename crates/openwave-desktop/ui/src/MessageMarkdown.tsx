@@ -5,6 +5,7 @@ import {
   useRef,
   type ReactElement,
   type ReactNode,
+  type Ref,
 } from "react";
 import ReactMarkdown, {
   type Components,
@@ -66,6 +67,20 @@ export function preserveLineBreaks(input: string): string {
     from = point;
   }
   return result + input.slice(from);
+}
+
+/**
+ * Decode a literal JSON-style Unicode escape left in model text.
+ *
+ * The API normally hands the renderer real Unicode. This is a narrow failsafe
+ * for a payload that was serialized twice and arrives with `\\uXXXX` still in
+ * the string; adjacent surrogate escapes remain an ordinary JavaScript
+ * surrogate pair and therefore render as the intended astral character.
+ */
+export function decodeUnicodeEscapes(input: string): string {
+  return input.replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
 }
 
 /**
@@ -349,7 +364,7 @@ const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
  * Markdown twice.
  */
 export function processMarkdownContent(input: string): string {
-  return preserveLineBreaks(escapeLatexText(input));
+  return preserveLineBreaks(escapeLatexText(decodeUnicodeEscapes(input)));
 }
 
 /**
@@ -416,6 +431,7 @@ function blockRehypePlugins(
   end: number | undefined,
 ): NonNullable<Options["rehypePlugins"]> {
   if (start == null || end == null || end <= start) return rehypePlugins;
+  if (decodeUnicodeEscapes(block) !== block) return rehypePlugins;
   if (escapeLatexText(block) !== block) return rehypePlugins;
   // A block carrying a citation is left alone too: the mark would split the
   // text the citation is read out of, leaving the two passes to argue over the
@@ -509,6 +525,8 @@ function wrappingComponents(
 
 interface MessageMarkdownProps {
   children: string;
+  /** The rendered Markdown root, for consumers such as rich clipboard copy. */
+  containerRef?: Ref<HTMLDivElement>;
   /**
    * Give every heading a slug id, for a caller that means to scroll to one.
    * Off for transcripts, where headings from separate messages would collide.
@@ -532,6 +550,7 @@ interface MessageMarkdownProps {
 
 export const MessageMarkdown = memo(function MessageMarkdown({
   children,
+  containerRef,
   headingIds = false,
   highlightRange,
   wrapBlock,
@@ -540,7 +559,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   const blockStarts = useMemo(() => pieceStartOffsets(blocks), [blocks]);
 
   return (
-    <div className="message-markdown">
+    <div className="message-markdown" ref={containerRef}>
       {blocks.map((block, index) => {
         const inBlock = highlightRange
           ? rangeWithinPiece(highlightRange, blockStarts[index]!, block.length)

@@ -20,7 +20,8 @@ import {
 import { useChatListStore } from "./ChatListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
-import { hasMacOverlayTitlebar } from "./host";
+import { useDesktopNavigation } from "./DesktopNavigation";
+import { hasMacOverlayTitlebar, hasNativeHost } from "./host";
 import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
@@ -99,6 +100,7 @@ export function AppShell() {
   const deletionInFlightRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const desktopUpdates = useDesktopUpdates();
+  const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
 
   // The native "Check for Updates…" menu item lands the reader on the
@@ -129,6 +131,12 @@ export function AppShell() {
   // scaling the window all work wherever the reader is. They are installed
   // below the gate, by GatedShellHooks.
   const shellShortcuts: ShellShortcutHandlers = {
+    "history-back": () => {
+      if (desktopNavigation.canGoBack) desktopNavigation.goBack();
+    },
+    "history-forward": () => {
+      if (desktopNavigation.canGoForward) desktopNavigation.goForward();
+    },
     "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
     "new-chat": () => void onNewChat(),
     "focus-composer": focusComposer,
@@ -364,6 +372,9 @@ export function AppShell() {
     );
   }
 
+  const nativeTitlebar = hasNativeHost();
+  const macOverlayTitlebar = hasMacOverlayTitlebar();
+
   return (
     <ManagedGate client={client}>
       <GatedShellHooks
@@ -392,10 +403,15 @@ export function AppShell() {
           restartForUpdate: onRestartForUpdate,
         }}
       >
-        <div className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}`}>
+        <div className={`app-shell${nativeTitlebar ? " with-titlebar" : ""}`}>
           {confirmDialog}
           <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
-          {hasMacOverlayTitlebar() && <Titlebar />}
+          {nativeTitlebar && (
+            <Titlebar
+              macOverlay={macOverlayTitlebar}
+              navigation={desktopNavigation}
+            />
+          )}
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
             <Outlet />

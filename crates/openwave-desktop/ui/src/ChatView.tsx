@@ -49,6 +49,10 @@ import {
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  TranscriptNavigation,
+  transcriptNavigationEntries,
+} from "./TranscriptNavigation";
 
 export type ChatViewProps = {
   client: ApiClient;
@@ -180,12 +184,41 @@ export function ChatView({
     }),
     [files, messages],
   );
+  const composerHistory = useMemo(
+    () =>
+      messages.flatMap((message) =>
+        message.role === "user" && message.text.trim() ? [message.text] : [],
+      ).reverse(),
+    [messages],
+  );
 
   const navigate = useNavigate();
-  const focusCallId = (useSearch({ strict: false }) as { focus?: string })
-    .focus;
+  const search = useSearch({ strict: false }) as {
+    focus?: string;
+    at?: string;
+  };
+  const focusCallId = search.focus;
+  const anchoredMessageId = search.at;
+  const navigationSignature = messages
+    .flatMap((message) => {
+      if (message.role === "user") return [message.id, message.text];
+      if (message.role === "tool") {
+        return [message.id, message.name, message.status];
+      }
+      return [];
+    })
+    .join("\0");
+  const navigationEntries = useMemo(
+    () => transcriptNavigationEntries(messages),
+    // Assistant streaming replaces the messages array every token, but does
+    // not change the table of contents. Keep the rail's observers mounted until
+    // one of the user/tool fields it actually presents changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [navigationSignature],
+  );
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
   /** The composer's slot, which a pending question or plan card takes over. */
   const promptSlotRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
@@ -268,6 +301,7 @@ export function ChatView({
     (element: HTMLDivElement | null) => {
       scrollObserverRef.current?.disconnect();
       scrollRef.current = element;
+      setScrollElement(element);
       if (!element) return;
       const observer = new ResizeObserver(() => {
         element.style.setProperty(
@@ -379,19 +413,89 @@ export function ChatView({
     };
   }, [focusCallId, transcriptVisible, chat.id, navigate]);
 
+  // The router's hash is already occupied by hash history, so a rail jump is
+  // represented by `?at=`. Keeping it in the URL makes an anchored reload land
+  // in the same place; it is cleared only when the reader returns to the tail.
+  useEffect(() => {
+    if (!anchoredMessageId || !transcriptVisible || !scrollElement) return;
+    const frame = window.requestAnimationFrame(() => {
+      const target = Array.from(
+        scrollElement.querySelectorAll<HTMLElement>(
+          "[data-transcript-anchor]",
+        ),
+      ).find(
+        (element) => element.dataset.transcriptAnchor === anchoredMessageId,
+      );
+      if (!target) return;
+      followsLatestRef.current = false;
+      setScrolledAway(true);
+      isProgrammaticRef.current = true;
+      const containerRect = scrollElement.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      scrollElement.scrollTo({
+        top: Math.max(
+          0,
+          scrollElement.scrollTop + targetRect.top - containerRect.top - 24,
+        ),
+        behavior: "smooth",
+      });
+      window.setTimeout(() => {
+        isProgrammaticRef.current = false;
+      }, 800);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [anchoredMessageId, messages, scrollElement, transcriptVisible]);
+
+  const jumpToMessage = useCallback(
+    (anchorId: string) => {
+      void navigate({
+        to: "/c/$chatId",
+        params: { chatId: chat.id },
+        search: (previous: Record<string, unknown>) => ({
+          ...previous,
+          at: anchorId,
+        }),
+        replace: true,
+      });
+    },
+    [chat.id, navigate],
+  );
+
   const jumpToLatest = useCallback(() => {
     followsLatestRef.current = true;
     setScrolledAway(false);
+    if (anchoredMessageId) {
+      void navigate({
+        to: "/c/$chatId",
+        params: { chatId: chat.id },
+        search: (previous: Record<string, unknown>) => ({
+          ...previous,
+          at: undefined,
+        }),
+        replace: true,
+      });
+    }
     scrollToBottom(followScrollBehavior(false));
-  }, [scrollToBottom]);
+  }, [anchoredMessageId, chat.id, navigate, scrollToBottom]);
 
   const handleSend = useCallback(async () => {
     followsLatestRef.current = true;
     setScrolledAway(false);
     setPinLastTurn(true);
+    if (anchoredMessageId) {
+      await navigate({
+        to: "/c/$chatId",
+        params: { chatId: chat.id },
+        search: (previous: Record<string, unknown>) => ({
+          ...previous,
+          at: undefined,
+        }),
+        replace: true,
+      });
+    }
     await onSend();
     scrollToBottom(followScrollBehavior(false));
-  }, [onSend, scrollToBottom]);
+  }, [anchoredMessageId, chat.id, navigate, onSend, scrollToBottom]);
 
   return (
     <section className="chat-pane">
@@ -443,15 +547,22 @@ export function ChatView({
           executionConfigClient={client}
           changeClient={client}
         />
+        <TranscriptNavigation
+          entries={navigationEntries}
+          scrollElement={scrollElement}
+          activeAnchor={anchoredMessageId}
+          onJump={jumpToMessage}
+        />
         <button
           type="button"
           className={cn(
             "absolute z-[1] left-1/2 bottom-3 -translate-x-1/2 inline-flex items-center justify-center rounded-full border border-border p-2 text-foreground bg-background shadow transition-[opacity,background-color] duration-150 ease-in-out opacity-0 pointer-events-none hover:bg-accent motion-reduce:transition-none",
-            scrolledAway && "opacity-100 pointer-events-auto",
+            (scrolledAway || anchoredMessageId) &&
+              "opacity-100 pointer-events-auto",
           )}
-          aria-label="Scroll to latest"
-          aria-hidden={!scrolledAway}
-          tabIndex={scrolledAway ? 0 : -1}
+          aria-label={anchoredMessageId ? "Return to latest" : "Scroll to latest"}
+          aria-hidden={!scrolledAway && !anchoredMessageId}
+          tabIndex={scrolledAway || anchoredMessageId ? 0 : -1}
           onClick={jumpToLatest}
         >
           <ArrowDown size={16} />
@@ -487,6 +598,7 @@ export function ChatView({
             }
             disabled={deletingChat}
             draft={draft}
+            history={composerHistory}
             modelMenu={composerModelMenu}
             permissionMenu={composerPermissionMenu}
             network={composerNetwork}
