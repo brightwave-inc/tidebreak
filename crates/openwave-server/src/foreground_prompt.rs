@@ -1333,7 +1333,7 @@ mod tests {
         // Re-pinned for the baseline Python set the exec section now names.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:298ceefd7828ae03d6f7136d3c4ec3042facb4952bc21e1e76a6b76c56070a3f"
+            "foreground-v2:sha256:9e3935b243daf4374b539dad23836d7f004174257cb901de8331c55ee6efdb32"
         );
     }
 }
