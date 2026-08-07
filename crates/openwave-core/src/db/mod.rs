@@ -53,7 +53,7 @@ use crate::storage::{
     CompleteTurnRunOutcome, DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome,
     FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome, MoveChatOutcome,
     OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
@@ -355,6 +355,23 @@ impl Store for DbStore {
         id: ProjectId,
     ) -> Result<DeleteProjectOutcome> {
         self.delete_project_impl(id, Some(owner)).await
+    }
+
+    async fn move_chat_to_project(
+        &self,
+        id: ChatId,
+        project_id: Option<ProjectId>,
+    ) -> Result<MoveChatOutcome> {
+        ops::conversation::move_chat_to_project(self, id, project_id, None).await
+    }
+
+    async fn move_chat_to_project_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+        project_id: Option<ProjectId>,
+    ) -> Result<MoveChatOutcome> {
+        ops::conversation::move_chat_to_project(self, id, project_id, Some(owner)).await
     }
 
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {

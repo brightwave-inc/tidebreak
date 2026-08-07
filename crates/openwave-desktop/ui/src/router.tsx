@@ -15,6 +15,7 @@ import { InboxView } from "./InboxView";
 import { useManagedPolicy } from "./managedPolicy";
 import type { PanelSearch } from "./panel/panelUrl";
 import { PluginsPage } from "./plugins/PluginsPage";
+import { useProjectListStore } from "./ProjectListStore";
 import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
@@ -142,6 +143,34 @@ function ChatRouteComponent() {
   return <ChatRoute key={chatId} chatId={chatId} />;
 }
 
+/**
+ * The same conversation, addressed through the project holding it.
+ *
+ * A chat inside a project is not a different kind of conversation, so this
+ * renders the identical route with the identical layout params — the path only
+ * says where the reader came from, which is what lets the rail keep the
+ * project's row open and highlighted. A chat that has since moved is not
+ * redirected: the id in the path is the conversation, and reopening the wrong
+ * project's link still lands on the right transcript.
+ */
+const projectChatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/p/$projectId/c/$chatId",
+  validateSearch: chatRoute.options.validateSearch,
+  component: ProjectChatRouteComponent,
+});
+
+function ProjectChatRouteComponent() {
+  const { projectId, chatId } = projectChatRoute.useParams();
+  // Opening a conversation through its project opens the project. Without this
+  // a deep link lands on a transcript whose row is inside a collapsed folder,
+  // so the rail shows the reader nothing of where they are.
+  useEffect(() => {
+    useProjectListStore.getState().expandProject(projectId);
+  }, [projectId]);
+  return <ChatRoute key={chatId} chatId={chatId} />;
+}
+
 export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -213,6 +242,7 @@ export const routeTree = rootRoute.addChildren([
   pluginDetailRoute,
   inboxRoute,
   chatRoute,
+  projectChatRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,

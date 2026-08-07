@@ -11,8 +11,8 @@ use std::path::Path as FsPath;
 
 use openwave_core::{
     AgentRunId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
-    Message as StoredMessage, MessageId, PermissionMode, Project, ProjectId, ReasoningEffort, Role,
-    TurnId, CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
+    Message as StoredMessage, MessageId, MoveChatOutcome, PermissionMode, Project, ProjectId,
+    ReasoningEffort, Role, TurnId, CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
 };
 
 use crate::error::ServerError;
@@ -320,6 +320,12 @@ pub struct ChatUpdate {
     /// Replace the code-execution network policy. Omitted leaves it unchanged.
     #[serde(default)]
     pub network_policy: Option<openwave_core::NetworkPolicy>,
+    /// File the conversation under a project, or take it back out with an
+    /// explicit `null`. Unlike the fields above this is never recorded as a
+    /// sticky default: where one conversation lives says nothing about where
+    /// the next one should be created.
+    #[serde(default, deserialize_with = "double_option")]
+    pub project_id: Option<Option<ProjectId>>,
 }
 
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
@@ -342,6 +348,36 @@ pub async fn patch_chat(
     // default resolves to.
     refuse_permission_mode_over_ceiling(&state, body.permission_mode.flatten()).await?;
     let title = body.title.map(normalize_chat_title).transpose()?;
+
+    // The move lands first, because it is the one field that can be refused on
+    // durable state rather than on its own value, and because the chat read
+    // below must see where the conversation ended up.
+    if let Some(project_id) = body.project_id {
+        match store.move_chat_to_project(id, project_id).await? {
+            MoveChatOutcome::Moved => {}
+            MoveChatOutcome::ChatNotFound => {
+                return Err(ServerError::not_found(format!("chat {id} not found")));
+            }
+            MoveChatOutcome::ProjectNotFound => {
+                return Err(ServerError::not_found(match project_id {
+                    Some(project_id) => format!("project {project_id} not found"),
+                    None => "project not found".to_owned(),
+                }));
+            }
+            MoveChatOutcome::HasConnectedFolders => {
+                return Err(ServerError::conflict_kind(
+                    "chat_roots_attached",
+                    "disconnect this conversation's folders before moving it",
+                ));
+            }
+            MoveChatOutcome::FolderChangePending => {
+                return Err(ServerError::conflict_kind(
+                    "chat_root_attachment_unresolved",
+                    "a connected-folder change is still finishing; try moving again in a moment",
+                ));
+            }
+        }
+    }
 
     let mut chat = store.require_chat(id).await?;
 

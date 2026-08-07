@@ -1,6 +1,12 @@
 import { createContext, useContext } from "react";
 
-import type { ApiClient, Chat, ModelInfo, ProviderInfo } from "./api";
+import type {
+  ApiClient,
+  Chat,
+  ModelInfo,
+  Project,
+  ProviderInfo,
+} from "./api";
 import type { DesktopUpdateState } from "./updates";
 
 /**
@@ -38,6 +44,20 @@ export type AppContextValue = {
   startRename: (chat: Chat) => void;
   commitRename: (chat: Chat) => void;
   cancelRename: () => void;
+  /** Create a project and drop its rail row straight into its rename field. */
+  newProject: () => void;
+  /**
+   * Confirm, move the project's conversations back to Recents, then delete it.
+   * The conversations survive: deleting a folder is not deleting its contents.
+   */
+  deleteProject: (project: Project) => void;
+  startProjectRename: (project: Project) => void;
+  commitProjectRename: (project: Project) => void;
+  cancelProjectRename: () => void;
+  /** Start a conversation inside a project and open it there. */
+  newChatInProject: (projectId: string) => void;
+  /** File a conversation under a project, or take it back out with `null`. */
+  moveChatToProject: (chat: Chat, projectId: string | null) => void;
   updateState: DesktopUpdateState;
   /** The most recent explicit update check confirmed the app is current. */
   updateUpToDate: boolean;

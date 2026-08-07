@@ -1,13 +1,23 @@
-import { CircleAlert, Ellipsis, Pencil, Trash2 } from "lucide-react";
+import {
+  CircleAlert,
+  Ellipsis,
+  FolderInput,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 
-import type { Chat } from "@/api";
+import type { Chat, Project } from "@/api";
 import { useChatListStore } from "@/ChatListStore";
 import { useTypewriterOnce } from "@/useTypewriterOnce";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuPortal,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -22,11 +32,13 @@ export function RecentChatRow({
   renameDraft,
   savingTitle,
   mutating,
+  projects,
   onRenameDraftChange,
   onOpen,
   onStartRename,
   onCommitRename,
   onCancelRename,
+  onMoveToProject,
   onDelete,
 }: {
   chat: Chat;
@@ -36,11 +48,14 @@ export function RecentChatRow({
   renameDraft: string;
   savingTitle: boolean;
   mutating: boolean;
+  /** Every project the chat could be filed under, for the move submenu. */
+  projects: Project[];
   onRenameDraftChange: (draft: string) => void;
   onOpen: () => void;
   onStartRename: () => void;
   onCommitRename: () => void;
   onCancelRename: () => void;
+  onMoveToProject: (projectId: string | null) => void;
   onDelete: () => void;
 }) {
   const title = chat.title?.trim() || "New chat";
@@ -119,6 +134,36 @@ export function RecentChatRow({
             <Pencil />
             Rename
           </DropdownMenuItem>
+          {(projects.length > 0 || chat.project_id) && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <FolderInput />
+                Move to project
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuSubContent>
+                  {chat.project_id && (
+                    <>
+                      <DropdownMenuItem onSelect={() => onMoveToProject(null)}>
+                        No project
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
+                  {projects
+                    .filter((project) => project.id !== chat.project_id)
+                    .map((project) => (
+                      <DropdownMenuItem
+                        key={project.id}
+                        onSelect={() => onMoveToProject(project.id)}
+                      >
+                        {project.title?.trim() || "Untitled project"}
+                      </DropdownMenuItem>
+                    ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onSelect={onDelete}>
             <Trash2 />

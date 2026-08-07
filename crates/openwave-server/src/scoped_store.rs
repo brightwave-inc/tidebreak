@@ -33,10 +33,10 @@ use openwave_core::{
     ChatTranscriptSnapshot, ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome,
     DeleteProjectOutcome, DocumentId, DocumentListCursor, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
-    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, NetworkPolicy,
-    OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId,
-    ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
-    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
+    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome,
+    NetworkPolicy, OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project,
+    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    Result, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
     TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
 };
 
@@ -168,6 +168,18 @@ impl ScopedStore {
     /// Delete the principal's project.
     pub async fn delete_project(&self, id: ProjectId) -> Result<DeleteProjectOutcome> {
         self.store.delete_project_scoped(&self.owner, id).await
+    }
+
+    /// File one of the principal's chats under one of their projects, or take
+    /// it back out with `None`.
+    pub async fn move_chat_to_project(
+        &self,
+        id: ChatId,
+        project_id: Option<ProjectId>,
+    ) -> Result<MoveChatOutcome> {
+        self.store
+            .move_chat_to_project_scoped(&self.owner, id, project_id)
+            .await
     }
 
     /// Fetch the principal's document by id.

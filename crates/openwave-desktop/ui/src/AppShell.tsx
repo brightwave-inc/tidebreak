@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Outlet, useNavigate } from "@tanstack/react-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 
 import {
   ApiClient,
   type Chat,
   type ModelInfo,
+  type Project,
   type ProviderInfo,
   type ServerInfo,
 } from "./api";
@@ -18,10 +20,12 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
+import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
 import { useDesktopNavigation } from "./DesktopNavigation";
 import { hasMacOverlayTitlebar, hasNativeHost } from "./host";
+import { friendlyErrorMessage } from "./lib/utils";
 import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
@@ -45,6 +49,7 @@ function focusComposer(): void {
 // Store actions are stable for the store's lifetime; these handles are for
 // calling actions only — never read state fields from them.
 const chatListActions = useChatListStore.getState();
+const projectListActions = useProjectListStore.getState();
 
 /**
  * The shell hooks that do work on their own — the parked-prompt poll and the
@@ -98,6 +103,10 @@ export function AppShell() {
   const skipRenameCommitRef = useRef(false);
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
+  // One fence over every project mutation, including the chat moves they drive:
+  // create/rename/delete/move all rewrite the same rail and must not interleave.
+  const projectMutationRef = useRef(false);
+  const skipProjectRenameCommitRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const desktopUpdates = useDesktopUpdates();
   const desktopNavigation = useDesktopNavigation();
@@ -217,6 +226,186 @@ export function AppShell() {
       chatListActions.setChatsError(null);
     } catch (err) {
       chatListActions.failChatsLoad(`Could not load chats: ${String(err)}`);
+    }
+  }
+
+  // Projects load beside the chats and fail as quietly: the rail simply shows
+  // no Projects section, which is also what a reader with none sees. Nothing
+  // else in the app depends on the list, so a failure here is not worth a
+  // second error banner over the sidebar.
+  useEffect(() => {
+    if (!client || !info) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const existing = await client.listProjects();
+        if (!cancelled) projectListActions.setProjects(existing);
+      } catch {
+        if (!cancelled) projectListActions.failProjectsLoad();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, info]);
+
+  async function onNewProject() {
+    if (!client || projectMutationRef.current) return;
+    projectMutationRef.current = true;
+    projectListActions.setCreatingProject(true);
+    try {
+      const created = await client.createProject("New project");
+      projectListActions.prependProject(created);
+      // Named on creation rather than through a dialog: the row drops straight
+      // into its rename field, which is the same edit the menu offers later.
+      projectListActions.beginProjectRename(created);
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not create the project."));
+    } finally {
+      projectMutationRef.current = false;
+      projectListActions.setCreatingProject(false);
+    }
+  }
+
+  function startProjectRename(target: Project) {
+    skipProjectRenameCommitRef.current = false;
+    projectListActions.beginProjectRename(target);
+  }
+
+  function cancelProjectRename() {
+    skipProjectRenameCommitRef.current = true;
+    projectListActions.endProjectRename();
+  }
+
+  async function commitProjectRename(target: Project) {
+    // Same blur/Escape dance as the chat rename above.
+    if (skipProjectRenameCommitRef.current) {
+      skipProjectRenameCommitRef.current = false;
+      return;
+    }
+    if (!client || projectMutationRef.current) return;
+    if (useProjectListStore.getState().savingProjectTitle) return;
+    const trimmed = useProjectListStore.getState().renameProjectDraft.trim();
+    if (trimmed === (target.title?.trim() ?? "")) {
+      projectListActions.endProjectRename();
+      return;
+    }
+    projectMutationRef.current = true;
+    projectListActions.setSavingProjectTitle(true);
+    try {
+      const updated = await client.patchProjectTitle(
+        target.id,
+        trimmed || null,
+      );
+      projectListActions.replaceProject(updated);
+      projectListActions.endProjectRename();
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not rename the project."));
+    } finally {
+      projectMutationRef.current = false;
+      projectListActions.setSavingProjectTitle(false);
+    }
+  }
+
+  /**
+   * Delete a project, taking its conversations out of it first.
+   *
+   * The server refuses to delete a project that still holds anything, and
+   * rightly so — but a reader deleting a folder means the folder, not the
+   * conversations in it. So each chat is moved out and kept, and only the
+   * project itself goes. A chat that cannot be moved (it still holds connected
+   * folders) leaves the project standing, and the toast says why.
+   */
+  async function onDeleteProject(target: Project) {
+    if (!client || projectMutationRef.current) return;
+    const label = target.title?.trim() || "this project";
+    const held = useChatListStore
+      .getState()
+      .chats.filter((chat) => chat.project_id === target.id);
+    const confirmed = await confirm({
+      title: `Delete ${label}?`,
+      description: held.length
+        ? `Its ${held.length === 1 ? "conversation moves" : `${held.length} conversations move`} back to Recents. Nothing is deleted but the project itself.`
+        : "This project is empty.",
+      confirmLabel: "Delete project",
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    projectMutationRef.current = true;
+    projectListActions.setDeletingProjectId(target.id);
+    try {
+      // Re-read rather than reusing the set the prompt was worded from: the
+      // dialog was open for as long as the reader took, and a chat filed
+      // somewhere else in the meantime is not this project's to move.
+      const moving = useChatListStore
+        .getState()
+        .chats.filter((chat) => chat.project_id === target.id);
+      for (const chat of moving) {
+        chatListActions.replaceChat(
+          await client.moveChatToProject(chat.id, null),
+        );
+      }
+      await client.deleteProject(target.id);
+      projectListActions.removeProject(target.id);
+      // The open conversation may have just moved out from under its URL.
+      if (openChatId && moving.some((chat) => chat.id === openChatId)) {
+        await navigate({ to: "/c/$chatId", params: { chatId: openChatId } });
+      }
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not delete the project."));
+      await refreshChats();
+    } finally {
+      projectMutationRef.current = false;
+      projectListActions.setDeletingProjectId(null);
+    }
+  }
+
+  /** Start a conversation inside a project and open it there. */
+  async function onNewChatInProject(projectId: string) {
+    if (!client || creationInFlightRef.current || deletionInFlightRef.current)
+      return;
+    creationInFlightRef.current = true;
+    chatListActions.setCreatingChat(true);
+    try {
+      const created = await client.createChat(undefined, projectId);
+      chatListActions.prependChat(created);
+      chatListActions.setChatsError(null);
+      projectListActions.expandProject(projectId);
+      await navigate({
+        to: "/p/$projectId/c/$chatId",
+        params: { projectId, chatId: created.id },
+      });
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not create the chat."));
+    } finally {
+      creationInFlightRef.current = false;
+      chatListActions.setCreatingChat(false);
+    }
+  }
+
+  /** File a conversation under a project, or take it back out with `null`. */
+  async function onMoveChatToProject(chat: Chat, projectId: string | null) {
+    if (!client || projectMutationRef.current) return;
+    if ((chat.project_id ?? null) === projectId) return;
+    projectMutationRef.current = true;
+    try {
+      const moved = await client.moveChatToProject(chat.id, projectId);
+      chatListActions.replaceChat(moved);
+      if (projectId) projectListActions.expandProject(projectId);
+      // Keep the open conversation's URL honest about where it now lives.
+      if (openChatId === chat.id) {
+        await (projectId
+          ? navigate({
+              to: "/p/$projectId/c/$chatId",
+              params: { projectId, chatId: chat.id },
+            })
+          : navigate({ to: "/c/$chatId", params: { chatId: chat.id } }));
+      }
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not move the chat."));
+    } finally {
+      projectMutationRef.current = false;
     }
   }
 
@@ -397,6 +586,14 @@ export function AppShell() {
           startRename: startChatRename,
           commitRename: (target) => void commitChatRename(target),
           cancelRename: cancelChatRename,
+          newProject: () => void onNewProject(),
+          deleteProject: (target) => void onDeleteProject(target),
+          startProjectRename,
+          commitProjectRename: (target) => void commitProjectRename(target),
+          cancelProjectRename,
+          newChatInProject: (projectId) => void onNewChatInProject(projectId),
+          moveChatToProject: (chat, projectId) =>
+            void onMoveChatToProject(chat, projectId),
           updateState: desktopUpdates.state,
           updateUpToDate: desktopUpdates.upToDate,
           checkForUpdate: desktopUpdates.check,

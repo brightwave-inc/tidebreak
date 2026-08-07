@@ -1014,6 +1014,20 @@ export class ApiClient {
     });
   }
 
+  /**
+   * File a chat under a project, or take it back out with `null`.
+   *
+   * The server refuses (409) a chat that still holds connected folders: its
+   * folder grants are keyed to the identity it would be leaving.
+   */
+  moveChatToProject(chatId: string, projectId: string | null): Promise<Chat> {
+    return this.json(`/chats/${encodeURIComponent(chatId)}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ project_id: projectId }),
+    });
+  }
+
   patchChatNetworkPolicy(
     chatId: string,
     networkPolicy: NetworkPolicy,

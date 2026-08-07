@@ -19,7 +19,7 @@ use crate::model::{
 use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
-    ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
+    ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome, MoveChatOutcome,
 };
 
 use super::super::{entities, project_from_models, store_err, DbStore};
@@ -250,6 +250,136 @@ where
         .map_err(store_err)?;
     }
     Ok(())
+}
+
+/// File a conversation under `project_id`, or take it back out with `None`.
+///
+/// Folder authority is keyed to the identity holding it — a chat inside a
+/// project grants across that project, a loose chat only across itself — so a
+/// conversation still holding connected folders cannot change identity without
+/// stranding the grants the broker issued under the old one. Such a move is
+/// refused rather than silently breaking them; the caller disconnects the
+/// folders first. Once the conversation is clean, the destination's ordered
+/// root defaults are snapshotted exactly as
+/// [`create_chat_with_project_defaults`] seeds a new conversation.
+pub(in crate::db) async fn move_chat_to_project(
+    store: &DbStore,
+    id: ChatId,
+    project_id: Option<ProjectId>,
+    owner: Option<&OwnerId>,
+) -> Result<MoveChatOutcome> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Destination before conversation, the same order
+    // `create_chat_with_project_defaults` takes, so the two cannot deadlock.
+    let project_roots = match load_chat_project_roots(&transaction, project_id, owner).await {
+        Ok(roots) => roots,
+        Err(AgentError::ProjectNotFound(_)) => {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(MoveChatOutcome::ProjectNotFound);
+        }
+        Err(error) => return Err(error),
+    };
+    if !acquire_chat_write_lock(&transaction, id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(MoveChatOutcome::ChatNotFound);
+    }
+    // Someone else's conversation is indistinguishable from an absent one
+    // (#853). The owner cannot change under the write lock above.
+    let mut query = entities::chat::Entity::find_by_id(id.0);
+    if let Some(owner) = owner {
+        query = query.filter(entities::chat::Column::Owner.eq(owner.as_str()));
+    }
+    let Some(model) = query.one(&transaction).await.map_err(store_err)? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(MoveChatOutcome::ChatNotFound);
+    };
+    if model.project_id.map(ProjectId) == project_id {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(MoveChatOutcome::Moved);
+    }
+
+    let attached = entities::chat_root_attachment::Entity::find()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if attached {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(MoveChatOutcome::HasConnectedFolders);
+    }
+    // Product rows can be clear while native authority is not: an in-flight or
+    // terminally failed change may still leave the broker attached under the
+    // subject this conversation is about to stop being. The latest operation
+    // per root has to say detached, exactly as conversation deletion requires.
+    let changes = entities::root_attachment_change::Entity::find()
+        .filter(entities::root_attachment_change::Column::ChatId.eq(id.0))
+        .order_by_desc(entities::root_attachment_change::Column::CreatedAt)
+        .order_by_desc(entities::root_attachment_change::Column::Id)
+        .all(&transaction)
+        .await
+        .map_err(store_err)?;
+    let mut observed_roots = HashSet::new();
+    let attachment_state_unresolved = changes.into_iter().any(|change| {
+        observed_roots.insert(change.root_id)
+            && (change.phase == "awaiting_broker"
+                || change.broker_currently_attached != Some(false))
+    });
+    if attachment_state_unresolved {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(MoveChatOutcome::FolderChangePending);
+    }
+
+    let mut chat = chat_from_models(model, Vec::new())?;
+    chat.project_id = project_id;
+    chat.root_attachments = project_roots
+        .iter()
+        .copied()
+        .map(|root_id| ChatRootAttachment {
+            root_id,
+            origin: RootAttachmentOrigin::ProjectDefault,
+        })
+        .collect();
+    // The revision is a CAS counter over the projection, so it only advances
+    // when the projection actually changes. It was empty on the way in.
+    if !chat.root_attachments.is_empty() {
+        chat.attachment_revision += 1;
+    }
+    validate_chat_root_projection_against_project(&chat, &project_roots)
+        .map_err(|message| AgentError::Store(message.into()))?;
+
+    let updated = entities::chat::Entity::update_many()
+        .col_expr(
+            entities::chat::Column::ProjectId,
+            sea_orm::sea_query::Expr::value(project_id.map(|project_id| project_id.0)),
+        )
+        .col_expr(
+            entities::chat::Column::AttachmentRevision,
+            sea_orm::sea_query::Expr::value(chat.attachment_revision),
+        )
+        .filter(entities::chat::Column::Id.eq(id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "conversation {id} changed while moving it between projects"
+        )));
+    }
+    for (position, attachment) in chat.root_attachments.iter().copied().enumerate() {
+        entities::chat_root_attachment::ActiveModel {
+            chat_id: Set(id.0),
+            root_id: Set(*attachment.root_id.as_uuid()),
+            position: Set(i32::try_from(position)
+                .map_err(|_| AgentError::Store("chat root position exceeds i32".into()))?),
+            origin: Set(attachment_origin_to_db(attachment.origin).to_owned()),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(MoveChatOutcome::Moved)
 }
 
 pub(in crate::db) async fn set_chat_model(
