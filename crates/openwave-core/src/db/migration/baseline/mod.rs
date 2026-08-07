@@ -160,10 +160,6 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             sandbox::sandbox_tool_call_indexes(),
         ),
         entry(
-            sandbox::sandbox_tool_call_receipt_table(),
-            sandbox::sandbox_tool_call_receipt_indexes(),
-        ),
-        entry(
             sandbox::sandbox_spawn_checkpoint_table(),
             sandbox::sandbox_spawn_checkpoint_indexes(),
         ),

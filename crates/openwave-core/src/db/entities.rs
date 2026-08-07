@@ -800,30 +800,12 @@ pub mod sandbox_tool_call {
         pub executor_lease_token: Option<Uuid>,
         pub executor_lease_expires_at: Option<DateTimeUtc>,
         pub retry_at: Option<DateTimeUtc>,
-        pub created_at: DateTimeUtc,
-        pub resolved_at: Option<DateTimeUtc>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod sandbox_tool_call_receipt {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "sandbox_tool_call_receipt")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub call_id: Uuid,
-        pub executor_lease_token: Uuid,
-        pub status: String,
-        pub result: String,
+        pub resolution_lease_token: Option<Uuid>,
+        pub result: Option<String>,
         pub error_code: Option<String>,
         pub error_detail: Option<String>,
-        pub resolved_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+        pub resolved_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
