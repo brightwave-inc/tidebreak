@@ -65,6 +65,16 @@ pub(crate) const LIBREOFFICE_VERSION: &str = "25.8.7";
 #[cfg(target_os = "macos")]
 const REQUIRED_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// The pinned DMGs are about 300 MB. Mirrors are not trusted, so stop an
+/// oversized response before it can consume the rest of the user's disk; the
+/// SHA-256 gate below still decides whether the bounded bytes are authentic.
+#[cfg(any(target_os = "macos", test))]
+const MAX_DMG_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(any(target_os = "macos", test))]
+const DOWNLOAD_TOO_LARGE: &str =
+    "The LibreOffice download was larger than expected and was discarded";
+
 /// Progress events the preview panel renders as a determinate bar.
 #[cfg(target_os = "macos")]
 pub(crate) const INSTALL_PROGRESS_EVENT: &str = "presentation-converter-install-progress";
@@ -561,6 +571,9 @@ async fn download(
         ));
     }
     let total_bytes = response.content_length();
+    if total_bytes.is_some_and(|total| total > MAX_DMG_BYTES) {
+        return Err(DOWNLOAD_TOO_LARGE.to_owned());
+    }
     emit_progress(
         app,
         InstallProgress {
@@ -582,10 +595,10 @@ async fn download(
             return Err(CANCELLED.to_owned());
         }
         let chunk = chunk.map_err(|error| format!("The download was interrupted: {error}"))?;
+        downloaded = next_downloaded_size(downloaded, chunk.len())?;
         file.write_all(&chunk)
             .await
             .map_err(|error| format!("Could not write the download: {error}"))?;
-        downloaded += chunk.len() as u64;
         if downloaded - last_reported >= REPORT_EVERY_BYTES {
             last_reported = downloaded;
             emit_progress(
@@ -602,6 +615,21 @@ async fn download(
         .await
         .map_err(|error| format!("Could not write the download: {error}"))?;
     Ok(())
+}
+
+/// Account for one response chunk before it is written. The content-length
+/// header is only a hint; this is the enforcement point for a missing or false
+/// header from the mirror.
+#[cfg(any(target_os = "macos", test))]
+fn next_downloaded_size(downloaded: u64, chunk_bytes: usize) -> Result<u64, String> {
+    let chunk_bytes = u64::try_from(chunk_bytes).map_err(|_| DOWNLOAD_TOO_LARGE.to_owned())?;
+    let next = downloaded
+        .checked_add(chunk_bytes)
+        .ok_or_else(|| DOWNLOAD_TOO_LARGE.to_owned())?;
+    if next > MAX_DMG_BYTES {
+        return Err(DOWNLOAD_TOO_LARGE.to_owned());
+    }
+    Ok(next)
 }
 
 /// SHA-256 of a file's contents, streamed, as lowercase hex.
@@ -705,6 +733,24 @@ mod tests {
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
         assert_ne!(actual, "0".repeat(64));
+    }
+
+    /// A mirror can omit or lie in Content-Length, so the streaming counter is
+    /// the boundary that prevents a bad response from filling the user's disk.
+    #[test]
+    fn managed_download_refuses_bytes_past_its_ceiling() {
+        assert_eq!(
+            next_downloaded_size(MAX_DMG_BYTES - 1, 1),
+            Ok(MAX_DMG_BYTES)
+        );
+        assert_eq!(
+            next_downloaded_size(MAX_DMG_BYTES, 1).unwrap_err(),
+            DOWNLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            next_downloaded_size(u64::MAX, 1).unwrap_err(),
+            DOWNLOAD_TOO_LARGE
+        );
     }
 
     /// At-rest integrity: the managed install only resolves behind a marker
