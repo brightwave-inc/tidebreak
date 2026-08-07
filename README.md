@@ -5,8 +5,8 @@
 <h1 align="center">OpenWave</h1>
 
 <p align="center">
-  <strong>An open, local-first cowork runtime.</strong><br>
-  A Rust-native agent that works over your files and tools — on your machine, with your own model keys.
+  <strong>An open, local-first agent runtime for real work.</strong><br>
+  The engine behind a production research platform, rebuilt in Rust to run on your machine with your own model keys.
 </p>
 
 <p align="center">
@@ -48,48 +48,40 @@ as described under [Building](#building).
 
 ## Where this comes from
 
-OpenWave is the open core of the [Brightwave](https://brightwave.io) platform.
+Since 2024 we've built [Brightwave](https://brightwave.io), a research platform
+for financial diligence. Hundreds of finance professionals use it for work they
+put their name on, where a missed detail in a data room has real consequences
+and every claim has to trace back to a source.
 
-We've spent years building Brightwave — an agentic system for demanding,
-real-world knowledge work: a runtime that plans and executes multi-step tasks,
-runs **fleets of agents in parallel** inside sandboxes, connects to your
-sources, and grounds its answers in citations. Skills and prompts are features
-on top of that runtime, not the point of it. **We're taking the core pieces of
-that platform — the agent loop, the tool model, sandboxing, connectors, and
-source tools — and opening them up** under Apache-2.0, rebuilt lean in Rust as a
-local-first application you run yourself.
+Running it in production taught us some things. The agent loop is the easy
+part; the hard part is what happens when a tool call fails halfway through a
+twenty-step task. Sandboxing has to be there from the start. And a user who
+can't switch models is stuck with their vendor's outages and their vendor's
+pricing.
 
-The idea is simple: the engine that does the work shouldn't be a cloud service
-that holds your data and meters your tokens. It should be something you own —
-local by default, model-agnostic, and open.
+OpenWave is that engine rebuilt in Rust: the agent loop, the tool model,
+sandboxed execution, connectors, and permissions. Apache-2.0, local-first, and
+complete on its own.
 
-The open version is **configurable end to end**. Bring your own API keys to
-connect the LLMs you prefer behind a common interface, with sensible,
-local-friendly defaults out of the box, so it works on your machine from the
-first run.
+## What we believe
 
-## Why
+**The engine that does the work should belong to you.** Not a cloud service
+that holds your data and meters your tokens. Files stay on your machine, keys
+stay in your keychain, code runs sandboxed, and the agent asks before it
+reaches past what you've granted. Those aren't features; they follow from the
+first sentence.
 
-Most agentic tools are cloud services that hold your data and meter your usage.
-OpenWave is the opposite: a slim desktop app (plus a headless mode) that runs the
-agent loop **on your machine**, keeps your data local, and lets you bring your
-own model — hosted or fully offline. Its MCP server foundation can expose the
-same tool registry to external agents; `openwave mcp <workspace>` serves the
-built-in read-only file tools today. The inverse client foundation can initialize
-external stdio MCP servers configured at boot and mount their tools into that
-registry; configuration UI remains in development.
+**A conversation shouldn't care which vendor is on the other end.** So the
+journal is provider-neutral and you can switch providers mid-chat, from Claude
+to GPT to a local model, and keep going. The day your provider has an outage
+and your work doesn't stop, that's the principle paying off.
 
-## Principles
+**Software should work before it asks you to configure it.** OpenWave runs on
+first launch with sensible defaults. Every layer underneath: models, sandboxes,
+tools, and permissions can be swapped out when you need to, and not before.
 
-- **Local-first & private.** Your files, keys, and history stay on your machine.
-- **Bring your own keys.** Configure Anthropic, OpenAI, or an OpenAI-compatible
-  endpoint (vLLM, LM Studio, Ollama, OpenRouter). We never meter tokens.
-- **Slim by default.** Small install; no bundled model weights or language
-  runtimes — fetched on first use, cached locally.
-- **Composable tool surface.** The MCP server foundation exposes OpenWave's
-  tools, while its client foundation mounts namespaced tools from external stdio
-  MCP servers behind the same approval-aware registry.
-- **Open core.** The runtime is Apache-2.0 and complete on its own.
+**The work is the point.** Demos optimize for the first five minutes. We
+optimize for whether the deliverable got done.
 
 ## Status
 
