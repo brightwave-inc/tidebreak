@@ -618,6 +618,7 @@ mod tests {
                     context_window: 32_768,
                     max_output_tokens: 4_096,
                 }],
+                model_protocols: Default::default(),
             },
         )
         .await

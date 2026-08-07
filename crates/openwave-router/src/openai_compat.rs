@@ -36,6 +36,13 @@ pub struct OpenAiCompatProvider {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
+    /// Per-request credential supplier for gateways that mint short-lived
+    /// tokens. Takes precedence over `api_key` when present.
+    token_source: Option<std::sync::Arc<dyn crate::BearerTokenSource>>,
+    /// Whether to declare the request's conversation to a model gateway.
+    /// Off for ordinary compatible endpoints, which are not parties to the
+    /// host's chat organization.
+    conversation_attribution: bool,
     /// Stable id reported by [`ModelProvider::id`] — `"openai"` or
     /// `"openai_compatible"` depending on how the caller configured it.
     provider_id: String,
@@ -51,6 +58,8 @@ impl OpenAiCompatProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            token_source: None,
+            conversation_attribution: false,
             provider_id: "openai".to_string(),
         }
     }
@@ -61,6 +70,8 @@ impl OpenAiCompatProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: base_url.into(),
+            token_source: None,
+            conversation_attribution: false,
             provider_id: "openai_compatible".to_string(),
         }
     }
@@ -76,6 +87,25 @@ impl OpenAiCompatProvider {
     #[must_use]
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.provider_id = id.into();
+        self
+    }
+
+    /// Fetch the credential from `source` at each request instead of using a
+    /// static key. Gateway token sources refresh behind their own lock.
+    #[must_use]
+    pub fn with_token_source(
+        mut self,
+        source: std::sync::Arc<dyn crate::BearerTokenSource>,
+    ) -> Self {
+        self.token_source = Some(source);
+        self
+    }
+
+    /// Declare each request's conversation to the gateway this provider points
+    /// at, so usage and attested tool calls are attributed to the same chat.
+    #[must_use]
+    pub fn with_conversation_attribution(mut self) -> Self {
+        self.conversation_attribution = true;
         self
     }
 }
@@ -95,12 +125,23 @@ impl ModelProvider for OpenAiCompatProvider {
             body["stream_options"] = json!({ "include_usage": true });
         }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let api_key = match &self.token_source {
+            Some(source) => source.bearer_token_for(req.conversation).await?,
+            None => self.api_key.clone(),
+        };
 
-        let response = self
+        let mut request = self
             .client
             .post(url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
+            .bearer_auth(api_key)
+            .header("content-type", "application/json");
+        if let (true, Some(conversation)) = (self.conversation_attribution, req.conversation) {
+            request = request.header(
+                crate::router::GATEWAY_CONVERSATION_HEADER,
+                conversation.to_string(),
+            );
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -1267,5 +1308,118 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_gateway_request_uses_the_rotating_conversation_token_and_attribution_header() {
+        use axum::extract::{Request, State};
+        use axum::http::{header, HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<(String, HeaderMap)>>>);
+
+        async fn capture(State(capture): State<Capture>, request: Request) -> impl IntoResponse {
+            capture
+                .0
+                .lock()
+                .unwrap()
+                .push((request.uri().path().to_owned(), request.headers().clone()));
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            )
+        }
+
+        struct RecordingTokenSource(Mutex<Vec<Option<openwave_core::id::ChatId>>>);
+
+        #[async_trait::async_trait]
+        impl crate::BearerTokenSource for RecordingTokenSource {
+            async fn bearer_token(&self) -> openwave_core::Result<String> {
+                unreachable!("the gateway adapter must ask for a conversation token");
+            }
+
+            async fn bearer_token_for(
+                &self,
+                conversation: Option<openwave_core::id::ChatId>,
+            ) -> openwave_core::Result<String> {
+                self.0.lock().unwrap().push(conversation);
+                Ok("mg_at_rotating".to_string())
+            }
+        }
+
+        let capture_state = Capture::default();
+        let app = Router::new()
+            .fallback(post(capture))
+            .with_state(capture_state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let source = Arc::new(RecordingTokenSource(Mutex::new(Vec::new())));
+        let provider = OpenAiCompatProvider::compatible(
+            "unused",
+            format!("http://{address}/compat/openai/v1"),
+        )
+        .with_token_source(source.clone())
+        .with_conversation_attribution();
+        let conversation = openwave_core::id::ChatId::new();
+        let stream = provider
+            .stream(ChatRequest {
+                model: "gpt-fable-5".into(),
+                conversation: Some(conversation),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        // A normal compatible endpoint uses its static key and must not learn
+        // how the host groups conversations merely because the request has an
+        // id available.
+        let direct = OpenAiCompatProvider::compatible(
+            "direct-key",
+            format!("http://{address}/compat/openai/v1"),
+        );
+        let stream = direct
+            .stream(ChatRequest {
+                model: "gpt-fable-5".into(),
+                conversation: Some(conversation),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        assert_eq!(source.0.lock().unwrap().as_slice(), &[Some(conversation)]);
+        let requests = capture_state.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "/compat/openai/v1/chat/completions");
+        assert_eq!(
+            requests[0].1.get(header::AUTHORIZATION).unwrap(),
+            "Bearer mg_at_rotating"
+        );
+        assert_eq!(
+            requests[0]
+                .1
+                .get(crate::router::GATEWAY_CONVERSATION_HEADER)
+                .unwrap(),
+            conversation.to_string().as_str()
+        );
+        assert_eq!(
+            requests[1].1.get(header::AUTHORIZATION).unwrap(),
+            "Bearer direct-key"
+        );
+        assert!(requests[1]
+            .1
+            .get(crate::router::GATEWAY_CONVERSATION_HEADER)
+            .is_none());
+        server.abort();
     }
 }

@@ -26,6 +26,11 @@ use crate::OpenAiCompatProvider;
 #[cfg(feature = "openai")]
 use crate::OpenAiProvider;
 
+/// Header a model-gateway deployment reads to group inference into one
+/// conversation. Gateway adapters opt in explicitly; direct providers never
+/// send it.
+pub(crate) const GATEWAY_CONVERSATION_HEADER: &str = "x-model-gateway-conversation-id";
+
 /// A per-request credential supplier for routes whose token is short-lived.
 ///
 /// A static key is snapshotted into the adapter for the lifetime of a cached
@@ -108,10 +113,16 @@ pub enum RouteKind {
     /// A model-gateway deployment's Anthropic-compatible surface, authenticated
     /// with short-lived resource-scoped tokens instead of a static key.
     ModelGateway,
+    /// The same model-gateway deployment's OpenAI-compatible Chat Completions
+    /// surface. It shares the public `model_gateway` provider namespace with
+    /// [`ModelGateway`](Self::ModelGateway); the synced model protocol chooses
+    /// which concrete route serves a request.
+    ModelGatewayOpenai,
 }
 
 impl RouteKind {
-    /// Stable id string matching the server's provider kind wire form.
+    /// Stable concrete-route id. Use [`provider_id`](Self::provider_id) for
+    /// the host-facing provider namespace.
     pub fn as_str(self) -> &'static str {
         match self {
             RouteKind::Anthropic => "anthropic",
@@ -119,6 +130,16 @@ impl RouteKind {
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
             RouteKind::ModelGateway => "model_gateway",
+            RouteKind::ModelGatewayOpenai => "model_gateway_openai",
+        }
+    }
+
+    /// Provider id used in host model selections. The two concrete gateway
+    /// adapters deliberately share one public provider namespace.
+    fn provider_id(self) -> &'static str {
+        match self {
+            Self::ModelGatewayOpenai => "model_gateway",
+            _ => self.as_str(),
         }
     }
 
@@ -202,7 +223,7 @@ impl Router {
                 has_openai_compat = true;
             }
             for model in &route.curated_models {
-                curated.insert(format!("{}::{model}", route.kind.as_str()), route.kind);
+                curated.insert(format!("{}::{model}", route.kind.provider_id()), route.kind);
             }
             if let Some(adapter) = build_adapter(&route) {
                 adapters.insert(route.kind, adapter);
@@ -230,11 +251,13 @@ impl Router {
             RouteKind::Openai,
             RouteKind::Gemini,
             RouteKind::ModelGateway,
+            RouteKind::ModelGatewayOpenai,
             RouteKind::OpenaiCompatible,
         ] {
             if self
                 .curated
-                .contains_key(&format!("{}::{model}", kind.as_str()))
+                .get(&format!("{}::{model}", kind.provider_id()))
+                == Some(&kind)
                 && self.adapters.contains_key(&kind)
             {
                 return Some(kind);
@@ -256,6 +279,10 @@ impl Router {
         let Some(provider) = provider else {
             return self.select(model);
         };
+        if provider.0 == "model_gateway" {
+            let kind = *self.curated.get(&format!("model_gateway::{model}"))?;
+            return self.adapters.contains_key(&kind).then_some(kind);
+        }
         let kind = RouteKind::parse(&provider.0)?;
         if !self.adapters.contains_key(&kind) {
             return None;
@@ -332,6 +359,25 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         }
         #[cfg(not(feature = "anthropic"))]
         RouteKind::ModelGateway => None,
+
+        #[cfg(feature = "openai-compat")]
+        RouteKind::ModelGatewayOpenai => {
+            // Like the Anthropic gateway route, this surface is unusable
+            // without a live token source: static credentials cannot follow
+            // the gateway's rotation or conversation attestation context.
+            let base = route.base_url.as_deref()?;
+            if !(base.starts_with("https://") || base.starts_with("http://")) {
+                return None;
+            }
+            let source = route.token_source.clone()?;
+            Some(Arc::new(
+                OpenAiCompatProvider::compatible(String::new(), base.to_string())
+                    .with_token_source(source)
+                    .with_conversation_attribution(),
+            ))
+        }
+        #[cfg(not(feature = "openai-compat"))]
+        RouteKind::ModelGatewayOpenai => None,
 
         #[cfg(feature = "openai")]
         RouteKind::Openai => {
@@ -569,6 +615,36 @@ mod tests {
             with.select_for(Some(&ProviderId::new("model_gateway")), "unknown"),
             None
         );
+    }
+
+    #[test]
+    fn a_gateway_provider_selects_each_models_synced_protocol() {
+        let mut anthropic = route(
+            RouteKind::ModelGateway,
+            "",
+            &["claude-fable-5"],
+            Some("http://127.0.0.1:28081/compat/anthropic"),
+        );
+        anthropic.token_source = Some(Arc::new(StaticSource("mg_at_x")));
+        let mut openai = route(
+            RouteKind::ModelGatewayOpenai,
+            "",
+            &["gpt-fable-5"],
+            Some("http://127.0.0.1:28081/compat/openai/v1"),
+        );
+        openai.token_source = Some(Arc::new(StaticSource("mg_at_x")));
+
+        let router = Router::build(vec![anthropic, openai]);
+        let gateway = ProviderId::new("model_gateway");
+        assert_eq!(
+            router.select_for(Some(&gateway), "claude-fable-5"),
+            Some(RouteKind::ModelGateway)
+        );
+        assert_eq!(
+            router.select_for(Some(&gateway), "gpt-fable-5"),
+            Some(RouteKind::ModelGatewayOpenai)
+        );
+        assert_eq!(router.select_for(Some(&gateway), "unknown"), None);
     }
 
     #[test]

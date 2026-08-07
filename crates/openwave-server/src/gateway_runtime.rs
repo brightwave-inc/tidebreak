@@ -453,6 +453,7 @@ impl GatewayRuntime {
                     &providers::GatewayModelSnapshot {
                         gateway_url: base_url,
                         models: Vec::new(),
+                        model_protocols: Default::default(),
                     },
                 )
                 .await?;
@@ -535,22 +536,33 @@ impl GatewayRuntime {
         let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
         let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
-        // The gateway routes these models over its Anthropic-compatible
-        // surface, so sync exactly the set that protocol can serve. Fetched
-        // before the row lock is taken: the entitlement round-trip must not
-        // stall the other row writers.
+        // Fetch the full entitled set: each row names the compatibility
+        // protocol the gateway serves it through, and route collection splits
+        // the snapshot across matching adapters. Fetched before the row lock
+        // is taken: the entitlement round-trip must not stall other writers.
+        let mut model_protocols = std::collections::BTreeMap::new();
         let models: Vec<CustomModelConfig> = connection
-            .models(Some("anthropic_messages"))
+            .models(None)
             .await?
             .into_iter()
-            .map(|model| CustomModelConfig {
-                id: model.id,
-                display_name: Some(model.name),
-                // Carried so a deployment-aliased id can still be matched to
-                // its curated row; gateways older than the field send none.
-                upstream_id: model.upstream_id,
-                context_window: clamp_u32(model.context_window, 32_768),
-                max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+            .filter_map(|model| {
+                let Some(protocol) = providers::GatewayModelProtocol::parse(&model.protocol) else {
+                    tracing::debug!(
+                        "gateway model sync skipped a model with an unsupported inference protocol"
+                    );
+                    return None;
+                };
+                let id = model.id;
+                model_protocols.insert(id.clone(), protocol);
+                Some(CustomModelConfig {
+                    id,
+                    display_name: Some(model.name),
+                    // Carried so a deployment-aliased id can still be matched to
+                    // its curated row; gateways older than the field send none.
+                    upstream_id: model.upstream_id,
+                    context_window: clamp_u32(model.context_window, 32_768),
+                    max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+                })
             })
             .collect();
         // The gateway is trusted for entitlements, not for shapes: the synced
@@ -579,6 +591,7 @@ impl GatewayRuntime {
             &providers::GatewayModelSnapshot {
                 gateway_url: base_url,
                 models,
+                model_protocols,
             },
         )
         .await?;
@@ -929,10 +942,7 @@ mod tests {
         axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
         headers: HeaderMap,
     ) -> Response {
-        assert_eq!(
-            query.get("protocol").map(String::as_str),
-            Some("anthropic_messages")
-        );
+        assert!(!query.contains_key("protocol"));
         let bearer = headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
@@ -942,6 +952,7 @@ mod tests {
             "models": [
                 {
                     "id": "sample-claude",
+                    "protocol": "anthropic_messages",
                     "name": "Sample Claude",
                     "context_window": 200000,
                     "max_output_tokens": 8192,
@@ -950,6 +961,7 @@ mod tests {
                 },
                 {
                     "id": "sample-coder",
+                    "protocol": "openai_chat_completions",
                     "name": "Sample Coder",
                     "context_window": null,
                     "max_output_tokens": null,
@@ -1129,6 +1141,18 @@ mod tests {
         // Absent limits fall back to the conservative custom-model defaults.
         assert_eq!(models[1].context_window, 32_768);
         assert_eq!(models[1].max_output_tokens, 4_096);
+        let snapshot = providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .expect("the sync persisted its protocol map");
+        assert_eq!(
+            snapshot.model_protocols.get("sample-claude"),
+            Some(&providers::GatewayModelProtocol::AnthropicMessages)
+        );
+        assert_eq!(
+            snapshot.model_protocols.get("sample-coder"),
+            Some(&providers::GatewayModelProtocol::OpenaiChatCompletions)
+        );
 
         // The synced snapshot resolves as a model policy under the gateway key.
         let policy =
@@ -1183,6 +1207,7 @@ mod tests {
                         max_output_tokens: 32_000,
                     },
                 ],
+                model_protocols: Default::default(),
             },
         )
         .await
@@ -1354,18 +1379,31 @@ mod tests {
             &policy,
         )
         .await;
-        let gateway_route = routes
+        let anthropic_route = routes
             .iter()
             .find(|route| route.kind == openwave_router::RouteKind::ModelGateway)
-            .expect("gateway route present");
+            .expect("Anthropic gateway route present");
         assert_eq!(
-            gateway_route.base_url.as_deref(),
+            anthropic_route.base_url.as_deref(),
             Some(format!("{base}/compat/anthropic").as_str())
         );
-        assert!(gateway_route.api_key.is_empty());
-        assert!(gateway_route
+        assert!(anthropic_route.api_key.is_empty());
+        assert!(anthropic_route
             .curated_models
             .contains(&"sample-claude".to_string()));
+        assert!(!anthropic_route
+            .curated_models
+            .contains(&"sample-coder".to_string()));
+        let openai_route = routes
+            .iter()
+            .find(|route| route.kind == openwave_router::RouteKind::ModelGatewayOpenai)
+            .expect("OpenAI gateway route present");
+        assert_eq!(
+            openai_route.base_url.as_deref(),
+            Some(format!("{base}/compat/openai/v1").as_str())
+        );
+        assert!(openai_route.api_key.is_empty());
+        assert_eq!(openai_route.curated_models, ["sample-coder"]);
         assert!(providers::provider_is_usable(
             &*store,
             &*runtime.secrets,

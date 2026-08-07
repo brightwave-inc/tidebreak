@@ -268,14 +268,25 @@ async fn models(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> 
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({
-        "models": [{
-            "id": "anthropic/claude-fable-5",
-            "name": "Claude Fable 5",
-            "context_window": 500000,
-            "max_output_tokens": 64000,
-            "supports_tools": true,
-            "supports_vision": true,
-        }]
+        "models": [
+            {
+                "id": "anthropic/claude-fable-5",
+                "name": "Claude Fable 5",
+                "context_window": 500000,
+                "max_output_tokens": 64000,
+                "supports_tools": true,
+                "supports_vision": true,
+            },
+            {
+                "id": "openai/gpt-fable-5",
+                "protocol": "openai_chat_completions",
+                "name": "GPT Fable 5",
+                "context_window": 256000,
+                "max_output_tokens": 32000,
+                "supports_tools": true,
+                "supports_vision": true,
+            }
+        ]
     }))
     .into_response()
 }
@@ -389,7 +400,9 @@ async fn access_tokens_cache_per_resource_and_rotate_on_refresh() {
 
     let models = connection.models(None).await.unwrap();
     assert_eq!(models[0].id, "anthropic/claude-fable-5");
+    assert_eq!(models[0].protocol, "anthropic_messages");
     assert!(models[0].supports_tools);
+    assert_eq!(models[1].protocol, "openai_chat_completions");
     let identity = connection.identity().await.unwrap();
     assert_eq!(identity.user_id, USER);
 }
