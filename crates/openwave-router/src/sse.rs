@@ -171,13 +171,28 @@ pub fn classify_in_band_error(
     provider: &str,
     error: &serde_json::Value,
 ) -> openwave_core::error::AgentError {
+    classify_in_band_error_redacting(provider, error, &[])
+}
+
+/// Classify an error delivered inside a 200 stream while preventing known
+/// values from entering the client-visible message.
+///
+/// This is the streaming counterpart of
+/// [`classify_provider_error_redacting`]. Vertex adapters pass the
+/// service-account project id because Google can include the full resource
+/// path in an otherwise ordinary permission error frame.
+pub fn classify_in_band_error_redacting(
+    provider: &str,
+    error: &serde_json::Value,
+    sensitive_values: &[&str],
+) -> openwave_core::error::AgentError {
     let status = error
         .get("code")
         .and_then(serde_json::Value::as_u64)
         .and_then(|code| u16::try_from(code).ok())
         .filter(|code| (100..=599).contains(code))
         .unwrap_or(500);
-    classify_provider_error(provider, status, &error.to_string(), None)
+    classify_provider_error_redacting(provider, status, &error.to_string(), None, sensitive_values)
 }
 
 /// Accept only a compact enum-style token. Error fields come from an

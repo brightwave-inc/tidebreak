@@ -23,8 +23,8 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, classify_provider_error_redacting,
-    drain_frames, frame_data, read_bounded_error_body,
+    classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
+    classify_provider_error_redacting, drain_frames, frame_data, read_bounded_error_body,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -194,6 +194,7 @@ impl ModelProvider for AnthropicProvider {
         let conversation = req.conversation;
         let model = req.model.clone();
         let provider_name = self.provider_name();
+        let vertex_project_id = self.vertex.as_ref().map(|vertex| vertex.project_id.clone());
         let ceiling = crate::http::timeouts().total_stream;
         let stream = async_stream::stream! {
             let mut response = response;
@@ -201,6 +202,7 @@ impl ModelProvider for AnthropicProvider {
                 output_tool,
                 raw_blocks: continuations_allowed.then(RawAssistantBlocks::default),
                 replay_origin: Some(replay_origin),
+                vertex_project_id,
                 ..StreamState::default()
             };
             let mut continuations = 0u32;
@@ -997,6 +999,9 @@ struct StreamState {
     /// Route that minted this stream's provider-executed calls, so their
     /// native blocks can be origin-gated on a later request.
     replay_origin: Option<ReasoningOrigin>,
+    /// Sensitive route identity retained only so accepted Vertex streams can
+    /// redact Google resource paths and attribute in-band failures correctly.
+    vertex_project_id: Option<String>,
 }
 
 impl StreamState {
@@ -1134,11 +1139,15 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         // the truncated step would read as a clean end and commit.
         Some("error") => {
             state.terminal = true;
+            let error = data.get("error").unwrap_or(data);
+            let error = match state.vertex_project_id.as_deref() {
+                Some(project_id) => {
+                    classify_in_band_error_redacting("vertex", error, &[project_id])
+                }
+                None => classify_in_band_error("anthropic", error),
+            };
             vec![ProviderEvent::Failed {
-                error: ProviderErrorInfo::from_error(&classify_in_band_error(
-                    "anthropic",
-                    data.get("error").unwrap_or(data),
-                )),
+                error: ProviderErrorInfo::from_error(&error),
             }]
         }
         Some("message_start") => {
@@ -3093,5 +3102,74 @@ mod tests {
         assert!(visible.contains("vertex returned 403"), "{visible}");
         assert!(visible.contains("permission_denied"), "{visible}");
         assert!(!visible.contains(PROJECT_ID), "{visible}");
+    }
+
+    #[tokio::test]
+    async fn vertex_in_band_error_redacts_project_and_uses_vertex_attribution() {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+
+        const PROJECT_ID: &str = "customer-project-123";
+
+        struct StaticToken;
+
+        #[async_trait::async_trait]
+        impl crate::BearerTokenSource for StaticToken {
+            async fn bearer_token(&self) -> openwave_core::Result<String> {
+                Ok("vertex-bearer".into())
+            }
+        }
+
+        async fn deny_after_accepting() -> impl IntoResponse {
+            let frame = json!({
+                "type": "error",
+                "error": {
+                    "code": 403,
+                    "type": "permission_denied",
+                    "message": format!(
+                        "Permission denied on projects/{PROJECT_ID}/locations/global"
+                    ),
+                }
+            });
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                format!("data: {frame}\n\n"),
+            )
+        }
+
+        let app = Router::new().fallback(post(deny_after_accepting));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider =
+            AnthropicProvider::vertex(PROJECT_ID, "global", std::sync::Arc::new(StaticToken))
+                .unwrap()
+                .with_base_url(format!("http://{address}"));
+        let events: Vec<_> = provider
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("vertex")),
+                model: "claude-opus-4-8".into(),
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        server.abort();
+
+        assert_eq!(
+            events,
+            vec![ProviderEvent::Failed {
+                error: ProviderErrorInfo {
+                    kind: "authentication".into(),
+                    message: "vertex returned 403 (permission_denied)".into(),
+                },
+            }]
+        );
+        assert!(!format!("{events:?}").contains(PROJECT_ID));
     }
 }

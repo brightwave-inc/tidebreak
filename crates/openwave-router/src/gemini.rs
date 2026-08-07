@@ -28,9 +28,9 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, classify_provider_error_redacting,
-    drain_frames, frame_data_raw, read_bounded_error_body, safe_http_error,
-    safe_http_error_redacting,
+    classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
+    classify_provider_error_redacting, drain_frames, frame_data_raw, read_bounded_error_body,
+    safe_http_error, safe_http_error_redacting,
 };
 use crate::BearerTokenSource;
 
@@ -270,11 +270,18 @@ impl ModelProvider for GeminiProvider {
         }
 
         let ceiling = crate::http::timeouts().total_stream;
+        let vertex_project_id = match &self.endpoint_family {
+            EndpointFamily::VertexAi { project_id, .. } => Some(project_id.clone()),
+            EndpointFamily::DeveloperApi => None,
+        };
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
             let mut buffer = Vec::new();
-            let mut state = StreamState::default();
+            let mut state = StreamState {
+                vertex_project_id,
+                ..StreamState::default()
+            };
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
@@ -1033,6 +1040,9 @@ struct StreamState {
     saw_tool_call: bool,
     terminal: bool,
     reported_grounding: bool,
+    /// Sensitive route identity retained only so accepted Vertex streams can
+    /// redact Google resource paths and attribute in-band failures correctly.
+    vertex_project_id: Option<String>,
 }
 
 /// Convert one complete Gemini response frame into provider-neutral events.
@@ -1042,8 +1052,12 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     }
     if let Some(error) = data.get("error") {
         state.terminal = true;
+        let error = match state.vertex_project_id.as_deref() {
+            Some(project_id) => classify_in_band_error_redacting("vertex", error, &[project_id]),
+            None => classify_in_band_error("gemini", error),
+        };
         return vec![ProviderEvent::Failed {
-            error: ProviderErrorInfo::from_error(&classify_in_band_error("gemini", error)),
+            error: ProviderErrorInfo::from_error(&error),
         }];
     }
     if let Some(block_reason) = data
@@ -2305,5 +2319,58 @@ mod tests {
         assert!(visible.contains("gemini returned 403"), "{visible}");
         assert!(visible.contains("permission_denied"), "{visible}");
         assert!(!visible.contains(PROJECT_ID), "{visible}");
+    }
+
+    #[tokio::test]
+    async fn vertex_in_band_error_redacts_project_and_uses_vertex_attribution() {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+
+        const PROJECT_ID: &str = "customer-project-123";
+
+        async fn deny_after_accepting() -> impl IntoResponse {
+            let frame = json!({
+                "error": {
+                    "code": 403,
+                    "type": "permission_denied",
+                    "message": format!(
+                        "Permission denied on projects/{PROJECT_ID}/locations/global"
+                    ),
+                }
+            });
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                format!("data: {frame}\n\n"),
+            )
+        }
+
+        let app = Router::new().fallback(post(deny_after_accepting));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = GeminiProvider::vertex(PROJECT_ID, "global", Arc::new(StaticToken))
+            .unwrap()
+            .with_base_url(format!("http://{address}"));
+        let events: Vec<_> = provider
+            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        server.abort();
+
+        assert_eq!(
+            events,
+            vec![ProviderEvent::Failed {
+                error: ProviderErrorInfo {
+                    kind: "authentication".into(),
+                    message: "vertex returned 403 (permission_denied)".into(),
+                },
+            }]
+        );
+        assert!(!format!("{events:?}").contains(PROJECT_ID));
     }
 }
