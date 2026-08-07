@@ -434,18 +434,20 @@ fn pair_cost(
     result_to_msg: &[(String, usize)],
 ) -> usize {
     let mut cost = entries[i].floor;
+    let mut charged_messages = HashSet::new();
+    charged_messages.insert(i);
     for block in &messages[i].content {
         match block {
             ContentBlock::ToolUse { id, .. } => {
                 if let Some(&(_, ri)) = result_to_msg.iter().find(|(tid, _)| tid == id) {
-                    if !entries[ri].kept {
+                    if !entries[ri].kept && charged_messages.insert(ri) {
                         cost += entries[ri].floor;
                     }
                 }
             }
             ContentBlock::ToolResult { tool_use_id, .. } => {
                 if let Some(&(_, ui)) = use_to_msg.iter().find(|(tid, _)| tid == tool_use_id) {
-                    if !entries[ui].kept {
+                    if !entries[ui].kept && charged_messages.insert(ui) {
                         cost += entries[ui].floor;
                     }
                 }
@@ -989,6 +991,56 @@ mod tests {
             has_use, has_result,
             "tool pair must be kept or dropped together"
         );
+    }
+
+    #[test]
+    fn parallel_tool_batch_is_charged_once_per_message() {
+        let tool_uses = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "tu_1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "a"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tu_2".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "b"}),
+                },
+            ],
+            reasoning: MessageReasoning::default(),
+        };
+        let tool_results = ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: "first result".repeat(100),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tu_2".into(),
+                    content: "second result".repeat(100),
+                    is_error: false,
+                },
+            ],
+            reasoning: MessageReasoning::default(),
+        };
+        let budget = message_floor(&tool_uses, 0) + message_floor(&tool_results, 0);
+        let messages = vec![user_msg("start"), tool_uses, tool_results];
+
+        let (fitted, reduced) = fit_to_budget(&messages, budget, 0);
+
+        assert!(reduced);
+        for id in ["tu_1", "tu_2"] {
+            assert!(fitted.iter().any(|message| message.content.iter().any(
+                |block| matches!(block, ContentBlock::ToolUse { id: actual, .. } if actual == id)
+            )));
+            assert!(fitted.iter().any(|message| message.content.iter().any(
+                |block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)
+            )));
+        }
     }
 
     #[test]
