@@ -2944,9 +2944,7 @@ async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted()
     settled.update(&store.conn).await.unwrap();
     let deleted = store.delete_chat(chat.id).await.unwrap();
     match deleted {
-        crate::DeleteChatOutcome::Deleted {
-            background_run_ids,
-        } => {
+        crate::DeleteChatOutcome::Deleted { background_run_ids } => {
             let mut ids = background_run_ids;
             ids.sort_by_key(|id| id.as_uuid().as_u128());
             let mut expected = vec![sandbox.id, sibling.id];

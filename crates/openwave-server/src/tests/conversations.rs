@@ -1022,7 +1022,10 @@ async fn delete_chat_erases_background_run_workspaces_immediately() {
         .unwrap()
         .expect("the claimed worker acknowledges cancellation");
 
-    let workspace = dir.path().join("scratch").join(format!("agent-run-{}", run.id));
+    let workspace = dir
+        .path()
+        .join("scratch")
+        .join(format!("agent-run-{}", run.id));
     std::fs::create_dir_all(workspace.join("tmp")).unwrap();
     std::fs::write(workspace.join("notes.txt"), b"run-private").unwrap();
     let chat_scratch = dir.path().join("scratch").join(chat.id.to_string());

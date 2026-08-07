@@ -657,7 +657,10 @@ async fn project_deletion_requires_an_empty_project_and_reports_missing_identity
         DeleteProjectOutcome::NotEmpty
     );
     assert!(store.get_project(with_chat.id).await.unwrap().is_some());
-    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert_eq!(
         store.delete_project(with_chat.id).await.unwrap(),
         DeleteProjectOutcome::Deleted
@@ -4266,7 +4269,10 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
             .unwrap(),
         crate::FinishTurnCancellationOutcome::Cancelled(_)
     ));
-    assert!(matches!(restarted.delete_chat(chat.id).await.unwrap(), crate::DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        restarted.delete_chat(chat.id).await.unwrap(),
+        crate::DeleteChatOutcome::Deleted { .. }
+    ));
 }
 
 #[tokio::test]
@@ -4338,7 +4344,10 @@ async fn user_question_answer_validation_and_cancellation_are_closed() {
             .unwrap(),
         crate::AnswerUserQuestionsOutcome::Unavailable
     );
-    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), crate::DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        crate::DeleteChatOutcome::Deleted { .. }
+    ));
 }
 
 #[tokio::test]
@@ -7597,7 +7606,10 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         )
         .await
         .unwrap();
-    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert_eq!(store.get_chat(chat.id).await.unwrap(), None);
     assert!(store.list_messages(chat.id).await.unwrap().is_empty());
     assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
@@ -7663,7 +7675,10 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         .await
         .unwrap()
         .expect("an unclaimed turn has no lease to fence against");
-    assert!(matches!(store.delete_chat(active.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(active.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert_eq!(store.get_task_plan(active.id).await.unwrap(), None);
 
     // A plan request restricts against the chat, its turn, the proposing call,
@@ -7702,7 +7717,10 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         )
         .await
         .unwrap();
-    assert!(matches!(store.delete_chat(planned.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(planned.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert!(store
         .list_pending_plan_approvals(planned.id)
         .await
@@ -7793,7 +7811,10 @@ async fn delete_chat_atomically_retires_only_its_owned_sources() {
             .unwrap(),
         vec![owned_id]
     );
-    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert_eq!(store.get_chat(chat.id).await.unwrap(), None);
     assert_eq!(store.get_document(owned_id).await.unwrap(), None);
     assert_eq!(
@@ -9033,7 +9054,10 @@ async fn delete_chat_erases_a_terminal_approval_receipt_before_its_event() {
         .unwrap()
         .is_some());
 
-    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert!(store.get_chat(chat.id).await.unwrap().is_none());
     assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
 }

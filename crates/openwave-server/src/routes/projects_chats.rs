@@ -758,9 +758,7 @@ pub async fn delete_chat(
     Path(id): Path<ChatId>,
 ) -> Result<StatusCode, ServerError> {
     match store.delete_chat(id).await? {
-        DeleteChatOutcome::Deleted {
-            background_run_ids,
-        } => {
+        DeleteChatOutcome::Deleted { background_run_ids } => {
             state.blob_retirement_wake.notify_one();
             let scratch_root = state.config.data_dir.join("scratch");
             let cleanup =

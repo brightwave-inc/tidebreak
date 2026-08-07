@@ -173,9 +173,7 @@ pub enum DeleteChatOutcome {
     /// before their rows were erased. The deletion path uses them to destroy
     /// each run's `agent-run-*` workspace immediately; the periodic reaper only
     /// remains as a backstop for crashes and foreign leftovers.
-    Deleted {
-        background_run_ids: Vec<AgentRunId>,
-    },
+    Deleted { background_run_ids: Vec<AgentRunId> },
     /// No conversation owns this id.
     NotFound,
     /// A foreground turn or sandboxed run can still make progress.

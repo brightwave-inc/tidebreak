@@ -156,7 +156,10 @@ async fn deleting_a_chat_removes_its_checkpoint_before_its_source_message() {
         .await
         .unwrap();
 
-    assert!(matches!(store.delete_chat(chat.id).await.unwrap(), DeleteChatOutcome::Deleted { .. }));
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
     assert!(store
         .get_context_checkpoint(chat.id)
         .await

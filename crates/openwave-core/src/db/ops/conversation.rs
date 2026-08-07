@@ -782,9 +782,7 @@ pub(in crate::db) async fn delete_chat(
         .map_err(store_err)?;
 
     transaction.commit().await.map_err(store_err)?;
-    Ok(DeleteChatOutcome::Deleted {
-        background_run_ids,
-    })
+    Ok(DeleteChatOutcome::Deleted { background_run_ids })
 }
 
 /// Read the visible transcript and cursor for future journal replay under the
