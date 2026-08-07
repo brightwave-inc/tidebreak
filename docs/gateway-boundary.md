@@ -125,12 +125,14 @@ The connector speaks a small, versioned HTTP surface on the gateway:
 - `/api/v1/meta` — unauthenticated deployment identity, shown before and
   during sign-in.
 - `/api/v1/cli/me` — the authenticated user, for the account hint.
-- `/api/v1/cli/models` — the models this user may invoke, optionally
-  filtered by `?protocol=` (`anthropic` / `openai`). Synced into a local
-  snapshot stamped with the gateway URL after sign-in and on the explicit
-  "Refresh models" affordance; the snapshot is what the model picker
-  offers, and sign-out empties it. A stamp that no longer matches policy
-  invalidates the snapshot rather than serving another gateway's models.
+- `/api/v1/cli/models` — the models this user may invoke. OpenWave syncs the
+  full list and retains each row's `protocol` (`anthropic_messages` or
+  `openai_chat_completions`) in a local snapshot stamped with the gateway URL
+  after sign-in and on the explicit "Refresh models" affordance; gateways
+  predating the field are treated as Anthropic-only. The snapshot is what the
+  model picker offers, and sign-out empties it. A stamp that no longer matches
+  policy invalidates the snapshot rather than serving another gateway's
+  models.
 - `/api/v1/cli/apps` — entitled connected apps
   (`id`, `name`, `app_kind`, `enabled`, `mcp_endpoint_slugs`), listed in
   the gateway settings panel. A `404` means an older gateway; the section
@@ -142,14 +144,16 @@ The connector speaks a small, versioned HTTP surface on the gateway:
   chat's inference tokens with its MCP tokens so gateway-attested endpoints
   can match tool calls against model-emitted observations; it carries no
   chat content and is meaningless outside the session it is pinned to.
-- Inference itself — invoked with `llm`-audience bearers on the gateway's
-  protocol-compatible routes, through the same provider machinery as any
-  direct provider. A turn's request also declares which conversation it
+- Inference itself — invoked with `llm`-audience bearers through the matching
+  gateway surface: Anthropic Messages at `/compat/anthropic/v1/messages`, or
+  OpenAI Chat Completions at `/compat/openai/v1/chat/completions`. Both use
+  the same provider machinery as their direct counterparts and fetch the
+  rotating bearer per request. A turn also declares which conversation it
   belongs to, as an `x-model-gateway-conversation-id` header carrying the
   chat's id, so the gateway's usage views group inference the way the app
-  does. The header is a per-route opt-in: only the gateway adapter sends it,
-  a direct provider never does, and it is a header rather than wire data, so
-  no model receives it. The chat id is the only thing declared — no title, no
+  does. The header is a per-route opt-in: only gateway adapters send it, a
+  direct provider never does, and it is a header rather than wire data, so no
+  model receives it. The chat id is the only thing declared — no title, no
   content, no participant.
 - MCP — `{base}/mcp/{slug}` per mounted endpoint. The connection minting
   its `mcp:<slug>` bearer at connect time rides the shared connect

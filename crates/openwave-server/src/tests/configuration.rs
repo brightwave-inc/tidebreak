@@ -1721,6 +1721,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                     max_output_tokens: 8_192,
                 },
             ],
+            model_protocols: Default::default(),
         },
     )
     .await

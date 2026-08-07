@@ -30,11 +30,6 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-/// Header a model-gateway deployment reads to group inference into one
-/// conversation. The gateway digests the value per user and harness; it is
-/// never forwarded upstream.
-const GATEWAY_CONVERSATION_HEADER: &str = "x-model-gateway-conversation-id";
-
 /// Description for the synthetic tool that carries a constrained response.
 ///
 /// The model is told what the call is for, because a forced tool with an opaque
@@ -258,7 +253,10 @@ impl AnthropicProvider {
         // The id is a UUID, so it satisfies the gateway's bound on the value
         // (1-256 ASCII graphic bytes) by construction.
         if let (true, Some(conversation)) = (self.conversation_attribution, conversation) {
-            request = request.header(GATEWAY_CONVERSATION_HEADER, conversation.to_string());
+            request = request.header(
+                crate::router::GATEWAY_CONVERSATION_HEADER,
+                conversation.to_string(),
+            );
         }
         let response = request
             .json(body)
@@ -2815,10 +2813,14 @@ mod tests {
         let requests = capture_state.0.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(
-            requests[0].get(GATEWAY_CONVERSATION_HEADER).unwrap(),
+            requests[0]
+                .get(crate::router::GATEWAY_CONVERSATION_HEADER)
+                .unwrap(),
             conversation.to_string().as_str()
         );
-        assert!(requests[1].get(GATEWAY_CONVERSATION_HEADER).is_none());
+        assert!(requests[1]
+            .get(crate::router::GATEWAY_CONVERSATION_HEADER)
+            .is_none());
         server.abort();
     }
 

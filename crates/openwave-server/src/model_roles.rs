@@ -460,6 +460,7 @@ mod tests {
                         max_output_tokens: 8_192,
                     },
                 ],
+                model_protocols: Default::default(),
             },
         )
         .await

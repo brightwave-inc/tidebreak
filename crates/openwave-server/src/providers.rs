@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 use openwave_core::{AgentConfig, ProviderId, ReasoningEffort, Result, SecretProvider, Store};
 
@@ -59,6 +60,36 @@ pub(crate) struct GatewayModelSnapshot {
     /// The normalized gateway base URL the models were fetched from.
     pub(crate) gateway_url: String,
     pub(crate) models: Vec<CustomModelConfig>,
+    /// Per-model inference protocol. An absent map is a snapshot written by a
+    /// gateway generation that served only Anthropic Messages, so lookup
+    /// defaults to that protocol for backward compatibility.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) model_protocols: BTreeMap<String, GatewayModelProtocol>,
+}
+
+/// The compatibility protocol a managed gateway uses for one entitled model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GatewayModelProtocol {
+    /// Anthropic Messages at `/compat/anthropic/v1/messages`.
+    #[default]
+    AnthropicMessages,
+    /// OpenAI Chat Completions at `/compat/openai/v1/chat/completions`.
+    OpenaiChatCompletions,
+}
+
+impl GatewayModelProtocol {
+    /// Accept the canonical gateway values plus the short names older
+    /// deployments used for the model-list filter.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "anthropic" | "anthropic_messages" => Some(Self::AnthropicMessages),
+            "openai" | "openai_compatible" | "openai_chat_completions" => {
+                Some(Self::OpenaiChatCompletions)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Read the stored snapshot regardless of provenance. Callers that offer
@@ -92,14 +123,22 @@ pub(crate) async fn gateway_models(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<Vec<CustomModelConfig>> {
+    Ok(gateway_snapshot_for_policy(store, policy)
+        .await?
+        .map(|snapshot| snapshot.models)
+        .unwrap_or_default())
+}
+
+async fn gateway_snapshot_for_policy(
+    store: &dyn Store,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<Option<GatewayModelSnapshot>> {
     let Some(gateway_url) = policy.gateway_url.as_deref().filter(|_| policy.managed) else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     Ok(read_gateway_snapshot(store)
         .await?
-        .filter(|snapshot| snapshot.gateway_url == gateway_url)
-        .map(|snapshot| snapshot.models)
-        .unwrap_or_default())
+        .filter(|snapshot| snapshot.gateway_url == gateway_url))
 }
 
 /// One-shot boot cutover for the retired additive gateway configuration.
@@ -184,6 +223,7 @@ pub(crate) async fn retire_legacy_gateway_row(
         &GatewayModelSnapshot {
             gateway_url,
             models: row.models,
+            model_protocols: BTreeMap::new(),
         },
     )
     .await?;
@@ -217,8 +257,8 @@ pub enum ProviderKind {
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
     OpenaiCompatible,
     /// A signed-in model-gateway deployment: entitled models synced from the
-    /// gateway, inference through its Anthropic-compatible surface with
-    /// short-lived OAuth tokens.
+    /// gateway, inference through each model's Anthropic- or OpenAI-compatible
+    /// surface with short-lived OAuth tokens.
     ModelGateway,
 }
 
@@ -1249,16 +1289,64 @@ pub async fn collect_routes(
             if !(base.starts_with("https://") || base.starts_with("http://")) {
                 continue;
             }
-            let models = gateway_models(store, policy).await.unwrap_or_default();
-            routes.push(openwave_router::Route {
-                kind: route_kind(kind),
-                api_key: String::new(),
-                base_url: Some(format!("{}/compat/anthropic", base.trim_end_matches('/'))),
-                curated_models: models.into_iter().map(|model| model.id).collect(),
-                token_source: Some(source),
-                vertex: None,
-                chatgpt_account_id: None,
-            });
+            let (models, model_protocols) = match gateway_snapshot_for_policy(store, policy)
+                .await
+                .unwrap_or_default()
+            {
+                Some(GatewayModelSnapshot {
+                    models,
+                    model_protocols,
+                    ..
+                }) => (models, model_protocols),
+                None => (Vec::new(), BTreeMap::new()),
+            };
+            let mut anthropic_models = Vec::new();
+            let mut openai_models = Vec::new();
+            for model in models {
+                match model_protocols.get(&model.id).copied().unwrap_or_default() {
+                    GatewayModelProtocol::AnthropicMessages => anthropic_models.push(model.id),
+                    GatewayModelProtocol::OpenaiChatCompletions => openai_models.push(model.id),
+                }
+            }
+            let base = base.trim_end_matches('/');
+            // Preserve the pre-protocol route shape before the first sync (or
+            // for an empty entitlement set): it still selects no model, but a
+            // signed-in managed profile has one inert gateway adapter rather
+            // than looking indistinguishable from missing credentials.
+            if anthropic_models.is_empty() && openai_models.is_empty() {
+                routes.push(openwave_router::Route {
+                    kind: route_kind(kind),
+                    api_key: String::new(),
+                    base_url: Some(format!("{base}/compat/anthropic")),
+                    curated_models: Vec::new(),
+                    token_source: Some(source),
+                    vertex: None,
+                    chatgpt_account_id: None,
+                });
+            } else {
+                if !anthropic_models.is_empty() {
+                    routes.push(openwave_router::Route {
+                        kind: route_kind(kind),
+                        api_key: String::new(),
+                        base_url: Some(format!("{base}/compat/anthropic")),
+                        curated_models: anthropic_models,
+                        token_source: Some(source.clone()),
+                        vertex: None,
+                        chatgpt_account_id: None,
+                    });
+                }
+                if !openai_models.is_empty() {
+                    routes.push(openwave_router::Route {
+                        kind: openwave_router::RouteKind::ModelGatewayOpenai,
+                        api_key: String::new(),
+                        base_url: Some(format!("{base}/compat/openai/v1")),
+                        curated_models: openai_models,
+                        token_source: Some(source),
+                        vertex: None,
+                        chatgpt_account_id: None,
+                    });
+                }
+            }
             continue;
         }
         if policy.managed {
@@ -1684,6 +1772,29 @@ mod tests {
             "provider.anthropic.credential"
         );
         assert_eq!(ProviderKind::Openai.setting_key(), "provider.openai");
+    }
+
+    #[test]
+    fn a_pre_protocol_gateway_snapshot_keeps_its_anthropic_route() {
+        let snapshot: GatewayModelSnapshot = serde_json::from_value(serde_json::json!({
+            "gateway_url": "https://gateway.example/",
+            "models": [{
+                "id": "legacy-claude",
+                "context_window": 32768,
+                "max_output_tokens": 4096
+            }]
+        }))
+        .expect("the persisted shape from before per-model protocols still loads");
+
+        assert!(snapshot.model_protocols.is_empty());
+        assert_eq!(
+            snapshot
+                .model_protocols
+                .get("legacy-claude")
+                .copied()
+                .unwrap_or_default(),
+            GatewayModelProtocol::AnthropicMessages
+        );
     }
 
     /// An unset display name is represented by the key being absent, in both

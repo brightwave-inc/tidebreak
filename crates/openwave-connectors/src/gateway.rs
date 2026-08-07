@@ -149,6 +149,14 @@ pub struct GatewayIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GatewayModel {
     pub id: String,
+    /// The gateway inference protocol this model is served through.
+    ///
+    /// Older gateways exposed only Anthropic Messages and omitted the field,
+    /// so absence preserves that route. Newer deployments report their exact
+    /// protocol (`anthropic_messages` or `openai_chat_completions`) so clients
+    /// can select the matching compatibility surface.
+    #[serde(default = "default_gateway_model_protocol")]
+    pub protocol: String,
     /// The provider-side id this deployment routes to, when it differs from
     /// `id` — a deployment alias such as `us.anthropic.claude-opus-5` behind
     /// the gateway id `anthropic-us-claude-opus-5`. Optional because gateways
@@ -160,6 +168,10 @@ pub struct GatewayModel {
     pub max_output_tokens: Option<i64>,
     pub supports_tools: bool,
     pub supports_vision: bool,
+}
+
+fn default_gateway_model_protocol() -> String {
+    "anthropic_messages".to_string()
 }
 
 /// One entitled connected app from `/api/v1/cli/apps`: the apps the user
@@ -454,7 +466,8 @@ impl GatewayAuth {
     }
 
     /// The models the authenticated user may invoke, optionally filtered to
-    /// one inference protocol (`anthropic` / `openai`).
+    /// one inference protocol (`anthropic_messages` /
+    /// `openai_chat_completions`).
     pub async fn models(
         &self,
         access_token: &str,
