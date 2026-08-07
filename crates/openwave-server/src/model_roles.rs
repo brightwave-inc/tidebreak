@@ -54,6 +54,7 @@ const UTILITY_DEFAULTS: &[&str] = &[
     "anthropic::claude-haiku-4-5-20251001",
     "openai::gpt-5.4-nano",
     "gemini::gemini-3.5-flash-lite",
+    "vertex::gemini-3.5-flash-lite",
 ];
 
 impl ModelRole {
@@ -266,11 +267,9 @@ async fn usable_policy(
     let Some(policy) = providers::resolve_model_policy(store, selection, false).await? else {
         return Ok(None);
     };
-    Ok(
-        providers::provider_is_usable(store, secrets, policy.provider, managed)
-            .await?
-            .then_some(policy),
-    )
+    Ok(providers::model_is_usable(store, secrets, &policy, managed)
+        .await?
+        .then_some(policy))
 }
 
 /// Resolve the `utility` role into the shape the agent carries for one turn.

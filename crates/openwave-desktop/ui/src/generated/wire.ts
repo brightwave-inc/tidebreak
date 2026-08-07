@@ -1480,7 +1480,8 @@ vendor: ProviderKind | null,
  */
 verification: VerificationTier, 
 /**
- * Whether the provider is enabled, configured, and credentialed.
+ * Whether the provider is enabled, configured, credentialed, and able to
+ * serve this model at its configured endpoint/location.
  */
 available: boolean, 
 /**

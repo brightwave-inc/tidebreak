@@ -1395,6 +1395,24 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
     }
 }
 
+/// Whether one curated row can be served under this provider configuration.
+///
+/// The first-class Vertex surface accepts only `global` and single-region
+/// locations. Google's current Claude catalog is not available in those
+/// single regions (only global plus multi-regions this surface deliberately
+/// does not accept), so keep Claude global-only until the registry carries an
+/// explicit per-model location matrix. Gemini keeps its existing endpoint
+/// rules, including the adapter's global override for Gemini 3.
+fn curated_model_is_routable(
+    kind: ProviderKind,
+    vendor: Option<ProviderKind>,
+    vertex_location: Option<&str>,
+) -> bool {
+    kind != ProviderKind::Vertex
+        || vendor != Some(ProviderKind::Anthropic)
+        || vertex_location.unwrap_or("global") == "global"
+}
+
 /// Collect enabled, credentialed routes for the composite router.
 ///
 /// A kind with no usable credential is skipped. Gemini service accounts become
@@ -1544,21 +1562,22 @@ pub async fn collect_routes(
                 let source = std::sync::Arc::new(
                     openwave_router::GoogleServiceAccountTokenSource::new(account),
                 );
+                let curated_models = model_registry::models_for(kind)
+                    .filter(|spec| curated_model_is_routable(kind, spec.vendor(), Some(location)))
+                    .collect::<Vec<_>>();
                 let vertex =
                     openwave_router::VertexRoute::new(project_id, location, credential_fingerprint);
                 let vertex = if kind == ProviderKind::Vertex {
-                    vertex.with_model_families(model_registry::models_for(kind).filter_map(
-                        |spec| {
-                            let family = match spec.vendor()? {
-                                ProviderKind::Gemini => openwave_router::VertexModelFamily::Gemini,
-                                ProviderKind::Anthropic => {
-                                    openwave_router::VertexModelFamily::Anthropic
-                                }
-                                _ => return None,
-                            };
-                            Some((spec.id.to_string(), family))
-                        },
-                    ))
+                    vertex.with_model_families(curated_models.iter().filter_map(|spec| {
+                        let family = match spec.vendor()? {
+                            ProviderKind::Gemini => openwave_router::VertexModelFamily::Gemini,
+                            ProviderKind::Anthropic => {
+                                openwave_router::VertexModelFamily::Anthropic
+                            }
+                            _ => return None,
+                        };
+                        Some((spec.id.to_string(), family))
+                    }))
                 } else {
                     vertex
                 };
@@ -1568,7 +1587,8 @@ pub async fn collect_routes(
                     // Production Vertex hosts are derived by the adapter.
                     // Never let stored config redirect a bearer token.
                     base_url: None,
-                    curated_models: model_registry::models_for(kind)
+                    curated_models: curated_models
+                        .into_iter()
                         .map(|spec| spec.id.to_string())
                         .collect(),
                     token_source: Some(source),
@@ -1766,6 +1786,28 @@ pub async fn provider_is_usable(
     Ok(true)
 }
 
+/// Whether this exact resolved model can run under the provider's current
+/// credential and non-secret configuration.
+pub async fn model_is_usable(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    model: &ResolvedModelPolicy,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<bool> {
+    if !provider_is_usable(store, secrets, model.provider, policy).await? {
+        return Ok(false);
+    }
+    if model.provider != ProviderKind::Vertex {
+        return Ok(true);
+    }
+    let config = read_config(store, ProviderKind::Vertex).await?;
+    Ok(curated_model_is_routable(
+        model.provider,
+        model.vendor,
+        config.vertex_location.as_deref(),
+    ))
+}
+
 /// Full typed catalog. Unavailable rows remain visible for provider-scoped
 /// settings, but clients must not offer them as usable selections.
 pub async fn catalog_models(
@@ -1776,9 +1818,15 @@ pub async fn catalog_models(
     let mut models = Vec::new();
     for &kind in ProviderKind::ALL {
         let available = provider_is_usable(store, secrets, kind, policy).await?;
+        let vertex_location = if kind == ProviderKind::Vertex {
+            read_config(store, kind).await?.vertex_location
+        } else {
+            None
+        };
         models.extend(model_registry::models_for(kind).map(|spec| CatalogModel {
             policy: ResolvedModelPolicy::curated(spec),
-            available,
+            available: available
+                && curated_model_is_routable(kind, spec.vendor(), vertex_location.as_deref()),
         }));
         // Configured model sets: the compatible endpoint's custom entries,
         // and the managed gateway's entitled snapshot — which is empty on an
@@ -1805,6 +1853,7 @@ pub async fn catalog_models(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -1827,6 +1876,15 @@ mod tests {
         async fn delete_secret(&self, key: &str) -> Result<()> {
             self.0.lock().unwrap().remove(key);
             Ok(())
+        }
+    }
+
+    struct StaticToken;
+
+    #[async_trait::async_trait]
+    impl openwave_router::BearerTokenSource for StaticToken {
+        async fn bearer_token(&self) -> Result<String> {
+            Ok("vertex-test-token".to_owned())
         }
     }
 
@@ -2203,6 +2261,65 @@ mod tests {
         assert_eq!(config.max_tokens, Some(4_096));
         assert!(!config.reasoning_model);
         assert_eq!(config.reasoning_effort, None);
+    }
+
+    #[test]
+    fn regional_vertex_keeps_claude_unavailable_and_out_of_the_route() {
+        let location = "us-east5";
+        let routed = model_registry::models_for(ProviderKind::Vertex)
+            .filter(|spec| {
+                curated_model_is_routable(ProviderKind::Vertex, spec.vendor(), Some(location))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(routed
+            .iter()
+            .all(|spec| spec.vendor() == Some(ProviderKind::Gemini)));
+        assert!(model_registry::models_for(ProviderKind::Vertex)
+            .filter(|spec| spec.vendor() == Some(ProviderKind::Anthropic))
+            .all(|spec| !curated_model_is_routable(
+                ProviderKind::Vertex,
+                spec.vendor(),
+                Some(location),
+            )));
+        assert!(
+            model_registry::models_for(ProviderKind::Vertex).all(|spec| {
+                curated_model_is_routable(ProviderKind::Vertex, spec.vendor(), Some("global"))
+            })
+        );
+
+        let route = openwave_router::Route {
+            kind: openwave_router::RouteKind::Vertex,
+            api_key: String::new(),
+            base_url: None,
+            curated_models: routed.iter().map(|spec| spec.id.to_owned()).collect(),
+            token_source: Some(Arc::new(StaticToken)),
+            vertex: Some(
+                openwave_router::VertexRoute::new("test-project", location, [1; 32])
+                    .with_model_families(routed.iter().map(|spec| {
+                        (
+                            spec.id.to_owned(),
+                            openwave_router::VertexModelFamily::Gemini,
+                        )
+                    })),
+            ),
+            chatgpt_account_id: None,
+        };
+        let router = openwave_router::Router::build(vec![route]);
+        assert_eq!(
+            router.select_for(
+                Some(&openwave_core::ProviderId::new("vertex")),
+                "gemini-3.5-flash-lite",
+            ),
+            Some(openwave_router::RouteKind::Vertex)
+        );
+        assert_eq!(
+            router.select_for(
+                Some(&openwave_core::ProviderId::new("vertex")),
+                "claude-opus-5",
+            ),
+            None
+        );
     }
 
     #[test]

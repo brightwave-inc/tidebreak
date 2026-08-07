@@ -96,11 +96,14 @@ families:
 - Claude models use Anthropic Messages through Vertex `streamRawPredict`.
 
 The provider derives its host from a validated `global` or regional location;
-credentials cannot supply an endpoint. Uploaded service-account JSON is
-exchanged only through Google's fixed OAuth token endpoint and never appears in
-the provider API response. Custom Vertex hosts, multi-region aliases, ambient
-Application Default Credentials, and arbitrary Model Garden entries are not
-promised by this surface.
+credentials cannot supply an endpoint. Curated Claude rows are first-class only
+at `global`: Google's other documented Claude locations are multi-regions this
+surface deliberately does not accept, so a single-region setting leaves those
+rows unavailable and routes only the supported Gemini family. Uploaded
+service-account JSON is exchanged only through Google's fixed OAuth token
+endpoint and never appears in the provider API response. Custom Vertex hosts,
+multi-region aliases, ambient Application Default Credentials, and arbitrary
+Model Garden entries are not promised by this surface.
 
 Vertex rows remain provider-qualified (`vertex::<model>`), even when the raw
 model id matches a direct Anthropic or Gemini row. That identity is also the

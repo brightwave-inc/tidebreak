@@ -300,6 +300,14 @@ describe("ProvidersPanel", () => {
       />,
     );
 
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.tagName === "P" &&
+          element.textContent?.includes("Claude models require global") === true,
+      ),
+    ).toBeInTheDocument();
+
     fireEvent.change(screen.getByLabelText("Vertex AI location"), {
       target: { value: "us-central1" },
     });

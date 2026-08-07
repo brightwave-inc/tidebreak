@@ -475,6 +475,8 @@ function ProviderRow({
               />
               <p className="text-xs text-muted-foreground">
                 Use <code>global</code> or a region such as <code>us-east5</code>.
+                Claude models require <code>global</code>; regional locations
+                expose only the Vertex models OpenWave can route there.
                 Multi-region aliases and ambient application-default credentials
                 are not configured by this surface.
               </p>
