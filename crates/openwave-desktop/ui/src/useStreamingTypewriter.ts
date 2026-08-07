@@ -4,6 +4,15 @@ const TICK_INTERVAL_MS = 20;
 const SMOOTHING_FACTOR = 18;
 
 /**
+ * How far the animation may trail its target before it stops animating and
+ * snaps. Live streaming never opens a gap this size: deltas arrive in small
+ * chunks and each tick closes most of what remains. A gap this large means
+ * catch-up — a reconnect replaying the active turn's journal (#1716) — and
+ * animating it re-types prose the reader already watched stream.
+ */
+const CATCH_UP_SNAP_CHARS = 600;
+
+/**
  * Types subsequent live changes without reanimating content that was already
  * present when the component mounted. Transcript history therefore appears
  * immediately, while an active step gains motion only as it receives new
@@ -50,6 +59,11 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
     const remaining = target.length - current.length;
     if (remaining <= 0) {
       timerRef.current = null;
+      return;
+    }
+    if (remaining > CATCH_UP_SNAP_CHARS) {
+      timerRef.current = null;
+      showImmediately(target);
       return;
     }
 
