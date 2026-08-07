@@ -10,19 +10,18 @@ use serde::Serialize;
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// A conservative body cap above the validated semantic limits.
 pub const MAX_PLAN_DECISION_BODY_BYTES: usize = 16 * 1024;
 
 pub async fn list_pending_plan_approvals(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(chat_id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingPlanApproval>>, ServerError> {
-    ensure_chat(&state, chat_id).await?;
-    Ok(Json(
-        state.store.list_pending_plan_approvals(chat_id).await?,
-    ))
+    store.require_chat(chat_id).await?;
+    Ok(Json(store.list_pending_plan_approvals(chat_id).await?))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -39,12 +38,12 @@ pub struct DecidedPlan {
 
 pub async fn decide_plan(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path((chat_id, call_id)): Path<(ChatId, CallId)>,
     Json(decision): Json<PlanDecision>,
 ) -> Result<Json<DecidedPlan>, ServerError> {
-    ensure_chat(&state, chat_id).await?;
-    let outcome = state
-        .store
+    store.require_chat(chat_id).await?;
+    let outcome = store
         .decide_plan(
             &DecidePlanRequest {
                 chat_id,
@@ -77,11 +76,4 @@ pub async fn decide_plan(
         state.turn_job_wake.notify_one();
     }
     Ok(Json(DecidedPlan { disposition }))
-}
-
-async fn ensure_chat(state: &AppState, chat_id: ChatId) -> Result<(), ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
-    Ok(())
 }

@@ -10,19 +10,18 @@ use serde::Serialize;
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// A conservative body cap above the validated semantic limits.
 pub const MAX_USER_QUESTION_ANSWER_BODY_BYTES: usize = 8 * 1024;
 
 pub async fn list_pending_user_questions(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(chat_id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingUserQuestions>>, ServerError> {
-    ensure_chat(&state, chat_id).await?;
-    Ok(Json(
-        state.store.list_pending_user_questions(chat_id).await?,
-    ))
+    store.require_chat(chat_id).await?;
+    Ok(Json(store.list_pending_user_questions(chat_id).await?))
 }
 
 /// `GET /chats/pending-prompts` — opaque cross-conversation attention state.
@@ -50,12 +49,12 @@ pub struct AnsweredUserQuestions {
 
 pub async fn answer_user_questions(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path((chat_id, call_id)): Path<(ChatId, CallId)>,
     Json(answers): Json<AnswerUserQuestions>,
 ) -> Result<Json<AnsweredUserQuestions>, ServerError> {
-    ensure_chat(&state, chat_id).await?;
-    let outcome = state
-        .store
+    store.require_chat(chat_id).await?;
+    let outcome = store
         .answer_user_questions(
             &AnswerUserQuestionsRequest {
                 chat_id,
@@ -96,11 +95,4 @@ pub async fn answer_user_questions(
         state.turn_job_wake.notify_one();
     }
     Ok(Json(AnsweredUserQuestions { disposition }))
-}
-
-async fn ensure_chat(state: &AppState, chat_id: ChatId) -> Result<(), ServerError> {
-    if state.store.get_chat(chat_id).await?.is_none() {
-        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
-    }
-    Ok(())
 }
