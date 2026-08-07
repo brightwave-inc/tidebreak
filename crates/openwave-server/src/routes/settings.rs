@@ -251,7 +251,10 @@ fn validate_compaction_settings(settings: &CompactionSettings) -> Result<(), Ser
             "compaction.target_fraction must be in (0, 1]",
         ));
     }
-    if !(settings.threshold_fraction > settings.target_fraction) {
+    // Both fractions are already known to be ordinary numbers in (0, 1], so
+    // this reads the same as rejecting `!(threshold > target)` without the
+    // negated partial-order comparison.
+    if settings.threshold_fraction <= settings.target_fraction {
         return Err(ServerError::bad_request(
             "compaction.threshold_fraction must be greater than compaction.target_fraction",
         ));
