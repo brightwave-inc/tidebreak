@@ -7599,6 +7599,52 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
     );
     assert_eq!(store.get_task_plan(active.id).await.unwrap(), None);
 
+    // A plan request restricts against the chat, its turn, the proposing call,
+    // and the journal row holding its renderer hint. Before deletion erased it,
+    // any chat that ever left plan mode was undeletable.
+    let planned = Chat {
+        permission_mode: Some(crate::PermissionMode::Plan),
+        ..sample_chat()
+    };
+    store.create_chat(&planned).await.unwrap();
+    let (planned_turn_id, plan_call, parked_at) = park_test_plan(&store, planned.id).await;
+    let decided_at = parked_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        store
+            .decide_plan(
+                &crate::DecidePlanRequest {
+                    chat_id: planned.id,
+                    call_id: plan_call.id,
+                    decision: crate::PlanDecision {
+                        decision: crate::PlanDecisionChoice::Accept,
+                        feedback: None,
+                        permission_mode: None,
+                    },
+                },
+                decided_at,
+            )
+            .await
+            .unwrap(),
+        crate::storage::DecidePlanOutcome::Decided(_)
+    ));
+    let planned_turn = store.get_turn_run(planned_turn_id).await.unwrap().unwrap();
+    store
+        .request_turn_cancellation_and_append_event(
+            planned_turn_id,
+            planned_turn.updated_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_chat(planned.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+    assert!(store
+        .list_pending_plan_approvals(planned.id)
+        .await
+        .unwrap()
+        .is_empty());
+
     let root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
     let mut rooted = sample_chat();
     rooted.attachment_revision = 1;
