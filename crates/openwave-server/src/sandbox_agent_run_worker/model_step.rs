@@ -12,7 +12,8 @@ use openwave_core::{
     AgentError, AgentRun, ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider,
     ProviderEvent, RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus,
     StopReason, Store, ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TASK_PLAN_CALLS,
-    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL, UPDATE_TASK_PLAN_TOOL,
+    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL, SANDBOX_TOOL_CALL_REFUSAL_RESERVE,
+    UPDATE_TASK_PLAN_TOOL,
 };
 
 use super::config::*;
@@ -72,7 +73,9 @@ pub(super) async fn sandbox_request(
     // it has already needed. One step can hold several rows, so they diverge.
     let SandboxRowBudget { work, plan } = sandbox_row_budget(calls);
     let steps = sandbox_call_steps(calls);
-    if work > MAX_SANDBOX_TOOL_CALLS || plan > MAX_SANDBOX_TASK_PLAN_CALLS {
+    if work > MAX_SANDBOX_TOOL_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE)
+        || plan > MAX_SANDBOX_TASK_PLAN_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE)
+    {
         return Err(AgentError::msg("sandbox tool budget exceeded"));
     }
     if config.max_steps == 0 || steps.len().saturating_add(1) > config.max_steps {
@@ -118,6 +121,16 @@ pub(super) async fn sandbox_request(
             content: tool_results,
             reasoning: MessageReasoning::default(),
         });
+    }
+    // A tool that runs out of budget simply stops being offered, and a model
+    // reading a transcript where it used that tool on every step reads the
+    // absence as an oversight rather than a rule — then calls it anyway. Say
+    // it in words instead. The notice is derived from the run's own row counts,
+    // so a replayed claim rebuilds the identical request.
+    if let Some(notice) = budget_notice(config, work, plan) {
+        if let Some(last) = messages.last_mut() {
+            last.content.push(ContentBlock::Text { text: notice });
+        }
     }
     Ok(ChatRequest {
         provider: config.provider.clone(),
@@ -176,6 +189,39 @@ pub(super) fn sandbox_row_budget(calls: &[SandboxToolCall]) -> SandboxRowBudget 
     SandboxRowBudget {
         work: calls.len() - plan,
         plan,
+    }
+}
+
+/// What to tell a run whose tools have started disappearing under it.
+///
+/// Withdrawing a tool is how a budget is enforced, but it is not how a budget
+/// is communicated: nothing in the request says a tool used to be there. This
+/// is the sentence that says so, and it names `done` explicitly because the
+/// only useful move left is to submit what the run already has.
+///
+/// A run whose model has no tools at all is not told anything — it has no move
+/// to make, and the step budget ends it.
+fn budget_notice(config: &AgentConfig, work_rows: usize, plan_rows: usize) -> Option<String> {
+    if !config.tools_supported {
+        return None;
+    }
+    let work_spent = work_rows >= MAX_SANDBOX_TOOL_CALLS;
+    let plan_spent = plan_rows >= MAX_SANDBOX_TASK_PLAN_CALLS;
+    if work_spent {
+        Some(
+            "You have used this task's entire tool budget. exec and search are no longer \
+             available and calling them will not run anything. Finish now: call done with the \
+             filenames you wrote under output/ and a short summary of what you produced."
+                .to_owned(),
+        )
+    } else if plan_spent {
+        Some(
+            "You have used this task's entire update_task_plan budget, so that tool is no longer \
+             available. Your other tools are unaffected — keep working and finish with done."
+                .to_owned(),
+        )
+    } else {
+        None
     }
 }
 

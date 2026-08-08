@@ -3044,3 +3044,169 @@ async fn a_run_at_its_last_step_submits_rather_than_being_reminded() {
         SandboxAgentRunWorkerOutcome::Completed(id)
     );
 }
+
+/// Spend a run's whole work budget on finished search rows.
+///
+/// The rows are written directly rather than driven through the worker: what
+/// is under test is the step *after* the budget is gone, and sixteen real
+/// model steps would only add the time it takes to reach it.
+async fn spend_the_work_budget(
+    store: &Arc<dyn Store>,
+    id: openwave_core::AgentRunId,
+    chat_id: ChatId,
+) {
+    for step in 0..openwave_core::MAX_SANDBOX_TOOL_CALLS {
+        let worker_lease = uuid::Uuid::new_v4();
+        assert_eq!(
+            store
+                .claim_agent_run(worker_lease, chrono::Duration::minutes(5), 4, 2)
+                .await
+                .unwrap()
+                .expect("run should be claimable while it still has budget")
+                .id,
+            id
+        );
+        let call = openwave_core::SandboxToolCallRequest {
+            id: CallId::new(),
+            agent_run_id: id,
+            chat_id,
+            provider_id: format!("seeded_search_{step}"),
+            name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+            arguments: serde_json::json!({"query": format!("step {step}")}),
+        };
+        let call_id = call.id;
+        store
+            .park_agent_run_for_sandbox_tool_calls(
+                id,
+                worker_lease,
+                &[openwave_core::SandboxToolCallParkEntry {
+                    call,
+                    resolution: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let executor_lease = uuid::Uuid::new_v4();
+        store
+            .claim_sandbox_tool_call(call_id, executor_lease, chrono::Duration::minutes(1))
+            .await
+            .unwrap();
+        store
+            .resolve_sandbox_tool_call(
+                call_id,
+                executor_lease,
+                &ToolCallResolution::Completed {
+                    result: "{\"results\":[]}".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+/// A run that calls a tool after its budget is gone is answered, not killed.
+///
+/// This is the production failure the reserve exists for. Three background
+/// runs spent all sixteen work rows producing documents, called a work tool
+/// once more after it had been withdrawn from the request, and were failed
+/// outright — then retried to their attempt ceiling, each retry replaying the
+/// identical transcript into the identical wall, and the finished work was
+/// discarded.
+///
+/// The budget is still a hard bound: the call does not run. What changes is
+/// that the refusal is a receipt the model can read, written into the row each
+/// budget keeps back for it, and the run gets the step it needs to hand over
+/// what it already produced.
+#[tokio::test]
+async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = sandbox_chat();
+    store.create_chat(&chat).await.unwrap();
+    let provider = Arc::new(WebSearchThenFinalProvider::default());
+    let worker = SandboxAgentRunWorker::new(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        AgentConfig {
+            model: "sandbox-model".into(),
+            // Generous, so the row budget is the only thing under test.
+            max_steps: 64,
+            ..AgentConfig::default()
+        },
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let spawn = CallId::new();
+    let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+    admit_sandbox(&store, chat.id, spawn, "Produce a document.").await;
+    spend_the_work_budget(&store, id, chat.id).await;
+
+    // The model searches anyway. That must not kill the run.
+    let refused = match worker.run_once().await.unwrap() {
+        SandboxAgentRunWorkerOutcome::ToolCheckpointed(call_id) => call_id,
+        outcome => panic!("the over-budget step should be answered, got {outcome:?}"),
+    };
+    assert_ne!(
+        store.get_agent_run(id).await.unwrap().unwrap().status,
+        AgentRunStatus::Failed
+    );
+    let receipt = store
+        .get_sandbox_tool_call_receipt(refused)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, SandboxToolCallStatus::Failed);
+    assert_eq!(receipt.error_code.as_deref(), Some("tool_budget_exhausted"));
+    assert!(
+        receipt.result.contains("no longer available"),
+        "the refusal should say why the call did not run, got {:?}",
+        receipt.result
+    );
+
+    // That step's request is the one the budget ran out on: the work tools are
+    // gone from it, and it says so in words rather than leaving the model to
+    // infer a rule from an absence.
+    let spent_request = provider.requests.lock().unwrap()[0].clone();
+    let offered: Vec<&str> = spent_request
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(
+        !offered.contains(&openwave_core::SANDBOX_WEB_SEARCH_TOOL)
+            && !offered.contains(&SANDBOX_EXEC_TOOL),
+        "work tools should be withdrawn at the cap, got {offered:?}"
+    );
+    let notice: String = spent_request
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notice.contains("entire tool budget") && notice.contains("done"),
+        "the exhausted request should say the budget is gone, got {notice:?}"
+    );
+
+    // And the run gets the step it needs to hand over the work it already did.
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::Completed(id)
+    );
+}

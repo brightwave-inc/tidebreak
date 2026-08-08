@@ -69,6 +69,21 @@ pub const MAX_SANDBOX_TOOL_CALLS: usize = 16;
 /// rewrite its checklist. It is smaller than the work budget because a plan is
 /// replaced whole: eight revisions is a generous account of one delegated task.
 pub const MAX_SANDBOX_TASK_PLAN_CALLS: usize = 8;
+/// Durable rows each budget keeps back so an over-budget call can be answered.
+///
+/// A tool is withdrawn from the request once its budget is spent, but
+/// withdrawal is not a guarantee: a model that has called `exec` on every step
+/// of a long transcript will sometimes call it once more after it disappears.
+/// That call still has to be answered, and the answer is a row like any other
+/// — so if the budget were spent to the last row there would be nowhere to put
+/// it, and the run would die holding work it had already finished.
+///
+/// The reserve is the row that refusal lands in. It is never advertised and
+/// never executes: the only thing that may be written into it is a rejection
+/// telling the model its budget is gone and to finish with `done`. One row is
+/// enough because it only has to survive the model ignoring the withdrawal
+/// once, and by the time it is spent the transcript says plainly what happened.
+pub const SANDBOX_TOOL_CALL_REFUSAL_RESERVE: usize = 1;
 /// Maximum tool calls one model step may park as a single batch.
 ///
 /// A step's calls are parked together and replayed together, so this bounds how
