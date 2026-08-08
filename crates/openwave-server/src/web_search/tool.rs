@@ -10,8 +10,8 @@ use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 
-use crate::extract_source::{extracted_page_result, uncitable_page_result, ExtractedPageSink};
-use crate::{
+use super::extract_source::{extracted_page_result, uncitable_page_result, ExtractedPageSink};
+use crate::web_search::{
     SearchDomain, WebExtractFailure, WebExtractRequest, WebExtractResponse, WebSearchError,
     WebSearchProvider, WebSearchRequest, WebSearchResult, MAX_EXTRACT_OUTPUT_BYTES,
     MAX_OUTPUT_BYTES,
@@ -313,7 +313,7 @@ mod tests {
     use openwave_core::{ChatId, Tool};
 
     use super::*;
-    use crate::{WebSearchProviderKind, WebSearchResponse};
+    use crate::web_search::{WebSearchProviderKind, WebSearchResponse};
 
     struct FakeResolver {
         provider: Option<Arc<dyn WebSearchProvider>>,
@@ -368,15 +368,15 @@ mod tests {
         assert_eq!(spec.name, "web_search");
         assert_eq!(
             spec.input_schema["properties"]["query"]["maxLength"],
-            crate::MAX_QUERY_CHARS
+            crate::web_search::MAX_QUERY_CHARS
         );
         assert_eq!(
             spec.input_schema["properties"]["max_results"]["maximum"],
-            crate::MAX_RESULTS
+            crate::web_search::MAX_RESULTS
         );
         assert_eq!(
             spec.input_schema["properties"]["domains"]["maxItems"],
-            crate::MAX_DOMAINS
+            crate::web_search::MAX_DOMAINS
         );
         assert_eq!(spec.input_schema["additionalProperties"], false);
     }
@@ -490,7 +490,7 @@ mod tests {
         ) -> Result<WebExtractResponse, WebExtractFailure> {
             *self.calls.lock().unwrap() += 1;
             WebExtractResponse::new(
-                crate::ExtractionMethod::Native,
+                crate::web_search::ExtractionMethod::Native,
                 request.url(),
                 "Native title",
                 "native content ".repeat(4),
@@ -564,7 +564,7 @@ mod tests {
                 ));
             }
             WebExtractResponse::new(
-                crate::ExtractionMethod::Provider(WebSearchProviderKind::Exa),
+                crate::web_search::ExtractionMethod::Provider(WebSearchProviderKind::Exa),
                 request.url(),
                 "Vendor title",
                 "vendor content",

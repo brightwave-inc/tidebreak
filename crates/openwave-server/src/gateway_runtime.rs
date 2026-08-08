@@ -12,10 +12,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use openwave_connectors::{
+use crate::connectors::{
     CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayConnection, RESOURCE_LLM,
 };
+use async_trait::async_trait;
 use openwave_core::{AgentError, Result, SecretProvider, Store};
 use openwave_router::BearerTokenSource;
 use serde::Serialize;
@@ -1077,7 +1077,7 @@ mod tests {
         // Stored credentials are private to the connectors crate by design;
         // seed the vault through its serialized form, exactly as a completed
         // sign-in would have persisted it.
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": session_base,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -1487,7 +1487,7 @@ mod tests {
             .unwrap(),
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": base_a,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -1715,7 +1715,7 @@ mod tests {
             .unwrap(),
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": base,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -1979,7 +1979,7 @@ mod tests {
             .unwrap(),
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": base,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -2071,7 +2071,7 @@ mod tests {
             .unwrap(),
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": base,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -2398,7 +2398,7 @@ mod tests {
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
         let seed = |secrets: Arc<dyn SecretProvider>, base_url: &'static str| async move {
-            let credentials: openwave_connectors::GatewayCredentials =
+            let credentials: crate::connectors::GatewayCredentials =
                 serde_json::from_value(json!({
                     "base_url": base_url,
                     "installation_id": "install-1",
@@ -2424,7 +2424,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            !crate::connectors::has_stored_credentials(&*secrets).await,
             "the retired session must not survive boot on an unmanaged profile"
         );
 
@@ -2436,7 +2436,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            !crate::connectors::has_stored_credentials(&*secrets).await,
             "a session whose stored URL cannot be parsed must still be cleared"
         );
 
@@ -2452,7 +2452,7 @@ mod tests {
         retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
-        assert!(openwave_connectors::has_stored_credentials(&*secrets).await);
+        assert!(crate::connectors::has_stored_credentials(&*secrets).await);
     }
 
     /// The managed analogue of the legacy hard cut: an MDM re-point
@@ -2472,7 +2472,7 @@ mod tests {
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
         let old_gateway = Arc::new(FakeGateway::default());
         let old_base = format!("http://{}", serve(old_gateway.clone()).await);
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": old_base,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -2499,14 +2499,14 @@ mod tests {
         retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
-        assert!(openwave_connectors::has_stored_credentials(&*secrets).await);
+        assert!(crate::connectors::has_stored_credentials(&*secrets).await);
 
         policy.gateway_url = Some("https://corp-new.gateway".into());
         retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
         assert!(
-            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            !crate::connectors::has_stored_credentials(&*secrets).await,
             "the superseded session must not survive the re-point"
         );
         // Revoked at the old deployment, with the superseded refresh token.
@@ -2526,7 +2526,7 @@ mod tests {
         let new_gateway = Arc::new(FakeGateway::default());
         let new_base = format!("http://{}", serve(new_gateway.clone()).await);
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        let superseded: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let superseded: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": old_base,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -2544,22 +2544,22 @@ mod tests {
             CredentialVault::new(secrets.clone()),
         );
         connection
-            .store_session(&openwave_connectors::AuthorizedSession {
-                meta: openwave_connectors::GatewayMeta {
+            .store_session(&crate::connectors::AuthorizedSession {
+                meta: crate::connectors::GatewayMeta {
                     api_version: "1".into(),
                     installation_id: "install-2".into(),
                     gateway_version: "1".into(),
                     public_url: new_base.clone(),
                     auth_mode: "oauth".into(),
                 },
-                identity: openwave_connectors::GatewayIdentity {
+                identity: crate::connectors::GatewayIdentity {
                     user_id: "user-2".into(),
                     email: Some("user@example.test".into()),
                     display_name: None,
                     session_id: "session-2".into(),
                     installation_id: "install-2".into(),
                 },
-                tokens: openwave_connectors::TokenSet {
+                tokens: crate::connectors::TokenSet {
                     access_token: "mg_at_fresh".into(),
                     refresh_token: "mg_rt_fresh".into(),
                     expires_at_unix: u64::MAX,
@@ -2578,6 +2578,6 @@ mod tests {
             ["mg_rt_zombie"]
         );
         assert!(new_gateway.revoked.lock().unwrap().is_empty());
-        assert!(openwave_connectors::has_stored_credentials_for(&*secrets, &new_base).await);
+        assert!(crate::connectors::has_stored_credentials_for(&*secrets, &new_base).await);
     }
 }

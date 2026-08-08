@@ -45,4 +45,4 @@ ratatui-textarea = "=0.9.2"
 unicode-width = "=0.2.0"
 
 [dev-dependencies]
-tempfile = "=3.27.0"
+tempfile = { workspace = true }

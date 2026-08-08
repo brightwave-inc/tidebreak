@@ -139,7 +139,7 @@ so this is mechanical.
 ## Non-goals here
 
 - OAuth-brokered kinds (Drive/Box-style source connectors) — the reserved
-  `openwave-connectors` scaffold; a future kind, not part of this epic.
+  server-owned connector scaffolding; a future kind, not part of this epic.
 - Filesystem bindings and their consent posture — #1331, designed in
   [folder-bindings.md](folder-bindings.md): folders bind as first-class
   roots, deliberately not a connected-app kind.

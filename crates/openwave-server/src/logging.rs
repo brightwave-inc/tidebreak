@@ -45,10 +45,10 @@ const LOG_ENV_VAR: &str = "OPENWAVE_LOG";
 
 /// `info` for the workspace's own crates, `warn` for dependencies.
 const DEFAULT_DIRECTIVES: &str = "warn,openwave_cli=info,openwave_code_execution=info,\
-    openwave_connectors=info,openwave_core=info,openwave_desktop=info,openwave_egress=info,\
+    openwave_core=info,openwave_desktop=info,openwave_egress=info,\
     openwave_host_broker=info,openwave_mcp=info,openwave_router=info,\
     openwave_sandbox_agent=info,openwave_sandbox_protocol=info,openwave_server=info,\
-    openwave_shell_policy=info,openwave_web_search=info";
+    openwave_shell_policy=info";
 
 /// Install the process-global subscriber, writing to `logs/openwave.log`
 /// under `data_dir`.

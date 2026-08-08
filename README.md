@@ -184,7 +184,6 @@ foreground/background execution model is described in
 | [`openwave-router`](crates/openwave-router) | Anthropic, OpenAI, xAI, Gemini, Amazon Bedrock Mantle, and compatible providers + model routing |
 | [`openwave-code-execution`](crates/openwave-code-execution) | provider-neutral command execution + native local sandbox |
 | [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
-| [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
 | [`openwave-mcp`](crates/openwave-mcp) | lifecycle-gated MCP server plus external stdio client tool mounting |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
 | [`openwave-cli`](crates/openwave-cli) | headless `openwave serve` + `openwave mcp` commands |

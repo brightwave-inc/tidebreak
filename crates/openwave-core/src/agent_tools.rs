@@ -117,7 +117,7 @@ pub const MAX_SANDBOX_DONE_OUTPUTS: usize = 16;
 pub const MAX_SANDBOX_DONE_SUMMARY_CHARS: usize = 4_000;
 /// Maximum web-extract URL length in bytes advertised to a model.
 ///
-/// `openwave-web-search` holds its fetch-admission URL bound to this value, so
+/// `openwave-server::web_search` holds its fetch-admission URL bound to this value, so
 /// the schema a model sees and the policy the fetcher enforces cannot drift.
 pub const MAX_WEB_EXTRACT_URL_BYTES: usize = 2_048;
 
@@ -530,7 +530,7 @@ pub fn wait_for_agents_tool_spec() -> ToolSpec {
 
 /// Narrow, host-executed web-search contract shared by trusted runtimes.
 ///
-/// The provider-backed implementation belongs to `openwave-web-search`; core
+/// The provider-backed implementation belongs to `openwave-server::web_search`; core
 /// owns this schema because the sandbox checkpoint protocol must advertise the
 /// same closed arguments without depending on a network integration crate.
 #[must_use]
@@ -543,7 +543,7 @@ pub fn web_search_tool_spec() -> ToolSpec {
 
 /// Host-executed contract for reading one exact public web page.
 ///
-/// The extraction implementation belongs to `openwave-web-search`; core owns
+/// The extraction implementation belongs to `openwave-server::web_search`; core owns
 /// this schema beside the shared web-search contract so every trusted runtime
 /// advertises the same closed arguments.
 #[must_use]

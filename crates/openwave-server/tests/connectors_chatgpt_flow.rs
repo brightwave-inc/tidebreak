@@ -13,11 +13,11 @@ use axum::routing::{get, post};
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use openwave_connectors::{
+use openwave_core::{Result as CoreResult, SecretProvider};
+use openwave_server::connectors::{
     has_stored_chatgpt_credentials, ChatGptAuth, ChatGptAuthConfig, ChatGptConnection,
     ChatGptCredentialVault, CHATGPT_SECRET_KEY, CLIENT_ID, REDIRECT_URI,
 };
-use openwave_core::{Result as CoreResult, SecretProvider};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 

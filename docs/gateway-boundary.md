@@ -6,7 +6,7 @@ enforcement details live in the module documentation of
 `crates/openwave-server/src/managed_policy.rs`,
 `crates/openwave-server/src/pairing.rs`,
 `crates/openwave-desktop/src/deep_link.rs`, and
-`crates/openwave-connectors/src/gateway.rs`. The per-platform MDM artifacts
+`crates/openwave-server/src/connectors/gateway.rs`. The per-platform MDM artifacts
 are in [managed-policy.md](managed-policy.md); the MCP transport details are
 in [mcp-servers.md](mcp-servers.md).
 

@@ -11,14 +11,13 @@ libraries.
                                │                 │
                                └────── openwave-server
                                             │
-      libraries          openwave-mcp          openwave-web-search
+      libraries          openwave-mcp
                          openwave-router
                          openwave-host-broker  openwave-code-execution
                          openwave-egress       openwave-sandbox-protocol
                                             │
       the seam                         openwave-core
 
-      scaffold                         openwave-connectors (stub)
 ```
 
 **Status legend:** 🟢 built/in active development · 🟡 partial baseline · ⚪ stub.
@@ -83,12 +82,6 @@ instead of growing an N² translation layer.
 
 ---
 
-## `openwave-connectors` — OAuth & source connectors ⚪
-
-Scaffold reserved for loopback OAuth (RFC 8252 + PKCE), token refresh, and
-connector tools that list and fetch from sources like Drive and Box.
-
-**Depends on:** nothing in the workspace yet.
 
 ## `openwave-host-broker` — consented host access 🟡
 
@@ -138,28 +131,6 @@ See [Execution providers and sandbox-resident agent runs](sandbox-providers.md).
 
 **Depends on:** no OpenWave crate (standalone wire contract).
 
-## `openwave-web-search` — provider-neutral web search 🟢
-
-The bounded request/result contract, direct HTTP adapters for Exa and Tavily,
-strict model-argument decoder, and foreground `WebSearchTool`. It remains
-separate from the model loop: loading a credential, building the tool, or
-constructing an adapter performs no egress, and calling search requires an
-explicit host-owned resolver and HTTP client. API keys are resolved only
-through `SecretProvider` under fixed provider keys, never from a model argument
-or persisted tool-call payload. The optional `http` feature provides a timeout-
-and response-size-bounded `reqwest` client; hosts may supply their own proxy,
-allow-list, audit, or test client through the same seam.
-
-`openwave-server` owns an explicit disabled-by-default Exa/Tavily selection
-and bounded request timeout. Its depth-one sandbox loop may durably checkpoint
-the one fixed `web_search` contract, and the server worker resolves that exact
-checkpoint under a fenced lease. The foreground registry mounts the crate's
-Sensitive tool over the same live resolver and durable approval boundary;
-recursive sandboxes remain unavailable. The concrete host client is bound to
-the selected provider's exact HTTPS API domain before credentials are attached;
-scheme, authority, explicit-port, or userinfo deviations fail before dispatch.
-
-**Depends on:** `openwave-core`.
 
 ## `openwave-code-execution` — provider-neutral command execution 🟢
 
@@ -239,6 +210,16 @@ The authenticated loopback HTTP/WebSocket surface shared by desktop and
 headless clients. It owns route orchestration and the durable document,
 retirement, and audit workers while core state transitions remain in
 `openwave-core`.
+
+Two former standalone crates now live here as modules, because the server
+was their only consumer:
+
+- `connectors` — loopback OAuth (RFC 8252 + PKCE) for model-gateway and
+  ChatGPT subscription sign-in, plus token vault helpers.
+- `web_search` — provider-neutral search/extract adapters, fetch admission,
+  native page extraction, and the host configuration surface that selects
+  and credentials them.
+
 
 Client-owned tool work is exposed through authenticated per-chat polling,
 claim, heartbeat, and resolution routes. General records show visible lease

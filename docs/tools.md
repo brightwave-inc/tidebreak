@@ -290,7 +290,7 @@ enterprise database tools, and recursive fleets remain deferred.
 
 ## Web search
 
-Web search now has a provider-neutral `openwave-web-search` crate rather than
+Web search now has a provider-neutral web-search module in `openwave-server` rather than
 HTTP code embedded in the core loop:
 
 ```text

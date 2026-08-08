@@ -612,7 +612,7 @@ mod tests {
 
         // Signed in, with entitled models synced: the walk lands on the
         // gateway's first usable model.
-        let credentials: openwave_connectors::GatewayCredentials =
+        let credentials: crate::connectors::GatewayCredentials =
             serde_json::from_value(serde_json::json!({
                 "base_url": "https://corp.gateway/",
                 "installation_id": "install-1",
@@ -621,7 +621,7 @@ mod tests {
                 "access_tokens": {}
             }))
             .unwrap();
-        openwave_connectors::CredentialVault::new(secrets.clone())
+        crate::connectors::CredentialVault::new(secrets.clone())
             .save(&credentials)
             .await
             .unwrap();

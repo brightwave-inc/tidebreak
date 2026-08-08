@@ -767,7 +767,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
 /// embedded credentials, normalized to the parsed form. Shared with the
 /// provider write path so a locked base URL compares in the same shape.
 pub(crate) fn validated_gateway_url(gateway_url: &str) -> Result<String> {
-    Ok(openwave_connectors::GatewayAuthConfig::new(gateway_url)?
+    Ok(crate::connectors::GatewayAuthConfig::new(gateway_url)?
         .base_url()
         .to_string())
 }

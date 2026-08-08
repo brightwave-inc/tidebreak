@@ -601,7 +601,7 @@ impl McpRuntime {
             }
             // The gateway is trusted for entitlements, not for shapes: a slug
             // outside the endpoint contract is skipped, never persisted.
-            if openwave_connectors::validate_mcp_endpoint_slug(slug).is_err() {
+            if crate::connectors::validate_mcp_endpoint_slug(slug).is_err() {
                 tracing::warn!(
                     slug = %slug,
                     "entitled gateway MCP endpoint slug is invalid; not auto-mounting"

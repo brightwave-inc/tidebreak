@@ -5,12 +5,10 @@
 //! variables. `reqwest` reads those when a client is built, so keeping them in
 //! a process of their own is what stops them from reaching another test.
 
-#![cfg(feature = "extract-native")]
-
 use std::net::IpAddr;
 use std::time::Duration;
 
-use openwave_web_search::{PageFetchTransport, ReqwestPageFetcher};
+use openwave_server::web_search::{PageFetchTransport, ReqwestPageFetcher};
 use tokio::net::TcpListener;
 use url::Url;
 

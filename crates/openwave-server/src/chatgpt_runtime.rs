@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use openwave_connectors::{
+use crate::connectors::{
     ChatGptAuth, ChatGptAuthConfig, ChatGptConnection, ChatGptCredentialVault,
 };
 use openwave_core::{Result, SecretProvider, Store};
@@ -134,7 +134,7 @@ impl ChatGptRuntime {
 
     async fn persist_session(
         &self,
-        session: &openwave_connectors::ChatGptAuthorizedSession,
+        session: &crate::connectors::ChatGptAuthorizedSession,
     ) -> Result<(), ServerError> {
         self.connection
             .store_session(session)
@@ -189,7 +189,7 @@ impl ChatGptRuntime {
                 .ok()
                 .flatten(),
             Some(ProviderCredential::Oauth {})
-        ) && openwave_connectors::has_stored_chatgpt_credentials(&*self.secrets)
+        ) && crate::connectors::has_stored_chatgpt_credentials(&*self.secrets)
             .await;
         match progress {
             SignInProgress::Pending { authorization_url } => ChatGptSignInStatus {

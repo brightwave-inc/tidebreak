@@ -1,6 +1,6 @@
 # Web search configuration
 
-OpenWave has a bounded `openwave-web-search` library for direct search and for
+OpenWave has a bounded web-search module in `openwave-server` (`crates/openwave-server/src/web_search`) for direct search and for
 single-page extraction. The crate owns the provider-neutral request/result
 contracts, HTTP adapters, and the foreground `WebSearchTool` and
 `WebExtractTool`; the server supplies current host policy and credentials

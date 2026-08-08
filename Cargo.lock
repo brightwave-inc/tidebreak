@@ -4420,22 +4420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-connectors"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.23.0",
- "openwave-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "openwave-core"
 version = "0.0.0"
 dependencies = [
@@ -4602,13 +4586,14 @@ dependencies = [
  "base64 0.23.0",
  "cap-std",
  "chrono",
+ "dom_query 0.28.0",
+ "dom_smoothie",
  "flate2",
  "futures",
  "image",
  "jsonschema",
  "libc",
  "openwave-code-execution",
- "openwave-connectors",
  "openwave-core",
  "openwave-egress",
  "openwave-mcp",
@@ -4616,7 +4601,6 @@ dependencies = [
  "openwave-sandbox-agent",
  "openwave-sandbox-protocol",
  "openwave-shell-policy",
- "openwave-web-search",
  "plist",
  "reqwest 0.12.28",
  "schemars 1.2.2",
@@ -4649,27 +4633,6 @@ version = "0.0.0"
 dependencies = [
  "brush-parser",
  "fancy-regex 0.19.0",
-]
-
-[[package]]
-name = "openwave-web-search"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "chrono",
- "dom_query 0.28.0",
- "dom_smoothie",
- "futures",
- "openwave-core",
- "openwave-egress",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "ts-rs",
- "url",
- "uuid",
 ]
 
 [[package]]

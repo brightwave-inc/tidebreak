@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openwave_core::{ChatId, DocumentId};
 
-use crate::WebExtractResponse;
+use crate::web_search::WebExtractResponse;
 
 /// Where one stored extraction landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +69,7 @@ fn extraction_header(page: &WebExtractResponse) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ExtractionMethod;
+    use crate::web_search::ExtractionMethod;
 
     #[test]
     fn stored_page_result_teaches_a_direct_document_citation() {

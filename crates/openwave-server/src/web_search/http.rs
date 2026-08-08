@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use url::Url;
 
-use crate::WebSearchError;
+use crate::web_search::WebSearchError;
 
 /// Largest JSON response an adapter may retain in memory or parse.
 pub const MAX_HTTP_RESPONSE_BYTES: usize = 1_000_000;
@@ -196,7 +196,7 @@ impl OutboundOrigin {
     ///
     /// `None` for a provider whose address is host configuration.
     #[must_use]
-    pub fn fixed(provider: crate::WebSearchProviderKind) -> Option<Self> {
+    pub fn fixed(provider: crate::web_search::WebSearchProviderKind) -> Option<Self> {
         provider.outbound_domain().map(|domain| Self {
             origin: format!("https://{domain}"),
             scheme: "https".into(),
@@ -235,14 +235,12 @@ impl OutboundOrigin {
     }
 }
 
-#[cfg(feature = "http")]
 #[derive(Clone, Debug)]
 pub struct ReqwestHttpClient {
     client: reqwest::Client,
     origin: OutboundOrigin,
 }
 
-#[cfg(feature = "http")]
 impl ReqwestHttpClient {
     /// Build a client bound to one origin with a bounded end-to-end timeout.
     ///
@@ -274,7 +272,6 @@ impl ReqwestHttpClient {
     }
 }
 
-#[cfg(feature = "http")]
 impl ReqwestHttpClient {
     /// Send one already authority-checked request and read its body under the
     /// hard byte cap.
@@ -301,7 +298,6 @@ impl ReqwestHttpClient {
     }
 }
 
-#[cfg(feature = "http")]
 #[async_trait]
 impl HttpClient for ReqwestHttpClient {
     async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
@@ -331,7 +327,6 @@ impl HttpClient for ReqwestHttpClient {
 /// anything the parser might normalize away — an added default port, a trailing
 /// dot on the host, userinfo, a look-alike suffix — and the parsed comparison
 /// rejects anything the raw form could disguise.
-#[cfg(feature = "http")]
 fn validate_outbound_url(value: &str, origin: &OutboundOrigin) -> Result<(), WebSearchError> {
     let parsed = Url::parse(value).map_err(|_| WebSearchError::OutboundNotAllowed)?;
     let boundary_is_clean = value
@@ -403,11 +398,10 @@ mod tests {
         assert!(debug.contains("public"));
     }
 
-    #[cfg(feature = "http")]
     #[tokio::test]
     async fn reqwest_client_rejects_requests_outside_its_provider_domain() {
         let client = ReqwestHttpClient::new(
-            OutboundOrigin::fixed(crate::WebSearchProviderKind::Exa).unwrap(),
+            OutboundOrigin::fixed(crate::web_search::WebSearchProviderKind::Exa).unwrap(),
         )
         .unwrap();
         for url in [
@@ -448,10 +442,9 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "http")]
     #[test]
     fn provider_endpoints_satisfy_their_fixed_domain_policy() {
-        for provider in crate::WebSearchProviderKind::ALL {
+        for provider in crate::web_search::WebSearchProviderKind::ALL {
             let Some(origin) = OutboundOrigin::fixed(provider) else {
                 // A self-hosted provider has no fixed domain to check; its
                 // origin is validated where the operator configures it.
@@ -473,7 +466,6 @@ mod tests {
     /// A configured origin is still exactly one origin. Loopback and an
     /// explicit port are reachable — that is the point of a self-hosted
     /// instance — but nothing else on the host is.
-    #[cfg(feature = "http")]
     #[test]
     fn a_configured_origin_binds_as_tightly_as_a_fixed_one() {
         let origin = OutboundOrigin::parse("http://localhost:8888").unwrap();
@@ -501,7 +493,6 @@ mod tests {
         assert!(OutboundOrigin::parse("ftp://localhost").is_err());
     }
 
-    #[cfg(feature = "http")]
     #[tokio::test]
     async fn reqwest_client_does_not_follow_cross_host_redirects_with_credentials() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -528,7 +519,7 @@ mod tests {
         });
 
         let client = ReqwestHttpClient::new(
-            OutboundOrigin::fixed(crate::WebSearchProviderKind::Exa).unwrap(),
+            OutboundOrigin::fixed(crate::web_search::WebSearchProviderKind::Exa).unwrap(),
         )
         .unwrap();
         let response = client

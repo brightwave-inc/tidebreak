@@ -1,6 +1,6 @@
 use openwave_core::SecretProvider;
 
-use crate::{WebSearchError, WebSearchProviderKind};
+use crate::web_search::{WebSearchError, WebSearchProviderKind};
 
 /// Non-serializable, redacted API credential for one search provider.
 #[derive(Clone)]

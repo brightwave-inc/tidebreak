@@ -9,6 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::web_search::{
+    WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResolver,
+    WebSearchResolverError, WebSearchResponse, WebSearchResult, WebSearchTool,
+};
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::http::{header, Request, StatusCode};
@@ -23,10 +27,6 @@ use openwave_core::{
     SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
     ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry,
     ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
-};
-use openwave_web_search::{
-    WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResolver,
-    WebSearchResolverError, WebSearchResponse, WebSearchResult, WebSearchTool,
 };
 use resolver::ProviderResolver;
 use sea_orm::ConnectionTrait;

@@ -16,11 +16,11 @@ use axum::routing::{get, post};
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use openwave_connectors::{
+use openwave_core::{Result as CoreResult, SecretProvider};
+use openwave_server::connectors::{
     is_sign_in_required, CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayConnection,
     RESOURCE_CONTROL, RESOURCE_LLM,
 };
-use openwave_core::{Result as CoreResult, SecretProvider};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 

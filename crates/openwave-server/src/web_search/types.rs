@@ -83,7 +83,7 @@ impl WebSearchProviderKind {
     /// `None` for a provider that authenticates with nothing at all. That is
     /// not the same as a key being optional: a provider named here is unusable
     /// until its key is stored, which is what
-    /// [`WebSearchCredentialState`](crate::WebSearchCredentialState) keeps
+    /// [`WebSearchCredentialState`](crate::web_search::WebSearchCredentialState) keeps
     /// distinguishable.
     #[must_use]
     pub const fn credential_key(self) -> Option<&'static str> {
@@ -130,7 +130,7 @@ impl WebSearchProviderKind {
     ///
     /// `None` for a self-hosted provider, whose address the operator supplies.
     /// The transport is still bound to exactly one origin — see
-    /// [`OutboundOrigin`](crate::OutboundOrigin) — it is just an origin fixed
+    /// [`OutboundOrigin`](crate::web_search::OutboundOrigin) — it is just an origin fixed
     /// at construction from validated host configuration rather than a
     /// constant.
     #[must_use]
@@ -453,7 +453,7 @@ pub struct WebExtractRequest {
 // The schema bound core advertises to models must equal the byte bound the
 // fetch admission policy enforces, or the two drift silently.
 const _: () =
-    assert!(openwave_core::MAX_WEB_EXTRACT_URL_BYTES == crate::fetch_policy::MAX_FETCH_URL_BYTES);
+    assert!(openwave_core::MAX_WEB_EXTRACT_URL_BYTES == super::fetch_policy::MAX_FETCH_URL_BYTES);
 
 impl WebExtractRequest {
     /// Admit a URL for extraction, or say precisely why not.
@@ -463,7 +463,7 @@ impl WebExtractRequest {
     /// transport can see the value, and keeps the canonical fragment-stripped
     /// form. The reason text is closed policy prose, safe for a model.
     pub fn new(url: impl AsRef<str>) -> Result<Self, WebSearchError> {
-        let admitted = crate::fetch_policy::admit_fetch_url(url.as_ref().trim())
+        let admitted = super::fetch_policy::admit_fetch_url(url.as_ref().trim())
             .map_err(|violation| WebSearchError::InvalidRequest(violation.to_string()))?;
         Ok(Self {
             url: admitted.into(),

@@ -46,8 +46,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::web_search::admit_fetch_address;
 use openwave_core::SecretProvider;
-use openwave_web_search::admit_fetch_address;
 
 use crate::openapi_catalog::{CatalogOperation, HttpMethod, OperationCatalog, ParameterLocation};
 

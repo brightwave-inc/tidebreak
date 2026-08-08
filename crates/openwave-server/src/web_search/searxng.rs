@@ -7,14 +7,14 @@
 //! **It carries no credential.** Every other provider holds an API key in the
 //! host's secret store and is unusable until that key is present. SearXNG has
 //! nothing to hold, which is a third state rather than an optional key — see
-//! [`WebSearchCredentialState`](crate::WebSearchCredentialState). The
+//! [`WebSearchCredentialState`](crate::web_search::WebSearchCredentialState). The
 //! credentialed providers still fail closed exactly as before.
 //!
 //! **Its address is configuration.** Every other provider pins a fixed
 //! `outbound_domain` so neither host settings nor a model argument can redirect
 //! egress. A self-hosted instance has no fixed address to pin, so the base URL
 //! is host configuration — validated by [`SearxngBaseUrl`] when it is stored,
-//! and turned into exactly one [`OutboundOrigin`](crate::OutboundOrigin) the
+//! and turned into exactly one [`OutboundOrigin`](crate::web_search::OutboundOrigin) the
 //! transport is bound to before any request exists. It is never a model
 //! argument and is not derivable from tool input.
 //!
@@ -30,11 +30,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use url::Url;
 
-use crate::types::{
+use super::types::{
     domain_scoped_query, parse_iso8601_instant, result_within_domains,
     result_within_published_window,
 };
-use crate::{
+use crate::web_search::{
     HttpClient, HttpGetRequest, OutboundOrigin, WebSearchError, WebSearchProvider,
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult,
 };
@@ -266,7 +266,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpRequest, HttpResponse, SearchDomain, WebExtractRequest};
+    use crate::web_search::{HttpRequest, HttpResponse, SearchDomain, WebExtractRequest};
 
     #[derive(Clone)]
     struct FakeHttpClient {
@@ -356,7 +356,9 @@ mod tests {
             first.published_at.unwrap().to_rfc3339(),
             "2026-07-01T09:30:00+00:00"
         );
-        assert!(serde_json::to_vec(&response).unwrap().len() <= crate::MAX_OUTPUT_BYTES);
+        assert!(
+            serde_json::to_vec(&response).unwrap().len() <= crate::web_search::MAX_OUTPUT_BYTES
+        );
 
         let sent = sent.lock().unwrap();
         let sent = sent.as_ref().unwrap();

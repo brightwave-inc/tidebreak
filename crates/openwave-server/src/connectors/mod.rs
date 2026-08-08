@@ -1,4 +1,4 @@
-//! OpenWave connectors — loopback OAuth (RFC 8252 + PKCE) for model-gateway
+//! Server-owned connectors — loopback OAuth (RFC 8252 + PKCE) for model-gateway
 //! and ChatGPT subscription sign-in, plus the future source connector tools
 //! that ingest from Drive, Box, and friends.
 //!
@@ -20,7 +20,7 @@
 //!
 //! Tokens are stored through the host's [`SecretProvider`] — the OS keychain
 //! in the desktop app — never in ordinary settings, and none of the types in
-//! this crate include token material in their `Debug` output.
+//! this module include token material in their `Debug` output.
 //!
 //! [`SecretProvider`]: openwave_core::SecretProvider
 

@@ -7,15 +7,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::web_search::{
+    request_from_tool_arguments, WebSearchError, WebSearchProvider, WebSearchRequest,
+    WebSearchResponse, MAX_OUTPUT_BYTES,
+};
 use async_trait::async_trait;
 #[cfg(test)]
 use chrono::Utc;
 use openwave_core::{
     AgentError, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, Store, ToolCallResolution,
-};
-use openwave_web_search::{
-    request_from_tool_arguments, WebSearchError, WebSearchProvider, WebSearchRequest,
-    WebSearchResponse, MAX_OUTPUT_BYTES,
 };
 use tokio::sync::Notify;
 
@@ -443,12 +443,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
+    use crate::web_search::{WebSearchProviderKind, WebSearchResult};
     use openwave_core::{
         AgentRunStatus, CallId, Chat, ChatId, ClaimSandboxToolCallOutcome, DbStore,
         ParkSandboxToolCallOutcome, RequestAgentRunCancellationOutcome, SandboxToolCallRequest,
         Store,
     };
-    use openwave_web_search::{WebSearchProviderKind, WebSearchResult};
 
     use super::*;
 
@@ -526,7 +526,7 @@ mod tests {
         async fn search(
             &self,
             _request: WebSearchRequest,
-        ) -> std::result::Result<WebSearchResponse, openwave_web_search::WebSearchError> {
+        ) -> std::result::Result<WebSearchResponse, crate::web_search::WebSearchError> {
             let _drop = DropMarker(self.dropped.clone());
             self.entered.notify_one();
             futures::future::pending().await
@@ -542,7 +542,7 @@ mod tests {
         async fn search(
             &self,
             request: WebSearchRequest,
-        ) -> std::result::Result<WebSearchResponse, openwave_web_search::WebSearchError> {
+        ) -> std::result::Result<WebSearchResponse, crate::web_search::WebSearchError> {
             self.requests.lock().unwrap().push(request);
             Ok(self.response.clone())
         }
@@ -691,7 +691,7 @@ mod tests {
         );
         assert_eq!(
             provider.requests.lock().unwrap()[0].max_results,
-            openwave_web_search::DEFAULT_MAX_RESULTS
+            crate::web_search::DEFAULT_MAX_RESULTS
         );
         let receipt = store
             .get_sandbox_tool_call_receipt(call.id)

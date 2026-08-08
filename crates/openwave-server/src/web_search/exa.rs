@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::types::{count_words, same_page_url};
-use crate::{
+use super::types::{count_words, same_page_url};
+use crate::web_search::{
     admit_fetch_url, ExtractionMethod, HttpClient, HttpRequest, WebExtractRequest,
     WebExtractResponse, WebSearchCredential, WebSearchError, WebSearchProvider,
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult, MIN_EXTRACT_WORDS,
@@ -23,7 +23,7 @@ use crate::{
 /// [`WebExtractResponse`] is a backstop here, not the primary control.
 const EXTRACT_MAX_CHARACTERS: usize = 10_000;
 
-const _: () = assert!(EXTRACT_MAX_CHARACTERS * 4 <= crate::MAX_EXTRACT_OUTPUT_BYTES);
+const _: () = assert!(EXTRACT_MAX_CHARACTERS * 4 <= crate::web_search::MAX_EXTRACT_OUTPUT_BYTES);
 
 /// How stale a cached crawl may be before Exa is asked to fetch the page live.
 ///
@@ -147,7 +147,7 @@ fn request_body(request: &WebSearchRequest) -> serde_json::Value {
         "query": request.query,
         "type": "auto",
         "numResults": request.max_results,
-        "contents": { "text": { "maxCharacters": crate::MAX_RESULT_CONTENT_CHARS } },
+        "contents": { "text": { "maxCharacters": crate::web_search::MAX_RESULT_CONTENT_CHARS } },
     });
     if !request.domains.is_empty() {
         body["includeDomains"] = json!(request
@@ -344,7 +344,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
+    use crate::web_search::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
     use openwave_core::{AgentError, SecretProvider};
 
     #[derive(Clone)]
@@ -391,7 +391,7 @@ mod tests {
 
         async fn get(
             &self,
-            _request: crate::HttpGetRequest,
+            _request: crate::web_search::HttpGetRequest,
         ) -> Result<HttpResponse, WebSearchError> {
             unreachable!("the Exa adapter posts JSON on both endpoints")
         }
@@ -489,7 +489,8 @@ mod tests {
         assert_eq!(response.word_count, 8_000);
         assert!(response.truncated);
         assert!(
-            serde_json::to_vec(&response).unwrap().len() <= crate::MAX_EXTRACT_OUTPUT_BYTES,
+            serde_json::to_vec(&response).unwrap().len()
+                <= crate::web_search::MAX_EXTRACT_OUTPUT_BYTES,
             "extraction exceeded its serialized output budget"
         );
 
