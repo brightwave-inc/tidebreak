@@ -2197,9 +2197,10 @@ async fn a_sandbox_run_may_checkpoint_repeatedly_up_to_a_bounded_chain() {
     let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
 
     // The whole chain rides every model request, so the count is bounded. Drive
-    // the bound exactly: the run keeps checkpointing until the budget is spent,
-    // then the next park is refused rather than growing the transcript further.
-    for step in 0..crate::MAX_SANDBOX_TOOL_CALLS {
+    // the bound exactly: the run keeps checkpointing until the budget and the
+    // refusal reserve behind it are both spent, then the next park is refused
+    // rather than growing the transcript further.
+    for step in 0..crate::MAX_SANDBOX_TOOL_CALLS + crate::SANDBOX_TOOL_CALL_REFUSAL_RESERVE {
         let worker_lease = uuid::Uuid::new_v4();
         assert_eq!(
             store
@@ -2302,7 +2303,7 @@ async fn a_sandbox_run_may_checkpoint_repeatedly_up_to_a_bounded_chain() {
             .await
             .unwrap()
             .len(),
-        crate::MAX_SANDBOX_TOOL_CALLS
+        crate::MAX_SANDBOX_TOOL_CALLS + crate::SANDBOX_TOOL_CALL_REFUSAL_RESERVE
     );
 }
 

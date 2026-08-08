@@ -8,7 +8,7 @@ use crate::agent_tools::{
     sandbox_call_is_parallel_eligible, validate_sandbox_exec_arguments,
     validate_sandbox_read_delegated_file_arguments, SandboxAgentFileResource,
     MAX_SANDBOX_TASK_PLAN_CALLS, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
-    SANDBOX_READ_DELEGATED_FILE_TOOL,
+    SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_TOOL_CALL_REFUSAL_RESERVE,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
@@ -195,6 +195,12 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
     // task is for — so the durable bound has to know which row is which. The
     // caller trims an oversized step before it gets here; this keeps both
     // bounds regardless of what the caller computed.
+    //
+    // Each bound carries [`SANDBOX_TOOL_CALL_REFUSAL_RESERVE`] rows past what
+    // the run may spend on executed calls. Those rows exist so the worker can
+    // answer a call made after a budget ran out; nothing here distinguishes
+    // them, because a rejected row is a row and the caller decides what goes
+    // in it.
     let plan_row = |name: &str| name == crate::UPDATE_TASK_PLAN_TOOL;
     let existing_plan_rows = siblings.iter().filter(|(_, name)| plan_row(name)).count();
     let added_plan_rows = entries
@@ -202,9 +208,9 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
         .filter(|entry| plan_row(&entry.call.name))
         .count();
     let over_budget = existing_plan_rows.saturating_add(added_plan_rows)
-        > MAX_SANDBOX_TASK_PLAN_CALLS
+        > MAX_SANDBOX_TASK_PLAN_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE)
         || (siblings.len() - existing_plan_rows).saturating_add(entries.len() - added_plan_rows)
-            > MAX_SANDBOX_TOOL_CALLS;
+            > MAX_SANDBOX_TOOL_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE);
     if !all_resolved || over_budget {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::IdentityConflict);

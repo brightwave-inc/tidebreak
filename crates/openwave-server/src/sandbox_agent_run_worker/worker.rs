@@ -12,6 +12,7 @@ use openwave_core::{
     Result, ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest,
     SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution,
     MAX_SANDBOX_TASK_PLAN_CALLS, MAX_SANDBOX_TOOL_CALLS, MAX_SANDBOX_TOOL_CALLS_PER_STEP,
+    SANDBOX_TOOL_CALL_REFUSAL_RESERVE as REFUSAL_RESERVE,
 };
 use tokio::sync::Notify;
 
@@ -826,6 +827,9 @@ impl SandboxAgentRunWorker {
     /// The step is trimmed to what the run's remaining tool budget can hold
     /// before anything is written: rows are the durable cost, and a batch the
     /// store would refuse is worse than one honest refusal the model can read.
+    /// A step that can hold nothing at all is answered out of the budget's
+    /// refusal reserve rather than failing the run — see
+    /// [`SANDBOX_TOOL_CALL_REFUSAL_RESERVE`](openwave_core::SANDBOX_TOOL_CALL_REFUSAL_RESERVE).
     pub(super) async fn park_sandbox_tool_calls(
         &self,
         run: AgentRun,
@@ -857,21 +861,46 @@ impl SandboxAgentRunWorker {
             *left -= 1;
             admitted += 1;
         }
-        if emitted == 0 || admitted == 0 {
-            // Tool advertisement is withdrawn before a budget runs out, so a
-            // step whose very first call has nothing left to spend has ignored
-            // a request that offered it no such tool at all.
+        if emitted == 0 {
+            // A completion that parked nothing is not a checkpoint at all;
+            // there is no call to answer and nothing durable to write.
             return self
                 .record_failure(
                     &run,
                     lease_token,
-                    AgentError::msg("sandbox tool checkpoint has no budget to park into"),
+                    AgentError::msg("sandbox tool checkpoint has no calls to park"),
                 )
                 .await;
         }
+        // A step whose first call has nothing left to spend called a tool the
+        // request no longer offered. That is a thing models do at the end of a
+        // long transcript, and the run has usually already produced the work it
+        // was asked for, so it is answered rather than killed: the budget keeps
+        // one row back for exactly this, and the answer tells the model to
+        // finish with `done`. Only when that reserve is spent too — the model
+        // ignoring the refusal it can now read — is there nowhere left to go.
+        let refusal_only = admitted == 0;
+        if refusal_only {
+            let spent_reserve = match intents[0].name.as_str() {
+                openwave_core::UPDATE_TASK_PLAN_TOOL => {
+                    previous_budget.plan >= MAX_SANDBOX_TASK_PLAN_CALLS + REFUSAL_RESERVE
+                }
+                _ => previous_budget.work >= MAX_SANDBOX_TOOL_CALLS + REFUSAL_RESERVE,
+            };
+            if spent_reserve {
+                return self
+                    .record_failure(
+                        &run,
+                        lease_token,
+                        AgentError::msg("sandbox tool checkpoint has no budget to park into"),
+                    )
+                    .await;
+            }
+            admitted = 1;
+        }
         let mut intents = intents;
         let dropped = emitted - admitted;
-        if dropped > 0 {
+        if dropped > 0 || refusal_only {
             // The last call the step can afford is answered rather than run, so
             // the model learns why the rest are missing. Everything past it is
             // dropped outright: the transcript is rebuilt from rows, so a call
@@ -889,13 +918,22 @@ impl SandboxAgentRunWorker {
                          them in a later step."
                     ),
                 )
-            } else {
+            } else if dropped > 0 {
                 (
                     "tool_budget_exhausted",
                     format!(
                         "This task's tool budget is exhausted: this call and {dropped} other \
                          call(s) in this step were not run. Finish with done."
                     ),
+                )
+            } else {
+                (
+                    "tool_budget_exhausted",
+                    "This task's tool budget is exhausted and this tool is no longer available: \
+                     the call was not run, and no further call to it will be. Finish now by \
+                     calling done with the filenames you wrote under output/ and a summary of \
+                     what you produced."
+                        .to_owned(),
                 )
             };
             last.disposition = SandboxToolCallDisposition::Rejected {
