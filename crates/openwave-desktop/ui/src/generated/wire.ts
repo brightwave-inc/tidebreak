@@ -2123,9 +2123,7 @@ media_type: string | null,
  * panel, an [`App`] row the apps library. A kind with nowhere to go
  * leaves this `None`.
  *
- * Aliased and `default` because retained projections wrote it as
- * `output_id`, when a published output was the only place a row could
- * point.
+ * `default` because retained projections predate the field.
  *
  * [`Output`]: ResultEntryKind::Output
  * [`App`]: ResultEntryKind::App
