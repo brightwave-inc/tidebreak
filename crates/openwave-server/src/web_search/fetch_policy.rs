@@ -17,7 +17,7 @@ use thiserror::Error;
 use url::{Host, Url};
 
 /// Longest URL accepted for a native page fetch, in bytes.
-pub const MAX_FETCH_URL_BYTES: usize = crate::MAX_RESULT_URL_BYTES;
+pub const MAX_FETCH_URL_BYTES: usize = crate::web_search::MAX_RESULT_URL_BYTES;
 
 /// Why a URL or resolved address may not be fetched.
 ///

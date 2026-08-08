@@ -20,11 +20,9 @@ postgres = ["openwave-core/postgres"]
 openwave-shell-policy = { path = "../openwave-shell-policy" }
 openwave-code-execution = { path = "../openwave-code-execution" }
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
-openwave-connectors = { path = "../openwave-connectors" }
 openwave-egress = { path = "../openwave-egress" }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-router = { path = "../openwave-router" }
-openwave-web-search = { path = "../openwave-web-search", features = ["http", "extract-native"] }
 openwave-sandbox-protocol = { path = "../openwave-sandbox-protocol" }
 axum = { workspace = true }
 # `rt-multi-thread` backs the durable operation log's synchronous `OperationStore`
@@ -54,7 +52,7 @@ cap-std = { workspace = true }
 # Image header inspection only: format sniffing from magic bytes and reading
 # dimensions without decoding pixels. Default features are off so the lean build
 # pulls just the four codecs OpenWave's allowlist accepts.
-image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+image = { workspace = true }
 # Managed-preferences (MDM) plist decoding for the macOS policy reader. A
 # regular dependency, not a macOS-only one, so the extraction stays
 # unit-testable on every OS.
@@ -62,7 +60,7 @@ plist = "=1.10.0"
 # Managed-policy resolution deliberately projects authority failures into a
 # minimal misconfigured state; these warnings are the admin's field
 # diagnostic for what exactly is broken.
-tracing = "=0.1.44"
+tracing = { workspace = true }
 # The shared subscriber both entry points (desktop shell, `openwave serve`)
 # install via [`logging::init_logging`]. Default features stay off: `ansi` and
 # `tracing-log` would pull crates the lockfile doesn't already resolve, and a
@@ -76,7 +74,11 @@ tempfile = { workspace = true }
 # already present in Cargo.lock; making them direct leaves resolution unchanged.
 flate2 = "=1.1.9"
 tar = "=0.4.46"
-url = "=2.5.8"
+url = { workspace = true }
+# Readability + HTML parse stack for native page extraction.
+dom_smoothie = { workspace = true }
+# Must move in lockstep with dom_smoothie (same major parse handoff type).
+dom_query = { workspace = true }
 zip = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

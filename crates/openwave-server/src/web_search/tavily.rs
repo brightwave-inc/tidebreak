@@ -7,8 +7,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::types::{count_words, same_page_url};
-use crate::{
+use super::types::{count_words, same_page_url};
+use crate::web_search::{
     admit_fetch_url, ExtractionMethod, HttpClient, HttpRequest, WebExtractRequest,
     WebExtractResponse, WebSearchCredential, WebSearchError, WebSearchProvider,
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult, MIN_EXTRACT_WORDS,
@@ -304,7 +304,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
+    use crate::web_search::{HttpResponse, WebSearchCredentialState, WebSearchCredentials};
     use openwave_core::{AgentError, SecretProvider};
 
     #[derive(Clone)]
@@ -351,7 +351,7 @@ mod tests {
 
         async fn get(
             &self,
-            _request: crate::HttpGetRequest,
+            _request: crate::web_search::HttpGetRequest,
         ) -> Result<HttpResponse, WebSearchError> {
             unreachable!("the Tavily adapter posts JSON on both endpoints")
         }
@@ -452,7 +452,8 @@ mod tests {
         // this page, and it says so.
         assert!(response.truncated);
         assert!(
-            serde_json::to_vec(&response).unwrap().len() <= crate::MAX_EXTRACT_OUTPUT_BYTES,
+            serde_json::to_vec(&response).unwrap().len()
+                <= crate::web_search::MAX_EXTRACT_OUTPUT_BYTES,
             "extraction exceeded its serialized output budget"
         );
 

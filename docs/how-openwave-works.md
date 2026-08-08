@@ -816,7 +816,7 @@ isolation is explicitly not claimed.
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
-| Connectors | `crates/openwave-connectors` | Placeholder, not a working product surface yet |
+| Connectors | `crates/openwave-server/src/connectors` | Gateway and ChatGPT loopback OAuth (PKCE), owned by the server host |
 
 The dependency direction is intentionally simple: clients compose libraries,
 and libraries point down toward `openwave-core`. Core defines the contracts; it

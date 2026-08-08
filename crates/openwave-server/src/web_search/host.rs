@@ -2,25 +2,25 @@
 //!
 //! A selected provider becomes usable only when the sandbox worker or approved
 //! foreground tool explicitly asks [`resolve_provider`] for it. Provider
-//! endpoints are fixed in `openwave-web-search`; this config never accepts an
+//! endpoints are fixed in `this module`; this config never accepts an
 //! endpoint, a secret reference, or a model-controlled network target.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use openwave_core::{
-    ApprovalClass, ChatId, DocumentId, DocumentUpsert, NetworkPolicy, Result, SecretProvider,
-    Store, Tool, ToolCtx, ToolOutput, ToolSpec, TurnWebSearch, VendorWebSearch,
-};
-use openwave_web_search::{
+use super::{
     BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, NativeExtractor,
     OutboundOrigin, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher, SearxngBaseUrl,
     SearxngProvider, StoredExtractedPage, TavilyProvider, TokioHostResolver, WebExtractFailure,
     WebExtractRequest, WebExtractResponse, WebExtractTool, WebSearchCredential,
     WebSearchCredentialState, WebSearchCredentials, WebSearchProvider, WebSearchProviderKind,
     WebSearchResolver, WebSearchResolverError, WebSearchTool,
+};
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use openwave_core::{
+    ApprovalClass, ChatId, DocumentId, DocumentUpsert, NetworkPolicy, Result, SecretProvider,
+    Store, Tool, ToolCtx, ToolOutput, ToolSpec, TurnWebSearch, VendorWebSearch,
 };
 use serde::{Deserialize, Serialize};
 

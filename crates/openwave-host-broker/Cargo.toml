@@ -27,7 +27,7 @@ uuid.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-tempfile = "=3.27.0"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

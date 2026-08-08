@@ -240,6 +240,25 @@ jobs:
       - name: Check RustSec advisories
         run: cargo deny --all-features check advisories
 
+
+  unused-deps:
+    name: unused deps (cargo-machete)
+    needs: changes
+    # Graph-only; cheap enough for every Rust-scoped PR. Complements cargo-deny
+    # (advisories) without requiring a full compile.
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        with:
+          tool: cargo-machete@0.9.1
+      - name: Check for unused dependencies
+        run: cargo machete
+
+
   fmt:
     name: rustfmt
     needs: changes

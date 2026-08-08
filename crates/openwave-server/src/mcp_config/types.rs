@@ -517,7 +517,7 @@ impl McpServerDefinition {
 /// at install, not a string the model just produced. Failing admission is a
 /// per-server connection failure: the plugin's other servers still start.
 async fn admit_plugin_endpoint(url: &str) -> Result<()> {
-    use openwave_web_search::admit_fetch_address;
+    use crate::web_search::admit_fetch_address;
 
     let parsed = url::Url::parse(url)
         .map_err(|_| AgentError::config("plugin MCP server URL is not a valid URL"))?;

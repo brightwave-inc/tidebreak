@@ -2,7 +2,7 @@
 //! bounded, readable text.
 //!
 //! The extractor follows redirects manually so that every hop — not just the
-//! first URL — passes the full [`crate::fetch_policy`] admission check with a
+//! first URL — passes the full [`super::fetch_policy`] admission check with a
 //! fresh DNS resolution, and each connection is pinned to the exact addresses
 //! that were vetted. That re-vetting is the defense against DNS rebinding and
 //! redirect-based server-side request forgery: a page may not launder a fetch
@@ -31,9 +31,9 @@ use async_trait::async_trait;
 use thiserror::Error;
 use url::{Host, Url};
 
-use crate::fetch_policy::{admit_fetch_address, admit_fetch_url, FetchPolicyViolation};
-use crate::types::{count_words, sanitized_content, sanitized_title, EXTRACT_TRUNCATION_MARKER};
-use crate::MIN_EXTRACT_WORDS;
+use super::fetch_policy::{admit_fetch_address, admit_fetch_url, FetchPolicyViolation};
+use super::types::{count_words, sanitized_content, sanitized_title, EXTRACT_TRUNCATION_MARKER};
+use crate::web_search::MIN_EXTRACT_WORDS;
 
 /// Largest response body retained for one native page fetch.
 pub const MAX_FETCH_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -231,7 +231,10 @@ impl<T: PageFetchTransport, R: HostAddressResolver> NativeExtractor<T, R> {
         let (content, truncated) = truncate_head_tail(&content, MAX_EXTRACT_CONTENT_CHARS);
         Ok(NativeExtraction {
             url: final_url.into(),
-            title: crate::types::truncate(&sanitized_title(&title), crate::MAX_RESULT_TITLE_CHARS),
+            title: super::types::truncate(
+                &sanitized_title(&title),
+                crate::web_search::MAX_RESULT_TITLE_CHARS,
+            ),
             content,
             word_count,
             truncated,
@@ -327,7 +330,7 @@ fn is_redirect_status(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
-impl From<NativeExtractError> for crate::WebExtractFailure {
+impl From<NativeExtractError> for crate::web_search::WebExtractFailure {
     /// Project the engine's closed error onto the model-facing failure
     /// vocabulary, dropping the transport prose on the way: the caller gets an
     /// actionable reason, never a diagnostic payload.
@@ -357,14 +360,16 @@ impl From<NativeExtractError> for crate::WebExtractFailure {
 }
 
 #[async_trait]
-impl<T: PageFetchTransport, R: HostAddressResolver> crate::PageExtractor for NativeExtractor<T, R> {
+impl<T: PageFetchTransport, R: HostAddressResolver> crate::web_search::PageExtractor
+    for NativeExtractor<T, R>
+{
     async fn extract_page(
         &self,
-        request: &crate::WebExtractRequest,
-    ) -> Result<crate::WebExtractResponse, crate::WebExtractFailure> {
+        request: &crate::web_search::WebExtractRequest,
+    ) -> Result<crate::web_search::WebExtractResponse, crate::web_search::WebExtractFailure> {
         let extraction = self.extract(request.url()).await?;
-        crate::WebExtractResponse::new(
-            crate::ExtractionMethod::Native,
+        crate::web_search::WebExtractResponse::new(
+            crate::web_search::ExtractionMethod::Native,
             &extraction.url,
             &extraction.title,
             extraction.content,
@@ -374,7 +379,7 @@ impl<T: PageFetchTransport, R: HostAddressResolver> crate::PageExtractor for Nat
         // The final URL came out of the admission policy, so this is
         // unreachable in practice; refusing the URL is the honest projection
         // if it ever is not.
-        .map_err(|_| crate::WebExtractFailure::UrlNotAllowed)
+        .map_err(|_| crate::web_search::WebExtractFailure::UrlNotAllowed)
     }
 }
 
@@ -397,7 +402,7 @@ fn extractable_media_type(value: Option<&str>) -> Result<PageMediaType, NativeEx
         "text/html" | "application/xhtml+xml" => Ok(PageMediaType::Html),
         "text/plain" | "text/markdown" => Ok(PageMediaType::Text),
         _ => Err(NativeExtractError::UnsupportedContentType(
-            crate::types::truncate(&essence, MAX_CONTENT_TYPE_ECHO_CHARS),
+            super::types::truncate(&essence, MAX_CONTENT_TYPE_ECHO_CHARS),
         )),
     }
 }

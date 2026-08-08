@@ -395,7 +395,7 @@ pub enum ProviderCredential {
         key: String,
     },
     /// An OAuth-backed provider. A marker, not the tokens: the token set lives
-    /// in its own keychain entry managed by `openwave-connectors`, so the
+    /// in its own keychain entry managed by `crate::connectors`, so the
     /// rotating material never rides the provider settings surface.
     Oauth {},
     /// A service-account key file, kept verbatim for the future token exchange.
@@ -1092,7 +1092,7 @@ pub async fn write_credential(
     // Mutual exclusivity for OpenAI: an API key replaces ChatGPT OAuth.
     if kind == ProviderKind::Openai && matches!(credential, ProviderCredential::ApiKey { .. }) {
         let _ = secrets
-            .delete_secret(openwave_connectors::CHATGPT_SECRET_KEY)
+            .delete_secret(crate::connectors::CHATGPT_SECRET_KEY)
             .await;
     }
     let raw = serde_json::to_string(credential)
@@ -1111,7 +1111,7 @@ pub async fn delete_credential(secrets: &dyn SecretProvider, kind: ProviderKind)
     }
     if kind == ProviderKind::Openai {
         let _ = secrets
-            .delete_secret(openwave_connectors::CHATGPT_SECRET_KEY)
+            .delete_secret(crate::connectors::CHATGPT_SECRET_KEY)
             .await;
     }
     Ok(())
@@ -1133,7 +1133,7 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
                 return true;
             }
             if kind == ProviderKind::Openai && matches!(credential, ProviderCredential::Oauth {}) {
-                return openwave_connectors::has_stored_chatgpt_credentials(secrets).await;
+                return crate::connectors::has_stored_chatgpt_credentials(secrets).await;
             }
             if kind == ProviderKind::Bedrock
                 && matches!(credential, ProviderCredential::AwsCredentials { .. })
@@ -1148,7 +1148,7 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
     }
     if kind == ProviderKind::ModelGateway {
         // The gateway's credential is its stored OAuth session, not a key.
-        return openwave_connectors::has_stored_credentials(secrets).await;
+        return crate::connectors::has_stored_credentials(secrets).await;
     }
     env_api_key(kind).is_some()
         || (kind == ProviderKind::Bedrock && env_aws_credentials().is_some())
@@ -1161,7 +1161,7 @@ async fn auth_mode_for(
     match read_credential(secrets, kind).await.ok().flatten() {
         Some(ProviderCredential::Oauth {})
             if kind == ProviderKind::Openai
-                && openwave_connectors::has_stored_chatgpt_credentials(secrets).await =>
+                && crate::connectors::has_stored_chatgpt_credentials(secrets).await =>
         {
             Some(ProviderAuthMode::Chatgpt)
         }
@@ -1219,7 +1219,7 @@ pub async fn list_providers(
                 // not read as this deployment's credential.
                 has_credential: match policy.gateway_url.as_deref() {
                     Some(gateway_url) => {
-                        openwave_connectors::has_stored_credentials_for(secrets, gateway_url).await
+                        crate::connectors::has_stored_credentials_for(secrets, gateway_url).await
                     }
                     None => false,
                 },
@@ -1828,7 +1828,7 @@ pub async fn collect_routes(
             routes.push(openwave_router::Route {
                 kind: route_kind(kind),
                 api_key: String::new(),
-                base_url: Some(openwave_connectors::CODEX_BASE_URL.to_string()),
+                base_url: Some(crate::connectors::CODEX_BASE_URL.to_string()),
                 curated_models: model_registry::models_for(kind)
                     .map(|spec| spec.id.to_string())
                     .collect(),
@@ -2092,7 +2092,7 @@ pub async fn provider_is_usable(
         let Some(gateway_url) = policy.gateway_url.as_deref() else {
             return Ok(false);
         };
-        return Ok(openwave_connectors::has_stored_credentials_for(secrets, gateway_url).await);
+        return Ok(crate::connectors::has_stored_credentials_for(secrets, gateway_url).await);
     }
     if kind == ProviderKind::ModelGateway {
         return Ok(false);

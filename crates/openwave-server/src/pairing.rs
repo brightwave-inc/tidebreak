@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use openwave_connectors::GatewayAuthConfig;
+use crate::connectors::GatewayAuthConfig;
 use openwave_core::{AgentError, Result, SecretProvider, Store};
 use tokio::sync::Mutex;
 
@@ -742,7 +742,7 @@ mod tests {
         managed_policy::provision(&*store, &old_url).await.unwrap();
         let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
         let secrets = test_secrets();
-        let credentials: openwave_connectors::GatewayCredentials = serde_json::from_value(json!({
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": old_url,
             "installation_id": "install-1",
             "user_id": "user-1",
@@ -750,7 +750,7 @@ mod tests {
             "access_tokens": {}
         }))
         .unwrap();
-        openwave_connectors::CredentialVault::new(secrets.clone())
+        crate::connectors::CredentialVault::new(secrets.clone())
             .save(&credentials)
             .await
             .unwrap();
@@ -781,7 +781,7 @@ mod tests {
             "the old session's refresh token must be revoked at the old gateway"
         );
         assert!(
-            !openwave_connectors::has_stored_credentials(&*secrets).await,
+            !crate::connectors::has_stored_credentials(&*secrets).await,
             "the old session must be cleared before the new one is stored"
         );
     }

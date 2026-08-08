@@ -15,10 +15,10 @@
 //! signature. Read the value first and hold it in memory, so a failure to
 //! delete leaves the credential in place.
 
+use crate::web_search::WebSearchProviderKind;
 use openwave_code_execution::{DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY};
 use openwave_core::connected_app::ConnectedAppKind;
 use openwave_core::{Result, SecretProvider, Store};
-use openwave_web_search::WebSearchProviderKind;
 
 use crate::providers::{ProviderKind, LEGACY_ANTHROPIC_API_KEY};
 

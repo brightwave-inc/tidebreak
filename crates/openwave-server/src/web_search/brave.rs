@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::types::{
+use super::types::{
     domain_scoped_query, parse_iso8601_instant, result_within_domains,
     result_within_published_window,
 };
-use crate::{
+use crate::web_search::{
     HttpClient, HttpGetRequest, WebSearchCredential, WebSearchError, WebSearchProvider,
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult,
 };
@@ -24,7 +24,7 @@ const MAX_COUNT: usize = 20;
 
 /// The crate never asks for more results than Brave will return, so `count`
 /// can carry `max_results` unclamped.
-const _: () = assert!(crate::MAX_RESULTS <= MAX_COUNT);
+const _: () = assert!(crate::web_search::MAX_RESULTS <= MAX_COUNT);
 
 /// Longest query Brave accepts in `q`.
 ///
@@ -33,7 +33,7 @@ const _: () = assert!(crate::MAX_RESULTS <= MAX_COUNT);
 /// the limit rather than assuming the operators always fit.
 const MAX_QUERY_CHARS: usize = 400;
 
-const _: () = assert!(crate::MAX_QUERY_CHARS <= MAX_QUERY_CHARS);
+const _: () = assert!(crate::web_search::MAX_QUERY_CHARS <= MAX_QUERY_CHARS);
 
 /// Brave adapter backed by an injected HTTP client.
 #[derive(Clone, Debug)]
@@ -208,7 +208,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{
+    use crate::web_search::{
         HttpRequest, HttpResponse, SearchDomain, WebExtractRequest, WebSearchCredentialState,
         WebSearchCredentials,
     };
@@ -330,7 +330,9 @@ mod tests {
             first.published_at.unwrap().to_rfc3339(),
             "2026-07-01T09:30:00+00:00"
         );
-        assert!(serde_json::to_vec(&response).unwrap().len() <= crate::MAX_OUTPUT_BYTES);
+        assert!(
+            serde_json::to_vec(&response).unwrap().len() <= crate::web_search::MAX_OUTPUT_BYTES
+        );
 
         let sent = sent.lock().unwrap();
         let sent = sent.as_ref().unwrap();

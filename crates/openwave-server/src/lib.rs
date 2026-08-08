@@ -24,6 +24,7 @@ mod chatgpt_runtime;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod connected_apps;
+pub mod connectors;
 /// The unified consent read model: standing tool grants and host-broker
 /// capability grants as one renderer-facing statement shape.
 pub mod consent;

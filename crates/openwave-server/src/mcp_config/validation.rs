@@ -147,7 +147,7 @@ pub(super) fn validate_no_process_fields(server: &McpServerDefinition) -> Result
 /// itself lives in one place — the connector that embeds the slug into the
 /// request path and token resource.
 pub(super) fn validate_gateway_endpoint_slug(server_name: &str, slug: &str) -> Result<()> {
-    openwave_connectors::validate_mcp_endpoint_slug(slug).map_err(|_| {
+    crate::connectors::validate_mcp_endpoint_slug(slug).map_err(|_| {
         server_error(
             server_name,
             "gateway endpoint must be 1-127 ASCII letters, digits, '_' or '-'",
@@ -210,7 +210,7 @@ pub(super) fn connection_diagnostic(
     error: &AgentError,
 ) -> String {
     if definition.gateway_endpoint.is_some() {
-        if openwave_connectors::is_sign_in_required(error) {
+        if crate::connectors::is_sign_in_required(error) {
             return "Sign in to the model gateway to reconnect this server.".to_string();
         }
         if matches!(error, AgentError::Config(_)) {

@@ -32,6 +32,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::web_search::{admit_fetch_address, admit_fetch_url};
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
@@ -44,7 +45,6 @@ use openwave_code_execution::{
     AGENT_PLUGIN_SPEC_VERSION, PLUGIN_INSTALL_STAMP_FILE, PLUGIN_INSTALL_STAMP_SCHEMA,
     PLUGIN_MANIFEST_FILE, SKILL_MANIFEST_FILE, SKILL_SCRIPTS_DIR,
 };
-use openwave_web_search::{admit_fetch_address, admit_fetch_url};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::{Host, Url};

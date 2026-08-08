@@ -88,5 +88,14 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate
 # current one — reading stopped at the first cluster boundary with "encountered
 # an unexpected element". Upstream fixed it in 619c680 (Symphonia #541) but has
 # not cut a release. Drop this patch for a plain version bump once 0.6.1 ships.
+
+tracing = "=0.1.44"
+url = "=2.5.8"
+# Image header/decode allowlist codecs shared by server, mcp, code-execution.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+dom_smoothie = "=0.18.0"
+# Exact version dom_smoothie builds against; pins move together.
+dom_query = "=0.28.0"
+
 [patch.crates-io]
 symphonia = { git = "https://github.com/pdeljanov/Symphonia", rev = "619c6806e5122b3206b8938773a801dd4a8a5950" }

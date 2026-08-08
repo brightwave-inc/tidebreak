@@ -2323,7 +2323,7 @@ impl ModelProvider for WebSearchFlowModelProvider {
                     .expect("foreground agent must advertise web_search");
                 assert_eq!(
                     spec.input_schema["properties"]["query"]["maxLength"],
-                    openwave_web_search::MAX_QUERY_CHARS
+                    crate::web_search::MAX_QUERY_CHARS
                 );
                 assert_eq!(spec.input_schema["additionalProperties"], false);
                 vec![

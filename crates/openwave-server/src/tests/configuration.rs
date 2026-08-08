@@ -2277,7 +2277,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     crate::managed_policy::provision(&*store, "https://corp.gateway")
         .await
         .unwrap();
-    let credentials: openwave_connectors::GatewayCredentials =
+    let credentials: crate::connectors::GatewayCredentials =
         serde_json::from_value(serde_json::json!({
             "base_url": "https://corp.gateway/",
             "installation_id": "install-1",
@@ -2286,7 +2286,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
             "access_tokens": {}
         }))
         .unwrap();
-    openwave_connectors::CredentialVault::new(secrets)
+    crate::connectors::CredentialVault::new(secrets)
         .save(&credentials)
         .await
         .unwrap();
@@ -3533,7 +3533,7 @@ async fn a_superseded_gateway_session_never_reads_usable() {
     );
     let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
     let seed = |secrets: Arc<dyn SecretProvider>, base_url: &'static str| async move {
-        let credentials: openwave_connectors::GatewayCredentials =
+        let credentials: crate::connectors::GatewayCredentials =
             serde_json::from_value(serde_json::json!({
                 "base_url": base_url,
                 "installation_id": "install-1",
@@ -3542,7 +3542,7 @@ async fn a_superseded_gateway_session_never_reads_usable() {
                 "access_tokens": {}
             }))
             .unwrap();
-        openwave_connectors::CredentialVault::new(secrets)
+        crate::connectors::CredentialVault::new(secrets)
             .save(&credentials)
             .await
             .unwrap();

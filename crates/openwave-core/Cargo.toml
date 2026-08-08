@@ -48,7 +48,7 @@ schemars = { workspace = true }
 jsonschema = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tracing = "=0.1.44"
+tracing = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
 chrono = { workspace = true }
 ts-rs = { workspace = true }
@@ -70,4 +70,4 @@ keyring = { version = "=3.6.3", features = ["async-secret-service", "crypto-rust
 
 [dev-dependencies]
 tokio = { workspace = true }
-tempfile = "=3.27.0"
+tempfile = { workspace = true }
