@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListTree, MessageSquare } from "lucide-react";
 
 import type { ChatMessage } from "./MessageList";
@@ -81,7 +81,15 @@ export function TranscriptNavigation({
 }) {
   const [open, setOpen] = useState(false);
   const [railVisible, setRailVisible] = useStoredRailVisibility();
-  const indicatorRefs = useRailPositions(scrollElement, entries, railVisible);
+  const railEntries = useMemo(
+    () => entries.filter((entry) => entry.kind === "user"),
+    [entries],
+  );
+  const indicatorRefs = useRailPositions(
+    scrollElement,
+    railEntries,
+    railVisible,
+  );
   const setIndicatorRef = useCallback(
     (anchorId: string, node: HTMLButtonElement | null) => {
       if (node) indicatorRefs.current.set(anchorId, node);
@@ -99,7 +107,7 @@ export function TranscriptNavigation({
           className="pointer-events-none absolute top-0 right-2 bottom-0 z-[2] hidden w-6 p-2 md:block"
           aria-label="Transcript rail"
         >
-          {entries.map((entry) => (
+          {railEntries.map((entry) => (
             <WithTooltip key={entry.anchorId} label={entry.label} side="left">
               <button
                 ref={(node) => setIndicatorRef(entry.anchorId, node)}
@@ -140,7 +148,7 @@ export function TranscriptNavigation({
                 checked={railVisible}
                 onCheckedChange={(checked) => setRailVisible(checked === true)}
               />
-              Show rail indicators
+              Show user message indicators
             </label>
             <div className="max-h-80 overflow-y-auto p-1">
               {entries.map((entry) => (
