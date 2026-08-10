@@ -223,9 +223,9 @@ mod tests {
         assert!(!html.contains("<script>"));
         // Self-contained: no stylesheets, fonts, images, or scripts fetched
         // over the network. The SVG xmlns is an identifier, not a request.
-        assert!(!html.contains("href="http"));
+        assert!(!html.contains(r#"href="http"#));
         assert!(!html.contains("href='http"));
-        assert!(!html.contains("src="http"));
+        assert!(!html.contains(r#"src="http"#));
         assert!(!html.contains("src='http"));
         assert!(!html.contains("@import"));
         assert!(!html.contains("url(http"));
