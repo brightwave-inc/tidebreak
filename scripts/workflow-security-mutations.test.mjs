@@ -23,6 +23,7 @@ const fixturePaths = [
   "crates/openwave-desktop/Cargo.toml",
   "crates/openwave-desktop/src/lib.rs",
   "crates/openwave-desktop/src/updater.rs",
+  "crates/openwave-desktop/src/broker.rs",
   "deploy/self-host/Dockerfile.dockerignore",
   "scripts/stage-self-host-build-context.sh",
   "deny.toml",
