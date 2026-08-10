@@ -24,6 +24,7 @@
 //!
 //! [`SecretProvider`]: openwave_core::SecretProvider
 
+mod callback_page;
 mod chatgpt;
 mod gateway;
 
