@@ -12,6 +12,7 @@
 //!   they change while the app runs, so they don't belong here.
 
 use std::ffi::OsString;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -93,7 +94,21 @@ pub struct Config {
     /// ignores this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_tokens_file: Option<PathBuf>,
+    /// The address the API binds, for deployments that must be reachable from
+    /// outside the machine (a container publishing a port, say). `None` — the
+    /// default — keeps the loopback, ephemeral-port bind every profile has
+    /// always used.
+    ///
+    /// Honoured only by [`Profile::SelfHost`]. Setting it on the desktop
+    /// profile is a boot error rather than a silent override: see
+    /// [`Config::bind_addr`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<SocketAddr>,
 }
+
+/// The bind every profile uses when no address is configured: loopback, and
+/// an ephemeral port the OS picks.
+const DEFAULT_BIND: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
 impl Config {
     /// The per-install directory user-authored skill packages are read from.
@@ -149,6 +164,7 @@ impl Config {
             container_execution_enabled: false,
             container_image: None,
             auth_tokens_file: None,
+            listen_addr: None,
         }
     }
 
@@ -158,8 +174,9 @@ impl Config {
     /// this to the platform's app-data location),
     /// `OPENWAVE_CONTAINER_EXECUTION_ENABLED` (default `false`),
     /// `OPENWAVE_CONTAINER_IMAGE` (defaulting to the server's default agent
-    /// image), and `OPENWAVE_AUTH_TOKENS_FILE` (self-host only; required
-    /// there).
+    /// image), `OPENWAVE_AUTH_TOKENS_FILE` (self-host only; required there),
+    /// and `OPENWAVE_LISTEN_ADDR` (self-host only; default loopback on an
+    /// ephemeral port).
     pub fn from_env() -> Result<Self> {
         Self::from_vars(
             std::env::var("OPENWAVE_PROFILE").ok(),
@@ -167,6 +184,7 @@ impl Config {
             std::env::var("OPENWAVE_CONTAINER_EXECUTION_ENABLED").ok(),
             std::env::var("OPENWAVE_CONTAINER_IMAGE").ok(),
             std::env::var_os("OPENWAVE_AUTH_TOKENS_FILE"),
+            std::env::var("OPENWAVE_LISTEN_ADDR").ok(),
         )
     }
 
@@ -183,6 +201,7 @@ impl Config {
         container_execution_enabled: Option<String>,
         container_image: Option<String>,
         auth_tokens_file: Option<OsString>,
+        listen_addr: Option<String>,
     ) -> Result<Self> {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
             None | Some("desktop") => Profile::Desktop,
@@ -208,6 +227,15 @@ impl Config {
         let auth_tokens_file = auth_tokens_file
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
+        let listen_addr = match listen_addr.filter(|value| !value.is_empty()) {
+            None => None,
+            Some(value) => Some(value.parse::<SocketAddr>().map_err(|_| {
+                AgentError::config(format!(
+                    "invalid OPENWAVE_LISTEN_ADDR {value:?}: expected an address and port, \
+                     e.g. `0.0.0.0:8080`"
+                ))
+            })?),
+        };
         Ok(Self {
             profile,
             data_dir,
@@ -220,7 +248,34 @@ impl Config {
             container_execution_enabled,
             container_image,
             auth_tokens_file,
+            listen_addr,
         })
+    }
+
+    /// The socket the API should bind for this config.
+    ///
+    /// Absent configuration means loopback on an ephemeral port, which is what
+    /// every profile did before the address was configurable.
+    ///
+    /// **The desktop profile refuses a configured address rather than
+    /// honouring it.** That server's per-launch bearer is the only thing
+    /// standing between the agent and any other process on the machine, and
+    /// its `Origin`/`Host` checks assume a loopback bind; a desktop server
+    /// listening on a routable interface would be a different security posture
+    /// reached by an environment variable nobody reviewed. Failing the boot is
+    /// the point — silently ignoring the variable would leave an operator
+    /// believing they had published a port.
+    pub fn bind_addr(&self) -> Result<SocketAddr> {
+        match (self.profile, self.listen_addr) {
+            (_, None) => Ok(DEFAULT_BIND),
+            (Profile::SelfHost, Some(addr)) => Ok(addr),
+            (Profile::Desktop, Some(addr)) => Err(AgentError::config(format!(
+                "refusing to bind the desktop profile to {addr}: the desktop server is \
+                 loopback-only, and its per-launch token is the only thing separating the \
+                 agent from other local processes. Unset OPENWAVE_LISTEN_ADDR, or run \
+                 OPENWAVE_PROFILE=self_host to publish a port"
+            ))),
+        }
     }
 
     /// The default `Store` connection URL for this config.
@@ -267,7 +322,8 @@ mod tests {
     fn empty_data_dir_var_falls_back_to_the_default() {
         // `OPENWAVE_DATA_DIR=` (set but empty) must behave like unset, not point
         // the store at `openwave.db` in the current directory.
-        let config = Config::from_vars(None, Some(OsString::new()), None, None, None).unwrap();
+        let config =
+            Config::from_vars(None, Some(OsString::new()), None, None, None, None).unwrap();
         let expected = std::env::current_dir().unwrap().join(".openwave");
         assert_eq!(config.data_dir, expected);
         assert_eq!(config.profile, Profile::Desktop);
@@ -278,6 +334,7 @@ mod tests {
         let config = Config::from_vars(
             Some(String::new()),
             Some(OsString::from("/data")),
+            None,
             None,
             None,
             None,
@@ -294,6 +351,7 @@ mod tests {
             None,
             None,
             Some(OsString::from("/etc/openwave/tokens")),
+            None,
         )
         .unwrap();
         assert_eq!(config.profile, Profile::SelfHost);
@@ -306,7 +364,52 @@ mod tests {
 
     #[test]
     fn unknown_profile_var_is_an_error() {
-        assert!(Config::from_vars(Some("bogus".into()), None, None, None, None).is_err());
+        assert!(Config::from_vars(Some("bogus".into()), None, None, None, None, None).is_err());
+    }
+
+    /// The desktop server is loopback-only by design, so a configured address
+    /// must stop the boot rather than quietly not applying — an operator who
+    /// set the variable would otherwise believe they had published a port.
+    #[test]
+    fn the_desktop_profile_refuses_a_configured_listen_address() {
+        let mut config = Config::desktop("/data");
+        assert_eq!(config.bind_addr().unwrap(), DEFAULT_BIND);
+
+        config.listen_addr = Some("0.0.0.0:8080".parse().unwrap());
+        let refusal = config.bind_addr().unwrap_err().to_string();
+        assert!(
+            refusal.contains("loopback-only") && refusal.contains("self_host"),
+            "the refusal must name the remedy: {refusal}"
+        );
+    }
+
+    #[test]
+    fn self_host_binds_the_configured_address_and_rejects_a_malformed_one() {
+        let config = Config::from_vars(
+            Some("self_host".into()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            Some("0.0.0.0:8080".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            config.bind_addr().unwrap(),
+            "0.0.0.0:8080".parse::<SocketAddr>().unwrap()
+        );
+
+        // A port-less host is the likely typo, and it must not silently fall
+        // back to the loopback default the operator was trying to escape.
+        assert!(Config::from_vars(
+            Some("self_host".into()),
+            None,
+            None,
+            None,
+            None,
+            Some("0.0.0.0".into())
+        )
+        .is_err());
     }
 
     #[test]
@@ -343,6 +446,7 @@ mod tests {
             Some("true".into()),
             Some("openwave-sandbox-agent:dev".into()),
             None,
+            None,
         )
         .unwrap();
         assert!(config.container_execution_enabled);
@@ -350,6 +454,6 @@ mod tests {
             config.container_image.as_deref(),
             Some("openwave-sandbox-agent:dev")
         );
-        assert!(Config::from_vars(None, None, Some("yes".into()), None, None).is_err());
+        assert!(Config::from_vars(None, None, Some("yes".into()), None, None, None).is_err());
     }
 }

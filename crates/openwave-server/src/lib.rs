@@ -11,6 +11,11 @@
 //! /chats/{id}/messages` to start a turn (one per chat at a time), and
 //! `WS /chats/{id}/events` to watch it — journaled events are replayed on connect
 //! and then streamed live (snapshot → replay → live).
+//!
+//! The loopback bind is the default, not the only option: a self-host
+//! deployment that must be reachable from outside its machine sets
+//! `OPENWAVE_LISTEN_ADDR`. The desktop profile refuses one — see
+//! [`Config::bind_addr`].
 
 mod agent_run_scratch_reaper;
 mod approval_judge;
@@ -87,7 +92,7 @@ pub mod web_search;
 mod wire_types;
 
 use std::fs::{OpenOptions, TryLockError};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
@@ -922,6 +927,11 @@ async fn bind_inner(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> Result<Server> {
+    // Resolved first, before the instance lock or the store: a desktop profile
+    // handed `OPENWAVE_LISTEN_ADDR` refuses the boot rather than binding a
+    // routable interface, and that refusal should cost nothing and leave
+    // nothing behind. See [`Config::bind_addr`].
+    let bind_addr = config.bind_addr()?;
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
@@ -1177,9 +1187,9 @@ async fn bind_inner(
     let gateway_runtime = state.gateway.clone();
     let router = app(state);
 
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let listener = TcpListener::bind(bind_addr)
         .await
-        .map_err(|e| AgentError::config(format!("failed to bind loopback: {e}")))?;
+        .map_err(|e| AgentError::config(format!("failed to bind {bind_addr}: {e}")))?;
     let local_addr = listener
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;

@@ -1,13 +1,16 @@
 //! OpenWave CLI — the headless daemon and MCP server.
 //!
-//! `openwave serve` boots the in-process HTTP/WebSocket surface on a loopback
-//! port and prints the address and per-launch bearer token it minted, so a local
-//! client (the desktop shell, or a script) can connect. Configuration comes from
+//! `openwave serve` boots the in-process HTTP/WebSocket surface and prints the
+//! address it bound, so a local client (the desktop shell, or a script) can
+//! connect. It binds a loopback, ephemeral port by default, and prints the
+//! per-launch bearer token it minted alongside the address — except on the
+//! self-host profile, where that token authenticates nobody and the address
+//! may be set with `OPENWAVE_LISTEN_ADDR`. Configuration comes from
 //! the environment via [`Config::from_env`] (`OPENWAVE_PROFILE`,
-//! `OPENWAVE_DATA_DIR`, `OPENWAVE_CONTAINER_EXECUTION_ENABLED`, and
-//! `OPENWAVE_CONTAINER_IMAGE`); the model API key comes from
-//! `ANTHROPIC_API_KEY`, and `OPENWAVE_MCP_CONFIG` may name an external
-//! stdio-server configuration file.
+//! `OPENWAVE_DATA_DIR`, `OPENWAVE_CONTAINER_EXECUTION_ENABLED`,
+//! `OPENWAVE_CONTAINER_IMAGE`, and `OPENWAVE_LISTEN_ADDR`); the model API key
+//! comes from `ANTHROPIC_API_KEY`, and `OPENWAVE_MCP_CONFIG` may name an
+//! external stdio-server configuration file.
 //!
 //! `openwave mcp <workspace>` serves the built-in read-only filesystem tools over
 //! MCP stdio, confined to the explicit workspace directory.
@@ -32,7 +35,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use openwave_core::{AgentError, ChatId, Config, ListDir, ReadFile, Result, ToolCtx, ToolRegistry};
+use openwave_core::{
+    AgentError, ChatId, Config, ListDir, Profile, ReadFile, Result, ToolCtx, ToolRegistry,
+};
 
 mod api;
 mod print;
@@ -172,16 +177,24 @@ fn profile_config() -> Result<Config> {
 /// Bind the server and run its accept loop, announcing where to reach it.
 async fn serve() -> Result<()> {
     let config = profile_config()?;
+    let profile = config.profile;
     // Tracing events land in `logs/openwave.log` under the profile data dir
     // (plus stderr in debug builds); see `openwave_server::logging`.
     openwave_server::logging::init_logging(&config.data_dir);
     let server = openwave_server::bind_configured(config).await?;
-    // The address and token are the client's entry point: the parent process that
-    // launched the daemon reads them from stdout to connect. The token is a secret,
-    // so an integrator should capture this process's stdout directly (a piped
-    // child) rather than run the daemon under a logging supervisor.
+    // The address is the client's entry point: the parent process that launched
+    // the daemon reads it from stdout to connect, and a container entrypoint
+    // waits on the same line.
     println!("openwave: listening on http://{}", server.local_addr());
-    println!("openwave: token {}", server.token());
+    // The token is a secret, so an integrator should capture this process's
+    // stdout directly (a piped child) rather than run the daemon under a
+    // logging supervisor. On self-host it is not printed at all: the
+    // per-launch bearer names nobody on a shared deployment and authenticates
+    // nobody there (see the server's `auth` module docs), so printing it into
+    // a container's logs would only invite someone to try it.
+    if profile != Profile::SelfHost {
+        println!("openwave: token {}", server.token());
+    }
     server.serve().await
 }
 
