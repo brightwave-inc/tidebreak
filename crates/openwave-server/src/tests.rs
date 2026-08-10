@@ -54,6 +54,12 @@ mod workers;
 use conversations::patch_chat;
 use lifecycle::{post_json, post_native_json, steer_turn, steer_turn_with_id};
 
+/// Self-host fixture credentials, named rather than inlined: the token floor
+/// is 32 characters, and inline high-entropy literals trip the secret scan.
+/// Alice administers the fixture deployments; Bob is a member.
+const ALICE_TOKEN: &str = "alice-token-padded-out-to-thirty-two";
+const BOB_TOKEN: &str = "bob-token-padded-out-to-thirty-two-x";
+
 struct MigratedSqliteTemplate {
     _directory: tempfile::TempDir,
     database: std::path::PathBuf,

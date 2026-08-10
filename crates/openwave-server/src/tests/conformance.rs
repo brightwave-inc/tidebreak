@@ -16,18 +16,17 @@ use openwave_core::{ApprovalDecision, ApprovalGate, ApprovalRequest};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-const ALICE_TOKEN: &str = "alice-token-0123456789abcdef";
-const BOB_TOKEN: &str = "bob-token-9876543210fedcba";
-
 /// A self-host app over one shared store, authenticating the two named
-/// principals above (and nothing else).
+/// principals above (and nothing else). Alice administers the deployment;
+/// Bob is an ordinary member, which is also what makes this fixture a valid
+/// token file — one that names no admin refuses to load.
 async fn self_host_app() -> (Router, AppState, Arc<dyn Store>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("conformance.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
     let tokens_file = dir.path().join("tokens");
     std::fs::write(
         &tokens_file,
-        format!("alice {ALICE_TOKEN}\nbob {BOB_TOKEN}\n"),
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
     )
     .unwrap();
     let mut config = Config::desktop(dir.path());
@@ -441,4 +440,148 @@ async fn self_host_boot_fails_closed_without_a_principal_naming_authenticator() 
         refusal.contains("names no principals"),
         "an empty authenticator must refuse boot: {refusal}"
     );
+
+    // Nor can it open behind an authenticator nobody can configure through.
+    std::fs::write(
+        config.auth_tokens_file.as_deref().unwrap(),
+        format!("alice {ALICE_TOKEN}\n"),
+    )
+    .unwrap();
+    let refusal = match crate::connect_store(&config).await {
+        Err(refusal) => refusal.to_string(),
+        Ok(_) => panic!("a self-host store must not open with no administrator"),
+    };
+    assert!(
+        refusal.contains("names no administrator"),
+        "a deployment nobody can configure must refuse boot: {refusal}"
+    );
+}
+
+/// The deployment plane, enumerated. This list is the canonical statement of
+/// which routes reconfigure the deployment or touch its shared secrets: a
+/// member is refused every one of them, and an admin passes the gate on every
+/// one of them.
+///
+/// Enumerating the assembled router is the point. A gate that matched path
+/// prefixes in middleware would survive spot checks on the routes someone
+/// remembered, and silently exempt the next config route whose path does not
+/// fit the pattern.
+fn deployment_plane_routes() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("PUT", "/settings"),
+        ("PUT", "/settings/api-key"),
+        ("DELETE", "/settings/api-key"),
+        ("PUT", "/models/roles/default"),
+        ("PUT", "/web-search"),
+        ("GET", "/web-search/credentials"),
+        ("PUT", "/web-search/credentials/brave"),
+        ("DELETE", "/web-search/credentials/brave"),
+        ("PUT", "/code-execution"),
+        ("GET", "/code-execution/credentials"),
+        ("PUT", "/code-execution/credentials/e2b"),
+        ("DELETE", "/code-execution/credentials/e2b"),
+        ("PUT", "/mcp/servers"),
+        ("POST", "/mcp/servers/example/reconnect"),
+        ("POST", "/plugins/install"),
+        ("PUT", "/plugins/enabled"),
+        ("PUT", "/connected-apps/rest/example"),
+        ("DELETE", "/connected-apps/rest/example"),
+        ("POST", "/connected-apps/rest/spec-preview"),
+        ("POST", "/gateway/sign-in"),
+        ("POST", "/gateway/sign-out"),
+        ("POST", "/gateway/models/sync"),
+        ("PUT", "/providers/anthropic"),
+        ("DELETE", "/providers/anthropic/credential"),
+        ("POST", "/providers/openai/chatgpt/sign-in"),
+        ("POST", "/providers/openai/chatgpt/sign-out"),
+        ("PUT", "/voice-transcription"),
+        ("POST", "/voice-transcription/install"),
+    ]
+}
+
+/// A representative slice of the member plane: reads that only reveal what the
+/// deployment can do, plus the owner-scoped data surface. None of these may
+/// become a `403` when the role gate lands.
+fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("GET", "/settings"),
+        ("GET", "/models"),
+        ("GET", "/web-search"),
+        ("GET", "/code-execution"),
+        ("GET", "/mcp/servers"),
+        ("GET", "/plugins"),
+        ("GET", "/connected-apps"),
+        ("GET", "/apps"),
+        ("GET", "/policy"),
+        ("GET", "/gateway/status"),
+        ("GET", "/gateway/apps"),
+        ("GET", "/providers"),
+        ("GET", "/providers/openai/chatgpt/status"),
+        ("GET", "/voice-transcription"),
+        ("GET", "/chats"),
+        ("GET", "/projects"),
+        ("GET", "/documents"),
+        ("GET", "/inbox"),
+        ("GET", "/grants"),
+        ("GET", "/consent/statements"),
+    ]
+}
+
+/// The plane split, driven across the real router with a real admin and a real
+/// member. `403` is the only status under test: what a deployment-plane
+/// handler does once the gate lets it through is its own concern, so any other
+/// status counts as having passed.
+#[tokio::test]
+async fn the_deployment_plane_admits_admins_and_refuses_members() {
+    let (router, _state, _store, _dir) = self_host_app().await;
+    let admin = format!("Bearer {ALICE_TOKEN}");
+    let member = format!("Bearer {BOB_TOKEN}");
+    let body = Some(serde_json::json!({}));
+
+    for (method, uri) in deployment_plane_routes() {
+        let response = request(&router, method, uri, &member, body.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {uri} reconfigures the deployment and must refuse a member"
+        );
+        let status = request(&router, method, uri, &admin, body.clone())
+            .await
+            .status();
+        assert!(
+            status != StatusCode::FORBIDDEN && status != StatusCode::UNAUTHORIZED,
+            "{method} {uri} must let an admin past the gate, got {status}"
+        );
+    }
+
+    for (method, uri) in member_plane_routes() {
+        let status = request(&router, method, uri, &member, None).await.status();
+        assert!(
+            status != StatusCode::FORBIDDEN && status != StatusCode::UNAUTHORIZED,
+            "{method} {uri} reveals only capability or the caller's own data, \
+             but answered {status} to a member"
+        );
+    }
+}
+
+/// The plausible wrong implementation: a role gate that defaults an identity
+/// when none was attached would pass every authenticated test above. It must
+/// fail closed instead, exactly like the `AuthContext` extractor.
+#[tokio::test]
+async fn the_role_gate_rejects_a_route_no_auth_middleware_covers() {
+    let app = Router::new()
+        .route("/settings", axum::routing::put(|| async { "leaked" }))
+        .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

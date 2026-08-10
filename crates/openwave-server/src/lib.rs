@@ -279,11 +279,130 @@ pub fn app(state: AppState) -> Router {
         axum::middleware::from_fn_with_state(state.clone(), auth::require_client_executor_token),
     );
 
-    let api = Router::new()
+    // The deployment plane: everything that changes what this deployment *is*
+    // or touches its shared secrets — MCP servers (host processes), provider
+    // and search and execution credentials (writes, deletes, and the presence
+    // reads that reveal their metadata), model roles, global settings writes,
+    // plugin install/enable, and connected-app sign-in/sign-out.
+    //
+    // Membership is decided here rather than in the handlers, so a new config
+    // route is gated by where it is registered. Reads that only tell a client
+    // what the deployment can do stay on the member plane below, including the
+    // `GET` halves of paths whose `PUT` lives here.
+    //
+    // See `docs/decisions/0004-self-host-deployment-plane-authorization.md`.
+    let deployment_api = Router::new()
+        .route("/settings", axum::routing::put(routes::put_settings))
         .route(
-            "/settings",
-            get(routes::get_settings).put(routes::put_settings),
+            // The legacy single-key Anthropic shim writes into the same shared
+            // secret store the typed provider credentials do.
+            "/settings/api-key",
+            axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
         )
+        .route(
+            "/models/roles/{role}",
+            axum::routing::put(routes::put_model_role),
+        )
+        .route(
+            "/web-search",
+            axum::routing::put(routes::put_web_search_config),
+        )
+        .route(
+            "/web-search/credentials",
+            get(routes::get_web_search_credentials),
+        )
+        .route(
+            "/web-search/credentials/{provider}",
+            axum::routing::put(routes::put_web_search_credential)
+                .delete(routes::delete_web_search_credential)
+                .layer(DefaultBodyLimit::max(MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES)),
+        )
+        .route(
+            "/code-execution",
+            axum::routing::put(routes::put_code_execution_config)
+                .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
+        )
+        .route(
+            "/code-execution/credentials",
+            get(routes::get_code_execution_credentials),
+        )
+        .route(
+            "/code-execution/credentials/{provider}",
+            axum::routing::put(routes::put_code_execution_credential)
+                .delete(routes::delete_code_execution_credential)
+                .layer(DefaultBodyLimit::max(
+                    MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/mcp/servers",
+            axum::routing::put(routes::put_mcp_servers)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
+        .route(
+            "/mcp/servers/{name}/reconnect",
+            post(routes::post_mcp_server_reconnect),
+        )
+        .route(
+            "/plugins/install",
+            post(routes::post_plugin_install).layer(DefaultBodyLimit::max(
+                plugin_install::MAX_PLUGIN_INSTALL_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/plugins/enabled",
+            axum::routing::put(routes::put_plugins_enabled)
+                .layer(DefaultBodyLimit::max(routes::MAX_PLUGIN_ENABLE_BODY_BYTES)),
+        )
+        .route(
+            "/connected-apps/rest/{id}",
+            axum::routing::put(routes::put_rest_connected_app)
+                .delete(routes::delete_rest_connected_app)
+                .layer(DefaultBodyLimit::max(
+                    routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/connected-apps/rest/spec-preview",
+            post(routes::post_rest_spec_preview).layer(DefaultBodyLimit::max(
+                routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
+            )),
+        )
+        .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
+        .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
+        .route(
+            "/gateway/models/sync",
+            post(routes::post_gateway_models_sync),
+        )
+        .route(
+            "/providers/{kind}",
+            axum::routing::put(routes::put_provider),
+        )
+        .route(
+            "/providers/{kind}/credential",
+            axum::routing::delete(routes::delete_provider_credential),
+        )
+        .route(
+            "/providers/openai/chatgpt/sign-in",
+            post(routes::post_openai_chatgpt_sign_in),
+        )
+        .route(
+            "/providers/openai/chatgpt/sign-out",
+            post(routes::post_openai_chatgpt_sign_out),
+        )
+        .route(
+            "/voice-transcription",
+            axum::routing::put(routes::put_voice_transcription)
+                .layer(DefaultBodyLimit::max(voice_transcription::MAX_AUDIO_BYTES)),
+        )
+        .route(
+            "/voice-transcription/install",
+            post(routes::post_voice_transcription_install),
+        )
+        .route_layer(axum::middleware::from_fn(auth::require_admin));
+
+    let api = Router::new()
+        .route("/settings", get(routes::get_settings))
         .route(
             "/projects",
             post(routes::create_project)
@@ -302,75 +421,21 @@ pub fn app(state: AppState) -> Router {
                 )),
         )
         .route("/models", get(routes::list_models))
-        .route(
-            "/models/roles/{role}",
-            axum::routing::put(routes::put_model_role),
-        )
-        .route(
-            "/web-search",
-            get(routes::get_web_search_config).put(routes::put_web_search_config),
-        )
+        .route("/web-search", get(routes::get_web_search_config))
         .route(
             "/code-execution",
             get(routes::get_code_execution_config)
-                .put(routes::put_code_execution_config)
                 .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
         )
-        .route(
-            "/code-execution/credentials",
-            get(routes::get_code_execution_credentials),
-        )
-        .route(
-            "/code-execution/credentials/{provider}",
-            axum::routing::put(routes::put_code_execution_credential)
-                .delete(routes::delete_code_execution_credential)
-                .layer(DefaultBodyLimit::max(
-                    MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES,
-                )),
-        )
-        .route(
-            "/mcp/servers",
-            get(routes::get_mcp_servers)
-                .put(routes::put_mcp_servers)
-                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
-        )
+        .route("/mcp/servers", get(routes::get_mcp_servers))
         .route("/connected-apps", get(routes::get_connected_apps))
         // The installed skill/plugin catalog and its enable flags.
         .route("/plugins", get(routes::get_plugins))
-        .route(
-            "/plugins/install",
-            post(routes::post_plugin_install).layer(DefaultBodyLimit::max(
-                plugin_install::MAX_PLUGIN_INSTALL_BODY_BYTES,
-            )),
-        )
-        .route(
-            "/plugins/enabled",
-            axum::routing::put(routes::put_plugins_enabled)
-                .layer(DefaultBodyLimit::max(routes::MAX_PLUGIN_ENABLE_BODY_BYTES)),
-        )
         .route(
             "/plugins/skills/{name}/instructions",
             get(routes::get_skill_instructions),
         )
         .route("/plugins/prompts/{name}/body", get(routes::get_prompt_body))
-        .route(
-            "/connected-apps/rest/{id}",
-            axum::routing::put(routes::put_rest_connected_app)
-                .delete(routes::delete_rest_connected_app)
-                .layer(DefaultBodyLimit::max(
-                    routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
-                )),
-        )
-        .route(
-            "/connected-apps/rest/spec-preview",
-            post(routes::post_rest_spec_preview).layer(DefaultBodyLimit::max(
-                routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
-            )),
-        )
-        .route(
-            "/mcp/servers/{name}/reconnect",
-            post(routes::post_mcp_server_reconnect),
-        )
         .route(
             "/mcp/servers/{name}/view-session",
             post(routes::post_mcp_view_session),
@@ -402,53 +467,16 @@ pub fn app(state: AppState) -> Router {
         .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))
-        .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
-        .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
         .route(
             "/gateway/pairing/dismiss",
             post(routes::post_gateway_pairing_dismiss),
-        )
-        .route(
-            "/gateway/models/sync",
-            post(routes::post_gateway_models_sync),
-        )
-        .route(
-            "/web-search/credentials",
-            get(routes::get_web_search_credentials),
-        )
-        .route(
-            "/web-search/credentials/{provider}",
-            axum::routing::put(routes::put_web_search_credential)
-                .delete(routes::delete_web_search_credential)
-                .layer(DefaultBodyLimit::max(MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES)),
         )
         .route("/providers", get(routes::list_providers))
         .route(
             "/voice-transcription",
             get(routes::get_voice_transcription)
-                .put(routes::put_voice_transcription)
                 .post(routes::post_voice_transcription)
                 .layer(DefaultBodyLimit::max(voice_transcription::MAX_AUDIO_BYTES)),
-        )
-        .route(
-            "/voice-transcription/install",
-            post(routes::post_voice_transcription_install),
-        )
-        .route(
-            "/providers/{kind}",
-            axum::routing::put(routes::put_provider),
-        )
-        .route(
-            "/providers/{kind}/credential",
-            axum::routing::delete(routes::delete_provider_credential),
-        )
-        .route(
-            "/providers/openai/chatgpt/sign-in",
-            post(routes::post_openai_chatgpt_sign_in),
-        )
-        .route(
-            "/providers/openai/chatgpt/sign-out",
-            post(routes::post_openai_chatgpt_sign_out),
         )
         .route(
             "/providers/openai/chatgpt/status",
@@ -496,10 +524,6 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/chats/{chat_id}/agent-runs/{run_id}/steer",
             post(routes::post_agent_run_steer),
-        )
-        .route(
-            "/settings/api-key",
-            axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
         )
         .route("/chats/{id}/messages", post(routes::post_message))
         .route("/chats/{id}/cancel", post(routes::post_cancel))
@@ -562,6 +586,11 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/chats/{id}/events", get(routes::chat_events))
         .merge(client_executor_api)
+        // Merged before the bearer layer, so `require_token` wraps outside
+        // `require_admin`: an unauthenticated request to a deployment-plane
+        // route is a 401 from the bearer check, and only an authenticated
+        // member reaches the role check's 403.
+        .merge(deployment_api)
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

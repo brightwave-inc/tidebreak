@@ -788,18 +788,34 @@ The pieces, each enforced where it cannot silently drift:
   unless the principal-naming authenticator is configured and names at least
   one user, so a shared store can never exist behind an API that cannot tell
   its callers apart.
+- **Configuration is admin-only.** Every principal carries a role. A token
+  line's optional third field, `admin`, puts that user on the deployment
+  plane; its absence makes them a member, and a file naming no admin refuses
+  to boot alongside the empty-file refusal. The desktop profile's local owner
+  is unconditionally admin.
 
-One deliberate exception, accepted rather than deferred: **settings are
-deployment-scoped, not per-user.** The settings table configures the
-deployment itself — enabled providers and credentials, model roles,
-web-search and code-execution configuration, managed policy — and the issue
-itself observed that a credential able to reconfigure the app is not
-containable per-user by a row filter. Every named user on a self-host
-deployment shares (and can change) that configuration, so the profile is for
-mutually trusting users of one operator's deployment — a household or a small
-team — not for adversarial tenants. Per-user preference settings can split
-out of the deployment table if that boundary is ever needed; multi-tenant
-isolation is explicitly not claimed.
+**The deployment plane, and what a member keeps.** The API is split in the
+router, not in the handlers: routes that change what the deployment *is* or
+touch its shared secrets — MCP server configuration (host processes), provider,
+web-search and code-execution credentials including the presence reads that
+reveal their metadata, model roles, settings writes, plugin install and enable,
+and connected-app sign-in/sign-out — are assembled into a sub-router behind an
+admin gate, and answer a member `403`. Members keep everything else: their own
+chats, projects, documents and event streams, and the reads that only tell a
+client what the deployment can do (the model list, the plugin catalog, the app
+library, the non-secret configuration reads). A new configuration route is
+admin-gated by where it is registered rather than by whether its author
+remembered a check, and a route-table conformance suite drives one admin and
+one member across the assembled router to keep that classification honest.
+Roles beyond the two, groups, per-capability grants, and per-user provider
+credentials are deliberately excluded — see
+[decision 4](decisions/0004-self-host-deployment-plane-authorization.md).
+
+Configuration remains deployment-scoped rather than per-user: the settings
+table configures the deployment itself, shared credentials are the point of a
+team deployment, and MCP servers are host processes. The profile targets one
+operator's small team, not adversarial tenants; multi-tenant isolation is
+explicitly not claimed.
 
 ## Where the code lives
 
