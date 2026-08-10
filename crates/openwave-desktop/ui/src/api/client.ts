@@ -15,6 +15,7 @@ import {
   type CodeExecutionConfigInfo,
   type CodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind,
+  type CompactionRun,
   type ConnectedAppsInfo,
   type ConsentStatementSnapshot,
   type CustomModelConfig,
@@ -865,6 +866,21 @@ export class ApiClient {
   listChatMessages(chatId: string): Promise<ChatTranscript> {
     return this.json(`/chats/${chatId}/messages`, {
       headers: this.headers(),
+    });
+  }
+
+  /**
+   * Compact this chat now, optionally saying what the summary should keep.
+   *
+   * Runs between turns only; the server refuses while one is running. A
+   * response with `compacted: false` is an ordinary answer — there was nothing
+   * worth summarizing — not a failure.
+   */
+  compactChat(chatId: string, focus?: string): Promise<CompactionRun> {
+    return this.json(`/chats/${encodeURIComponent(chatId)}/compact`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify(focus ? { focus } : {}),
     });
   }
 
