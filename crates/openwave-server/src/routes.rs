@@ -9,6 +9,7 @@ pub(crate) const COMPACTION_TARGET_FRACTION_SETTING: &str = "compaction.target_f
 pub(crate) const COMPACTION_MIN_THRESHOLD_TOKENS_SETTING: &str = "compaction.min_threshold_tokens";
 pub(crate) const COMPACTION_PROTECT_RECENT_MESSAGES_SETTING: &str =
     "compaction.protect_recent_messages";
+pub(crate) const MODEL_VISIBILITY_OVERRIDES_SETTING: &str = "models.visibility_overrides";
 
 mod agent_runs;
 mod app_grant;

@@ -676,6 +676,14 @@ pub struct ResolvedModelPolicy {
     pub vendor: Option<ProviderKind>,
     /// How thoroughly this exact provider/model combination has been exercised.
     pub verification: VerificationTier,
+    /// Whether a picker shows this model without being asked for the full
+    /// catalog. Curation, not capability — see [`ModelSpec::recommended`].
+    ///
+    /// Only the static catalog carries a curation stance. A custom endpoint or
+    /// a gateway entitlement is something the reader configured deliberately,
+    /// so it is recommended by construction; the curated row's flag is not
+    /// inherited over those routes any more than its limits are.
+    pub recommended: bool,
     /// Runtime context reduction limit.
     pub context_window: u32,
     /// Runtime output cap.
@@ -707,6 +715,7 @@ impl ResolvedModelPolicy {
             provider: spec.provider,
             vendor: spec.vendor(),
             verification: spec.verification,
+            recommended: spec.recommended,
             context_window: spec.context_window,
             max_output_tokens: spec.max_output_tokens,
             input_modalities: spec.input_modalities.to_vec(),
@@ -769,6 +778,7 @@ impl ResolvedModelPolicy {
             provider,
             vendor: None,
             verification: VerificationTier::Unverified,
+            recommended: true,
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
             input_modalities: if first_party_xai {
