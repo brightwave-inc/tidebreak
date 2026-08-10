@@ -255,6 +255,15 @@ describe("notConnectedProviders", () => {
     };
     expect(notConnectedProviders([gateway], [])).toEqual([]);
   });
+
+  it("offers no setup at all on a managed profile", () => {
+    // Managed policy refuses every provider credential write, so a row whose
+    // only action is "Set up" can lead nowhere.
+    const gemini: ModelInfo[] = [
+      { ...MODELS[0], key: "gemini::a", provider: "gemini", available: false },
+    ];
+    expect(notConnectedProviders([...MODELS, ...gemini], [], true)).toEqual([]);
+  });
 });
 
 describe("firstAvailableModel", () => {
