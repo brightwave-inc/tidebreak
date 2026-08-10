@@ -18,8 +18,8 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::Role;
 
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, finish_frame, frame_data, push_frames,
-    read_bounded_error_body, safe_http_error,
+    classify_in_band_error, classify_provider_error, frame_data, read_bounded_error_body,
+    safe_http_error, SseFramer,
 };
 use crate::BearerTokenSource;
 
@@ -239,7 +239,7 @@ impl ModelProvider for OpenAiProvider {
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
-            let mut buffer = Vec::new();
+            let mut framer = SseFramer::default();
             let mut state = StreamState {
                 provider_label,
                 ..StreamState::default()
@@ -254,7 +254,7 @@ impl ModelProvider for OpenAiProvider {
                         return;
                     }
                 };
-                let frames = match push_frames(&mut buffer, &chunk) {
+                let frames = match framer.push(&chunk) {
                     Ok(frames) => frames,
                     Err(error) => {
                         yield ProviderEvent::Failed {
@@ -273,7 +273,7 @@ impl ModelProvider for OpenAiProvider {
                     }
                 }
             }
-            let final_frame = match finish_frame(&mut buffer) {
+            let final_frame = match framer.finish() {
                 Ok(frame) => frame,
                 Err(error) => {
                     yield ProviderEvent::Failed {

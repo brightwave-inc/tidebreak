@@ -232,7 +232,7 @@ impl HttpWire {
         };
         validate_parsed_http_url(
             &self.url,
-            authorization.is_some() || !self.configured.is_empty(),
+            authorization.is_some() || !self.configured.is_empty() || self.session_id.is_some(),
         )?;
         // One map, built configured-first and then overwritten by every
         // client-generated header, so a configured entry can never displace
@@ -254,8 +254,9 @@ impl HttpWire {
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         if let Some(session_id) = &self.session_id {
-            let value = reqwest::header::HeaderValue::from_str(session_id)
+            let mut value = reqwest::header::HeaderValue::from_str(session_id)
                 .map_err(|_| mcp_message("external server session id is not header-safe"))?;
+            value.set_sensitive(true);
             headers.insert(
                 reqwest::header::HeaderName::from_static(SESSION_ID_HEADER),
                 value,
@@ -434,7 +435,15 @@ impl SseParser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
     use reqwest::header::{HeaderMap, HeaderName};
 
     #[test]
@@ -530,6 +539,65 @@ mod tests {
             .await
             .expect_err("dynamic credentials must not cross remote cleartext HTTP");
         assert!(error.to_string().contains("must use https"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn server_issued_session_is_not_sent_over_remote_cleartext_http() {
+        async fn handler(State(requests): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+            requests.fetch_add(1, Ordering::SeqCst);
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json"),
+                    (SESSION_ID_HEADER, "session-secret"),
+                ],
+                serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}).to_string(),
+            )
+        }
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/mcp", post(handler))
+            .with_state(Arc::clone(&requests));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut wire = HttpWire {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .resolve("remote.example", address)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            url: reqwest::Url::parse(&format!("http://remote.example:{}/mcp", address.port()))
+                .unwrap(),
+            authorization: None,
+            configured: HeaderMap::new(),
+            session_id: None,
+        };
+        let mut tools_list_changed = false;
+        wire.request(
+            1,
+            &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            &mut tools_list_changed,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        let error = wire
+            .notify(&serde_json::json!({
+                "jsonrpc":"2.0",
+                "method":"notifications/initialized"
+            }))
+            .await
+            .expect_err("the session credential must not cross remote cleartext HTTP");
+        assert!(error.to_string().contains("must use https"), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

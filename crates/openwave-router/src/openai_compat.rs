@@ -23,8 +23,7 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, finish_frame, frame_data, push_frames,
-    read_bounded_error_body,
+    classify_in_band_error, classify_provider_error, frame_data, read_bounded_error_body, SseFramer,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -180,7 +179,7 @@ impl ModelProvider for OpenAiCompatProvider {
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
-            let mut buffer: Vec<u8> = Vec::new();
+            let mut framer = SseFramer::default();
             let mut state = StreamState::new(provider_id);
             while let Some(chunk) = bytes.next().await {
                 // A mid-stream transport error must not read as a clean end:
@@ -197,7 +196,7 @@ impl ModelProvider for OpenAiCompatProvider {
                         return;
                     }
                 };
-                let frames = match push_frames(&mut buffer, &chunk) {
+                let frames = match framer.push(&chunk) {
                     Ok(frames) => frames,
                     Err(error) => {
                         yield ProviderEvent::Failed {
@@ -216,7 +215,7 @@ impl ModelProvider for OpenAiCompatProvider {
                     }
                 }
             }
-            let final_frame = match finish_frame(&mut buffer) {
+            let final_frame = match framer.finish() {
                 Ok(frame) => frame,
                 Err(error) => {
                     yield ProviderEvent::Failed {
@@ -800,16 +799,19 @@ fn stream_index(
     data: &Value,
     state: &mut StreamState,
 ) -> std::result::Result<u32, ProviderErrorInfo> {
-    let Some(index) = data.get("index").and_then(Value::as_u64) else {
+    let Some(value) = data.get("index") else {
         return Ok(0);
     };
-    u32::try_from(index).map_err(|_| {
-        state.terminal = true;
-        ProviderErrorInfo::provider(format!(
-            "{} returned an invalid tool-call index",
-            state.provider_id
-        ))
-    })
+    value
+        .as_u64()
+        .and_then(|index| u32::try_from(index).ok())
+        .ok_or_else(|| {
+            state.terminal = true;
+            ProviderErrorInfo::provider(format!(
+                "{} returned an invalid tool-call index",
+                state.provider_id
+            ))
+        })
 }
 
 fn map_stop_reason(reason: &str) -> StopReason {
@@ -1156,6 +1158,30 @@ mod tests {
             }]}}]
         })]);
         assert!(matches!(events.as_slice(), [ProviderEvent::Failed { .. }]));
+    }
+
+    #[test]
+    fn present_non_unsigned_tool_call_indices_cannot_alias_an_open_call() {
+        for invalid in [json!(-1), json!(1.5), json!("0"), Value::Null] {
+            let mut state = StreamState::new("together");
+            let events: Vec<ProviderEvent> = [
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":\""}}]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":invalid,"function":{"arguments":"a\"}"}}]}}]}),
+            ]
+            .iter()
+            .flat_map(|chunk| normalize(chunk, &mut state))
+            .collect();
+
+            assert!(matches!(
+                events.as_slice(),
+                [
+                    ProviderEvent::ToolCallStarted { index: 0, .. },
+                    ProviderEvent::ToolCallArgsDelta { index: 0, fragment },
+                    ProviderEvent::Failed { .. },
+                ] if fragment == "{\"path\":\""
+            ));
+            assert!(state.terminal);
+        }
     }
 
     #[test]

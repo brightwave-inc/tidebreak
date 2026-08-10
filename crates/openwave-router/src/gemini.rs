@@ -29,8 +29,8 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
     classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
-    classify_provider_error_redacting, finish_frame, frame_data_raw, push_frames,
-    read_bounded_error_body, safe_http_error, safe_http_error_redacting,
+    classify_provider_error_redacting, frame_data_raw, read_bounded_error_body, safe_http_error,
+    safe_http_error_redacting, SseFramer,
 };
 use crate::BearerTokenSource;
 
@@ -317,7 +317,7 @@ impl ModelProvider for GeminiProvider {
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
-            let mut buffer = Vec::new();
+            let mut framer = SseFramer::default();
             let mut state = StreamState {
                 vertex_project_id,
                 ..StreamState::default()
@@ -336,7 +336,7 @@ impl ModelProvider for GeminiProvider {
                         return;
                     }
                 };
-                let frames = match push_frames(&mut buffer, &chunk) {
+                let frames = match framer.push(&chunk) {
                     Ok(frames) => frames,
                     Err(error) => {
                         yield ProviderEvent::Failed {
@@ -368,7 +368,7 @@ impl ModelProvider for GeminiProvider {
                     }
                 }
             }
-            let final_frame = match finish_frame(&mut buffer) {
+            let final_frame = match framer.finish() {
                 Ok(frame) => frame,
                 Err(error) => {
                     yield ProviderEvent::Failed {

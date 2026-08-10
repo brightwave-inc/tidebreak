@@ -24,8 +24,7 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
     classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
-    classify_provider_error_redacting, finish_frame, frame_data, push_frames,
-    read_bounded_error_body,
+    classify_provider_error_redacting, frame_data, read_bounded_error_body, SseFramer,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -228,7 +227,7 @@ impl ModelProvider for AnthropicProvider {
                 futures::pin_mut!(bytes);
                 // Accumulate raw BYTES, not a String: a chunk may split a multi-byte
                 // UTF-8 character, so we only decode once a whole frame is buffered.
-                let mut buffer: Vec<u8> = Vec::new();
+                let mut framer = SseFramer::default();
                 while let Some(chunk) = bytes.next().await {
                     // A mid-stream transport error must not read as a clean end:
                     // the accumulated tool-call arguments may be truncated
@@ -244,7 +243,7 @@ impl ModelProvider for AnthropicProvider {
                             return;
                         }
                     };
-                    let frames = match push_frames(&mut buffer, &chunk) {
+                    let frames = match framer.push(&chunk) {
                         Ok(frames) => frames,
                         Err(error) => {
                             yield ProviderEvent::Failed {
@@ -264,7 +263,7 @@ impl ModelProvider for AnthropicProvider {
                     }
                 }
                 // Flush a final frame that wasn't terminated by a blank line.
-                let final_frame = match finish_frame(&mut buffer) {
+                let final_frame = match framer.finish() {
                     Ok(frame) => frame,
                     Err(error) => {
                         yield ProviderEvent::Failed {
@@ -1180,14 +1179,16 @@ fn stream_index(
     data: &Value,
     state: &mut StreamState,
 ) -> std::result::Result<u32, ProviderErrorInfo> {
-    let Some(index) = data.get("index").and_then(Value::as_u64) else {
-        return Ok(0);
-    };
-    u32::try_from(index).map_err(|_| {
-        let provider = stream_provider_label(state).to_string();
-        state.terminal = true;
-        ProviderErrorInfo::provider(format!("{provider} returned an invalid stream block index"))
-    })
+    data.get("index")
+        .and_then(Value::as_u64)
+        .and_then(|index| u32::try_from(index).ok())
+        .ok_or_else(|| {
+            let provider = stream_provider_label(state).to_string();
+            state.terminal = true;
+            ProviderErrorInfo::provider(format!(
+                "{provider} returned an invalid stream block index"
+            ))
+        })
 }
 
 /// Map one parsed Anthropic stream event into zero or more `ProviderEvent`s.
@@ -2010,6 +2011,45 @@ mod tests {
             "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"}
         })]);
         assert!(matches!(events.as_slice(), [ProviderEvent::Failed { .. }]));
+    }
+
+    #[test]
+    fn missing_or_non_unsigned_structural_indices_cannot_alias_an_open_block() {
+        let invalid_indices = [
+            Some(json!(-1)),
+            Some(json!(1.5)),
+            Some(json!("0")),
+            Some(Value::Null),
+            None,
+        ];
+        for invalid in invalid_indices {
+            let mut invalid_delta = json!({
+                "type": "content_block_delta",
+                "delta": {"type": "input_json_delta", "partial_json": "a\"}"}
+            });
+            if let Some(invalid) = invalid {
+                invalid_delta["index"] = invalid;
+            }
+            let mut state = StreamState::default();
+            let events: Vec<ProviderEvent> = [
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\""}}),
+                invalid_delta,
+            ]
+            .iter()
+            .flat_map(|frame| normalize(frame, &mut state))
+            .collect();
+
+            assert!(matches!(
+                events.as_slice(),
+                [
+                    ProviderEvent::ToolCallStarted { index: 0, .. },
+                    ProviderEvent::ToolCallArgsDelta { index: 0, fragment },
+                    ProviderEvent::Failed { .. },
+                ] if fragment == "{\"path\":\""
+            ));
+            assert!(state.terminal);
+        }
     }
 
     fn search_origin(model: &str) -> ReasoningOrigin {
