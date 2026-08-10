@@ -51,6 +51,13 @@ pub struct PostMessage {
     /// submit arbitrary hidden prompt text.
     #[serde(default)]
     pub voice_input_used: bool,
+    /// Queue instead of refusing when the chat has a live turn.
+    ///
+    /// With this set, `ChatBusy` durably parks the validated message as a
+    /// [`openwave_core::QueuedTurn`]; the promoter runs it as its own turn
+    /// once the chat is free. An idle chat sends immediately either way.
+    #[serde(default)]
+    pub queue: bool,
 }
 
 /// Refuse a turn that invokes a skill the install cannot actually run.
@@ -393,11 +400,134 @@ pub async fn post_message(
                 )))
             }
         }
-        AcceptTurnOutcome::ChatBusy(active) => Err(ServerError::conflict(format!(
-            "chat {id} already has active turn {}",
-            active.id
+        AcceptTurnOutcome::ChatBusy(active) => {
+            if body.queue {
+                store
+                    .enqueue_queued_turn(&openwave_core::QueuedTurn {
+                        id: body.turn_id,
+                        chat_id: id,
+                        content: body.content.clone(),
+                        attachments: body.attachments.clone(),
+                        file_attachments: body.file_attachments.clone(),
+                        invoked_skills: body.invoked_skills.clone(),
+                        voice_input_used: body.voice_input_used,
+                        // Assigned durably at insert; echoes back in the row.
+                        position: 0,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    })
+                    .await?;
+                return Ok(StatusCode::ACCEPTED);
+            }
+            Err(ServerError::conflict(format!(
+                "chat {id} already has active turn {}",
+                active.id
+            )))
+        }
+    }
+}
+
+/// Response of `GET /chats/{chat_id}/queued`.
+#[derive(Debug, serde::Serialize)]
+pub struct QueuedTurnsSnapshot {
+    pub queued: Vec<openwave_core::QueuedTurn>,
+    pub paused: bool,
+}
+
+fn queue_paused_setting(chat_id: ChatId) -> String {
+    format!("chats.{chat_id}.queue_paused")
+}
+
+pub(crate) async fn read_queue_paused(
+    store: &dyn openwave_core::Store,
+    chat_id: ChatId,
+) -> openwave_core::Result<bool> {
+    Ok(store
+        .get_setting(&queue_paused_setting(chat_id))
+        .await?
+        .and_then(|value| serde_json::from_value::<bool>(value).ok())
+        .unwrap_or(false))
+}
+
+/// `GET /chats/{chat_id}/queued` — the chat's queued messages, FIFO.
+pub async fn list_queued_turns(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path(id): Path<ChatId>,
+) -> Result<Json<QueuedTurnsSnapshot>, ServerError> {
+    store.require_chat(id).await?;
+    Ok(Json(QueuedTurnsSnapshot {
+        queued: state.store.list_queued_turns(id).await?,
+        paused: read_queue_paused(&*state.store, id).await?,
+    }))
+}
+
+/// Body of `PATCH /chats/{chat_id}/queued/{turn_id}`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct QueuedTurnUpdate {
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub position: Option<i32>,
+}
+
+/// `PATCH /chats/{chat_id}/queued/{turn_id}` — edit or reorder one queued
+/// message.
+pub async fn patch_queued_turn(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path((id, turn_id)): Path<(ChatId, TurnId)>,
+    Json(body): Json<QueuedTurnUpdate>,
+) -> Result<Json<openwave_core::QueuedTurn>, ServerError> {
+    store.require_chat(id).await?;
+    match state
+        .store
+        .update_queued_turn(id, turn_id, body.content.as_deref(), body.position)
+        .await?
+    {
+        Some(updated) => Ok(Json(updated)),
+        None => Err(ServerError::not_found(format!(
+            "queued turn {turn_id} not found"
         ))),
     }
+}
+
+/// `DELETE /chats/{chat_id}/queued/{turn_id}` — retract one queued message.
+pub async fn delete_queued_turn(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path((id, turn_id)): Path<(ChatId, TurnId)>,
+) -> Result<StatusCode, ServerError> {
+    store.require_chat(id).await?;
+    if state.store.delete_queued_turn(id, turn_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ServerError::not_found(format!(
+            "queued turn {turn_id} not found"
+        )))
+    }
+}
+
+/// Body of `PUT /chats/{chat_id}/queue-paused`.
+#[derive(Debug, serde::Deserialize)]
+pub struct QueuePausedBody {
+    pub paused: bool,
+}
+
+/// `PUT /chats/{chat_id}/queue-paused` — stop or restart automatic promotion
+/// for this chat; queued rows stay put while paused.
+pub async fn put_queue_paused(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path(id): Path<ChatId>,
+    Json(body): Json<QueuePausedBody>,
+) -> Result<StatusCode, ServerError> {
+    store.require_chat(id).await?;
+    state
+        .store
+        .set_setting(&queue_paused_setting(id), &serde_json::json!(body.paused))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Body of `POST /chats/{id}/steer`.
@@ -553,4 +683,98 @@ pub async fn post_cancel(
     // truth if this notification is lost.
     state.agent_run_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
+}
+
+/// One promotion sweep: for every chat holding queued messages and no live
+/// turn, try to accept the oldest row as a real turn and delete it on
+/// success.
+///
+/// Promotion is deliberately try-based rather than fenced: acceptance is
+/// idempotent under the queued row's own turn id, so `ChatBusy` leaves the
+/// row for the next sweep, a crash between acceptance and deletion re-runs
+/// into `Existing`, and a row whose id was somehow reused for different input
+/// is dropped rather than retried forever. A row whose attachments or skills
+/// no longer resolve is dropped too — its turn could never be accepted.
+pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerError> {
+    for chat_id in state.store.chats_with_queued_turns().await? {
+        if read_queue_paused(&*state.store, chat_id).await? {
+            continue;
+        }
+        let Some(chat) = state.store.get_chat(chat_id).await? else {
+            continue;
+        };
+        let Some(next) = state
+            .store
+            .list_queued_turns(chat_id)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
+        let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+        let selected = if managed.managed && chat.model.is_none() {
+            model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
+                .await?
+                .map_or(selected, |policy| policy.key)
+        } else {
+            selected
+        };
+        let dropped = |reason: &str| {
+            eprintln!(
+                "openwave: dropping queued message {} for chat {chat_id}: {reason}",
+                next.id
+            );
+        };
+        let model = match validate_model_selection(state, &selected, true).await {
+            Ok(model) => model,
+            Err(_) => {
+                // The chat's model became unusable; leave the row so fixing
+                // the model releases the queue rather than losing messages.
+                continue;
+            }
+        };
+        if require_invocable_skills(state, &next.invoked_skills)
+            .await
+            .is_err()
+        {
+            dropped("an invoked skill is no longer available");
+            state.store.delete_queued_turn(chat_id, next.id).await?;
+            continue;
+        }
+        let images = match resolve_message_attachments(state, &next.attachments).await {
+            Ok(images) => images,
+            Err(_) => {
+                dropped("an image attachment no longer resolves");
+                state.store.delete_queued_turn(chat_id, next.id).await?;
+                continue;
+            }
+        };
+        match state
+            .store
+            .accept_turn_with_message_context(
+                next.id,
+                chat_id,
+                &model,
+                &next.content,
+                &images,
+                &next.file_attachments,
+                &next.invoked_skills,
+                next.voice_input_used,
+            )
+            .await?
+        {
+            AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
+                state.store.delete_queued_turn(chat_id, next.id).await?;
+                state.turn_job_wake.notify_one();
+            }
+            AcceptTurnOutcome::ChatBusy(_) => {}
+            AcceptTurnOutcome::IdentityConflict => {
+                dropped("its turn id was already used with different input");
+                state.store.delete_queued_turn(chat_id, next.id).await?;
+            }
+        }
+    }
+    Ok(())
 }

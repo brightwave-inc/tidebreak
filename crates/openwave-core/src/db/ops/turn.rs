@@ -26,6 +26,7 @@ use super::{
 
 mod client_wait;
 mod multi_agent_run_wait;
+pub(in crate::db) mod queued;
 mod resolution;
 mod sandbox_spawn;
 pub(in crate::db) mod steer;

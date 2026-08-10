@@ -36,8 +36,8 @@ use crate::model::{
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
     Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
     DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
-    NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort, RootAttachmentChange,
-    RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
+    NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
     SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
     TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
 };
@@ -1518,6 +1518,32 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
     ) -> Result<TurnLeaseFence> {
         ops::turn::fence_turn_lease(self, id, lease_token, now).await
+    }
+
+    async fn enqueue_queued_turn(&self, queued: &QueuedTurn) -> Result<QueuedTurn> {
+        ops::turn::queued::enqueue_turn(self, queued).await
+    }
+
+    async fn list_queued_turns(&self, chat_id: ChatId) -> Result<Vec<QueuedTurn>> {
+        ops::turn::queued::list_queued_turns(self, chat_id).await
+    }
+
+    async fn chats_with_queued_turns(&self) -> Result<Vec<ChatId>> {
+        ops::turn::queued::chats_with_queued_turns(self).await
+    }
+
+    async fn delete_queued_turn(&self, chat_id: ChatId, id: TurnId) -> Result<bool> {
+        ops::turn::queued::delete_queued_turn(self, chat_id, id).await
+    }
+
+    async fn update_queued_turn(
+        &self,
+        chat_id: ChatId,
+        id: TurnId,
+        content: Option<&str>,
+        position: Option<i32>,
+    ) -> Result<Option<QueuedTurn>> {
+        ops::turn::queued::update_queued_turn(self, chat_id, id, content, position).await
     }
 
     async fn accept_turn_steer(

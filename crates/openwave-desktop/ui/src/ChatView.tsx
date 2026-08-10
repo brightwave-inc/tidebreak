@@ -37,6 +37,7 @@ import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
 import { useStreamStalled } from "./useStreamStalled";
+import { QueueTray } from "./QueueTray";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useTaskPlan } from "./useTaskPlan";
@@ -82,6 +83,8 @@ export type ChatViewProps = {
   onDraftChange: (value: string) => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
+  /** Queue the draft to run after the active turn; absent disables queueing. */
+  onQueue?: () => Promise<void>;
   /** Put a failed turn back on the wire, unchanged, as a new turn. */
   onRetryTurn?: (turn: RetryableTurn) => void;
   /** Open one background run's panel beside the conversation. */
@@ -118,6 +121,7 @@ export function ChatView({
   onDraftChange,
   onSelectPrompt,
   onSend,
+  onQueue,
   onRetryTurn,
   onOpenAgentPanel,
   onOpenOutput,
@@ -659,7 +663,9 @@ export function ChatView({
             onPlanCancel={planApprovals.cancel}
           />
         ) : (
-          <Composer
+          <>
+            <QueueTray client={client} chatId={chat.id} active={activeTurnId !== null} />
+            <Composer
             activeTurnId={activeTurnId}
             busy={busy}
             cancelError={turnControls.cancelError}
@@ -704,6 +710,7 @@ export function ChatView({
               onDraftChange(value);
             }}
             onSend={handleSend}
+            onQueue={onQueue}
             onSteer={turnControls.steer}
             onStop={turnControls.cancel}
             resetKey={chat.id}
@@ -713,7 +720,8 @@ export function ChatView({
               turnControls.steerPendingTurnId === activeTurnId
             }
             steerStatus={turnControls.steerStatus}
-          />
+            />
+          </>
         )}
       </div>
     </section>

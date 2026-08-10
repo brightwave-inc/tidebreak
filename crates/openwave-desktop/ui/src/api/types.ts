@@ -49,6 +49,7 @@ import {
   type ModelInfo as WireModelInfo,
   type ModelRole as WireModelRole,
   type ModelVisibility as WireModelVisibility,
+  type QueuedTurn as WireQueuedTurn,
   type ModelRoleInfo as WireModelRoleInfo,
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
@@ -173,6 +174,9 @@ export type ModelSelectionKey = `${ProviderKind}::${string}`;
 
 /** A reader's deviation from a model's curated `recommended` default. */
 export type ModelVisibility = WireModelVisibility;
+
+/** One message waiting to run as its own turn once the chat is free. */
+export type QueuedTurn = WireQueuedTurn;
 
 /** How hard a reasoning-capable model should think before answering. */
 export type ReasoningEffort = WireReasoningEffort;

@@ -1967,6 +1967,56 @@ models: Array<CustomModelConfig>, aws_region?: string, };
 export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "bedrock" | "fireworks" | "together" | "openai_compatible" | "model_gateway";
 
 /**
+ * One message accepted while its chat had a live turn, waiting its turn.
+ *
+ * The id is the client-generated turn id promotion will accept under, so an
+ * ambiguous promotion retry resolves to `Existing` rather than a duplicate
+ * turn. Rows are FIFO by `position` within a chat and fully durable: a queue
+ * survives restarts and is visible to every client on the chat.
+ */
+export type QueuedTurn = { 
+/**
+ * The turn id this row becomes when promoted.
+ */
+id: TurnId, 
+/**
+ * Owning chat.
+ */
+chat_id: ChatId, 
+/**
+ * Byte-exact user message.
+ */
+content: string, 
+/**
+ * Image-attachment ids, in display order.
+ */
+attachments: Array<string>, 
+/**
+ * Chat-owned document ids.
+ */
+file_attachments: Array<DocumentId>, 
+/**
+ * Skills the user explicitly invoked.
+ */
+invoked_skills: Array<string>, 
+/**
+ * Whether the message was dictated.
+ */
+voice_input_used: boolean, 
+/**
+ * FIFO order within the chat.
+ */
+position: number, 
+/**
+ * When the message was queued.
+ */
+created_at: string, 
+/**
+ * When it was last edited or reordered.
+ */
+updated_at: string, };
+
+/**
  * How hard a reasoning-capable model should think before answering.
  *
  * The scale runs from [`Self::None`] to [`Self::Max`] and the ordering is the

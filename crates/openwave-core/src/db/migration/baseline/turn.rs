@@ -1022,3 +1022,71 @@ pub(super) fn context_checkpoint_table() -> TableCreateStatement {
 pub(super) fn context_checkpoint_indexes() -> Vec<IndexCreateStatement> {
     vec![]
 }
+
+/// Messages waiting to become turns, FIFO per chat.
+pub(super) fn queued_turn_table() -> TableCreateStatement {
+    Table::create()
+        .table(QueuedTurn::Table)
+        .col(
+            ColumnDef::new(QueuedTurn::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(QueuedTurn::ChatId).uuid().not_null())
+        .col(ColumnDef::new(QueuedTurn::Content).text().not_null())
+        .col(
+            ColumnDef::new(QueuedTurn::AttachmentsJson)
+                .text()
+                .not_null()
+                .default("[]"),
+        )
+        .col(
+            ColumnDef::new(QueuedTurn::FileAttachmentsJson)
+                .text()
+                .not_null()
+                .default("[]"),
+        )
+        .col(
+            ColumnDef::new(QueuedTurn::InvokedSkillsJson)
+                .text()
+                .not_null()
+                .default("[]"),
+        )
+        .col(
+            ColumnDef::new(QueuedTurn::VoiceInputUsed)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .col(ColumnDef::new(QueuedTurn::Position).integer().not_null())
+        .col(
+            ColumnDef::new(QueuedTurn::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QueuedTurn::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_queued_turn_chat")
+                .from(QueuedTurn::Table, QueuedTurn::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(Func::char_length(Expr::col(QueuedTurn::Content)).gt(0))
+        .check(Expr::col(QueuedTurn::Position).gte(0))
+        .to_owned()
+}
+
+pub(super) fn queued_turn_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("ix_queued_turn_chat_position")
+        .table(QueuedTurn::Table)
+        .col(QueuedTurn::ChatId)
+        .col(QueuedTurn::Position)
+        .to_owned()]
+}

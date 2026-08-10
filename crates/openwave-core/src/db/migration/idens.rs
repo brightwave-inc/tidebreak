@@ -730,3 +730,18 @@ pub(crate) enum Event {
     Payload,
     CreatedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum QueuedTurn {
+    Table,
+    Id,
+    ChatId,
+    Content,
+    AttachmentsJson,
+    FileAttachmentsJson,
+    InvokedSkillsJson,
+    VoiceInputUsed,
+    Position,
+    CreatedAt,
+    UpdatedAt,
+}

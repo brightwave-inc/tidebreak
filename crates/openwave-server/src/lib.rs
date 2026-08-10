@@ -530,6 +530,15 @@ pub fn app(state: AppState) -> Router {
             "/chats/{chat_id}/agent-runs/{run_id}/resume",
             post(routes::post_agent_run_resume),
         )
+        .route("/chats/{chat_id}/queued", get(routes::list_queued_turns))
+        .route(
+            "/chats/{chat_id}/queued/{turn_id}",
+            axum::routing::patch(routes::patch_queued_turn).delete(routes::delete_queued_turn),
+        )
+        .route(
+            "/chats/{chat_id}/queue-paused",
+            axum::routing::put(routes::put_queue_paused),
+        )
         .route(
             "/chats/{chat_id}/agent-runs/{run_id}/steer",
             post(routes::post_agent_run_steer),
@@ -1205,6 +1214,24 @@ async fn bind_inner(
             sandbox_container_run_worker::SandboxContainerRunWorkerConfig::default(),
         )
     };
+
+    // Queued-message promotion: a light sweep, wake-driven with a slow floor.
+    // Try-based on the idempotent turn acceptance, so it needs no lease of its
+    // own — see `routes::promote_queued_turns`.
+    let queued_turn_promoter = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(750));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if let Err(error) = routes::promote_queued_turns(&state).await {
+                    eprintln!("openwave: queued-turn promotion failed: {error:?}");
+                }
+            }
+        })
+    };
+    drop(queued_turn_promoter);
     let server_store = state.store.clone();
     let mcp_runtime = state.mcp.clone();
     let gateway_runtime = state.gateway.clone();
