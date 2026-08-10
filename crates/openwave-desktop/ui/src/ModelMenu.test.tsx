@@ -2,14 +2,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   firstAvailableModel,
+  hiddenModelCount,
   ModelMenu,
   ModelToolCapabilityChip,
   ModelVerificationChip,
+  notConnectedProviders,
   reasoningEffortOptions,
   visibleModelGroups,
 } from "./ModelMenu";
 import { ProviderIcon } from "./ProviderIcons";
-import type { ModelInfo } from "./api";
+import type { ModelInfo, ProviderInfo } from "./api";
 
 const MODELS: ModelInfo[] = [
   {
@@ -50,12 +52,23 @@ const MODELS: ModelInfo[] = [
   },
 ];
 
+/** An available Anthropic model the catalog does not recommend. */
+const HAIKU: ModelInfo = {
+  ...MODELS[0],
+  key: "anthropic::claude-haiku",
+  id: "claude-haiku",
+  display_name: "Claude Haiku",
+  recommended: false,
+};
+
 function triggerMarkup(value: string | null, defaultKey?: string | null): string {
   return renderToStaticMarkup(
     <ModelMenu
       models={MODELS}
       value={value}
       defaultKey={defaultKey ?? null}
+      onManageModels={() => {}}
+      onSetUpProvider={() => {}}
       onChange={() => {}}
     />,
   );
@@ -86,7 +99,14 @@ describe("ModelMenu", () => {
 
   it("disables the trigger when asked", () => {
     const markup = renderToStaticMarkup(
-      <ModelMenu models={MODELS} value={null} disabled onChange={() => {}} />,
+      <ModelMenu
+        models={MODELS}
+        value={null}
+        disabled
+        onManageModels={() => {}}
+        onSetUpProvider={() => {}}
+        onChange={() => {}}
+      />,
     );
     expect(markup).toContain("disabled");
   });
@@ -172,6 +192,69 @@ describe("visibleModelGroups", () => {
     );
     expect(anthropic?.models).toHaveLength(2);
   });
+
+  it("leaves out a model the catalog does not recommend", () => {
+    const anthropic = visibleModelGroups([MODELS[0], HAIKU], null).find(
+      (group) => group.provider === "anthropic",
+    );
+    expect(anthropic?.models.map((model) => model.key)).toEqual([MODELS[0].key]);
+  });
+
+  it("lists a hidden model the reader overrode back on", () => {
+    const anthropic = visibleModelGroups([MODELS[0], HAIKU], null, {
+      [HAIKU.key]: "show",
+    }).find((group) => group.provider === "anthropic");
+    expect(anthropic?.models.map((model) => model.key)).toContain(HAIKU.key);
+  });
+
+  it("keeps the chat's own model listed however it is hidden", () => {
+    // Hiding is presentation, never a capability: the chat is pinned to this
+    // model and the picker that set it must still show it.
+    const anthropic = visibleModelGroups([MODELS[0], HAIKU], HAIKU.key, {
+      [HAIKU.key]: "hide",
+    }).find((group) => group.provider === "anthropic");
+    expect(anthropic?.models.map((model) => model.key)).toContain(HAIKU.key);
+  });
+});
+
+describe("hiddenModelCount", () => {
+  it("counts what the reader could run but cannot see", () => {
+    expect(hiddenModelCount([MODELS[0], HAIKU], null)).toBe(1);
+    // The chat's own model renders regardless, so counting it reads as a bug.
+    expect(hiddenModelCount([MODELS[0], HAIKU], HAIKU.key)).toBe(0);
+    expect(hiddenModelCount([MODELS[0], HAIKU], null, { [HAIKU.key]: "show" })).toBe(
+      0,
+    );
+  });
+});
+
+describe("notConnectedProviders", () => {
+  const credentialed = (kind: ProviderInfo["kind"]): ProviderInfo => ({
+    kind,
+    enabled: true,
+    has_credential: true,
+    models: [],
+  });
+
+  it("offers setup for a provider whose catalog rows cannot run", () => {
+    const gemini: ModelInfo[] = [
+      { ...MODELS[0], key: "gemini::a", provider: "gemini", available: false },
+      { ...MODELS[0], key: "gemini::b", provider: "gemini", available: false },
+    ];
+    expect(
+      notConnectedProviders([...MODELS, ...gemini], [credentialed("anthropic")]),
+    ).toEqual([{ provider: "gemini", modelCount: 2 }]);
+  });
+
+  it("leaves out the gateway, whose models are policy rather than a key", () => {
+    const gateway: ModelInfo = {
+      ...MODELS[0],
+      key: "model_gateway::claude",
+      provider: "model_gateway",
+      available: false,
+    };
+    expect(notConnectedProviders([gateway], [])).toEqual([]);
+  });
 });
 
 describe("firstAvailableModel", () => {
@@ -219,6 +302,8 @@ describe("model marks", () => {
         models={[gatewayClaude]}
         value={gatewayClaude.key}
         defaultKey={null}
+        onManageModels={() => {}}
+        onSetUpProvider={() => {}}
         onChange={() => {}}
       />,
     );

@@ -23,7 +23,7 @@ import {
   type ImageAttachment,
   type PickedImage,
 } from "./ImageAttachments";
-import { ModelMenu } from "./ModelMenu";
+import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { modelForSelection } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
@@ -49,7 +49,9 @@ function isImportedDocument(
 
 export function HomeRoute() {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey } = useApp();
+  const { client, models, defaultModelKey, providers, modelVisibilityOverrides } =
+    useApp();
+  const modelSettingsNav = useModelSettingsNav();
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const draft = useComposerDraft(HOME_DRAFT_KEY);
   const composerPlugins = useComposerPlugins(client);
@@ -362,6 +364,10 @@ export function HomeRoute() {
                 value={effective.model}
                 defaultKey={defaultModelKey}
                 disabled={creatingChat}
+                visibilityOverrides={modelVisibilityOverrides}
+                providers={providers}
+                onManageModels={modelSettingsNav.onManageModels}
+                onSetUpProvider={modelSettingsNav.onSetUpProvider}
                 onChange={newChat.setModel}
               />
             }
