@@ -12,6 +12,10 @@ import {
   copyAgentRunDebug,
   fetchAgentRunProgress,
 } from "./AgentRunDebugReport";
+import {
+  AgentRunProgressStream,
+  useAgentRunProgress,
+} from "./AgentRunProgress";
 import { agentRunStatusDetail, RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
 import {
   AgentRunTaskPlanChecklist,
@@ -71,6 +75,15 @@ export function BackgroundAgentPanel({
     run !== null,
     agentRuns.loadActivity,
   );
+  // The stream is read for any run the panel has, and re-read on a timer only
+  // while the run can still add to it. Each poll resumes from the cursor the
+  // last page returned, so an open panel asks for what it does not have.
+  const progress = useAgentRunProgress(
+    runId,
+    run !== null,
+    run !== null && RUNNING_AGENT_STATUSES.has(run.status),
+    agentRuns.loadProgress,
+  );
   // Opening the panel is the intent the row's chevron stands for, so the full
   // checklist is read here rather than waiting on a second disclosure.
   const taskPlan = useAgentRunTaskPlan(
@@ -120,6 +133,7 @@ export function BackgroundAgentPanel({
         <BackgroundAgentDetail
           run={run}
           activity={activity}
+          progress={progress}
           taskPlan={taskPlan}
           chatId={chatId}
           onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
@@ -153,12 +167,14 @@ export function BackgroundAgentPanel({
 function BackgroundAgentDetail({
   run,
   activity,
+  progress,
   taskPlan,
   chatId,
   onOpenOutput,
 }: {
   run: AgentRun;
   activity: ReturnType<typeof useAgentRunActivity>;
+  progress: ReturnType<typeof useAgentRunProgress>;
   taskPlan: ReturnType<typeof useAgentRunTaskPlan>;
   chatId: string;
   onOpenOutput?: (outputId: string) => void;
@@ -226,6 +242,7 @@ function BackgroundAgentDetail({
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4" aria-live="polite">
+        <AgentRunProgressStream state={progress} className="mb-4" />
         <AgentActivityTimeline
           key={run.id}
           state={activity}

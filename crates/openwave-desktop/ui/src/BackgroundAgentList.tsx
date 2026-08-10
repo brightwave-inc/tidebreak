@@ -5,9 +5,11 @@ import { toast } from "sonner";
 import type {
   AgentActivityHistoryEntry,
   AgentRun,
+  AgentRunProgress,
   AgentRunTaskPlan,
   ApiClient,
 } from "./api";
+import { useAgentRunProgress } from "./AgentRunProgress";
 import {
   AgentRunTaskPlanChecklist,
   AgentRunTaskPlanProgress,
@@ -49,6 +51,11 @@ type BackgroundAgentListProps = {
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   /** Fetch a run's full task plan, read only when a row is opened. */
   onLoadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+  /** Read one page of a run's live progress, resuming from a held cursor. */
+  onLoadProgress: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
   /** Open one run's dedicated panel beside the conversation. */
   onOpen?: (runId: string) => void;
   /** Open one file a run submitted, from its pill on the row. */
@@ -71,6 +78,7 @@ export function BackgroundAgentList({
   onCancel,
   onLoadActivity,
   onLoadTaskPlan,
+  onLoadProgress,
   onOpen,
   onOpenOutput,
 }: BackgroundAgentListProps) {
@@ -189,6 +197,7 @@ export function BackgroundAgentList({
                         onCancel={onCancel}
                         onLoadActivity={onLoadActivity}
                         onLoadTaskPlan={onLoadTaskPlan}
+                        onLoadProgress={onLoadProgress}
                         onOpen={onOpen}
                         onOpenOutput={onOpenOutput}
                         expanded={expandedRunIds.has(run.id)}
@@ -254,6 +263,7 @@ function BackgroundAgentRow({
   onCancel,
   onLoadActivity,
   onLoadTaskPlan,
+  onLoadProgress,
   onOpen,
   onOpenOutput,
   expanded,
@@ -267,6 +277,10 @@ function BackgroundAgentRow({
   onCancel: (runId: string) => Promise<void>;
   onLoadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   onLoadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+  onLoadProgress: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
   onOpen?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
   expanded: boolean;
@@ -282,6 +296,9 @@ function BackgroundAgentRow({
     onLoadActivity,
   );
   const live = RUNNING_AGENT_STATUSES.has(run.status);
+  // Read while the child is live whether or not the row is open: the latest
+  // line is what the collapsed row says, so it cannot wait on a disclosure.
+  const progress = useAgentRunProgress(run.id, live, live, onLoadProgress);
   // Keyed on the plan's own timestamp rather than the run's: the row re-reads
   // the list when the plan moves on, not on every poll that touches the run.
   const taskPlan = useAgentRunTaskPlan(
@@ -318,6 +335,16 @@ function BackgroundAgentRow({
 
   const contentId = `background-agent-activity-${run.id}`;
 
+  // What the row says the child is up to. A live child that has narrated
+  // something says that, in its own words, rather than repeating the state
+  // its own dot already carries; anything else falls back to the state. The
+  // line is the agent's own prose, so it is rendered as text and held to one
+  // truncated line — it shares the row with the task and the controls.
+  const latestProgress = !showStopping && live ? progress.latest : null;
+  const statusText = showStopping
+    ? "Stopping"
+    : (latestProgress?.text ?? agentRunStatusDetail(run));
+
   return (
     <div className="px-3 py-2.5">
       <div className="flex min-w-0 items-center gap-2">
@@ -352,8 +379,15 @@ function BackgroundAgentRow({
             {run.task ?? "Background agent"}
           </span>
         </button>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {showStopping ? "Stopping" : agentRunStatusDetail(run)}
+        <span
+          className={cn(
+            "text-xs text-muted-foreground",
+            latestProgress === null
+              ? "shrink-0"
+              : "min-w-0 max-w-[50%] shrink truncate",
+          )}
+        >
+          {statusText}
         </span>
         {client && chatId && (
           <CopyAgentRunDebugButton
