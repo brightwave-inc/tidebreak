@@ -1,7 +1,8 @@
 //! `openwave -p "<prompt>"` — one unattended turn.
 //!
-//! Boots the same in-process server `openwave serve` runs and drives one turn
-//! over the loopback API, then exits with a status that says how the turn ended.
+//! Boots the same in-process server `openwave serve` runs — or, with
+//! `--server`, attaches to one already running — and drives one turn over the
+//! HTTP+WS API, then exits with a status that says how the turn ended.
 //! stdout carries the output (assistant text, or the raw event stream under
 //! `--output-format json`) and nothing else: logging is file-only and every
 //! notice goes to stderr, so `openwave -p … > answer.txt` is exactly the answer.
@@ -44,8 +45,8 @@ const EXIT_DECISION_FAILED: i32 = 4;
 const EXIT_INTERRUPTED: i32 = 130;
 
 /// Attempts to re-open the event socket after it closes mid-turn before giving
-/// up. The server is in-process, so a close means something is badly wrong; the
-/// retries only cover a transient accept-loop hiccup.
+/// up. The retries cover a transient hiccup — an accept-loop stumble when the
+/// server is in-process, a dropped connection when it is not.
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -75,18 +76,14 @@ pub async fn run(
     chat: Option<ChatId>,
     format: OutputFormat,
     permission_mode: Option<String>,
+    server: crate::connect::Server,
 ) -> Result<i32> {
-    let config = crate::profile_config()?;
-    // stdout belongs to the output, so logs go to the profile's log file only.
-    openwave_server::logging::init_logging_file_only(&config.data_dir);
-    let server = openwave_server::bind_configured(config).await?;
-    let addr = server.local_addr();
-    let token = server.token().to_owned();
-    // Dropping the Server aborts its background workers, the turn worker
-    // included; this handle is what keeps the engine alive for the turn.
-    let serve = tokio::spawn(server.serve());
-
-    let client = Client::new(addr, &token)?;
+    // Either binds the engine in-process (the default) or attaches to one that
+    // is already running; the turn below is identical either way. The session
+    // keeps an embedded engine alive — dropping it aborts the accept loop and
+    // with it the turn worker.
+    let session = crate::connect::Session::open(&server).await?;
+    let client = session.client().clone();
     let chat = match chat {
         Some(chat) => {
             client.require_chat(chat).await?;
@@ -106,9 +103,7 @@ pub async fn run(
     let driving = format == OutputFormat::Json && !std::io::stdin().is_terminal();
     let mut driver = Driver::from_stdin(driving);
 
-    let result = one_turn(&client, chat, &prompt, format, &mut driver).await;
-    serve.abort();
-    result
+    one_turn(&client, chat, &prompt, format, &mut driver).await
 }
 
 /// Post the message and follow the event stream until the turn ends.

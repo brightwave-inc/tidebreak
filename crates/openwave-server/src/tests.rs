@@ -2223,15 +2223,29 @@ async fn malformed_requests_get_json_errors_not_plaintext() {
     assert_eq!(info.kind, "bad_request");
 }
 
+/// One process owns a data directory at a time, and the claim is honest across
+/// a crash: the lock lives on an open file descriptor, so it goes away with the
+/// process whether or not anything ran on the way out. A leftover
+/// `openwave.lock` on disk must therefore be reclaimable, and the refusal must
+/// point at the way in that does work — attaching as a client.
 #[test]
 fn one_server_process_owns_a_desktop_data_directory() {
     let dir = tempfile::tempdir().unwrap();
     let config = Config::desktop(dir.path());
     let first = InstanceLock::acquire(&config).unwrap();
-    assert!(InstanceLock::acquire(&config).is_err());
+    let Err(refused) = InstanceLock::acquire(&config) else {
+        panic!("a second claim must be refused");
+    };
+    assert!(
+        refused.to_string().contains("--server"),
+        "the refusal must point at attach mode: {refused}"
+    );
 
     drop(first);
-    InstanceLock::acquire(&config).expect("dropping the server releases its directory lock");
+    let reclaimed = InstanceLock::acquire(&config)
+        .expect("a released directory is reclaimable even though the lock file is still there");
+    assert!(dir.path().join("openwave.lock").exists());
+    drop(reclaimed);
 }
 
 /// The MCP App view frame contract, at the HTTP boundary: minting requires

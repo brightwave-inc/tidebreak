@@ -661,6 +661,13 @@ pub struct Server {
     _instance_lock: InstanceLock,
 }
 
+/// The claim one process makes on a data directory for as long as it serves it.
+///
+/// An OS advisory lock on a file in the directory, held open for the process's
+/// lifetime. The kernel drops it when the file descriptor closes, which happens
+/// on a clean exit and on a crash alike — so a stale `openwave.lock` left on
+/// disk by a killed process never bricks the directory the way a PID file
+/// would. The file's contents are irrelevant; only the lock is.
 struct InstanceLock {
     _file: std::fs::File,
 }
@@ -681,8 +688,15 @@ impl InstanceLock {
             })?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
+            // Two servers over one directory would race the database with
+            // nothing but SQLite's own locking between them, so this refuses
+            // instead. The second process's way in is to be a client of the
+            // first rather than a second server.
             Err(TryLockError::WouldBlock) => Err(AgentError::config(format!(
-                "another OpenWave server already owns {}",
+                "another OpenWave process is already running on the data directory {}. \
+                 Connect to it instead (the CLI's --server <url>, with that server's token \
+                 in OPENWAVE_SERVER_TOKEN), quit the running one, or point \
+                 OPENWAVE_DATA_DIR somewhere else.",
                 config.data_dir.display()
             ))),
             Err(TryLockError::Error(error)) => Err(AgentError::config(format!(

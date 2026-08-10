@@ -1,0 +1,184 @@
+//! Attach or embed — how a command reaches a server.
+//!
+//! Every client command (`tui`, `-p`, and the setup families) needs an
+//! `openwave-server` to talk to, and there are two honest ways to get one. By
+//! default the CLI **embeds**: it binds the server in-process over its own data
+//! directory, which is the right shape for a script or an agent trying things
+//! out in isolation. With `--server <url>` (or `OPENWAVE_SERVER_URL`) it
+//! **attaches** instead, becoming a pure HTTP+WS client of an already-running
+//! `openwave serve` — the same client the desktop webview is.
+//!
+//! Attaching is what a second process on one data directory must do. A data
+//! directory belongs to exactly one server process (`openwave-server` holds an
+//! advisory lock on it for the life of the process), so pointing a second
+//! embedding CLI at a directory the desktop or a running daemon already owns is
+//! refused rather than allowed to race the database.
+//!
+//! The token never rides argv. It comes from `OPENWAVE_SERVER_TOKEN`, or from
+//! the variable `--server-token-env <var>` names — a command line is readable
+//! by every process on the machine and lands in shell history, and a per-launch
+//! bearer token is full authority over the profile.
+
+use openwave_core::{AgentError, Result};
+
+use crate::api::client::Client;
+
+/// Names the server to attach to instead of embedding one.
+pub const SERVER_URL_ENV: &str = "OPENWAVE_SERVER_URL";
+/// Holds the bearer token for that server, unless `--server-token-env` names
+/// another variable.
+pub const SERVER_TOKEN_ENV: &str = "OPENWAVE_SERVER_TOKEN";
+
+/// Where a command's server comes from.
+pub enum Server {
+    /// Bind one in-process over the configured data directory (the default).
+    Embed,
+    /// Talk to one that is already running.
+    Attach { base: String, token: String },
+}
+
+impl Server {
+    /// Resolve the choice from the `--server` / `--server-token-env` flags and
+    /// the environment. The flag wins over `OPENWAVE_SERVER_URL`, so a script
+    /// with the variable exported can still target one invocation elsewhere.
+    pub fn resolve(url_flag: Option<String>, token_env: Option<String>) -> Result<Self> {
+        let url = match url_flag {
+            Some(url) => Some(url),
+            None => std::env::var(SERVER_URL_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        };
+        let Some(url) = url else {
+            if let Some(var) = token_env {
+                return Err(AgentError::config(format!(
+                    "--server-token-env {var} names a token for a server to attach to, \
+                     but no --server <url> (or {SERVER_URL_ENV}) was given"
+                )));
+            }
+            return Ok(Self::Embed);
+        };
+        let base = base_url(&url)?;
+        let var = token_env.as_deref().unwrap_or(SERVER_TOKEN_ENV);
+        let token = std::env::var(var)
+            .ok()
+            .map(|token| token.trim().to_owned())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                AgentError::config(format!(
+                    "{var} is not set; attaching to {base} needs the bearer token that \
+                     server printed at startup"
+                ))
+            })?;
+        Ok(Self::Attach { base, token })
+    }
+}
+
+/// Normalize `--server` into the base every route is formatted against.
+///
+/// Deliberately strict about the scheme: the event socket is derived from this
+/// string, and a bare `127.0.0.1:8080` would silently produce a URL nothing can
+/// connect to.
+fn base_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    let rest = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .ok_or_else(|| {
+            AgentError::config(format!(
+                "--server expects an http:// or https:// URL, got {value:?}"
+            ))
+        })?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return Err(AgentError::config(format!(
+            "--server URL {value:?} has no host"
+        )));
+    }
+    if rest.contains('?') || rest.contains('#') {
+        return Err(AgentError::config(format!(
+            "--server expects a base URL without a query or fragment, got {value:?}"
+        )));
+    }
+    Ok(value.trim_end_matches('/').to_owned())
+}
+
+/// A live client plus, when embedding, the engine keeping it answering.
+///
+/// Dropping the session aborts the embedded accept loop; dropping the `Server`
+/// it owns aborts the background workers with it. Attach mode owns nothing —
+/// the process on the other end keeps running when this one exits.
+pub struct Session {
+    client: Client,
+    serve: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+impl Session {
+    /// Bind or attach, whichever `server` asks for.
+    pub async fn open(server: &Server) -> Result<Self> {
+        match server {
+            Server::Embed => {
+                let config = crate::profile_config()?;
+                // stdout belongs to the command's output, so logs are file-only.
+                openwave_server::logging::init_logging_file_only(&config.data_dir);
+                let server = openwave_server::bind_configured(config).await?;
+                let client = Client::new(server.local_addr(), server.token())?;
+                Ok(Self {
+                    client,
+                    serve: Some(tokio::spawn(server.serve())),
+                })
+            }
+            // Nothing local is touched in attach mode: no data directory, no
+            // log file, no keychain. This process is only a client.
+            Server::Attach { base, token } => Ok(Self {
+                client: Client::attach(base.clone(), token)?,
+                serve: None,
+            }),
+        }
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(serve) = &self.serve {
+            serve.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The parsing rules worth stating: a base URL is normalized, junk is
+    /// refused before a request is built against it, and a token variable
+    /// without a server is a mistake rather than a silent embed.
+    #[test]
+    fn a_server_url_is_normalized_or_refused() {
+        assert_eq!(
+            base_url("http://127.0.0.1:8080/").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            base_url(" https://box.local:9000 ").unwrap(),
+            "https://box.local:9000"
+        );
+        assert!(
+            base_url("127.0.0.1:8080").is_err(),
+            "the scheme is required"
+        );
+        assert!(base_url("http://").is_err(), "a host is required");
+        assert!(base_url("http://host/?a=1").is_err(), "no query string");
+
+        std::env::remove_var(SERVER_URL_ENV);
+        let Err(error) = Server::resolve(None, Some("SOME_VAR".to_owned())) else {
+            panic!("a token variable alone is not enough to attach");
+        };
+        assert!(
+            error.to_string().contains("--server"),
+            "error should name the missing flag: {error}"
+        );
+    }
+}

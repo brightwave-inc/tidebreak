@@ -3,8 +3,8 @@
 //! Every command here is a thin client of a route the server already serves —
 //! the same ones the desktop settings pages call — so configuring OpenWave
 //! from a script and configuring it from the app converge on one
-//! implementation. Nothing in this module decides anything: it boots the
-//! in-process server exactly as print mode does, makes the call, and renders
+//! implementation. Nothing in this module decides anything: it opens a session
+//! (embedded by default, attached with `--server`), makes the call, and renders
 //! the answer.
 //!
 //! Secrets are read from stdin or from a named environment variable, never
@@ -100,21 +100,21 @@ pub enum Command {
     McpRemove { name: String },
 }
 
-/// Boot the engine, run one setup command against it, and shut it down.
+/// Run one setup command against the profile's server, and shut down anything
+/// this process started for it.
 ///
-/// The server is the same one `openwave serve` and `-p` bind, on the same
-/// profile and data directory, so a credential stored here is the credential
-/// the next turn resolves.
-pub async fn run(command: Command, format: OutputFormat) -> Result<()> {
-    let config = crate::profile_config()?;
-    // stdout belongs to the command's output; logs go to the profile's file.
-    openwave_server::logging::init_logging_file_only(&config.data_dir);
-    let server = openwave_server::bind_configured(config).await?;
-    let client = Client::new(server.local_addr(), server.token())?;
-    let serve = tokio::spawn(server.serve());
-    let result = execute(&client, command, format).await;
-    serve.abort();
-    result
+/// The embedded server is the same one `openwave serve` and `-p` bind, on the
+/// same profile and data directory, so a credential stored here is the
+/// credential the next turn resolves. With `--server` the command runs against
+/// a server already holding that data directory instead — the same routes, the
+/// same effect on the same profile.
+pub async fn run(
+    command: Command,
+    format: OutputFormat,
+    server: crate::connect::Server,
+) -> Result<()> {
+    let session = crate::connect::Session::open(&server).await?;
+    execute(session.client(), command, format).await
 }
 
 /// Make the call and render it. Split from [`run`] so a test can drive several
