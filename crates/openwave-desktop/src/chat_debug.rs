@@ -23,8 +23,12 @@
 //! below returns provider credentials.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 use chrono::{DateTime, Utc};
 use openwave_core::event::{AgentEvent, SequencedEvent};
 use openwave_core::model::{Chat, Message, TurnRun};
@@ -133,11 +137,13 @@ const SECRET_KEY_SUFFIXES: &[&str] = &[
 /// token in a bug report, a false negative publishes a live key.
 #[must_use]
 pub(crate) fn scrub_credentials(input: &str) -> String {
+    let input = redact_private_key_blocks(input);
+    let input = redact_credential_urls(&input);
     let mut out = String::with_capacity(input.len());
     // The token that could name the value about to be read, if the separators
     // since have all been "still the same key/value pair" characters.
     let mut key: Option<String> = None;
-    let mut rest = input;
+    let mut rest = input.as_str();
     while let Some(next) = rest.chars().next() {
         if is_token_char(next) {
             let end = rest.find(|c| !is_token_char(c)).unwrap_or(rest.len());
@@ -159,6 +165,102 @@ pub(crate) fn scrub_credentials(input: &str) -> String {
         }
     }
     out
+}
+
+/// Remove complete PEM/OpenSSH/PGP private-key blocks before token scanning.
+/// Their base64 bodies have no vendor prefix, and JSON rendering may represent
+/// their newlines as `\n`, so line-based token heuristics cannot recognize them
+/// reliably. An unterminated block is redacted through EOF rather than risking
+/// disclosure of a damaged or partially copied key.
+fn redact_private_key_blocks(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    const BEGIN: &str = "-----BEGIN ";
+    const MARKER_END: &str = "-----";
+
+    while let Some(relative_begin) = input[cursor..].find(BEGIN) {
+        let begin = cursor + relative_begin;
+        let label_start = begin + BEGIN.len();
+        let Some(relative_label_end) = input[label_start..].find(MARKER_END) else {
+            break;
+        };
+        let label_end = label_start + relative_label_end;
+        let label = &input[label_start..label_end];
+        let begin_end = label_end + MARKER_END.len();
+        if !label.contains("PRIVATE KEY") {
+            out.push_str(&input[cursor..begin_end]);
+            cursor = begin_end;
+            continue;
+        }
+
+        out.push_str(&input[cursor..begin]);
+        out.push_str(REDACTED);
+        let end_marker = format!("-----END {label}-----");
+        let Some(relative_end) = input[begin_end..].find(&end_marker) else {
+            return out;
+        };
+        cursor = begin_end + relative_end + end_marker.len();
+    }
+
+    out.push_str(&input[cursor..]);
+    out
+}
+
+/// Redact URLs whose authority embeds userinfo. Database, message-broker,
+/// proxy, and ordinary HTTP URLs all use this standard syntax for passwords or
+/// bearer tokens, and retaining the hostname is less important than making a
+/// copied connection string safe to share.
+fn redact_credential_urls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(relative_separator) = input[cursor..].find("://") {
+        let separator = cursor + relative_separator;
+        let scheme_start = input[..separator]
+            .rfind(|character: char| !is_url_scheme_char(character))
+            .map_or(0, |index| index + 1);
+        let scheme = &input[scheme_start..separator];
+        if scheme.is_empty()
+            || !scheme
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+        {
+            out.push_str(&input[cursor..separator + 3]);
+            cursor = separator + 3;
+            continue;
+        }
+
+        let url_end = input[separator + 3..]
+            .find(is_url_boundary)
+            .map_or(input.len(), |offset| separator + 3 + offset);
+        let candidate = &input[scheme_start..url_end];
+        let has_credentials = url::Url::parse(candidate)
+            .ok()
+            .is_some_and(|url| !url.username().is_empty() || url.password().is_some());
+        if has_credentials {
+            out.push_str(&input[cursor..scheme_start]);
+            out.push_str(REDACTED);
+        } else {
+            out.push_str(&input[cursor..url_end]);
+        }
+        cursor = url_end;
+    }
+
+    out.push_str(&input[cursor..]);
+    out
+}
+
+const fn is_url_scheme_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+}
+
+const fn is_url_boundary(character: char) -> bool {
+    character.is_ascii_whitespace()
+        || matches!(
+            character,
+            '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '`' | '\\'
+        )
 }
 
 /// Whether a character continues the current token. `:` and `=` are excluded
@@ -280,9 +382,9 @@ fn render_header(
     let _ = writeln!(
         out,
         "This bundle contains the full conversation — every message, tool \
-         argument, tool result, and file path in this chat. API keys and \
-         other credential-shaped tokens are removed; nothing else is. Read \
-         it before sharing it.\n",
+         argument, tool result, and file path in this chat. Credential \
+         redaction is best-effort, including common tokens, credential URLs, \
+         and private-key blocks. Read the entire bundle before sharing it.\n",
     );
     let _ = writeln!(out, "## Chat\n");
     let _ = writeln!(out, "| Field | Value |");
@@ -760,7 +862,46 @@ fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
     if !destination.is_absolute() {
         return Err("The save destination is invalid".to_owned());
     }
-    std::fs::write(destination, content).map_err(|_| "Could not write the debug bundle".to_owned())
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "The save destination is invalid".to_owned())?;
+    let filename = destination
+        .file_name()
+        .ok_or_else(|| "The save destination is invalid".to_owned())?;
+    let directory = Dir::open_ambient_dir(parent, ambient_authority())
+        .map_err(|_| "Could not open the selected folder".to_owned())?;
+    match directory.symlink_metadata(filename) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err("The selected destination is not a regular file".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not inspect the selected destination".to_owned()),
+    }
+
+    let temporary = format!(".openwave-debug-export-{}.tmp", Uuid::new_v4());
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = directory.open_with(&temporary, &options)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        directory.rename(&temporary, &directory, filename)?;
+        #[cfg(unix)]
+        directory.open(".")?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = directory.remove_file(&temporary);
+    }
+    result.map_err(|_| "Could not write the debug bundle".to_owned())
 }
 
 #[cfg(test)]
@@ -1011,6 +1152,88 @@ mod tests {
             "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
         );
         assert_eq!(scrub_credentials(&jwt), "[redacted]");
+    }
+
+    #[test]
+    fn private_key_blocks_and_credential_urls_are_redacted() {
+        for label in [
+            "PRIVATE KEY",
+            "RSA PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+        ] {
+            let begin = format!("-----BEGIN {label}-----");
+            let end = format!("-----END {label}-----");
+            let private_key = format!("before\n{begin}\nopaque-key-material\n{end}\nafter");
+            assert_eq!(
+                scrub_credentials(&private_key),
+                "before\n[redacted]\nafter",
+                "redacting {label}"
+            );
+        }
+
+        let begin = format!("-----BEGIN {} KEY-----", "OPENSSH PRIVATE");
+        let unterminated = format!("before\n{begin}\nopaque-key-material");
+        assert_eq!(scrub_credentials(&unterminated), "before\n[redacted]");
+
+        let escaped = r#"{"output":"-----BEGIN PRIVATE KEY-----\nopaque-key-material\n-----END PRIVATE KEY-----"}"#;
+        assert_eq!(scrub_credentials(escaped), r#"{"output":"[redacted]"}"#);
+
+        let password = "correct-horse-battery-staple";
+        let connection = format!("database=postgres://alice:{password}@db.example.test/openwave");
+        assert_eq!(scrub_credentials(&connection), "database=[redacted]");
+
+        let token_url = "remote=https://ghp_abcdefghijklmnopqrstuvwxyz@github.com/openwave.git";
+        assert_eq!(scrub_credentials(token_url), "remote=[redacted]");
+
+        assert_eq!(
+            scrub_credentials("docs=https://example.test/reference"),
+            "docs=https://example.test/reference"
+        );
+    }
+
+    #[test]
+    fn debug_bundle_export_is_private_and_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("bundle.md");
+        write_bundle(&destination, b"first").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"first");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        write_bundle(&destination, b"replacement").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"replacement");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_bundle_export_rejects_destination_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.md");
+        let destination = directory.path().join("bundle.md");
+        std::fs::write(&target, b"private target").unwrap();
+        symlink(&target, &destination).unwrap();
+
+        assert!(write_bundle(&destination, b"replacement").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"private target");
     }
 
     /// The scrubber runs over the rendered document, not only over the
