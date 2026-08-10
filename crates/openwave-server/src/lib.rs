@@ -494,6 +494,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_agent_run_cancel),
         )
         .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/resume",
+            post(routes::post_agent_run_resume),
+        )
+        .route(
             "/chats/{chat_id}/agent-runs/{run_id}/steer",
             post(routes::post_agent_run_steer),
         )

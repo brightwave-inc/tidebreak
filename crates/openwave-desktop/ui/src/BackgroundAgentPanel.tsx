@@ -23,6 +23,8 @@ import {
   useAgentRunTaskPlan,
 } from "./AgentRunTaskPlan";
 import type { AgentRun, ApiClient } from "./api";
+import { friendlyErrorMessage } from "./lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 import { ClipboardCopyButton, copyPlainText } from "./ClipboardCopyButton";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { SubmittedOutputPills } from "./SubmittedOutputPills";
@@ -62,7 +64,7 @@ export function BackgroundAgentPanel({
 
   const stoppable =
     run !== null &&
-    RUNNING_AGENT_STATUSES.has(run.status) &&
+    (RUNNING_AGENT_STATUSES.has(run.status) || run.status === "needs_input") &&
     run.status !== "cancelling";
   const [stopping, setStopping] = useState(false);
   useEffect(() => {
@@ -220,6 +222,9 @@ function BackgroundAgentDetail({
             {run.last_error_code}
           </p>
         )}
+        {run.status === "needs_input" && (
+          <AgentRunCheckInControls chatId={chatId} runId={run.id} />
+        )}
       </div>
       <div className="mt-3 flex shrink-0 flex-col gap-2 border-b px-4 pb-3 empty:hidden">
         {run.task_plan && (
@@ -334,6 +339,13 @@ export function AgentRunStatusBadge({ status }: { status: AgentRun["status"] }) 
           Stopping
         </Badge>
       );
+    case "needs_input":
+      return (
+        <Badge variant="warning" size="sm">
+          <Clock className="size-3" aria-hidden="true" />
+          Needs input
+        </Badge>
+      );
     case "waiting":
     case "retry_wait":
       return (
@@ -390,4 +402,59 @@ export function elapsedLabel(run: AgentRun, now: number): string | null {
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+/**
+ * The action strip for a run paused at a check-in: optional guidance, then
+ * resume (another cadence window) or stop. Shown only in `needs_input`, and
+ * the run's own progress feed directly below carries why it paused.
+ */
+function AgentRunCheckInControls({
+  chatId,
+  runId,
+}: {
+  chatId: string;
+  runId: string;
+}) {
+  const { client } = useApp();
+  const agentRuns = useAgentRuns(client, chatId, [runId]);
+  const [guidance, setGuidance] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function resume() {
+    setBusy(true);
+    try {
+      await agentRuns.resume(runId, guidance.trim() || undefined);
+      toast.success("Agent resumed");
+    } catch (error) {
+      toast.error(friendlyErrorMessage(error, "Could not resume the agent"));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="ml-9 mt-2 flex flex-col gap-2">
+      <Textarea
+        rows={2}
+        placeholder="Optional guidance for the agent before it continues…"
+        value={guidance}
+        disabled={busy}
+        onChange={(event) => setGuidance(event.target.value)}
+      />
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          className="h-7 px-3 text-xs"
+          disabled={busy}
+          onClick={() => void resume()}
+        >
+          {busy ? "Resuming…" : "Resume"}
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Grants another step window{guidance.trim() ? " with your guidance" : ""}.
+        </span>
+      </div>
+    </div>
+  );
 }

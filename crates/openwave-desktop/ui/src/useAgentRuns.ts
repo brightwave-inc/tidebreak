@@ -42,6 +42,11 @@ export type AgentRuns = {
    * own optimistic "Stopping" state until that durable status arrives.
    */
   cancel: (runId: string) => Promise<void>;
+  /**
+   * Resume a run paused at a check-in, optionally with guidance, then refresh
+   * so the poll picks up the transition back to live work.
+   */
+  resume: (runId: string, guidance?: string) => Promise<void>;
   /** Fetch the ordered, renderer-safe activity history for one background run. */
   loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
   /**
@@ -153,6 +158,14 @@ export function useAgentRuns(
     },
     [client, chatId],
   );
+  const resume = useCallback(
+    async (runId: string, guidance?: string) => {
+      if (!client || !chatId) return;
+      await client.resumeAgentRun(chatId, runId, guidance);
+      refreshRef.current?.();
+    },
+    [client, chatId],
+  );
   const loadActivity = useCallback(
     async (runId: string) => {
       if (!client || !chatId) return [];
@@ -182,6 +195,7 @@ export function useAgentRuns(
     error,
     refresh: () => refreshRef.current?.(),
     cancel,
+    resume,
     loadActivity,
     loadTaskPlan,
     loadProgress,

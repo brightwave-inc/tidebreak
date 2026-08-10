@@ -1508,6 +1508,31 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Atomically park one exact live sandbox lease in `NeedsInput` with a
+    /// check-in receipt its parent's wait can consume. Not terminal: a resume
+    /// deletes the receipt and grants the run another cadence window.
+    async fn submit_agent_run_checkin(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _reason: crate::model::AgentRunCheckInReason,
+        _steps_used: u32,
+        _detail: &str,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Resume a run parked in `NeedsInput`, recording the grant and watermark
+    /// durably and appending any guidance to the run's task text. Returns
+    /// `None` when the run is not paused.
+    async fn resume_agent_run_from_checkin(
+        &self,
+        _id: AgentRunId,
+        _guidance: Option<&str>,
+    ) -> Result<Option<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Atomically persist immutable final text and complete one exact live
     /// sandbox lease. An exact ambiguous retry returns the original receipt;
     /// stale, cancelled, or differently-payloaded submissions return `None`.

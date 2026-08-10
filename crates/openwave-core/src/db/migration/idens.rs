@@ -193,6 +193,8 @@ pub(crate) enum AgentRun {
     AttemptCount,
     MaxAttempts,
     ClaimCount,
+    CheckinGrants,
+    CheckinWatermark,
     AvailableAt,
     DeadlineAt,
     LeaseToken,

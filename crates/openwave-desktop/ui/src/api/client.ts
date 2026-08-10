@@ -1182,6 +1182,23 @@ export class ApiClient {
     return parseAgentRunProgress(body, afterSequence);
   }
 
+  /** Resume a background run paused at a check-in, optionally with guidance. */
+  async resumeAgentRun(
+    chatId: string,
+    runId: string,
+    guidance?: string,
+  ): Promise<void> {
+    await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/agent-runs/${encodeURIComponent(runId)}/resume`,
+      {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(guidance ? { guidance } : {}),
+      },
+      202,
+    );
+  }
+
   async cancelAgentRun(
     chatId: string,
     runId: string,

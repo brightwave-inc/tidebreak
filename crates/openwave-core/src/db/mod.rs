@@ -1355,6 +1355,26 @@ impl Store for DbStore {
         ops::agent_run::submit_agent_run_result(self, id, lease_token, text).await
     }
 
+    async fn submit_agent_run_checkin(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        reason: crate::model::AgentRunCheckInReason,
+        steps_used: u32,
+        detail: &str,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        ops::agent_run::submit_agent_run_checkin(self, id, lease_token, reason, steps_used, detail)
+            .await
+    }
+
+    async fn resume_agent_run_from_checkin(
+        &self,
+        id: AgentRunId,
+        guidance: Option<&str>,
+    ) -> Result<Option<AgentRun>> {
+        ops::agent_run::resume_agent_run_from_checkin(self, id, guidance).await
+    }
+
     async fn submit_agent_run_submission(
         &self,
         id: AgentRunId,

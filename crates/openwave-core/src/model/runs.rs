@@ -163,6 +163,20 @@ pub struct AgentRun {
     pub max_attempts: i32,
     /// Exact worker lease segments issued over the run's lifetime.
     pub claim_count: i32,
+    /// Cadence windows granted beyond the first by check-in resumes.
+    ///
+    /// The effective step budget at a claim is the configured cadence times
+    /// one more than this, so a resumed run replays deterministically: the
+    /// grant is durable state, not a live setting.
+    #[serde(default)]
+    pub checkin_grants: i32,
+    /// Durable tool rows the run had when it was last resumed.
+    ///
+    /// The consecutive-error trigger counts trailing error receipts past this
+    /// mark only, so the failures that caused one check-in cannot re-trigger
+    /// the next.
+    #[serde(default)]
+    pub checkin_watermark: i32,
     /// Earliest time queued or retry-wait work may be claimed.
     pub available_at: DateTime<Utc>,
     /// Absolute wall-clock limit for sandbox work. Foreground coordinators do
@@ -398,6 +412,51 @@ pub enum AgentRunResultPayload {
         /// Stable reason recorded by the cancellation state machine.
         reason: AgentRunCancellationReason,
     },
+    /// The run paused for direction instead of finishing.
+    ///
+    /// Unlike every other variant this is not terminal: the run sits in
+    /// `NeedsInput`, and a resume deletes this receipt so the run's single
+    /// result slot is free for the outcome it eventually produces.
+    CheckIn {
+        /// What made the run pause.
+        reason: AgentRunCheckInReason,
+        /// Model steps the run had taken when it paused.
+        steps_used: u32,
+        /// Bounded prose for the requester: progress so far, or the error the
+        /// run kept hitting.
+        detail: String,
+    },
+}
+
+/// Why a background run checked in with its requester.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunCheckInReason {
+    /// The run used its whole cadence window without finishing.
+    StepCadence,
+    /// The run's trailing tool calls all resolved as errors.
+    ConsecutiveToolErrors,
+}
+
+impl AgentRunCheckInReason {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StepCadence => "step_cadence",
+            Self::ConsecutiveToolErrors => "consecutive_tool_errors",
+        }
+    }
+
+    /// Parse the stored representation.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "step_cadence" => Some(Self::StepCadence),
+            "consecutive_tool_errors" => Some(Self::ConsecutiveToolErrors),
+            _ => None,
+        }
+    }
 }
 
 /// One file a background run submitted as a deliverable.
@@ -605,6 +664,11 @@ pub enum AgentRunStatus {
     Waiting,
     /// Replay-safe work awaits another scheduler claim.
     RetryWait,
+    /// The run checked in and is paused for its requester's direction.
+    ///
+    /// Not terminal and not claimable: nothing advances the run until a
+    /// resume (which grants another cadence window) or a cancellation.
+    NeedsInput,
     /// The run submitted its final result successfully.
     Completed,
     /// The run failed permanently or cannot be replayed safely.
@@ -624,6 +688,7 @@ impl AgentRunStatus {
             Self::Cancelling => "cancelling",
             Self::Waiting => "waiting",
             Self::RetryWait => "retry_wait",
+            Self::NeedsInput => "needs_input",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",

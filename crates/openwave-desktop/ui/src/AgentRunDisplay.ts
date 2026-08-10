@@ -21,6 +21,7 @@ export const AGENT_RUN_STATUS_GROUPS: readonly AgentRunStatusGroup[] = [
     label: "Running",
     statuses: ["active", "queued", "running", "waiting", "retry_wait"],
   },
+  { id: "needs_input", label: "Needs input", statuses: ["needs_input"] },
   { id: "stopping", label: "Stopping", statuses: ["cancelling"] },
   { id: "completed", label: "Completed", statuses: ["completed"] },
   { id: "stopped", label: "Stopped", statuses: ["cancelled"] },
@@ -45,6 +46,8 @@ export function getAgentRunDotClass(status: AgentRunStatus): string {
     case "retry_wait":
     case "cancelling":
       return "animate-pulse bg-muted-foreground";
+    case "needs_input":
+      return "bg-warning";
     case "completed":
       return "bg-success";
     case "failed":
@@ -88,6 +91,8 @@ export function agentRunStatusDetail(run: AgentRun): string {
       return "Waiting to continue";
     case "retry_wait":
       return "Waiting to retry";
+    case "needs_input":
+      return "Checked in — needs your direction";
     case "completed":
       return "Finished";
     case "failed":
