@@ -8,23 +8,42 @@
 !Cargo.lock
 !rust-toolchain.toml
 
-# Cargo must be able to discover every workspace member. The final rules below
-# still reject credential-shaped files even if one is accidentally created
-# inside a crate directory.
+# Cargo must be able to discover every workspace member, but the build only
+# receives manifests, Rust source trees, build scripts, and the few data files
+# embedded by the selected package closure. Do not broaden these back to
+# `!crates/**`: that would upload unrelated untracked files to remote builders.
 !crates/
-!crates/**
+!crates/*/
+!crates/*/Cargo.toml
+!crates/*/build.rs
+!crates/*/src/
+!crates/*/src/**
+!crates/openwave-code-execution/baseline_python_deps.txt
+!crates/openwave-sandbox-agent/documents-requirements.txt
 
-# Source-time files referenced by the server dependency closure.
+# Built-in manifests are source inputs for compile-time contract checks. Admit
+# only the reviewed manifest names, not arbitrary files beside them.
 !skills/
-!skills/**
+!skills/*/
+!skills/*/SKILL.md
 !plugins/
-!plugins/**
+!plugins/*/
+!plugins/*/PLUGIN.md
 
-# Never admit local credentials or application state, even below an allowed
-# source directory. Keep these after the allow rules so they win.
+# Never admit hidden files or common credential files, even below an allowed
+# source directory. Keep these after the allow rules so they win. The explicit
+# credential names are defense in depth for future changes to the hidden-file
+# rule and document the exact probes enforced by workflow-security.test.mjs.
+**/.npmrc
+**/.netrc
+**/.pypirc
+**/.cargo/credentials
+**/.cargo/credentials.toml
+**/id_*
+**/credentials
+**/credentials.*
 **/.env
 **/.env.*
-!**/.env.example
 **/*.pem
 **/*.key
 **/*.p12
@@ -38,6 +57,8 @@
 **/.ssh/**
 **/.openwave
 **/.openwave/**
+**/.*
+**/.*/**
 
 # Generated and dependency trees are never source inputs.
 **/target

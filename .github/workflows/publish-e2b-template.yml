@@ -56,9 +56,18 @@ on:
     branches: [main]
     paths:
       - "crates/openwave-sandbox-agent/e2b/**"
+      - ".github/e2b-cli/**"
       - ".github/workflows/publish-e2b-template.yml"
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: >-
+          Optional published vX.Y.Z release whose template definition should
+          be rebuilt. The workflow itself must still be dispatched from the
+          repository's current default branch.
+        required: false
+        default: ""
+        type: string
       force_rebuild:
         description: >-
           Rebuild and republish even when the alias is already public. Use
@@ -78,7 +87,8 @@ env:
   # The E2B management API the client crate also talks to
   # (`E2B_API_BASE` in crates/openwave-code-execution/src/e2b.rs).
   E2B_API_BASE: https://api.e2b.app
-  TEMPLATE_DIR: crates/openwave-sandbox-agent/e2b
+  TEMPLATE_PATH: crates/openwave-sandbox-agent/e2b
+  SOURCE_TEMPLATE_DIR: .release-source/crates/openwave-sandbox-agent/e2b
 
 jobs:
   # Reads the template definition and decides whether anything needs building.
@@ -96,53 +106,76 @@ jobs:
       cpu_count: ${{ steps.definition.outputs.cpu_count }}
       memory_mb: ${{ steps.definition.outputs.memory_mb }}
       publish: ${{ steps.state.outputs.publish }}
+      source_sha: ${{ steps.source.outputs.sha }}
       # The template ID the alias already resolves to, when it does. Empty on
       # a 404; the publish job's own verification supplies it in that case.
       template_id: ${{ steps.state.outputs.template_id }}
     steps:
+      # This first checkout is always the revision that supplied the running
+      # workflow. Manual runs are rejected unless that revision came from the
+      # current default branch; a requested release is only data for the
+      # separate sparse checkout below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Validate the publication source
+        id: source
         env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_REF: ${{ github.ref }}
           SOURCE_REF_NAME: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
-          git fetch --no-tags origin main:refs/remotes/origin/main
+          [[ -n "$DEFAULT_BRANCH" ]] || {
+            echo "The repository event did not identify a default branch." >&2
+            exit 1
+          }
+          git fetch --no-tags origin \
+            "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] || {
+            echo "The trusted checkout does not match the workflow revision $SOURCE_SHA." >&2
+            exit 1
+          }
 
           case "$EVENT_NAME" in
             push)
-              [[ "$SOURCE_REF" == refs/heads/main && "$SOURCE_REF_NAME" == main ]] || {
-                echo "Automatic E2B publication must run from main, got $SOURCE_REF ($SOURCE_REF_NAME)" >&2
+              [[ "$SOURCE_REF" == "refs/heads/$DEFAULT_BRANCH" &&
+                "$SOURCE_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
+                echo "Automatic E2B publication must run from $DEFAULT_BRANCH, got $SOURCE_REF ($SOURCE_REF_NAME)" >&2
                 exit 1
               }
+              [[ -z "$RELEASE_TAG" ]] || {
+                echo "Automatic E2B publication cannot select a release tag." >&2
+                exit 1
+              }
+              template_sha="$SOURCE_SHA"
               ;;
             workflow_dispatch)
-              if [[ "$SOURCE_REF" == refs/heads/main && "$SOURCE_REF_NAME" == main ]]; then
-                :
-              elif [[ "$SOURCE_REF" == "refs/tags/$SOURCE_REF_NAME" ]]; then
-                node scripts/check-release-tag.mjs "$SOURCE_REF_NAME"
+              [[ "$SOURCE_REF" == "refs/heads/$DEFAULT_BRANCH" &&
+                "$SOURCE_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
+                echo "Manual E2B publication must dispatch the current $DEFAULT_BRANCH workflow, got $SOURCE_REF ($SOURCE_REF_NAME)" >&2
+                exit 1
+              }
+              if [[ -n "$RELEASE_TAG" ]]; then
+                node scripts/check-release-tag.mjs "$RELEASE_TAG"
                 release_json="$(gh api \
                   -H 'Accept: application/vnd.github+json' \
-                  "repos/$GITHUB_REPOSITORY/releases/tags/$SOURCE_REF_NAME")"
-                [[ "$(jq -r .tag_name <<<"$release_json")" == "$SOURCE_REF_NAME" &&
+                  "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+                [[ "$(jq -r .tag_name <<<"$release_json")" == "$RELEASE_TAG" &&
                   "$(jq -r .draft <<<"$release_json")" == false &&
                   "$(jq -r .prerelease <<<"$release_json")" == false ]] || {
                   echo "Manual E2B publication requires a published, non-prerelease GitHub Release." >&2
                   exit 1
                 }
-                tag_sha="$(git rev-parse "refs/tags/$SOURCE_REF_NAME^{commit}")"
-                [[ "$tag_sha" == "$SOURCE_SHA" ]] || {
-                  echo "Selected release tag $SOURCE_REF_NAME resolves to $tag_sha, not $SOURCE_SHA" >&2
-                  exit 1
-                }
+                git fetch --force --no-tags origin \
+                  "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+                template_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
               else
-                echo "Manual E2B publication must select main or a vX.Y.Z release tag, got $SOURCE_REF" >&2
-                exit 1
+                template_sha="$SOURCE_SHA"
               fi
               ;;
             *)
@@ -151,10 +184,21 @@ jobs:
               ;;
           esac
 
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "Refusing to publish E2B content not contained in main: $SOURCE_SHA" >&2
+          git merge-base --is-ancestor "$template_sha" "origin/$DEFAULT_BRANCH" || {
+            echo "Refusing to publish E2B content not contained in $DEFAULT_BRANCH: $template_sha" >&2
             exit 1
           }
+          echo "sha=$template_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the validated template source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          path: .release-source
+          fetch-depth: 1
+          sparse-checkout: |
+            crates/openwave-sandbox-agent/e2b
+          sparse-checkout-cone-mode: false
 
       - name: Require the E2B credential
         env:
@@ -185,7 +229,7 @@ jobs:
           import re
           import sys
 
-          directory = os.environ["TEMPLATE_DIR"]
+          directory = os.environ["SOURCE_TEMPLATE_DIR"]
           with open(f"{directory}/e2b.toml") as handle:
               config = handle.read()
 
@@ -298,7 +342,21 @@ jobs:
     env:
       ALIAS: ${{ needs.resolve.outputs.alias }}
     steps:
+      # Trusted workflow/tooling checkout. The selected release can only
+      # populate the sparse template-source checkout that follows.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Check out the validated template source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          path: .release-source
+          fetch-depth: 1
+          sparse-checkout: |
+            crates/openwave-sandbox-agent/e2b
+          sparse-checkout-cone-mode: false
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
@@ -316,13 +374,18 @@ jobs:
       - name: Install the locked E2B CLI
         run: |
           pnpm --dir .github/e2b-cli install --frozen-lockfile --ignore-scripts
-          .github/e2b-cli/node_modules/.bin/e2b --version
+          expected="$(node -p "require('./.github/e2b-cli/package.json').dependencies['@e2b/cli']")"
+          actual="$(.github/e2b-cli/node_modules/.bin/e2b --version)"
+          [[ "$actual" == "$expected" ]] || {
+            echo "Expected E2B CLI $expected, got $actual" >&2
+            exit 1
+          }
 
       # `e2b template create` takes no config file: it reads the Dockerfile and
       # takes sizing as flags, so e2b.toml's numbers are passed explicitly
       # rather than duplicated here.
       - name: Build the template
-        working-directory: ${{ env.TEMPLATE_DIR }}
+        working-directory: ${{ env.SOURCE_TEMPLATE_DIR }}
         env:
           CPU_COUNT: ${{ needs.resolve.outputs.cpu_count }}
           E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
@@ -339,7 +402,7 @@ jobs:
       # alias only resolves inside the OpenWave team — so a user who has
       # pasted nothing but their own API key gets the documents image.
       - name: Publish the template
-        working-directory: ${{ env.TEMPLATE_DIR }}
+        working-directory: ${{ env.SOURCE_TEMPLATE_DIR }}
         env:
           E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
@@ -434,7 +497,7 @@ jobs:
           import re
           import sys
 
-          directory = os.environ["TEMPLATE_DIR"]
+          directory = os.environ["TEMPLATE_PATH"]
           alias = os.environ["ALIAS"]
           template_id = os.environ["TEMPLATE_ID"]
 
