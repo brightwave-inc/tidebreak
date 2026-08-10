@@ -309,6 +309,9 @@ function ProviderRow({
         model_visibility_overrides: next,
       });
       onOverridesChanged(settings.model_visibility_overrides ?? {});
+      // The shell holds its own copy of the overrides for the picker, so a
+      // write here is a catalog change as much as a credential save is.
+      onChanged();
     } catch (err) {
       toast.error(friendlyErrorMessage(err, failure));
     } finally {
