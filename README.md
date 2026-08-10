@@ -170,7 +170,9 @@ Worth knowing before you install:
 - **The native execution sandbox is macOS-only.** On Linux or Windows there is
   no native confinement primitive; the choices are the opt-in local Docker
   backend or a managed cloud provider that receives the chat's staged files.
-  The Docker backend does not enforce the chat's network policy at all today.
+  The Docker backend enforces only a chat set to no network, which it runs with
+  `--network none`; allowlist and package-manager policies are not enforced
+  there.
 - **Connected-folder access inside code execution is macOS-only.** Managed
   providers cannot reach host folders at all.
 - **No semantic search or indexed retrieval.** There is no corpus, no
