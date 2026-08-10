@@ -13,7 +13,8 @@
 #   docker compose --env-file .env up -d --build
 #
 # Required before the first `up`:
-#   - a tokens file at ./tokens (see docs/self-hosting.md for the format)
+#   - a tokens file at ./tokens, naming at least one `admin` user (see
+#     docs/self-hosting.md for the format; a file with no admin refuses to boot)
 #   - POSTGRES_PASSWORD set in the environment or a .env file beside this one
 
 name: openwave-self-host
@@ -59,7 +60,8 @@ services:
       OPENWAVE_DATABASE_URL: postgres://openwave:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/openwave
       OPENWAVE_AUTH_TOKENS_FILE: /run/openwave/tokens
       OPENWAVE_DATA_DIR: /var/lib/openwave
-      OPENWAVE_LISTEN_PORT: "8080"
+      # All interfaces of the container, published to loopback only below.
+      OPENWAVE_LISTEN_ADDR: 0.0.0.0:8080
       # Log filter; see the server's `logging` module for the syntax.
       OPENWAVE_LOG: ${OPENWAVE_LOG:-info}
       # Model credentials. The container has no OS keychain, so a self-host

@@ -20,11 +20,13 @@ Selecting `OPENWAVE_PROFILE=self_host` changes three things about the server:
   driver to exist at all.
 - **Every request must name a user.** The desktop profile's per-launch bearer
   token authenticates nobody here; credentials come from an operator-managed
-  token file and resolve to a named principal. Chats, projects, documents,
-  transcripts, and the event stream are owner-scoped to that principal.
+  token file and resolve to a named principal carrying a role. Chats, projects,
+  documents, transcripts, and the event stream are owner-scoped to that
+  principal.
 - **Boot fails closed.** The server refuses to open the shared store unless
   `OPENWAVE_AUTH_TOKENS_FILE` is set and loads cleanly — a shared database
-  never comes up behind an API that cannot tell its callers apart.
+  never comes up behind an API that cannot tell its callers apart, or that
+  nobody is empowered to configure.
 
 The deployment posture is stated in
 [decision record 4](decisions/0004-self-host-deployment-plane-authorization.md):
@@ -33,9 +35,10 @@ termination and network exposure belong to the operator's fronting
 infrastructure. OpenWave serves plain HTTP and never terminates TLS.
 
 Settings are **deployment-scoped, not per-user** — enabled providers,
-credentials, model roles, and policy are shared by everyone with a token. The
-profile is for mutually trusting users of one operator's deployment, not for
-adversarial tenants. See the self-host section of
+credentials, model roles, and policy configure the deployment itself, and
+every administrator shares (and can change) them. The profile is for mutually
+trusting users of one operator's deployment, not for adversarial tenants. See
+the self-host section of
 [how OpenWave works](how-openwave-works.md#self-host) for the full statement
 and for what is still integration work.
 
@@ -47,12 +50,13 @@ and for what is still integration work.
 
 ## Generating tokens
 
-The token file is the credential-to-principal map. One line per token,
+The token file is the credential-to-principal map, and it is also where roles
+are managed — there is deliberately no UI for that. One line per token,
 whitespace-separated, `#` comments and blank lines ignored:
 
 ```text
-# user-id  token
-alice  4f9c0e9b2d5a4c1e8f7b6a5d4c3b2a1f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b
+# user-id  token                                                             role
+alice  4f9c0e9b2d5a4c1e8f7b6a5d4c3b2a1f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b  admin
 bob    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
@@ -62,26 +66,45 @@ Generate each token with:
 openssl rand -hex 32
 ```
 
-Rules the loader enforces today: tokens are at least 16 characters drawn from
-`[A-Za-z0-9._~-]` (32 hex bytes gives 64, comfortably over the floor); one
-user may hold several tokens, which is how rotation works; a token may name
-only one user, and a duplicate token fails the load.
+Rules the loader enforces:
 
-**Roles.** Decision record 4 adds an optional third field, `admin`
-(`<user-id> <token> admin`), splitting the API into a member plane and a
-deployment plane and requiring at least one admin for a self-host boot to
-succeed. **That role work is not implemented yet** — on this branch the loader
-accepts two fields only, and every token-holder can reach the configuration
-surface (including MCP server definitions, which spawn processes on the host,
-and the shared provider credentials). Treat every token you hand out as an
-administrator credential until the role gate lands, and give tokens only to
-people you would make an administrator.
+- Tokens are at least **32 characters** drawn from `[A-Za-z0-9._~-]`. Thirty-two
+  random bytes in hex gives 64 characters, comfortably over the floor.
+- The optional third field is the user's role. `admin` puts them on the
+  deployment plane; an absent field means member, and anything else is a parse
+  error rather than a silent demotion.
+- **At least one line must say `admin`**, or the file fails to load and the
+  server does not start. A deployment nobody is empowered to configure must
+  not exist.
+- A user's lines must agree about their role. A file that says both fails to
+  load.
+- One user may hold several tokens, which is how rotation works. A token may
+  name only one user, and a duplicate token fails the load.
+
+### What a member can and cannot do
+
+Members get their own chats, projects, documents, transcripts, and event
+stream, plus the read-only discovery a client needs in order to work — the
+model list, the plugin catalog, the app library. They get `403` on the
+**deployment plane**: MCP server configuration, provider and web-search and
+code-execution credentials (including the presence reads that reveal secret
+metadata), model role assignments, settings writes, plugin install and enable,
+and connected-app sign-in and sign-out.
+
+That split is a property of the router rather than of individual handlers, so
+a configuration route cannot quietly land outside the gate. The reasoning, the
+rejected alternatives, and what would make us revisit it are in
+[decision record 4](decisions/0004-self-host-deployment-plane-authorization.md).
+
+Give `admin` only to the people who actually administer the deployment: MCP
+server definitions spawn processes on the host, and the provider credentials
+are shared.
 
 Keep the file `0600` and owned by whoever runs the stack:
 
 ```sh
 umask 077
-printf 'alice %s\n' "$(openssl rand -hex 32)" > deploy/self-host/tokens
+printf 'alice %s admin\n' "$(openssl rand -hex 32)" > deploy/self-host/tokens
 ```
 
 ## Environment variables
@@ -101,22 +124,16 @@ aspirational.
 | `OPENWAVE_CONTAINER_EXECUTION_ENABLED` | no | `false` | Enables the container code-execution backend. The compose stack does not configure one. |
 | `OPENWAVE_CONTAINER_IMAGE` | no | server default | Agent container image, when the above is on. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK` | no | unset | Fallback provider credentials, consulted when no credential is stored for that provider. A container has no OS keychain, so this is how a self-host deployment supplies model keys. |
-| `OPENWAVE_LISTEN_PORT` | no | `8080` | Container-only: the port the image's entrypoint publishes. Not read by the server itself — see the note below. |
-
-**The server's own listener is not configurable.** It binds `127.0.0.1` on an
-ephemeral port and announces the address on stdout. The image's entrypoint
-reads that announcement and bridges the fixed `OPENWAVE_LISTEN_PORT` to it, so
-the container is reachable. That bridge is packaging scaffolding and should go
-away once the server accepts a bind address.
+| `OPENWAVE_LISTEN_ADDR` | no | loopback, ephemeral port | Self-host only: the address and port the API binds, e.g. `0.0.0.0:8080`. The desktop profile refuses to boot with it set — that profile's loopback binding is what its per-launch token assumes. The image sets it to `0.0.0.0:8080` so the container is reachable at a known port. |
 
 ## Compose quickstart
 
 ```sh
 cd deploy/self-host
 
-# 1. Tokens.
+# 1. Tokens. At least one line must be an admin, or the server will not boot.
 umask 077
-printf 'alice %s\n' "$(openssl rand -hex 32)" > tokens
+printf 'alice %s admin\n' "$(openssl rand -hex 32)" > tokens
 
 # 2. Database password and provider key.
 cat > .env <<'EOF'
@@ -217,18 +234,19 @@ data in a self-host deployment yet:
 
 - Document and blob PostgreSQL parity is not comprehensively tested (the
   durable turn state machine is what CI exercises against PostgreSQL).
-- Remote secret custody is future work; this stack supplies provider keys
-  through the environment, which means they are visible to anyone who can
-  inspect the container.
+- Remote secret custody is future work, and it shows up immediately in a
+  container: there is no OS keychain behind the credential store, so the
+  deployment-plane routes that write or read provider and web-search
+  credentials answer `500 web search credential storage is unavailable`
+  rather than storing anything. Supply model credentials through the
+  environment instead (see the table above) — which also means they are
+  visible to anyone who can inspect the container.
 - Object storage is not wired.
 - Multi-process ownership is not wired: run exactly one server process against
   a database. The instance lock only guards one data directory, not the shared
   store.
 
-Two more, specific to this packaging:
+One more, specific to this packaging:
 
-- The admin/member role split from decision record 4 is not implemented, so
-  every token is effectively an administrator credential (see
-  [Generating tokens](#generating-tokens)).
 - Code execution is not configured by this stack. `exec` needs a backend, and
   none of the container backends is set up here.

@@ -44,15 +44,12 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # ca-certificates: the binary's TLS stack is rustls (no OpenSSL anywhere in
 # the lockfile), but parts of the graph resolve platform roots, so the system
 # trust store must exist for outbound model-provider calls.
-# curl: the container healthcheck below.
-# socat: the loopback bridge the entrypoint needs — see entrypoint.sh for why
-# it is here and what removes it.
+# curl: the container healthcheck below, and nothing else.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl socat \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/openwave /usr/local/bin/openwave
-COPY deploy/self-host/entrypoint.sh /usr/local/bin/openwave-entrypoint
 
 # The server runs unprivileged. The uid is fixed rather than assigned by
 # adduser so a data volume initialized from this layer carries an ownership
@@ -61,24 +58,28 @@ RUN groupadd --gid 10001 openwave \
     && useradd --uid 10001 --gid 10001 --home-dir /home/openwave --create-home \
        --shell /usr/sbin/nologin openwave \
     && mkdir -p /var/lib/openwave \
-    && chown -R openwave:openwave /var/lib/openwave /home/openwave \
-    && chmod 0755 /usr/local/bin/openwave-entrypoint
+    && chown -R openwave:openwave /var/lib/openwave /home/openwave
 
 # The self-host profile. `OPENWAVE_DATABASE_URL` and `OPENWAVE_AUTH_TOKENS_FILE`
 # have no defaults and must be supplied — the server refuses to open a shared
-# store without a principal-naming authenticator.
+# store without a principal-naming authenticator, and refuses to start when
+# that authenticator names no administrator.
 ENV OPENWAVE_PROFILE=self_host
 # Instance lock, logs, and per-turn scratch live here; back this with a volume
 # only if you want the logs to outlive the container. The durable state is in
 # PostgreSQL.
 ENV OPENWAVE_DATA_DIR=/var/lib/openwave
-# The port the entrypoint's bridge publishes. Plain HTTP by design.
-ENV OPENWAVE_LISTEN_PORT=8080
+# All interfaces *of this container* — which is what makes it reachable at a
+# known port from outside its own network namespace. Exposure beyond the
+# container is the host's decision: docker-compose.yml publishes this to
+# 127.0.0.1 only, and production exposure belongs to a TLS-terminating proxy in
+# front of it. Plain HTTP by design; nothing here terminates TLS.
+ENV OPENWAVE_LISTEN_ADDR=0.0.0.0:8080
 EXPOSE 8080
 
 USER openwave:openwave
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
-    CMD curl -fsS "http://127.0.0.1:${OPENWAVE_LISTEN_PORT}/healthz" || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 
-ENTRYPOINT ["/usr/local/bin/openwave-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/openwave", "serve"]
