@@ -18,6 +18,7 @@ const base = {
   reasoning_efforts: [],
   multimodal: false,
   available: true,
+  recommended: false,
 };
 
 const models: ModelInfo[] = [
