@@ -48,15 +48,17 @@ function slash(overrides: Partial<ComposerSlash> = {}): ComposerSlash {
 function ComposerHarness({
   slash: menu,
   onDraftChange,
+  activeTurnId = null,
 }: {
   slash: ComposerSlash;
   onDraftChange?: (draft: string) => void;
+  activeTurnId?: string | null;
 }) {
   const [draft, setDraft] = useState("");
   return (
     <Composer
-      activeTurnId={null}
-      busy={false}
+      activeTurnId={activeTurnId}
+      busy={activeTurnId !== null}
       cancelError={null}
       cancelPending={false}
       disabled={false}
@@ -149,4 +151,34 @@ it("invokes a picked skill and shows it as a chip the reader can drop", async ()
   render(<ComposerHarness slash={slash({ invoked: ["pptx"], onRemove })} />);
   await user.click(screen.getByRole("button", { name: "Remove Pptx" }));
   expect(onRemove).toHaveBeenCalledWith("pptx");
+});
+
+it("shows a bundle a running turn cannot reach, and refuses the pick", async () => {
+  const user = userEvent.setup();
+  const onInvoke = vi.fn();
+  const menu = slash({
+    onInvoke,
+    options: [
+      ...OPTIONS,
+      {
+        kind: "plugin",
+        name: "charts",
+        label: "Charts",
+        description: "Draws figures.",
+        skills: ["charts"],
+        enabled: false,
+      },
+    ],
+  });
+  render(<ComposerHarness slash={menu} activeTurnId="turn-1" />);
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("also /charts");
+  // Visible, so a library seen a moment ago has not silently lost an entry —
+  // and marked, because turning it on mid-turn names a manifest this turn's
+  // workspace never staged.
+  const row = screen.getByRole("option", { name: /Charts/ });
+  expect(row).toHaveAttribute("aria-disabled", "true");
+  await user.click(row);
+  expect(onInvoke).not.toHaveBeenCalled();
 });

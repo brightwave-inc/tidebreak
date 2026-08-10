@@ -487,12 +487,15 @@ export function Composer({
    * leaves one per member skill, and turns itself on first if it was off. A
    * prompt is text, so its body goes into the draft — fetched only now, because
    * the catalog deliberately carries no bodies.
+   *
+   * A row the list marked unavailable does nothing: it is shown so the reader
+   * can see it is still installed, and its hint already says what is in the way.
    */
   function pickOption(
     option: SlashOption,
     token: { start: number; query: string } | null,
   ) {
-    if (!slash) return;
+    if (!slash || option.unavailable) return;
     const caret = token ? token.start + 1 + token.query.length : 0;
     if (option.kind === "prompt") {
       void (async () => {
@@ -574,7 +577,9 @@ export function Composer({
     }
     if (event.key === "Enter" || event.key === "Tab") {
       const option = slashMatches[slashIndex];
-      if (option) {
+      // A row that cannot be picked keeps the list up instead of closing on a
+      // key that did nothing, so the reason stays in front of the reader.
+      if (option && !option.unavailable) {
         setSlashToken(null);
         pickOption(option, slashToken);
       }

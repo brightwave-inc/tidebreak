@@ -29,6 +29,12 @@ export type SlashOption = {
    * so the flag is what tells the two cases apart.
    */
   enabled?: boolean;
+  /**
+   * Why this row is visible but cannot be picked right now, absent on a row that
+   * can. A library someone can see at rest and cannot see mid-turn reads as one
+   * that has lost entries, so the row stays and says what is in the way.
+   */
+  unavailable?: string;
 };
 
 /**
@@ -217,26 +223,37 @@ export function skillsToInvoke(
  * What the panel can still reach, given what this message already carries.
  *
  * A skill already on the message is not offered again, and neither is anything
- * that invokes once the cap is reached. A steer carries its own invocation
- * under its own budget, so skills stay reachable while a turn runs — but a
- * *disabled* bundle's row does not: picking one turns the bundle on
- * install-wide and names a manifest the running turn's workspace never staged.
- * Prompts are text and stay available throughout.
+ * that invokes once the cap is reached. A steer carries its own invocation under
+ * its own budget, so skills stay reachable while a turn runs — but a *disabled*
+ * bundle cannot be picked there: doing so turns the bundle on install-wide and
+ * names a manifest the running turn's workspace never staged. Its row is kept
+ * and marked rather than dropped, because a row that quietly disappears when a
+ * turn starts reads as a catalog that has lost it. Prompts are text and stay
+ * available throughout.
  */
 export function availableSlashOptions(
   options: readonly SlashOption[],
   invoked: readonly string[],
   { steering }: { steering: boolean },
 ): SlashOption[] {
-  return options.filter((option) => {
-    if (option.kind === "prompt") return true;
-    if (steering && option.kind === "plugin" && option.enabled === false) {
-      return false;
+  const available: SlashOption[] = [];
+  for (const option of options) {
+    if (option.kind === "prompt") {
+      available.push(option);
+      continue;
     }
-    if (invoked.length >= MAX_INVOKED_SKILLS) return false;
-    return skillsToInvoke(option, invoked).length > 0;
-  });
+    if (steering && option.kind === "plugin" && option.enabled === false) {
+      available.push({ ...option, unavailable: DISABLED_BUNDLE_MID_TURN });
+      continue;
+    }
+    if (invoked.length >= MAX_INVOKED_SKILLS) continue;
+    if (skillsToInvoke(option, invoked).length > 0) available.push(option);
+  }
+  return available;
 }
+
+/** What a bundle row says instead of its kind while a turn is running. */
+export const DISABLED_BUNDLE_MID_TURN = "Off — turn on between turns";
 
 /**
  * Where an arrow key moves the highlight, or `null` when the key is not the
