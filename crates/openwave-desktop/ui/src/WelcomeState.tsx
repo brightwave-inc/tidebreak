@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { FileSearch, ListChecks, MessageCircle, Sparkles } from "lucide-react";
+import {
+  AppWindow,
+  ChartColumn,
+  FileText,
+  Sparkles,
+  Users,
+} from "lucide-react";
 import type {
   ApiClient,
   CodeExecutionConfigInfo,
@@ -29,26 +35,38 @@ type StarterPrompt = {
   prompt: string;
 };
 
+/**
+ * The starters home falls back to with no prompt library installed.
+ *
+ * Each one names a finished result rather than a chat behavior, and each
+ * prompt stands on its own before anything is attached: it says which input
+ * is missing and what to do first, so a card that is clicked and sent
+ * immediately still starts a real conversation.
+ */
 const STARTER_PROMPTS: StarterPrompt[] = [
   {
-    icon: MessageCircle,
-    label: "What can you help me with?",
-    prompt: "What can you help me with?",
+    icon: FileText,
+    label: "Write a report from files",
+    prompt:
+      "I want a written report I can share, built from my own files. Tell me what to attach and which sections you would cover, then draft it once the files are in.",
   },
   {
-    icon: FileSearch,
-    label: "Search this chat's sources",
-    prompt: "Search the sources in this chat for ",
+    icon: ChartColumn,
+    label: "Analyze a spreadsheet",
+    prompt:
+      "I want a spreadsheet analyzed and the findings charted. Tell me what to attach, then walk the data, call out what actually changed, and build the charts that show it.",
   },
   {
-    icon: Sparkles,
-    label: "Summarize a document",
-    prompt: "Summarize the key points from ",
+    icon: Users,
+    label: "Delegate work in parallel",
+    prompt:
+      "I have work that could run several ways at once. Ask me what the work is, then split it into background tasks you can run in parallel and report back on each.",
   },
   {
-    icon: ListChecks,
-    label: "Draft a plan",
-    prompt: "Help me draft a plan for ",
+    icon: AppWindow,
+    label: "Turn a folder into an app",
+    prompt:
+      "I want a small private app that runs on my own machine over a folder of files. Ask me which folder and what it should do, then build it.",
   },
 ];
 
@@ -156,7 +174,7 @@ export function WelcomeState({
       <div className="welcome-copy">
         <h2>How can I help?</h2>
         <p>
-          Ask a question, search attached sources, or start a task.
+          Ask a question, work through your files, or start a task.
         </p>
         {managedExecutionOnly && <p>{MANAGED_EXECUTION_DISCLOSURE}</p>}
       </div>
