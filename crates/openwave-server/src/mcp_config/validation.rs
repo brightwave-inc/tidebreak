@@ -37,8 +37,11 @@ pub(super) fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
             }
             (None, Some(url), None) => {
                 validate_process_string(&server.name, "url", url)?;
-                openwave_mcp::validate_http_url(url)
-                    .map_err(|error| server_error(&server.name, error))?;
+                openwave_mcp::validate_http_url_with_credentials(
+                    url,
+                    server.bearer_token_env.is_some(),
+                )
+                .map_err(|error| server_error(&server.name, error))?;
                 validate_no_process_fields(server)?;
                 if let Some(bearer_name) = &server.bearer_token_env {
                     validate_environment_name(&server.name, bearer_name)?;
@@ -239,4 +242,44 @@ pub(super) fn connection_diagnostic(
 
 pub(super) fn server_error(name: &str, message: impl std::fmt::Display) -> AgentError {
     AgentError::config(format!("invalid external MCP server {name:?}: {message}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::*;
+
+    fn http_server(url: &str, bearer_token_env: Option<&str>) -> McpServerDefinition {
+        McpServerDefinition {
+            name: "docs".to_string(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeSet::new(),
+            env_values: BTreeMap::new(),
+            env_from: Vec::new(),
+            cwd: None,
+            url: Some(url.to_string()),
+            bearer_token_env: bearer_token_env.map(str::to_string),
+            gateway_endpoint: None,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            enabled: true,
+            plugin: None,
+            launch: None,
+        }
+    }
+
+    #[test]
+    fn remote_cleartext_http_rejects_environment_bearers_at_validation() {
+        assert!(validate_servers(&[http_server("http://remote.example/mcp", None)]).is_ok());
+        assert!(
+            validate_servers(&[http_server("http://127.0.0.1:9000/mcp", Some("MCP_TOKEN"))])
+                .is_ok()
+        );
+
+        let error =
+            validate_servers(&[http_server("http://remote.example/mcp", Some("MCP_TOKEN"))])
+                .expect_err("remote cleartext bearer configuration must be rejected");
+        assert!(error.to_string().contains("must use https"), "{error}");
+    }
 }
