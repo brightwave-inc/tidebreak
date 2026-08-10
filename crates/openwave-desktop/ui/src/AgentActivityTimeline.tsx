@@ -363,7 +363,8 @@ function activityOutcomeTone(
   }
 }
 
-function formatActivityTime(at: string): string {
+/** The clock time one recorded moment happened, blank if it cannot be read. */
+export function formatActivityTime(at: string): string {
   const parsed = new Date(at);
   if (Number.isNaN(parsed.getTime())) return "";
   return parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

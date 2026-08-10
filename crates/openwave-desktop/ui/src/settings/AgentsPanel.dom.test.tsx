@@ -26,6 +26,7 @@ describe("AgentsPanel", () => {
         min_threshold_tokens: 50000,
         protect_recent_messages: 5,
       },
+      model_visibility_overrides: {},
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,

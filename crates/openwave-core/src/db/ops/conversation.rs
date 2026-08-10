@@ -19,7 +19,8 @@ use crate::model::{
 use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
-    ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome, MoveChatOutcome,
+    ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome, MessageInvokedSkills,
+    MoveChatOutcome,
 };
 
 use super::super::{entities, project_from_models, store_err, DbStore};
@@ -936,6 +937,7 @@ pub(in crate::db) async fn get_chat_transcript(
     let message_document_attachments =
         super::message_document_attachment::list_for_chat_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
+    let message_invoked_skills = list_message_invoked_skills_on(&transaction, chat_id).await?;
     let terminal_turns = list_terminal_turns_on(&transaction, chat_id, &messages).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
@@ -945,10 +947,63 @@ pub(in crate::db) async fn get_chat_transcript(
         message_attachments,
         message_document_attachments,
         citations,
+        message_invoked_skills,
         terminal_turns,
         tool_activity,
         last_event_seq,
     }))
+}
+
+/// Pair every user message that invoked skills with the list it invoked.
+///
+/// Two authorities, because invocation is scoped to one message: a turn's row
+/// owns what its opening message named, and a steer's row owns what that one
+/// instruction named. Reading them back beats copying the list onto `message`,
+/// where the duplicate could disagree with the list the model was actually
+/// given. A turn that invoked nothing contributes no entry.
+async fn list_message_invoked_skills_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+) -> Result<Vec<MessageInvokedSkills>>
+where
+    C: ConnectionTrait,
+{
+    let turns = entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let mut invoked = Vec::new();
+    for turn in &turns {
+        let skills = super::turn::invoked_skills_from_model(turn)?;
+        if !skills.is_empty() {
+            invoked.push(MessageInvokedSkills {
+                message_id: MessageId(turn.input_message_id),
+                skills,
+            });
+        }
+    }
+    let steers = entities::turn_steer::Entity::find()
+        .filter(entities::turn_steer::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_steer::Column::MessageId.is_not_null())
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    for steer in &steers {
+        // Guarded by the query, but a steer with no applied message has nothing
+        // in the transcript to attach to either way.
+        let Some(message_id) = steer.message_id else {
+            continue;
+        };
+        let skills = super::turn::steer::invoked_skills_from_steer(steer)?;
+        if !skills.is_empty() {
+            invoked.push(MessageInvokedSkills {
+                message_id: MessageId(message_id),
+                skills,
+            });
+        }
+    }
+    Ok(invoked)
 }
 
 /// Rebuild the visible stream and outcome of every terminal turn.

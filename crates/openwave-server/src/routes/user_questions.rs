@@ -29,10 +29,12 @@ pub async fn list_pending_user_questions(
 /// The shell uses this single summary read to find parked chats. Detail stays
 /// behind each chat's dedicated prompt-recovery route, so this endpoint never
 /// carries question content, folder-access arguments, or executor metadata.
+/// A cross-chat root read, so it answers only for the requesting principal's
+/// own conversations.
 pub async fn list_pending_chat_prompts(
-    State(state): State<AppState>,
+    store: ScopedStore,
 ) -> Result<Json<Vec<PendingChatPrompt>>, ServerError> {
-    Ok(Json(state.store.list_pending_chat_prompts().await?))
+    Ok(Json(store.list_pending_chat_prompts().await?))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

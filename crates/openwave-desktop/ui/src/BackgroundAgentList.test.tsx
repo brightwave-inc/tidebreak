@@ -4,6 +4,12 @@ import { describe, expect, it } from "vitest";
 import type { AgentRun } from "./api";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 
+/** No run in these tests narrates anything; the cursor comes back unchanged. */
+const noProgress = async (_runId: string, afterSequence: number) => ({
+  entries: [],
+  nextSequence: afterSequence,
+});
+
 function run(
   id: string,
   spawnCallId: string,
@@ -51,6 +57,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -78,6 +85,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -102,6 +110,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -120,6 +129,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -137,6 +147,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -154,6 +165,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -178,6 +190,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 
@@ -195,6 +208,7 @@ describe("BackgroundAgentList", () => {
         onCancel={noop}
         onLoadActivity={noActivity}
         onLoadTaskPlan={noTaskPlan}
+        onLoadProgress={noProgress}
       />,
     );
 

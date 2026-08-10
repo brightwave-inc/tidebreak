@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use openwave_core::{
     AgentRun, ChatId, CompactionPolicy, PermissionMode, ReasoningEffort, Store, TurnId,
@@ -34,7 +35,8 @@ use super::providers_models::{has_api_key, read_model, validate_model_selection}
 use super::{
     COMPACTION_MIN_THRESHOLD_TOKENS_SETTING, COMPACTION_PROTECT_RECENT_MESSAGES_SETTING,
     COMPACTION_TARGET_FRACTION_SETTING, COMPACTION_THRESHOLD_FRACTION_SETTING,
-    MAX_ACTIVE_BACKGROUND_AGENTS_SETTING, SERVED_BYTES_CONTENT_POLICY,
+    MAX_ACTIVE_BACKGROUND_AGENTS_SETTING, MODEL_VISIBILITY_OVERRIDES_SETTING,
+    SERVED_BYTES_CONTENT_POLICY,
 };
 
 /// Host-tunable chat compaction cadence and retention.
@@ -72,6 +74,21 @@ impl From<&CompactionSettings> for CompactionPolicy {
     }
 }
 
+/// A reader's explicit deviation from a model's curated `recommended` flag.
+///
+/// Only deviations are stored. Effective visibility is the catalog's
+/// `recommended` flag flipped by a matching override, so a catalog refresh
+/// gives new models their curated default without a reconciliation step, and
+/// "we changed the default" stays distinguishable from "you chose" forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelVisibility {
+    /// Show a model the catalog does not recommend.
+    Show,
+    /// Hide a model the catalog recommends.
+    Hide,
+}
+
 /// Runtime settings a client can read. The API key itself is never returned —
 /// it lives in the `SecretProvider`, not the store — only whether one is set.
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
@@ -90,6 +107,20 @@ pub struct Settings {
     /// When and how hard semantic compaction may run.
     #[serde(default)]
     pub compaction: CompactionSettings,
+    /// Per-model deviations from the catalog's `recommended` flag, keyed by the
+    /// same provider-qualified selection key `ModelInfo.key` and a chat's model
+    /// carry (`"<provider>::<id>"`).
+    ///
+    /// Deviations only: a model with no entry uses its catalog default, and
+    /// resetting one to the default means sending the map without that key.
+    /// `PUT /settings` **replaces this map wholesale** rather than merging, so
+    /// a writer sends the complete set of deviations it wants to persist.
+    ///
+    /// Visibility is a picker concern: the server stores and serves this map
+    /// and never filters `GET /models` by it. A hidden model remains fully
+    /// valid for existing chats, replay, and explicit selection.
+    #[serde(default)]
+    pub model_visibility_overrides: BTreeMap<String, ModelVisibility>,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -121,6 +152,14 @@ pub struct SettingsUpdate {
     pub max_active_background_agents: Option<u32>,
     #[serde(default)]
     pub compaction: Option<CompactionSettingsUpdate>,
+    /// The complete set of per-model visibility deviations to persist.
+    ///
+    /// Absent leaves the stored map unchanged; present **replaces** it, so an
+    /// empty map clears every override and returns every model to its curated
+    /// default. Merging was rejected because it gives a client no way to
+    /// express a deletion at all.
+    #[serde(default)]
+    pub model_visibility_overrides: Option<BTreeMap<String, ModelVisibility>>,
 }
 
 /// Partial update for [`CompactionSettings`]. Absent fields leave the current
@@ -151,13 +190,7 @@ where
 
 /// `GET /settings` — the current runtime settings.
 pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings>, ServerError> {
-    Ok(Json(Settings {
-        model: read_model(&*state.store).await?,
-        has_api_key: has_api_key(&*state.secrets).await,
-        chat_defaults: read_sticky_chat_defaults(&state).await?,
-        max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
-        compaction: read_compaction_settings(&*state.store).await?,
-    }))
+    Ok(Json(read_settings(&state).await?))
 }
 
 /// `PUT /settings` — update runtime settings, returning the new state. Only the
@@ -216,13 +249,68 @@ pub async fn put_settings(
         validate_compaction_settings(&next)?;
         write_compaction_settings(&*state.store, &next).await?;
     }
-    Ok(Json(Settings {
+    if let Some(overrides) = body.model_visibility_overrides {
+        validate_model_visibility_overrides(&overrides)?;
+        state
+            .store
+            .set_setting(
+                MODEL_VISIBILITY_OVERRIDES_SETTING,
+                &serde_json::json!(overrides),
+            )
+            .await?;
+    }
+    Ok(Json(read_settings(&state).await?))
+}
+
+/// The settings both handlers return, read back from the store so a response
+/// always reflects what was persisted rather than what was requested.
+async fn read_settings(state: &AppState) -> Result<Settings, ServerError> {
+    Ok(Settings {
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
-        chat_defaults: read_sticky_chat_defaults(&state).await?,
+        chat_defaults: read_sticky_chat_defaults(state).await?,
         max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
         compaction: read_compaction_settings(&*state.store).await?,
-    }))
+        model_visibility_overrides: read_model_visibility_overrides(&*state.store).await?,
+    })
+}
+
+/// The largest number of stored visibility deviations.
+///
+/// The overrides live in one settings row, and a client only ever needs one
+/// entry per catalog model. This bounds an unbounded map without constraining
+/// any real use.
+const MAX_MODEL_VISIBILITY_OVERRIDES: usize = 512;
+
+fn validate_model_visibility_overrides(
+    overrides: &BTreeMap<String, ModelVisibility>,
+) -> Result<(), ServerError> {
+    if overrides.len() > MAX_MODEL_VISIBILITY_OVERRIDES {
+        return Err(ServerError::bad_request(format!(
+            "model_visibility_overrides must contain at most {MAX_MODEL_VISIBILITY_OVERRIDES} entries",
+        )));
+    }
+    for key in overrides.keys() {
+        // Structural validation only. Whether the key names a model in today's
+        // catalog is deliberately not checked: an override must survive a
+        // provider being decredentialed or a model briefly leaving the catalog.
+        if crate::model_registry::parse_selection_key(key).is_none() {
+            return Err(ServerError::bad_request(format!(
+                "`{key}` is not a provider-qualified model key",
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn read_model_visibility_overrides(
+    store: &dyn Store,
+) -> openwave_core::Result<BTreeMap<String, ModelVisibility>> {
+    Ok(store
+        .get_setting(MODEL_VISIBILITY_OVERRIDES_SETTING)
+        .await?
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default())
 }
 
 pub(crate) async fn read_max_active_background_agents(

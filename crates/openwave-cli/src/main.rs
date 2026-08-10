@@ -16,9 +16,11 @@
 //! keychain items belong to the running binary's code signature, which is what
 //! stops macOS asking for credentials an earlier build created.
 //!
-//! `openwave tui [--chat <id>]` runs an interactive terminal chat: it boots the
-//! same in-process server as `serve` and drives it over the loopback HTTP+WS
-//! API, starting a fresh chat or resuming an existing one.
+//! `openwave tui [--chat <id> | --new]` runs an interactive terminal chat: it
+//! boots the same in-process server as `serve` and drives it over the loopback
+//! HTTP+WS API. With neither flag it opens a picker over the existing chats, so
+//! a session can be resumed without knowing its id; `--new` skips straight to a
+//! fresh chat, and `--chat` resumes one by id.
 //!
 //! `openwave -p "<prompt>"` runs one turn without a terminal: same engine, no
 //! interaction. stdout carries the assistant's text (or, with
@@ -39,7 +41,7 @@ mod tui;
 use print::OutputFormat;
 
 const USAGE: &str = "usage: openwave serve\n       openwave mcp <workspace>\n       openwave \
-                     rehome-secrets\n       openwave tui [--chat <id>]\n       openwave -p \
+                     rehome-secrets\n       openwave tui [--chat <id> | --new]\n       openwave -p \
                      <prompt> [--chat <id>] [--output-format text|json]";
 
 #[tokio::main]
@@ -86,23 +88,29 @@ async fn run() -> Result<i32> {
             rehome_secrets().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("tui") => {
-            let chat = match args.next() {
-                None => None,
-                Some(flag) if flag == OsStr::new("--chat") => {
+            let mut open = None;
+            while let Some(flag) = args.next() {
+                if flag == OsStr::new("--chat") {
                     let Some(id) = args.next() else {
                         usage_error("tui --chat requires a chat id");
                     };
-                    match ChatId::from_str(&id.to_string_lossy()) {
-                        Ok(chat) => Some(chat),
-                        Err(_) => usage_error("tui --chat expects a chat UUID"),
+                    let Ok(chat) = ChatId::from_str(&id.to_string_lossy()) else {
+                        usage_error("tui --chat expects a chat UUID");
+                    };
+                    if open.is_some() {
+                        usage_error("tui takes either --chat <id> or --new, not both");
                     }
+                    open = Some(tui::Open::Chat(chat));
+                } else if flag == OsStr::new("--new") {
+                    if open.is_some() {
+                        usage_error("tui takes either --chat <id> or --new, not both");
+                    }
+                    open = Some(tui::Open::New);
+                } else {
+                    usage_error("tui accepts only --chat <id> or --new");
                 }
-                Some(_) => usage_error("tui accepts only an optional --chat <id>"),
-            };
-            if args.next().is_some() {
-                usage_error("tui accepts only an optional --chat <id>");
             }
-            tui::run(chat).await.map(|()| 0)
+            tui::run(open.unwrap_or(tui::Open::Pick)).await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("-p") || command == OsStr::new("--print") => {
             let Some(prompt) = args.next() else {

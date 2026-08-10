@@ -21,6 +21,8 @@ export type HydratedTranscriptEntry =
       text: string;
       images: TranscriptImageAttachment[];
       files: TranscriptFileAttachment[];
+      /** Skills a user message named, empty on every other role. */
+      invokedSkills: readonly string[];
       sources: AssistantSource[];
       createdAt: string;
       refusal?: RendererRefusal;
@@ -107,6 +109,8 @@ export function hydrateTranscriptHistory(
                 }),
               )
             : [],
+        invokedSkills:
+          message.role === "user" ? (message.invoked_skills ?? []) : [],
         // Ownership is already established by the server, which groups
         // citations by message before nesting them in each snapshot.
         sources:

@@ -18,6 +18,11 @@ export type OptionRow = {
   icon: LucideIcon;
   /** A word on the right saying what picking this row will do. */
   hint?: string;
+  /**
+   * The row is shown for context but cannot be picked. Its `hint` carries the
+   * reason, which is the only thing making a dimmed row worth showing at all.
+   */
+  disabled?: boolean;
 };
 
 /**
@@ -62,15 +67,20 @@ export function OptionListbox({
               id={optionElementId(listId, index)}
               role="option"
               aria-selected={index === activeIndex}
+              aria-disabled={row.disabled || undefined}
               className={cn(
                 "flex w-full items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
                 index === activeIndex && "bg-accent text-accent-foreground",
+                row.disabled && "opacity-50",
               )}
               // Taken on mousedown so the field never loses the caret the
               // insertion is about to be made at.
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => onHighlight(index)}
-              onClick={() => onPick(index)}
+              onClick={() => {
+                if (row.disabled) return;
+                onPick(index);
+              }}
             >
               <Icon
                 className="mt-0.5 size-4 shrink-0 text-muted-foreground"
