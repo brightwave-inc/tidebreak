@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::deliverable::{
-    output_revision_relative_path, revision_byte_ceiling, CreateOutput, DeliverableKind,
-    NewOutputRevision, OutputRevision, RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES,
-    OUTPUTS_DIRECTORY,
+    media_type_is_editable_text, output_revision_relative_path, revision_byte_ceiling,
+    validate_editable_text_content, CreateOutput, DeliverableKind, NewOutputRevision,
+    OutputRevision, RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, OutputId, OutputRevisionId};
@@ -194,11 +194,12 @@ pub async fn restore_output_to_revision(
                 id: revision_id,
                 byte_len: target.byte_len,
                 sha256: target.sha256,
-                // No producer: both-absent durably marks a user action.
                 turn_id: None,
                 producing_run_id: None,
                 created_at: now,
-            },
+            }
+            // Both-absent producer durably marks the user action.
+            .with_producer(RevisionProducer::User),
         )
         .await?;
 
@@ -227,6 +228,124 @@ pub async fn restore_output_to_revision(
         })
         .await;
     Ok(restored)
+}
+
+/// Publish a user's edit of a text output as a new, user-authored revision.
+///
+/// This is the person's own equivalent of the `output/` scan: the bytes they
+/// typed become the head of the same output's history, and every earlier
+/// revision keeps its identity and its bytes. Nothing is edited in place —
+/// "editing an output" means appending to it, exactly as it does for the agent.
+///
+/// `expected_current` is the revision the editor was opened on. The append is
+/// conditional on it still being current, so an edit of text an agent has since
+/// replaced is refused with [`AgentError::OutputRevisionConflict`] rather than
+/// quietly discarding the newer version. Identity derives from the (base,
+/// content) pair, so retrying an ambiguous save appends once.
+///
+/// Saving content the head already carries is a no-op, which is also what a
+/// retry observes once its first attempt committed.
+pub async fn save_user_output_revision(
+    store: &dyn Store,
+    scratch: &Dir,
+    chat_id: ChatId,
+    output_id: OutputId,
+    expected_current: OutputRevisionId,
+    content: &str,
+    now: DateTime<Utc>,
+) -> Result<OutputRecord> {
+    validate_editable_text_content(content)
+        .map_err(|message| AgentError::Store(format!("this edit cannot be saved: {message}")))?;
+    let output = store
+        .get_output(output_id)
+        .await?
+        .filter(|output| output.chat_id == chat_id && output.deleted_at.is_none())
+        .ok_or_else(|| AgentError::Store("output not found in this conversation".into()))?;
+    if !media_type_is_editable_text(&output.media_type) {
+        return Err(AgentError::Store(
+            "this kind of output cannot be edited here".into(),
+        ));
+    }
+
+    let bytes = content.as_bytes();
+    let byte_len = bytes.len() as u64;
+    let sha256: [u8; 32] = Sha256::digest(bytes).into();
+    let current = store
+        .get_output_revision(output.current_revision)
+        .await?
+        .ok_or_else(|| AgentError::Store("current revision is missing".into()))?;
+    // Checked before the precondition on purpose: after a save commits, its own
+    // retry sees a head it did not expect, and that head is this exact content.
+    // Comparing content first makes the retry idempotent instead of reporting a
+    // conflict with itself.
+    if current.sha256 == sha256 && current.byte_len == byte_len {
+        return Ok(output);
+    }
+    if output.current_revision != expected_current {
+        return Err(AgentError::OutputRevisionConflict {
+            output_id: output.id,
+            current_revision: output.current_revision,
+        });
+    }
+
+    let revision_id = OutputRevisionId::for_user_edit(expected_current, &sha256);
+    let relative_path = output_revision_relative_path(output.id, revision_id);
+    let publish_scratch = scratch
+        .try_clone()
+        .map_err(|error| AgentError::Store(format!("could not open private scratch: {error}")))?;
+    let publish_content = bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        crate::tools::private_scratch::publish_immutable_file(
+            &publish_scratch,
+            &relative_path,
+            &publish_content,
+        )
+    })
+    .await
+    .map_err(|error| AgentError::Store(format!("edit publication task failed: {error}")))?
+    .map_err(|error| AgentError::Store(format!("could not publish edited revision: {error}")))?;
+
+    // The precondition is re-evaluated inside the store transaction that holds
+    // the conversation's write lock. The check above is the early, cheap one; it
+    // cannot be the authoritative one, because a publication can land between
+    // reading the head and appending to it.
+    let saved = store
+        .append_output_revision_from(
+            output.id,
+            expected_current,
+            &NewOutputRevision {
+                id: revision_id,
+                byte_len,
+                sha256,
+                turn_id: None,
+                producing_run_id: None,
+                created_at: now,
+            }
+            .with_producer(RevisionProducer::User),
+        )
+        .await?;
+
+    // Same reason restore leaves one: the model's context still holds the text
+    // the user just rewrote, and its next turn must re-read the file rather than
+    // publish over the edit. Best-effort — the revision has committed, and a
+    // lost note must not fail the save.
+    let _ = store
+        .append_message(&crate::model::Message {
+            id: crate::id::MessageId::new(),
+            chat_id,
+            turn_id: crate::id::TurnId::new(),
+            role: crate::model::Role::System,
+            reasoning: Default::default(),
+            content: format!(
+                "User edited output '{}' directly (now the latest version, v{}). \
+                 Re-read output/{} before relying on or changing it.",
+                output.filename, saved.revision_count, output.filename
+            ),
+            llm_content: None,
+            created_at: now,
+        })
+        .await;
+    Ok(saved)
 }
 
 /// Read and verify one revision's bytes from the conversation's private

@@ -148,21 +148,22 @@ automatic.
    carries so the products they package are always linked from the tag's own
    sources. The macOS job then signs the app with the Developer ID identity,
    notarizes and staples the app and DMG, verifies them with Apple tooling, and
-   creates a signed Tauri updater archive. The parallel Windows job packages
-   one unsigned NSIS installer — Authenticode signing is deliberately not
-   performed yet — and signs the installer bytes with the same Tauri updater
-   key, which is artifact authenticity rather than Windows code signing.
+   creates a signed Tauri updater archive. The parallel Windows job is parked
+   behind a literal `false` and never runs — see
+   [What comes after v1](deferred.md) — so a release currently produces macOS
+   artifacts only.
 7. Only after the build passes does the publisher upload immutable versioned
    files, advance the public manifests, invalidate their CDN paths, and
    smoke-test the hosted release. If a prior attempt already uploaded the
    complete immutable prefix, a new dispatch validates and reuses those bytes,
    skips the desktop build, and resumes only mutable metadata publication,
    CDN invalidation, and smoke testing.
-8. A final job downloads the notarized disk image and the Windows installer
-   back from the CDN, checks them against the immutable manifest digests, and
-   attaches them to the GitHub Release as `OpenWave-macos-apple-silicon.dmg`
-   and `OpenWave-windows-x86_64-setup.exe` with `.sha256` sidecars. It holds no
-   signing or AWS credentials. The names omit the version so that
+8. A final job downloads every installer the immutable manifest lists back from
+   the CDN, checks them against its digests, and attaches them to the GitHub
+   Release with `.sha256` sidecars — today that is the notarized disk image as
+   `OpenWave-macos-apple-silicon.dmg`, and it would again include
+   `OpenWave-windows-x86_64-setup.exe` if the Windows lane were unparked. It
+   holds no signing or AWS credentials. The names omit the version so that
    `https://github.com/brightwave-inc/openwave/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
    app's own version string identify which build it is.
@@ -197,7 +198,15 @@ against the current platform set, so a release published before a platform
 change cannot be re-dispatched; it fails on the artifact count instead of
 silently republishing.
 
-### Windows: unsigned x86_64, for now
+### Windows: parked, unsigned x86_64 when it returns
+
+**The Windows release lane is currently parked**, so releases are macOS-only.
+`prepare_windows` and `build_windows` in `release.yml` are each gated behind a
+literal `false`, and the `windows` descriptor in
+`scripts/create-release-manifests.mjs` is retained outside `RELEASE_PLATFORMS`
+rather than deleted. The reason is release time, not a product decision — see
+[What comes after v1](deferred.md). The packaging below is what shipped through
+v0.34.0 and what resuming the lane restores; nothing in it has been removed.
 
 A release ships one `x86_64` Windows build as a single NSIS `-setup.exe`
 installer. NSIS is the one installer format for v1 because Tauri bundles it
@@ -210,7 +219,8 @@ That updater signature covers the exact installer bytes and feeds
 installer itself, so no separate updater archive exists on Windows. Packaged
 apps currently run the update loop only on macOS; the Windows metadata is
 published so updater-enabled Windows builds can adopt it without a manifest
-change.
+change. While the lane is parked, `latest.json` carries no `windows-x86_64`
+key at all, so a Windows user on v0.34.0 has no upgrade path until it returns.
 
 Unlike macOS, no cache-warming workflow exists for Windows: the credential-free
 `prepare_windows` job compiles the tag from scratch (or from an earlier
@@ -230,17 +240,17 @@ openwave/releases/vMAJOR.MINOR.PATCH/
 ├── manifest.json
 ├── macos/
 │   └── aarch64/
-└── windows/
+└── windows/          (absent while the Windows lane is parked)
     └── x86_64/
 ```
 
 Each macOS architecture directory contains a notarized DMG, a zip of the
 notarized app, a signed `.app.tar.gz` updater archive, its signature, and
-SHA-256 files. Each Windows architecture directory contains an unsigned NSIS
-installer, its Tauri updater signature, and SHA-256 files. The root
-`manifest.json` and Tauri-compatible `latest.json` are the only mutable
-objects. The workflow refuses to overwrite a versioned object with different
-bytes or move `latest.json` to an older version.
+SHA-256 files. A Windows architecture directory, when the lane produces one,
+contains an unsigned NSIS installer, its Tauri updater signature, and SHA-256
+files. The root `manifest.json` and Tauri-compatible `latest.json` are the only
+mutable objects. The workflow refuses to overwrite a versioned object with
+different bytes or move `latest.json` to an older version.
 
 Packaged macOS apps check `latest.json` 15 seconds after launch and every five
 minutes. When a newer signed version is available, the Tauri updater downloads
@@ -312,7 +322,7 @@ the configured distribution. No long-lived AWS access key belongs in GitHub.
 Before the first public release, protect the environment as appropriate, verify
 all configuration values, and exercise the workflow with the intended first
 tag. The workflow references Apple signing secrets only in the macOS jobs; the
-Windows jobs receive only the Tauri updater key, and publishing uses
+parked Windows jobs receive only the Tauri updater key, and publishing uses
 short-lived AWS credentials obtained through OIDC.
 
 ### Release CI and cache security
@@ -448,12 +458,14 @@ non-required: the required `semantic PR title` job already fails unless the
 managed release labels match the title, so requiring the label job too would
 add nothing.
 
-`Windows cargo check` is intentionally separate from the required contexts. It
-runs automatically for Rust-scoped pushes to `main`, weekly schedules, and
-manual dispatches, while pull requests opt in with `windows-ci` when they touch
-a native Windows boundary. Keep it non-required so pull requests do not wait
-for long-running native platform coverage; the post-merge and scheduled runs
-remain the backstop.
+`Windows cargo check` is intentionally separate from the required contexts, and
+is currently parked behind a literal `false` along with the release lanes — see
+[What comes after v1](deferred.md) — so the `windows-ci` label does nothing
+today. When it is unparked it runs automatically for Rust-scoped pushes to
+`main`, weekly schedules, and manual dispatches, while pull requests opt in with
+`windows-ci` when they touch a native Windows boundary. Keep it non-required so
+pull requests do not wait for long-running native platform coverage; the
+post-merge and scheduled runs remain the backstop.
 
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.

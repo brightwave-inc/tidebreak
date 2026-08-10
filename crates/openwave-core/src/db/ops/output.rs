@@ -90,6 +90,31 @@ pub(in crate::db) async fn append_output_revision(
     output_id: OutputId,
     revision: &NewOutputRevision,
 ) -> Result<OutputRecord> {
+    append_revision(store, output_id, None, revision).await
+}
+
+pub(in crate::db) async fn append_output_revision_from(
+    store: &DbStore,
+    output_id: OutputId,
+    expected_current: OutputRevisionId,
+    revision: &NewOutputRevision,
+) -> Result<OutputRecord> {
+    append_revision(store, output_id, Some(expected_current), revision).await
+}
+
+/// Append a revision, optionally only if the output's head is still
+/// `expected_current`.
+///
+/// The precondition is evaluated inside the same transaction that holds the
+/// conversation's write lock, so a concurrent publication cannot slip between
+/// the check and the insert; that is the whole point of carrying it down here
+/// rather than testing the head in the caller.
+async fn append_revision(
+    store: &DbStore,
+    output_id: OutputId,
+    expected_current: Option<OutputRevisionId>,
+    revision: &NewOutputRevision,
+) -> Result<OutputRecord> {
     let created_at = canonical_db_timestamp(revision.created_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let Some(existing) = find_output_on(&transaction, output_id).await? else {
@@ -129,6 +154,19 @@ pub(in crate::db) async fn append_output_revision(
         };
     }
     let existing = require_output_on(&transaction, output_id).await?;
+    // The caller edited one exact revision. If anything published a newer one
+    // in the meantime, refuse rather than publish an edit of superseded text on
+    // top of it; the caller is told which revision is current so it can
+    // reconcile against the content that actually won.
+    if let Some(expected) = expected_current {
+        if existing.current_revision != expected {
+            transaction.rollback().await.map_err(store_err)?;
+            return Err(AgentError::OutputRevisionConflict {
+                output_id,
+                current_revision: existing.current_revision,
+            });
+        }
+    }
     let ordinal = existing.revision_count + 1;
     if ordinal > MAX_OUTPUT_REVISIONS {
         transaction.rollback().await.map_err(store_err)?;
