@@ -49,7 +49,17 @@ const MINIMAL_ENV_KEYS: &[&str] = &[
 /// Serializes the synchronous sidecar protocol behind one lazy child process.
 pub(crate) struct BrokerClient {
     commands: mpsc::Sender<BrokerCommand>,
+    admission: StdMutex<BrokerAdmission>,
     task: StdMutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrokerAdmission {
+    Running,
+    Quiescing,
+    Quiesced,
+    Resuming,
+    Shutdown,
 }
 
 impl BrokerClient {
@@ -63,11 +73,13 @@ impl BrokerClient {
                 execute_commands: openwave_code_execution::LocalExecutionProvider::availability()
                     .is_ok(),
                 session: None,
+                allow_session_start: true,
             }
             .run(receiver),
         );
         Self {
             commands,
+            admission: StdMutex::new(BrokerAdmission::Running),
             task: StdMutex::new(Some(task)),
         }
     }
@@ -96,14 +108,12 @@ impl BrokerClient {
         dispatch_deadline: Option<Instant>,
     ) -> Result<ControlResult, BrokerClientError> {
         let (reply, result) = oneshot::channel();
-        self.commands
-            .try_send(BrokerCommand::Control {
-                request,
-                retry,
-                dispatch_deadline,
-                reply,
-            })
-            .map_err(map_admission_error)?;
+        self.admit(BrokerCommand::Control {
+            request,
+            retry,
+            dispatch_deadline,
+            reply,
+        })?;
         result.await.map_err(|_| BrokerClientError::Closed)?
     }
 
@@ -112,13 +122,128 @@ impl BrokerClient {
         envelope: OperationEnvelope,
     ) -> Result<OperationResult, BrokerClientError> {
         let (reply, result) = oneshot::channel();
-        self.commands
-            .try_send(BrokerCommand::Operation { envelope, reply })
-            .map_err(map_admission_error)?;
+        self.admit(BrokerCommand::Operation { envelope, reply })?;
         result.await.map_err(|_| BrokerClientError::Closed)?
     }
 
+    fn admit(&self, command: BrokerCommand) -> Result<(), BrokerClientError> {
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *admission != BrokerAdmission::Running {
+            return Err(BrokerClientError::Quiesced);
+        }
+        // Keep the admission lock through enqueue. Once quiesce changes the
+        // state, every accepted command is already ordered before its barrier.
+        self.commands.try_send(command).map_err(map_admission_error)
+    }
+
+    /// Close admission, drain every command accepted before the barrier, and
+    /// pin an old-bundle sidecar process across app replacement.
+    pub(crate) async fn quiesce_for_update(&self) -> Result<(), BrokerClientError> {
+        self.begin_transition(BrokerAdmission::Running, BrokerAdmission::Quiescing)?;
+        let (reply, result) = oneshot::channel();
+        if self
+            .commands
+            .send(BrokerCommand::Quiesce { reply })
+            .await
+            .is_err()
+        {
+            self.set_admission(BrokerAdmission::Shutdown);
+            return Err(BrokerClientError::Closed);
+        }
+        let result = match result.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.set_admission(BrokerAdmission::Shutdown);
+                return Err(BrokerClientError::Closed);
+            }
+        };
+        match result {
+            Ok(()) => {
+                if self.finish_transition(BrokerAdmission::Quiescing, BrokerAdmission::Quiesced) {
+                    Ok(())
+                } else {
+                    Err(BrokerClientError::Closed)
+                }
+            }
+            Err(error) => {
+                self.finish_transition(BrokerAdmission::Quiescing, BrokerAdmission::Running);
+                Err(error)
+            }
+        }
+    }
+
+    /// Reopen admission after installation failed, but keep the worker pinned
+    /// to the old sidecar process. If that process later dies, host operations
+    /// fail safely until relaunch instead of resolving a binary from a bundle
+    /// the failed installer may have partially replaced.
+    pub(crate) async fn resume_after_failed_update(&self) -> Result<(), BrokerClientError> {
+        self.begin_transition(BrokerAdmission::Quiesced, BrokerAdmission::Resuming)?;
+        let (reply, result) = oneshot::channel();
+        if self
+            .commands
+            .send(BrokerCommand::ResumeAfterFailedUpdate { reply })
+            .await
+            .is_err()
+        {
+            self.set_admission(BrokerAdmission::Shutdown);
+            return Err(BrokerClientError::Closed);
+        }
+        if result.await.is_err() {
+            self.set_admission(BrokerAdmission::Shutdown);
+            return Err(BrokerClientError::Closed);
+        }
+        if self.finish_transition(BrokerAdmission::Resuming, BrokerAdmission::Running) {
+            Ok(())
+        } else {
+            Err(BrokerClientError::Closed)
+        }
+    }
+
+    fn begin_transition(
+        &self,
+        expected: BrokerAdmission,
+        next: BrokerAdmission,
+    ) -> Result<(), BrokerClientError> {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *admission != expected {
+            return Err(if *admission == BrokerAdmission::Shutdown {
+                BrokerClientError::Closed
+            } else {
+                BrokerClientError::Quiesced
+            });
+        }
+        *admission = next;
+        Ok(())
+    }
+
+    fn finish_transition(&self, expected: BrokerAdmission, next: BrokerAdmission) -> bool {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *admission == expected {
+            *admission = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn set_admission(&self, next: BrokerAdmission) {
+        *self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+    }
+
     pub(crate) async fn shutdown(&self) {
+        self.set_admission(BrokerAdmission::Shutdown);
         let (reply, finished) = oneshot::channel();
         let acknowledged = matches!(
             timeout(SHUTDOWN_TIMEOUT + SHUTDOWN_TIMEOUT, async {
@@ -156,6 +281,12 @@ enum BrokerCommand {
         envelope: OperationEnvelope,
         reply: oneshot::Sender<Result<OperationResult, BrokerClientError>>,
     },
+    Quiesce {
+        reply: oneshot::Sender<Result<(), BrokerClientError>>,
+    },
+    ResumeAfterFailedUpdate {
+        reply: oneshot::Sender<()>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -174,6 +305,7 @@ struct BrokerWorker {
     home_dir: PathBuf,
     execute_commands: bool,
     session: Option<Session>,
+    allow_session_start: bool,
 }
 
 impl BrokerWorker {
@@ -202,6 +334,19 @@ impl BrokerWorker {
                             ExchangeResult::Control(_) => Err(BrokerClientError::Protocol),
                         });
                     let _ = reply.send(result);
+                }
+                BrokerCommand::Quiesce { reply } => {
+                    // The command itself is the queue barrier. Admission was
+                    // closed before it was enqueued, so all earlier work and
+                    // any retry it performs have completed. Starting here is
+                    // still from the old bundle and gives a failed install a
+                    // coherent process to resume without path resolution.
+                    let result = self.ensure_session().await.map(|_| ());
+                    let _ = reply.send(result);
+                }
+                BrokerCommand::ResumeAfterFailedUpdate { reply } => {
+                    self.allow_session_start = false;
+                    let _ = reply.send(());
                 }
                 BrokerCommand::Shutdown { reply } => {
                     self.stop_session().await;
@@ -261,17 +406,7 @@ impl BrokerWorker {
         if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(BrokerClientError::DispatchExpired);
         }
-        if self.session.is_none() {
-            self.session = Some(
-                Session::start(
-                    &self.app,
-                    &self.data_dir,
-                    &self.home_dir,
-                    self.execute_commands,
-                )
-                .await?,
-            );
-        }
+        self.ensure_session().await?;
         if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(BrokerClientError::DispatchExpired);
         }
@@ -297,6 +432,24 @@ impl BrokerWorker {
             self.stop_session().await;
         }
         result
+    }
+
+    async fn ensure_session(&mut self) -> Result<&mut Session, BrokerClientError> {
+        if self.session.is_none() {
+            if !self.allow_session_start {
+                return Err(BrokerClientError::UpdateRecovery);
+            }
+            self.session = Some(
+                Session::start(
+                    &self.app,
+                    &self.data_dir,
+                    &self.home_dir,
+                    self.execute_commands,
+                )
+                .await?,
+            );
+        }
+        Ok(self.session.as_mut().expect("session initialized"))
     }
 
     async fn stop_session(&mut self) {
@@ -523,6 +676,10 @@ pub(crate) enum BrokerClientError {
     Start,
     #[error("host broker is busy; try again")]
     Busy,
+    #[error("host broker is paused while OpenWave updates")]
+    Quiesced,
+    #[error("host broker is unavailable until OpenWave restarts after a failed update")]
+    UpdateRecovery,
     #[error("host broker mutation could not start before its authority deadline")]
     DispatchExpired,
     #[error("host broker connection closed")]
@@ -569,6 +726,53 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn quiesce_closes_admission_before_its_queue_barrier() {
+        let (commands, mut receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
+        let client = BrokerClient {
+            commands,
+            admission: StdMutex::new(BrokerAdmission::Running),
+            task: StdMutex::new(None),
+        };
+        let (first_reply, _first_finished) = oneshot::channel();
+        client
+            .admit(BrokerCommand::Shutdown { reply: first_reply })
+            .unwrap();
+        client
+            .begin_transition(BrokerAdmission::Running, BrokerAdmission::Quiescing)
+            .unwrap();
+        let (barrier_reply, _barrier_finished) = oneshot::channel();
+        client
+            .commands
+            .try_send(BrokerCommand::Quiesce {
+                reply: barrier_reply,
+            })
+            .unwrap();
+        let (late_reply, _late_finished) = oneshot::channel();
+        assert!(matches!(
+            client.admit(BrokerCommand::Shutdown { reply: late_reply }),
+            Err(BrokerClientError::Quiesced)
+        ));
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(BrokerCommand::Shutdown { .. })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(BrokerCommand::Quiesce { .. })
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        client.set_admission(BrokerAdmission::Shutdown);
+        assert!(!client.finish_transition(BrokerAdmission::Quiescing, BrokerAdmission::Quiesced));
+    }
+
+    #[test]
+    fn failed_update_recovery_never_retries_into_a_new_sidecar() {
+        assert!(!BrokerClientError::UpdateRecovery.retryable_control());
+    }
 
     #[test]
     fn validates_channel_version_and_correlation() {

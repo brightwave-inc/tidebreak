@@ -76,8 +76,22 @@ pub(crate) fn static_headers(
 /// Exposed so configuration layers can reject an invalid URL before accepting
 /// a definition, with the same rules the transport applies.
 pub fn validate_http_url(url: &str) -> Result<()> {
+    validate_http_url_with_credentials(url, false)
+}
+
+/// Validate an MCP HTTP endpoint with its credential posture.
+///
+/// Cleartext HTTP is accepted only without credentials, or when the URL names
+/// a literal loopback address. A hostname such as `localhost` is not sufficient
+/// evidence here: static bearer/configured headers must not depend on ambient
+/// DNS or hosts-file configuration to remain on-machine.
+pub fn validate_http_url_with_credentials(url: &str, has_credentials: bool) -> Result<()> {
     let parsed =
         reqwest::Url::parse(url).map_err(|_| mcp_message("external server URL is invalid"))?;
+    validate_parsed_http_url(&parsed, has_credentials)
+}
+
+fn validate_parsed_http_url(parsed: &reqwest::Url, has_credentials: bool) -> Result<()> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(mcp_message("external server URL must use http or https"));
     }
@@ -89,7 +103,23 @@ pub fn validate_http_url(url: &str) -> Result<()> {
     if parsed.host_str().is_none() {
         return Err(mcp_message("external server URL must name a host"));
     }
+    if has_credentials && parsed.scheme() == "http" && !is_literal_loopback(parsed) {
+        return Err(mcp_message(
+            "credentialed external server URLs must use https unless they name a literal loopback address",
+        ));
+    }
     Ok(())
+}
+
+fn is_literal_loopback(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .map(|host| {
+            host.strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host)
+        })
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback())
 }
 
 impl HttpWire {
@@ -98,9 +128,9 @@ impl HttpWire {
         bearer_token: Option<&str>,
         configured: reqwest::header::HeaderMap,
     ) -> Result<Self> {
-        validate_http_url(url)?;
         let url =
             reqwest::Url::parse(url).map_err(|_| mcp_message("external server URL is invalid"))?;
+        validate_parsed_http_url(&url, bearer_token.is_some() || !configured.is_empty())?;
         if bearer_token.is_some_and(|token| {
             token.is_empty() || token.bytes().any(|byte| byte.is_ascii_control())
         }) {
@@ -200,6 +230,10 @@ impl HttpWire {
             }
             None => self.authorization.clone(),
         };
+        validate_parsed_http_url(
+            &self.url,
+            authorization.is_some() || !self.configured.is_empty() || self.session_id.is_some(),
+        )?;
         // One map, built configured-first and then overwritten by every
         // client-generated header, so a configured entry can never displace
         // what this transport says about itself — whatever the builder's
@@ -220,8 +254,9 @@ impl HttpWire {
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         if let Some(session_id) = &self.session_id {
-            let value = reqwest::header::HeaderValue::from_str(session_id)
+            let mut value = reqwest::header::HeaderValue::from_str(session_id)
                 .map_err(|_| mcp_message("external server session id is not header-safe"))?;
+            value.set_sensitive(true);
             headers.insert(
                 reqwest::header::HeaderName::from_static(SESSION_ID_HEADER),
                 value,
@@ -400,7 +435,15 @@ impl SseParser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
     use reqwest::header::{HeaderMap, HeaderName};
 
     #[test]
@@ -433,6 +476,7 @@ mod tests {
     #[test]
     fn url_validation_rejects_unsupported_shapes() {
         assert!(validate_http_url("http://127.0.0.1:9000/mcp").is_ok());
+        assert!(validate_http_url("http://remote.example/mcp").is_ok());
         assert!(validate_http_url("https://gateway.example/mcp/tools").is_ok());
         for url in [
             "ftp://host/mcp",
@@ -442,6 +486,118 @@ mod tests {
         ] {
             assert!(validate_http_url(url).is_err(), "{url} must be rejected");
         }
+    }
+
+    #[test]
+    fn credentialed_http_requires_a_literal_loopback_address() {
+        for url in [
+            "http://127.0.0.1:9000/mcp",
+            "http://127.27.4.9/mcp",
+            "http://[::1]:9000/mcp",
+            "https://gateway.example/mcp",
+        ] {
+            assert!(
+                validate_http_url_with_credentials(url, true).is_ok(),
+                "{url} should be accepted"
+            );
+        }
+        for url in [
+            "http://gateway.example/mcp",
+            "http://192.0.2.10/mcp",
+            "http://localhost:9000/mcp",
+        ] {
+            assert!(
+                validate_http_url_with_credentials(url, true).is_err(),
+                "{url} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_rejects_remote_cleartext_credentials() {
+        assert!(HttpWire::with_headers(
+            "http://gateway.example/mcp",
+            Some("secret"),
+            HeaderMap::new(),
+        )
+        .is_err());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_static("secret"),
+        );
+        assert!(HttpWire::with_headers("http://gateway.example/mcp", None, headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_bearer_rejects_an_otherwise_uncredentialed_remote_http_url() {
+        let wire =
+            HttpWire::with_headers("http://gateway.example/mcp", None, HeaderMap::new()).unwrap();
+        let error = wire
+            .post(&serde_json::json!({}), Some("dynamic-secret"))
+            .await
+            .expect_err("dynamic credentials must not cross remote cleartext HTTP");
+        assert!(error.to_string().contains("must use https"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn server_issued_session_is_not_sent_over_remote_cleartext_http() {
+        async fn handler(State(requests): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+            requests.fetch_add(1, Ordering::SeqCst);
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json"),
+                    (SESSION_ID_HEADER, "session-secret"),
+                ],
+                serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}).to_string(),
+            )
+        }
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/mcp", post(handler))
+            .with_state(Arc::clone(&requests));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut wire = HttpWire {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .resolve("remote.example", address)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            url: reqwest::Url::parse(&format!("http://remote.example:{}/mcp", address.port()))
+                .unwrap(),
+            authorization: None,
+            configured: HeaderMap::new(),
+            session_id: None,
+        };
+        let mut tools_list_changed = false;
+        wire.request(
+            1,
+            &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            &mut tools_list_changed,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        let error = wire
+            .notify(&serde_json::json!({
+                "jsonrpc":"2.0",
+                "method":"notifications/initialized"
+            }))
+            .await
+            .expect_err("the session credential must not cross remote cleartext HTTP");
+        assert!(error.to_string().contains("must use https"), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

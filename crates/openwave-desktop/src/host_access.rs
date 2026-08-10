@@ -187,6 +187,20 @@ impl HostAccess {
     pub(crate) async fn shutdown(&self) {
         self.broker.shutdown().await;
     }
+
+    pub(crate) async fn quiesce_for_update(&self) -> Result<(), String> {
+        self.broker
+            .quiesce_for_update()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn resume_after_failed_update(&self) -> Result<(), String> {
+        self.broker
+            .resume_after_failed_update()
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Native bridge for server-owned exec requests.

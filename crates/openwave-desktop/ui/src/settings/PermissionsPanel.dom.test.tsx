@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ConsentStatementSnapshot } from "../api";
@@ -56,6 +56,14 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     revokeStandingGrant: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as ApiClient;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -161,6 +169,106 @@ describe("PermissionsPanel", () => {
     render(<PermissionsPanel client={client} />);
     await screen.findByText(/Nothing saved yet/);
     expect(client.listConsentStatements).toHaveBeenCalled();
+  });
+
+  it("ignores a previous chat load that resolves after the current chat", async () => {
+    const oldChatId = "22222222-2222-2222-2222-222222222222";
+    const newChatId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const newStatement: ConsentStatementSnapshot = {
+      ...execStatement,
+      handle: {
+        kind: "tool_grant",
+        call_id: "99999999-9999-9999-9999-999999999999",
+      },
+      level: { level: "chat", chat_id: newChatId },
+      level_title: "Current chat",
+      resource: {
+        kind: "action_scope",
+        scope: { scope: "any_args_for", command: "pnpm" },
+      },
+    };
+    const oldLoad = deferred<ConsentStatementSnapshot[]>();
+    const newLoad = deferred<ConsentStatementSnapshot[]>();
+    const client = api({
+      listConsentStatements: vi
+        .fn()
+        .mockReturnValueOnce(oldLoad.promise)
+        .mockReturnValueOnce(newLoad.promise),
+    });
+    const { rerender } = render(
+      <PermissionsPanel
+        client={client}
+        chat={{ id: oldChatId, project_id: null }}
+      />,
+    );
+
+    rerender(
+      <PermissionsPanel
+        client={client}
+        chat={{ id: newChatId, project_id: null }}
+      />,
+    );
+    await act(async () => newLoad.resolve([newStatement]));
+    expect(await screen.findByText("pnpm …")).toBeInTheDocument();
+
+    await act(async () => oldLoad.resolve([execStatement]));
+    expect(screen.getByText("pnpm …")).toBeInTheDocument();
+    expect(screen.queryByText("cargo …")).not.toBeInTheDocument();
+  });
+
+  it("does not reload a previous chat after its revocation finishes", async () => {
+    const oldChatId = "22222222-2222-2222-2222-222222222222";
+    const newChatId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const currentStatement: ConsentStatementSnapshot = {
+      ...execStatement,
+      handle: {
+        kind: "tool_grant",
+        call_id: "99999999-9999-9999-9999-999999999999",
+      },
+      level: { level: "chat", chat_id: newChatId },
+      level_title: "Current chat",
+      resource: {
+        kind: "action_scope",
+        scope: { scope: "any_args_for", command: "pnpm" },
+      },
+    };
+    const revokeDone = deferred<void>();
+    const listConsentStatements = vi
+      .fn()
+      .mockResolvedValueOnce([execStatement])
+      .mockResolvedValue([currentStatement]);
+    const client = api({
+      listConsentStatements,
+      revokeStandingGrant: vi.fn(() => revokeDone.promise),
+    });
+    const { rerender } = render(
+      <PermissionsPanel
+        client={client}
+        chat={{ id: oldChatId, project_id: null }}
+      />,
+    );
+
+    await screen.findByText("cargo …");
+    await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Revoke", hidden: false }),
+    );
+    await waitFor(() =>
+      expect(client.revokeStandingGrant).toHaveBeenCalledTimes(1),
+    );
+
+    rerender(
+      <PermissionsPanel
+        client={client}
+        chat={{ id: newChatId, project_id: null }}
+      />,
+    );
+    expect(await screen.findByText("pnpm …")).toBeInTheDocument();
+
+    await act(async () => revokeDone.resolve());
+    expect(listConsentStatements).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("pnpm …")).toBeInTheDocument();
+    expect(screen.queryByText("cargo …")).not.toBeInTheDocument();
   });
 });
 

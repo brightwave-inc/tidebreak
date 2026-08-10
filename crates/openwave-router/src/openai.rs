@@ -18,8 +18,8 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::Role;
 
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, drain_frames, frame_data,
-    read_bounded_error_body, safe_http_error,
+    classify_in_band_error, classify_provider_error, frame_data, read_bounded_error_body,
+    safe_http_error, SseFramer,
 };
 use crate::BearerTokenSource;
 
@@ -239,7 +239,7 @@ impl ModelProvider for OpenAiProvider {
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
-            let mut buffer = Vec::new();
+            let mut framer = SseFramer::default();
             let mut state = StreamState {
                 provider_label,
                 ..StreamState::default()
@@ -254,8 +254,18 @@ impl ModelProvider for OpenAiProvider {
                         return;
                     }
                 };
-                buffer.extend_from_slice(&chunk);
-                for frame in drain_frames(&mut buffer) {
+                let frames = match framer.push(&chunk) {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        yield ProviderEvent::Failed {
+                            error: ProviderErrorInfo::provider(format!(
+                                "{provider_label} {error}"
+                            )),
+                        };
+                        return;
+                    }
+                };
+                for frame in frames {
                     if let Some(data) = frame_data(&frame) {
                         for event in normalize_for(&data, &mut state, wire_provider) {
                             yield event;
@@ -263,8 +273,18 @@ impl ModelProvider for OpenAiProvider {
                     }
                 }
             }
-            if !buffer.is_empty() {
-                let frame = String::from_utf8_lossy(&buffer).into_owned();
+            let final_frame = match framer.finish() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    yield ProviderEvent::Failed {
+                        error: ProviderErrorInfo::provider(format!(
+                            "{provider_label} {error}"
+                        )),
+                    };
+                    return;
+                }
+            };
+            if let Some(frame) = final_frame {
                 if let Some(data) = frame_data(&frame) {
                     for event in normalize_for(&data, &mut state, wire_provider) {
                         yield event;

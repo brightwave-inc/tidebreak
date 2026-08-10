@@ -131,7 +131,8 @@ use resolver::KeyedResolver;
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
-    register_pending_pairing, register_replacing_pairing, PairingError, PairingHandle,
+    deprovision_provisioned_gateway, deprovision_target, register_pending_pairing,
+    register_replacing_pairing, DeprovisionTarget, PairingError, PairingHandle,
     PendingRegistration,
 };
 pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};

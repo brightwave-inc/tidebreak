@@ -9,7 +9,10 @@
 # Build context is the WORKSPACE ROOT, so the whole Cargo workspace and the
 # committed Cargo.lock are visible to a `--locked` build:
 #
-#   docker build -f deploy/self-host/Dockerfile -t openwave-self-host .
+#   context="$(mktemp -d)"
+#   scripts/stage-self-host-build-context.sh "$context"
+#   docker build -f "$context/deploy/self-host/Dockerfile" -t openwave-self-host "$context"
+#   rm -rf "$context"
 #
 # The deployment posture this image assumes is decision record 4: the server
 # and its PostgreSQL database run inside the operator's own network, and TLS

@@ -41,6 +41,30 @@ const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
 const firstMessageActions = useFirstMessage.getState();
 
+/**
+ * A file picker creates a chat before there is a first message. Reconcile the
+ * home pickers immediately before that first message is held so changes made
+ * while the attachment strip was open govern the turn that follows.
+ */
+export async function applyPendingChatSettings(
+  client: Pick<
+    typeof import("./api").ApiClient.prototype,
+    "patchChatPermissionMode" | "patchChatNetworkPolicy"
+  >,
+  chatId: string,
+  settings: {
+    permissionMode: import("./api").PermissionMode | null;
+    networkPolicy: import("./api").NetworkPolicy;
+  },
+): Promise<void> {
+  chatListActions.replaceChat(
+    await client.patchChatPermissionMode(chatId, settings.permissionMode),
+  );
+  chatListActions.replaceChat(
+    await client.patchChatNetworkPolicy(chatId, settings.networkPolicy),
+  );
+}
+
 function isImportedDocument(
   result: { status: string },
 ): result is LibraryImportSuccess {
@@ -237,6 +261,11 @@ export function HomeRoute() {
         chatListActions.prependChat(created);
         chatListActions.setChatsError(null);
         chatId = created.id;
+      } else {
+        await applyPendingChatSettings(client, chatId, {
+          permissionMode: effective.permissionMode,
+          networkPolicy: effective.networkPolicy,
+        });
       }
       firstMessageActions.hold(chatId, {
         text: content,
@@ -373,6 +402,7 @@ export function HomeRoute() {
             }
             permissionMenu={
               <PermissionModeMenu
+                scopeKey="new-chat"
                 value={effective.permissionMode}
                 disabled={creatingChat}
                 onChange={newChat.setPermissionMode}

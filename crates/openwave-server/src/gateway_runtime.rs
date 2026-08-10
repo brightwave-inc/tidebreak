@@ -463,6 +463,30 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Invalidate any in-flight browser sign-in and drop the pending pairing
+    /// — the disconnect epilogue. Same discipline as sign-out: an exchange
+    /// that completes afterwards serializes behind the state lock, observes
+    /// the generation bump, and abandons rather than re-saving the session
+    /// it just minted.
+    pub(crate) async fn abandon_sign_in_and_pairing(&self) {
+        let mut sign_in = self.sign_in.lock().await;
+        self.sign_in_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.pending_pairing.lock().await = None;
+        *sign_in = SignInProgress::Idle;
+    }
+
+    /// Retire the stored session against the current resolved policy: after
+    /// a deprovision the profile is unmanaged, so [`sign_out`](Self::sign_out)
+    /// (managed-only) cannot run, but the keychain session must still be
+    /// revoked (best-effort) and cleared (unconditionally). Thin wrapper so
+    /// callers without the secrets handle can reach
+    /// [`retire_superseded_gateway_session`].
+    pub(crate) async fn retire_session_for_current_policy(&self) -> Result<()> {
+        let policy = self.policy().await?;
+        retire_superseded_gateway_session(self.secrets.clone(), &policy).await
+    }
+
     /// The connection for the policy's gateway, or `None` when the profile is
     /// unmanaged (or the managed policy is misconfigured).
     ///

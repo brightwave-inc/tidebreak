@@ -737,6 +737,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           }
           composerPermissionMenu={
             <PermissionModeMenu
+              scopeKey={chatId}
               value={chat!.permission_mode}
               disabled={deletingChatId !== null}
               onChange={onPermissionModeChange}

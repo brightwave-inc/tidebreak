@@ -1632,6 +1632,9 @@ impl Store for PauseTerminalStore {
     async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         self.inner.set_setting(key, value).await
     }
+    async fn delete_setting(&self, key: &str) -> Result<()> {
+        self.inner.delete_setting(key).await
+    }
     async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
         if matches!(
             event,

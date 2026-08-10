@@ -12,14 +12,12 @@
 //! more at click time so the app never installs an older artifact than the
 //! newest published release it can reach.
 //!
-//! A staged update is also installed autonomously, but only when doing so
-//! cannot interrupt work: the app must be quiescent (the embedded server
-//! reports no non-terminal turns and no live background runs — in-process
-//! background runs do not survive a restart) and unfocused (no window has
-//! focus, so nobody is typing into it), sustained across consecutive samples.
-//! While the app stays busy or in use, the update waits for the explicit
-//! restart button exactly as before.
+//! Installation is always an explicit user action. Native quiescence cannot
+//! prove that renderer-only drafts, dialogs, or editor state have been saved,
+//! so an unfocused window is not sufficient consent to replace and restart the
+//! application.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -40,13 +38,9 @@ const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_ERROR: &str = "Could not check for updates. Try again later.";
 const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
+const UPDATE_INSTALL_ERROR: &str = "Could not install the update. Try again later.";
 const UPDATE_WITHDRAWN_ERROR: &str =
     "The downloaded update is no longer published. OpenWave will keep checking.";
-const AUTO_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(60);
-/// Consecutive clean samples required before an autonomous restart, so a
-/// restart never fires on the instant between a user's send and the turn row
-/// becoming visible, or right as focus is returning.
-const AUTO_RESTART_REQUIRED_STREAK: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,27 +112,20 @@ enum StagedAction {
     Discard,
 }
 
-/// True when `candidate` should supersede the staged version.
-///
-/// Versions are published as semver tags; when either side fails to parse,
-/// the feed is treated as authoritative and any *different* advertised
-/// version replaces the staged one. Equal or older versions never do, so a
-/// check that raced a release cannot downgrade what is already staged.
-fn is_newer(candidate: &str, staged: &str) -> bool {
-    match (
-        semver::Version::parse(candidate),
-        semver::Version::parse(staged),
-    ) {
-        (Ok(candidate), Ok(staged)) => candidate > staged,
-        _ => candidate != staged,
-    }
-}
-
 fn reconcile_staged(feed_version: Option<&str>, staged_version: &str) -> StagedAction {
     match feed_version {
         None => StagedAction::Discard,
-        Some(feed) if is_newer(feed, staged_version) => StagedAction::Replace,
-        Some(_) => StagedAction::Keep,
+        Some(feed) if feed == staged_version => StagedAction::Keep,
+        Some(feed) => match (
+            semver::Version::parse(feed),
+            semver::Version::parse(staged_version),
+        ) {
+            (Ok(feed), Ok(staged)) if feed > staged => StagedAction::Replace,
+            // An older feed version is an intentional rollback/withdrawal as
+            // far as this client can prove. Malformed unequal versions also
+            // fail closed rather than preserving an unadvertised artifact.
+            _ => StagedAction::Discard,
+        },
     }
 }
 
@@ -347,70 +334,6 @@ pub(crate) fn spawn_update_loop(app: AppHandle) {
             }
         }
     });
-    tauri::async_runtime::spawn(async move {
-        let mut streak = 0u32;
-        loop {
-            tokio::time::sleep(AUTO_RESTART_POLL_INTERVAL).await;
-            let (next, fire) = advance_auto_restart_streak(streak, auto_restart_gate(&app).await);
-            streak = next;
-            if fire {
-                // On success this call never returns: the process relaunches.
-                if let Err(error) = take_staged_and_restart(app.clone()).await {
-                    eprintln!("openwave-desktop: autonomous update restart deferred: {error}");
-                    streak = 0;
-                }
-            }
-        }
-    });
-}
-
-/// One autonomous-restart sample: an installable update is staged, the
-/// embedded server supervises no in-flight work, and no window has focus.
-/// Every failure to know is treated as "in use".
-async fn auto_restart_gate(app: &AppHandle) -> bool {
-    {
-        let manager = app.state::<UpdateManager>();
-        let state = manager
-            .state
-            .lock()
-            .expect("update state mutex poisoned")
-            .clone();
-        let has_staged = manager
-            .staged
-            .lock()
-            .expect("staged update mutex poisoned")
-            .is_some();
-        if !can_restart(&state, has_staged) {
-            return false;
-        }
-    }
-
-    if app
-        .webview_windows()
-        .values()
-        .any(|window| window.is_focused().unwrap_or(true))
-    {
-        return false;
-    }
-
-    match app.state::<HostAccess>().store() {
-        Some(store) => store
-            .count_active_work()
-            .await
-            .map(|snapshot| snapshot.is_quiescent())
-            .unwrap_or(false),
-        None => false,
-    }
-}
-
-/// Advance the consecutive-clean-sample counter; fire only once the streak
-/// reaches [`AUTO_RESTART_REQUIRED_STREAK`]. Any dirty sample resets it.
-fn advance_auto_restart_streak(streak: u32, sample_ok: bool) -> (u32, bool) {
-    if !sample_ok {
-        return (0, false);
-    }
-    let next = streak.saturating_add(1);
-    (next, next >= AUTO_RESTART_REQUIRED_STREAK)
 }
 
 #[tauri::command]
@@ -435,7 +358,7 @@ fn can_restart(state: &DesktopUpdateState, has_staged_update: bool) -> bool {
 async fn resolve_latest_for_install(
     app: &AppHandle,
     staged: StagedUpdate,
-) -> Result<StagedUpdate, String> {
+) -> Result<StagedUpdate, InstallResolutionError> {
     let updater = match app.updater() {
         Ok(updater) => updater,
         Err(error) => {
@@ -463,13 +386,72 @@ async fn resolve_latest_for_install(
                 Ok(bytes) => Ok(StagedUpdate { update, bytes }),
                 Err(error) => {
                     eprintln!("openwave-desktop: install-time update download failed: {error}");
-                    Ok(staged)
+                    Err(InstallResolutionError {
+                        staged: Some(staged),
+                        message: UPDATE_PREPARE_ERROR,
+                    })
                 }
             }
         }
-        StagedAction::Discard => {
-            set_update_state(app, DesktopUpdateState::idle());
-            Err(UPDATE_WITHDRAWN_ERROR.to_owned())
+        StagedAction::Discard => Err(InstallResolutionError {
+            staged: None,
+            message: UPDATE_WITHDRAWN_ERROR,
+        }),
+    }
+}
+
+struct InstallResolutionError {
+    /// A still-published staged artifact that can be retried later. Withdrawn
+    /// artifacts are deliberately omitted so no subsequent action can install
+    /// them without downloading them from a newly authoritative feed.
+    staged: Option<StagedUpdate>,
+    message: &'static str,
+}
+
+fn retryable_update_state(version: String, message: &'static str) -> DesktopUpdateState {
+    DesktopUpdateState {
+        status: DesktopUpdateStatus::Ready,
+        version: Some(version),
+        error: Some(message.to_owned()),
+        enabled: updates_enabled(),
+    }
+}
+
+struct FailedInstall<E> {
+    install_error: E,
+    resume_error: Option<String>,
+}
+
+/// Run the synchronous bundle replacement only after the broker's admission
+/// barrier has drained. The closures keep the ordering contract directly
+/// testable without constructing a packaged Tauri updater in unit tests.
+async fn install_behind_broker_barrier<E, Q, QF, I, R, RF, S, SF>(
+    quiesce: Q,
+    install: I,
+    resume: R,
+    shutdown: S,
+) -> Result<Result<(), FailedInstall<E>>, String>
+where
+    Q: FnOnce() -> QF,
+    QF: Future<Output = Result<(), String>>,
+    I: FnOnce() -> Result<(), E>,
+    R: FnOnce() -> RF,
+    RF: Future<Output = Result<(), String>>,
+    S: FnOnce() -> SF,
+    SF: Future<Output = ()>,
+{
+    quiesce().await?;
+    match install() {
+        Ok(()) => {
+            shutdown().await;
+            Ok(Ok(()))
+        }
+        Err(install_error) => {
+            let resume_error = resume().await.err();
+            Ok(Err(FailedInstall {
+                install_error,
+                resume_error,
+            }))
         }
     }
 }
@@ -480,9 +462,17 @@ pub(crate) async fn restart_for_update(app: AppHandle) -> Result<(), String> {
 }
 
 /// Take the staged update, converge it on the newest published release, and
-/// restart into it. Shared by the explicit restart button and the autonomous
-/// quiescent-restart path. On success this never returns.
+/// restart into it. This is reached only from the explicit restart command. On
+/// success this never returns.
 async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
+    if app
+        .state::<UpdateManager>()
+        .busy
+        .swap(true, Ordering::AcqRel)
+    {
+        return Err("An update check is already in progress".to_owned());
+    }
+
     let staged = {
         let manager = app.state::<UpdateManager>();
         let state = manager
@@ -492,42 +482,71 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
             .clone();
         let mut staged = manager.staged.lock().expect("staged update mutex poisoned");
         if !can_restart(&state, staged.is_some()) {
+            manager.busy.store(false, Ordering::Release);
             return Err("no update is ready to install".to_owned());
         }
         staged.take().expect("ready update must have staged bytes")
     };
 
-    // Block the background loop from starting a new check while the install
-    // proceeds; on success the process restarts, and every error path below
-    // returns through `release_busy`.
-    let was_busy = app
-        .state::<UpdateManager>()
-        .busy
-        .swap(true, Ordering::AcqRel);
-
     let staged = match resolve_latest_for_install(&app, staged).await {
         Ok(staged) => staged,
-        Err(message) => {
-            if !was_busy {
-                app.state::<UpdateManager>()
-                    .busy
-                    .store(false, Ordering::Release);
+        Err(error) => {
+            if let Some(staged) = error.staged {
+                let version = staged.update.version.clone();
+                store_staged(&app, Some(staged));
+                set_update_state(&app, retryable_update_state(version, error.message));
+            } else {
+                store_staged(&app, None);
+                set_update_state(&app, DesktopUpdateState::failed(error.message));
             }
-            return Err(message);
+            app.state::<UpdateManager>()
+                .busy
+                .store(false, Ordering::Release);
+            return Err(error.message.to_owned());
         }
     };
 
-    // Once the bundle is replaced, every new sidecar process would come from
-    // the new app. Close the old host's broker permanently before installation
-    // so it cannot respawn a mismatched sidecar in the install/restart window.
-    app.state::<HostAccess>().shutdown().await;
-    if let Err(error) = staged.update.install(&staged.bytes) {
-        eprintln!("openwave-desktop: update installation failed: {error}");
-    }
+    let version = staged.update.version.clone();
+    let host_access = app.state::<HostAccess>();
+    let install_result = install_behind_broker_barrier(
+        || host_access.quiesce_for_update(),
+        || staged.update.install(&staged.bytes),
+        || host_access.resume_after_failed_update(),
+        || host_access.shutdown(),
+    )
+    .await;
 
-    // Relaunch even if installation failed so the current app gets a fresh,
-    // usable broker instead of remaining alive after its broker was closed.
-    app.restart();
+    match install_result {
+        Err(error) => {
+            eprintln!("openwave-desktop: could not quiesce host broker for update: {error}");
+            store_staged(&app, Some(staged));
+            set_update_state(&app, retryable_update_state(version, UPDATE_PREPARE_ERROR));
+            app.state::<UpdateManager>()
+                .busy
+                .store(false, Ordering::Release);
+            Err(UPDATE_PREPARE_ERROR.to_owned())
+        }
+        Ok(Err(failure)) => {
+            eprintln!(
+                "openwave-desktop: update installation failed: {}",
+                failure.install_error
+            );
+            if let Some(error) = failure.resume_error {
+                eprintln!(
+                    "openwave-desktop: old host broker could not resume after update failure: {error}"
+                );
+            }
+            store_staged(&app, Some(staged));
+            set_update_state(&app, retryable_update_state(version, UPDATE_INSTALL_ERROR));
+            app.state::<UpdateManager>()
+                .busy
+                .store(false, Ordering::Release);
+            Err(UPDATE_INSTALL_ERROR.to_owned())
+        }
+        Ok(Ok(())) => {
+            app.restart();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -577,15 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_restart_requires_a_sustained_clean_window() {
-        assert_eq!(advance_auto_restart_streak(0, false), (0, false));
-        assert_eq!(advance_auto_restart_streak(0, true), (1, false));
-        assert_eq!(advance_auto_restart_streak(1, true), (2, true));
-        // Any dirty sample resets the streak entirely.
-        assert_eq!(advance_auto_restart_streak(1, false), (0, false));
-    }
-
-    #[test]
     fn a_newer_release_replaces_the_staged_artifact() {
         // The double-release window: v0.4.1 was staged, v0.4.2 shipped before
         // the user acted. The stale artifact must be replaced, never installed.
@@ -602,31 +612,119 @@ mod tests {
     #[test]
     fn the_staged_artifact_is_kept_when_still_newest() {
         assert_eq!(reconcile_staged(Some("0.4.1"), "0.4.1"), StagedAction::Keep);
-        // A check that raced a release and resolved the *older* feed must not
-        // downgrade what is already staged.
-        assert_eq!(reconcile_staged(Some("0.4.0"), "0.4.1"), StagedAction::Keep);
+    }
+
+    #[test]
+    fn a_withdrawn_or_rolled_back_release_is_discarded_not_installed() {
+        assert_eq!(reconcile_staged(None, "0.4.1"), StagedAction::Discard);
+        assert_eq!(
+            reconcile_staged(Some("0.4.0"), "0.4.1"),
+            StagedAction::Discard
+        );
         assert_eq!(
             reconcile_staged(Some("0.4.2-rc.1"), "0.4.2"),
-            StagedAction::Keep
+            StagedAction::Discard
         );
     }
 
     #[test]
-    fn a_withdrawn_release_is_discarded_not_installed() {
-        assert_eq!(reconcile_staged(None, "0.4.1"), StagedAction::Discard);
-    }
-
-    #[test]
-    fn unparseable_versions_defer_to_the_feed() {
-        // The feed is authoritative when tags are not semver: any different
-        // advertised version replaces the staged one, an identical one stays.
+    fn unparseable_versions_fail_closed_unless_they_match_exactly() {
         assert_eq!(
             reconcile_staged(Some("build-124"), "build-123"),
-            StagedAction::Replace
+            StagedAction::Discard
         );
         assert_eq!(
             reconcile_staged(Some("build-123"), "build-123"),
             StagedAction::Keep
         );
+    }
+
+    #[test]
+    fn failed_install_state_remains_retryable() {
+        let mut state = retryable_update_state("1.2.3".to_owned(), UPDATE_INSTALL_ERROR);
+
+        assert_eq!(state.enabled, updates_enabled());
+        state.enabled = true;
+        assert!(can_restart(&state, true));
+        assert_eq!(state.version.as_deref(), Some("1.2.3"));
+        assert_eq!(state.error.as_deref(), Some(UPDATE_INSTALL_ERROR));
+    }
+
+    #[tokio::test]
+    async fn broker_barrier_drains_before_install_and_resumes_only_on_failure() {
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let quiesce_events = events.clone();
+        let install_events = events.clone();
+        let resume_events = events.clone();
+        let shutdown_events = events.clone();
+
+        let result = install_behind_broker_barrier(
+            move || async move {
+                let mut events = quiesce_events.lock().unwrap();
+                events.push("in-flight finished");
+                events.push("queued finished");
+                events.push("admission closed");
+                Ok(())
+            },
+            move || {
+                install_events.lock().unwrap().push("install");
+                Err("injected install failure")
+            },
+            move || async move {
+                resume_events.lock().unwrap().push("resume pinned broker");
+                Ok(())
+            },
+            move || async move {
+                shutdown_events.lock().unwrap().push("shutdown");
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(result.install_error, "injected install failure");
+        assert!(result.resume_error.is_none());
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "in-flight finished",
+                "queued finished",
+                "admission closed",
+                "install",
+                "resume pinned broker",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_install_permanently_shuts_down_before_restart() {
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let quiesce_events = events.clone();
+        let install_events = events.clone();
+        let resume_events = events.clone();
+        let shutdown_events = events.clone();
+
+        let result = install_behind_broker_barrier(
+            move || async move {
+                quiesce_events.lock().unwrap().push("quiesce");
+                Ok(())
+            },
+            move || {
+                install_events.lock().unwrap().push("install");
+                Ok::<(), &'static str>(())
+            },
+            move || async move {
+                resume_events.lock().unwrap().push("resume");
+                Ok(())
+            },
+            move || async move {
+                shutdown_events.lock().unwrap().push("shutdown");
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(*events.lock().unwrap(), ["quiesce", "install", "shutdown"]);
     }
 }
