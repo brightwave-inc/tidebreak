@@ -649,8 +649,33 @@ mod tests {
         steer::{SteerMessage, MAX_PENDING_STEERS, MAX_STEER_BYTES},
     };
 
+    type HostReader = tokio::io::BufReader<tokio::io::ReadHalf<DuplexStream>>;
+
     fn run_with(secret: &TransportSecret) -> SandboxRun {
         SandboxRun::new([], Some(secret.clone()))
+    }
+
+    /// Ping over `writer` and await the matching pong on `reader`.
+    ///
+    /// A serve loop reads its first inbound frame only after it has installed
+    /// its connection as the run's live peer, so a pong proves both that the
+    /// installation has happened and that every frame written ahead of the ping
+    /// has already been processed. `attach` returning proves neither: the
+    /// handshake response is written before the connection is installed, so a
+    /// test that orders two connections by their handshakes is ordering them by
+    /// nothing at all.
+    async fn ping_pong(reader: &mut HostReader, writer: &mut WriteHalf<DuplexStream>, nonce: u64) {
+        write_frame(writer, &WireFrame::Control(ControlFrame::Ping { nonce }))
+            .await
+            .expect("send ping");
+        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(reader))
+            .await
+            .expect("the connection is served")
+            .expect("pong");
+        assert!(
+            matches!(pong, WireFrame::Control(ControlFrame::Pong { nonce: answered }) if answered == nonce),
+            "the connection answered {pong:?} rather than the pong for {nonce}"
+        );
     }
 
     /// Attach over `host_side`, returning the halves so the caller can keep
@@ -659,10 +684,7 @@ mod tests {
         host_side: DuplexStream,
         secret: &TransportSecret,
         resume_from: EventCursor,
-    ) -> (
-        tokio::io::BufReader<tokio::io::ReadHalf<DuplexStream>>,
-        WriteHalf<DuplexStream>,
-    ) {
+    ) -> (HostReader, WriteHalf<DuplexStream>) {
         let (read_half, mut write_half) = split(host_side);
         let mut reader = tokio::io::BufReader::new(read_half);
         let attach = WireFrame::Attach(AttachRequest {
@@ -736,20 +758,7 @@ mod tests {
         }
         // A ping behind them, answered on the same connection, proves every
         // steer above was processed before the assertions read the queue.
-        write_frame(
-            &mut writer,
-            &WireFrame::Control(ControlFrame::Ping { nonce: 7 }),
-        )
-        .await
-        .expect("send ping");
-        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut reader))
-            .await
-            .expect("the connection is served")
-            .expect("pong");
-        assert!(matches!(
-            pong,
-            WireFrame::Control(ControlFrame::Pong { nonce: 7 })
-        ));
+        ping_pong(&mut reader, &mut writer, 7).await;
 
         let taken = run.take_steering();
         assert_eq!(
@@ -785,33 +794,21 @@ mod tests {
         tokio::spawn(super::serve_connection(first_sandbox, run.clone()));
         let (mut first_reader, mut first_writer) =
             attach(first_host, &secret, EventCursor::START).await;
+        // Supersession is ordered by installation, not by handshake, so the
+        // first connection must be *installed* before the second attaches —
+        // otherwise the two race and the first can install last, making it the
+        // live peer and its ack a legitimate one.
+        ping_pong(&mut first_reader, &mut first_writer, 0).await;
 
         // The host reconnects; the second connection becomes the live one while
-        // the first is still readable. `attach` returning proves only that the
-        // handshake completed on the test side, so before touching the first
-        // connection, a ping-pong on the second proves its serve loop — which
-        // runs only after the connection is installed as live — is up.
+        // the first is still readable. Its own ping-pong proves its serve loop —
+        // which runs only after the connection is installed as live — is up, so
+        // the first connection is now definitively superseded.
         let (second_host, second_sandbox) = tokio::io::duplex(4096);
         tokio::spawn(super::serve_connection(second_sandbox, run.clone()));
         let (mut second_reader, mut second_writer) =
             attach(second_host, &secret, EventCursor::START).await;
-        write_frame(
-            &mut second_writer,
-            &WireFrame::Control(ControlFrame::Ping { nonce: 0 }),
-        )
-        .await
-        .expect("send ping on the live connection");
-        let pong = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            read_frame(&mut second_reader),
-        )
-        .await
-        .expect("the live connection is served")
-        .expect("pong");
-        assert!(matches!(
-            pong,
-            WireFrame::Control(ControlFrame::Pong { nonce: 0 })
-        ));
+        ping_pong(&mut second_reader, &mut second_writer, 1).await;
 
         // The stale peer acknowledges. A ping behind it, answered on the same
         // connection, proves the ack was processed before we assert.
@@ -823,23 +820,7 @@ mod tests {
         )
         .await
         .expect("send stale ack");
-        write_frame(
-            &mut first_writer,
-            &WireFrame::Control(ControlFrame::Ping { nonce: 1 }),
-        )
-        .await
-        .expect("send ping");
-        let pong = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            read_frame(&mut first_reader),
-        )
-        .await
-        .expect("the stale connection is still served")
-        .expect("pong");
-        assert!(matches!(
-            pong,
-            WireFrame::Control(ControlFrame::Pong { nonce: 1 })
-        ));
+        ping_pong(&mut first_reader, &mut first_writer, 2).await;
 
         let acked = run
             .inner
@@ -896,23 +877,7 @@ mod tests {
         .await
         .expect("send ack");
         // A ping answered behind the ack proves the ack was processed.
-        write_frame(
-            &mut first_writer,
-            &WireFrame::Control(ControlFrame::Ping { nonce: 0 }),
-        )
-        .await
-        .expect("send ping");
-        let pong = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            read_frame(&mut first_reader),
-        )
-        .await
-        .expect("the live connection is served")
-        .expect("pong");
-        assert!(matches!(
-            pong,
-            WireFrame::Control(ControlFrame::Pong { nonce: 0 })
-        ));
+        ping_pong(&mut first_reader, &mut first_writer, 0).await;
 
         {
             let buffer = run.inner.events.lock().expect("event buffer lock");
