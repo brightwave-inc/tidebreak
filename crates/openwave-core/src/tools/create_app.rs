@@ -40,6 +40,9 @@ pub struct CreateAppTool {
     /// Authoring-time lookup of approved connected folders, when this
     /// embedding has one. Absent, folder bindings refuse at the door.
     folders: Option<Arc<dyn crate::local_app::ApprovedFolderSource>>,
+    /// Authoring-time lookup of the gateway's connected apps, when this
+    /// embedding has one. Absent, gateway bindings refuse at the door.
+    gateway_apps: Option<Arc<dyn crate::local_app::GatewayAppSource>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -54,9 +57,12 @@ pub(super) struct Arguments {
                        capabilities it may call, grouped by binding. A binding \
                        either names a rest_api connected app by id with the \
                        declared OpenAPI operationIds it may execute \
-                       (`{app, operation_ids}`), or an approved connected folder \
+                       (`{app, operation_ids}`), an approved connected folder \
                        by root id with an access level \
-                       (`{folder, access: \"read\"|\"read_write\"}`). The tool \
+                       (`{folder, access: \"read\"|\"read_write\"}`), or a \
+                       connected app of the model gateway by its gateway id \
+                       with the operation ids it declares \
+                       (`{gateway_app, operation_ids}`). The tool \
                        description lists the available ids. Mounted MCP tools \
                        cannot be bound.")]
     manifest: AppManifest,
@@ -78,6 +84,7 @@ impl CreateAppTool {
             store,
             profile_data_dir,
             folders: None,
+            gateway_apps: None,
         }
     }
 
@@ -89,6 +96,17 @@ impl CreateAppTool {
         folders: Arc<dyn crate::local_app::ApprovedFolderSource>,
     ) -> Self {
         self.folders = Some(folders);
+        self
+    }
+
+    /// Let the door resolve gateway bindings against the connected apps the
+    /// model gateway holds for this profile.
+    #[must_use]
+    pub fn with_gateway_apps(
+        mut self,
+        gateway_apps: Arc<dyn crate::local_app::GatewayAppSource>,
+    ) -> Self {
+        self.gateway_apps = Some(gateway_apps);
         self
     }
 
@@ -116,14 +134,12 @@ impl CreateAppTool {
             .ok_or_else(|| ToolOutput::error("this call is not recorded in this conversation"))
     }
 
-    /// Check that every manifest binding names a configured connected app or
-    /// approved folder and speaks a live vocabulary: operation bindings
-    /// resolve to a `rest_api` record with each pinned `operationId` declared
-    /// by its ingested catalog.
-    ///
-    /// A gateway binding names an app only the model gateway can resolve, and
-    /// this door has no roster to resolve it against, so it is refused here:
-    /// admitting one would author a pin the consent surface could not grant.
+    /// Check that every manifest binding names a configured connected app,
+    /// approved folder, or entitled gateway app and speaks a live vocabulary:
+    /// operation bindings resolve to a `rest_api` record with each pinned
+    /// `operationId` declared by its ingested catalog, and gateway bindings
+    /// resolve to an app the gateway currently declares, with each pinned
+    /// operation id in the catalog it declares for it.
     async fn check_bindings(&self, manifest: &AppManifest) -> std::result::Result<(), String> {
         if manifest.bindings.is_empty() {
             return Ok(());
@@ -133,15 +149,64 @@ impl CreateAppTool {
             .list_connected_apps()
             .await
             .map_err(|_| "could not read the configured connected apps".to_owned())?;
+        // Resolved once for the whole manifest: a manifest may carry several
+        // gateway bindings and the lookup is a live read across the network.
+        // `None` covers both no seam and no session — the door cannot tell
+        // them apart and does not need to, because the fix for both is the
+        // same sentence.
+        let gateway_apps = match &self.gateway_apps {
+            Some(source)
+                if manifest
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.gateway_app().is_some()) =>
+            {
+                source.entitled_apps().await
+            }
+            _ => None,
+        };
         for binding in &manifest.bindings {
-            // A gateway app is the gateway's record, not a local one: nothing
-            // here can name it, and nothing local could grant it.
+            // A gateway binding names an app only the gateway can resolve:
+            // no definition, no catalog, and no credential for it exists on
+            // this machine.
             if let AppBinding::GatewayOperations(binding) = binding {
-                return Err(format!(
-                    "gateway app {:?} cannot be bound here; only configured \
-                     connected apps and approved connected folders are bindable",
-                    binding.gateway_app
-                ));
+                let Some(entitled) = &gateway_apps else {
+                    return Err(
+                        "this profile has no gateway session, so gateway app bindings \
+                         cannot be authored"
+                            .to_owned(),
+                    );
+                };
+                let Some(app) = entitled.iter().find(|app| app.id == binding.gateway_app) else {
+                    let available: Vec<String> = entitled
+                        .iter()
+                        .map(|app| format!("{} ({})", app.id, app.name))
+                        .collect();
+                    return Err(if available.is_empty() {
+                        format!(
+                            "gateway app {:?} is not available to this profile, and no \
+                             gateway apps are",
+                            binding.gateway_app
+                        )
+                    } else {
+                        format!(
+                            "gateway app {:?} is not available to this profile; bind one \
+                             of: {}",
+                            binding.gateway_app,
+                            available.join(", ")
+                        )
+                    });
+                };
+                for operation_id in &binding.operation_ids {
+                    if !app.operation_ids.contains(operation_id) {
+                        return Err(format!(
+                            "operation {operation_id:?} is not declared by gateway app \
+                             {} ({})",
+                            app.id, app.name
+                        ));
+                    }
+                }
+                continue;
             }
             // A folder binding resolves against the host's approved
             // connected folders — when this embedding has none, the door
@@ -823,6 +888,116 @@ mod tests {
         let (_, ctx) = sourced.recorded_call().await;
         let created = tool
             .execute(&ctx, folder_manifest(*approved.as_uuid()))
+            .await
+            .unwrap();
+        assert!(!created.is_error, "{}", created.content);
+    }
+
+    /// The door resolves gateway bindings against the profile's gateway
+    /// session: no session refuses with the one fix the user has (sign in),
+    /// an unentitled id refuses with what is bindable spelled out, an
+    /// undeclared operation names the app it is not declared by, and a
+    /// declared pin publishes (docs/decisions/0007).
+    #[tokio::test]
+    async fn gateway_bindings_resolve_against_the_gateway_session_at_the_door() {
+        use crate::local_app::{GatewayAppSource, GatewayAuthoringApp};
+
+        struct StaticGateway(Option<Vec<GatewayAuthoringApp>>);
+
+        #[async_trait]
+        impl GatewayAppSource for StaticGateway {
+            async fn entitled_apps(&self) -> Option<Vec<GatewayAuthoringApp>> {
+                self.0.as_ref().map(|apps| {
+                    apps.iter()
+                        .map(|app| GatewayAuthoringApp {
+                            id: app.id.clone(),
+                            name: app.name.clone(),
+                            operation_ids: app.operation_ids.clone(),
+                        })
+                        .collect()
+                })
+            }
+        }
+
+        let gateway_manifest = |gateway_app: &str, operation_ids: &[&str]| {
+            json!({
+                "bundle_html": "<!doctype html><h1>Incidents</h1>",
+                "manifest": {
+                    "name": "Incident board",
+                    "bindings": [{
+                        "gateway_app": gateway_app,
+                        "operation_ids": operation_ids,
+                    }],
+                },
+            })
+        };
+        let entitled = || {
+            vec![GatewayAuthoringApp {
+                id: "app-incident".into(),
+                name: "Incident API".into(),
+                operation_ids: vec!["listIncidents".into()],
+            }]
+        };
+
+        // No source at all, and a source reporting no session, are the same
+        // refusal: the fix for both is a gateway session.
+        for source in [None, Some(Arc::new(StaticGateway(None)))] {
+            let fixture = fixture().await;
+            let tool = match source {
+                Some(source) => {
+                    CreateAppTool::new(fixture.store.clone(), fixture.profile_dir.clone())
+                        .with_gateway_apps(source)
+                }
+                None => CreateAppTool::new(fixture.store.clone(), fixture.profile_dir.clone()),
+            };
+            let (_, ctx) = fixture.recorded_call().await;
+            let refused = tool
+                .execute(&ctx, gateway_manifest("app-incident", &["listIncidents"]))
+                .await
+                .unwrap();
+            assert!(refused.is_error);
+            assert!(
+                refused.content.contains("no gateway session"),
+                "{}",
+                refused.content
+            );
+        }
+
+        let fixture = fixture().await;
+        let tool = CreateAppTool::new(fixture.store.clone(), fixture.profile_dir.clone())
+            .with_gateway_apps(Arc::new(StaticGateway(Some(entitled()))));
+
+        // An id the session does not answer to refuses with the alternatives.
+        let (_, ctx) = fixture.recorded_call().await;
+        let refused = tool
+            .execute(&ctx, gateway_manifest("app-ghost", &["listIncidents"]))
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("Incident API"),
+            "{}",
+            refused.content
+        );
+
+        // An operation the gateway's catalog does not declare refuses naming
+        // the app it is not declared by.
+        let (_, ctx) = fixture.recorded_call().await;
+        let refused = tool
+            .execute(&ctx, gateway_manifest("app-incident", &["ghostOp"]))
+            .await
+            .unwrap();
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("not declared by gateway app"),
+            "{}",
+            refused.content
+        );
+
+        // A declared pin on an entitled app publishes.
+        let (_, ctx) = fixture.recorded_call().await;
+        let created = tool
+            .execute(&ctx, gateway_manifest("app-incident", &["listIncidents"]))
             .await
             .unwrap();
         assert!(!created.is_error, "{}", created.content);

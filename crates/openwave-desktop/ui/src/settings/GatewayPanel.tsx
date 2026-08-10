@@ -9,6 +9,7 @@ import {
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
+  usedByLabel,
 } from "./primitives";
 
 const SIGN_IN_POLL_MS = 2_000;
@@ -332,6 +333,11 @@ function ManagedGatewayPanel({
                     {app.mcp_endpoint_slugs.length > 0 && (
                       <p className="text-muted-foreground text-xs">
                         via {app.mcp_endpoint_slugs.join(", ")}
+                      </p>
+                    )}
+                    {app.used_by_app_count > 0 && (
+                      <p className="text-muted-foreground text-xs">
+                        {usedByLabel(app.used_by_app_count)}
                       </p>
                     )}
                   </li>

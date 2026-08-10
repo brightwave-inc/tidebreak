@@ -720,11 +720,48 @@ async fn signed_out_gateway_mounts_degrade_to_a_sign_in_diagnostic() {
     // as "nothing bindable", not as a bindable app with a caveat.
     let state = runtime.state.lock().await;
     assert!(!state.definitions.is_empty());
-    let roster = connected_app_roster(&[], &[]);
+    let roster = connected_app_roster(&[], &[], &[]);
     assert!(
         roster.contains("No rest_api connected apps are configured"),
         "{roster}"
     );
+}
+
+/// The roster's gateway section is where a model learns the ids a gateway
+/// binding names, so it must spell out the binding shape, elide a long
+/// catalog instead of pasting it into every tool description, and be absent
+/// entirely without a gateway session — which is the same thing the door's
+/// refusal says.
+#[test]
+fn the_create_app_roster_lists_gateway_apps_and_elides_long_catalogs() {
+    let operation_ids: Vec<String> = (0..ROSTER_OPERATION_IDS + 5)
+        .map(|index| format!("op{index}"))
+        .collect();
+    let roster = connected_app_roster(
+        &[],
+        &[],
+        &[GatewayRosterApp {
+            id: "app-incident".into(),
+            name: "Incident API".into(),
+            operation_ids: operation_ids.clone(),
+        }],
+    );
+    assert!(
+        roster.contains("app-incident — Incident API (gateway app)"),
+        "{roster}"
+    );
+    assert!(roster.contains("\"gateway_app\": id"), "{roster}");
+    assert!(roster.contains("op0"), "{roster}");
+    assert!(roster.contains('…'), "{roster}");
+    assert!(
+        !roster.contains(operation_ids.last().unwrap().as_str()),
+        "{roster}"
+    );
+
+    // No session, no section: the roster never implies a binding vocabulary
+    // this profile could not resolve.
+    let signed_out = connected_app_roster(&[], &[], &[]);
+    assert!(!signed_out.contains("gateway app"), "{signed_out}");
 }
 
 /// The two non-sign-in gateway failures are different problems with
@@ -958,7 +995,7 @@ async fn replaces_with_a_streamable_http_server_and_mounts_its_tools() {
     // Even a healthy, connected server contributes nothing bindable to
     // the create_app roster: tool bindings are retired (#1332).
     {
-        let roster = connected_app_roster(&[], &[]);
+        let roster = connected_app_roster(&[], &[], &[]);
         assert!(!roster.contains("mcp__gateway__"), "{roster}");
         assert!(
             roster.contains("No rest_api connected apps are configured"),

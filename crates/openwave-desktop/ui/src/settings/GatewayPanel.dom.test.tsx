@@ -179,6 +179,7 @@ describe("GatewayPanel", () => {
             app_kind: "rest_api",
             enabled: true,
             mcp_endpoint_slugs: ["example-security-tools"],
+            used_by_app_count: 2,
           },
         ],
       }),
@@ -187,6 +188,8 @@ describe("GatewayPanel", () => {
 
     expect(await screen.findByText("Incident API")).toBeInTheDocument();
     expect(screen.getByText(/via example-security-tools/)).toBeInTheDocument();
+    // What a revocation here would break: the local apps bound to this app.
+    expect(screen.getByText("Used by 2 local apps")).toBeInTheDocument();
 
     cleanup();
     // A gateway that predates the JSON apps surface: no section, no error.
@@ -217,6 +220,7 @@ describe("GatewayPanel", () => {
             app_kind: "rest_api",
             enabled: true,
             mcp_endpoint_slugs: ["example-security-tools"],
+            used_by_app_count: 2,
           },
         ],
       }),

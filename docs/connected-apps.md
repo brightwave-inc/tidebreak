@@ -83,9 +83,11 @@ invalidate consent; repointing the reference does.
 A manifest may also bind `{ gateway_app, operation_ids[] }` — an app the
 model gateway holds, named by the gateway's own id (record 7). It is not a
 connected-app record and nothing about it resolves locally, so it keys off
-its own namespace, carries its own canonical fingerprint form, and is refused
-by the authoring door until the gateway roster, consent, and relay surfaces
-exist.
+its own namespace and carries its own canonical fingerprint form: the gateway
+origin, the app id, and a hash of the operation catalog the gateway declared.
+Both the authoring roster and that fingerprint are read live from the
+signed-in session — no gateway catalog is ever cached here — so a profile
+with no session can neither author nor grant one.
 
 The consent sheet leads with the app's display name ("Sentry") and lists
 pinned capabilities under it — a legibility improvement over leading with

@@ -1580,6 +1580,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         .unwrap(),
     );
     let extract_store = store.clone();
+    let store_for_gateway = store.clone();
     let (mut tools, config) = agent_deps(
         Arc::new(UnavailableCodeExecution),
         web_search::foreground_tool(store.clone(), Arc::new(MemSecrets::default())),
@@ -1587,6 +1588,11 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         store,
         dir.path().join("profile-data"),
         None,
+        crate::gateway_runtime::GatewayRuntime::new(
+            store_for_gateway,
+            Arc::new(MemSecrets::default()),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ),
     );
     assert!(
         config.system_prompt.is_none(),

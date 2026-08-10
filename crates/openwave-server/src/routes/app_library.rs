@@ -74,18 +74,32 @@ pub async fn get_app_library(
     State(state): State<AppState>,
 ) -> Result<Json<AppLibrary>, ServerError> {
     let records = state.store.list_apps(MAX_LISTED_APPS).await?;
-    let current = crate::connected_apps::current_fingerprints(&state).await?;
+    // The current revisions first, so the fingerprint read knows which gateway
+    // apps the listing actually needs — each one is a live catalog read, and
+    // the listing must not fetch the whole entitled set to badge apps that
+    // bind none of it. An app whose current revision cannot be read fails
+    // closed below: it lists, but never as granted.
+    let mut revisions = Vec::with_capacity(records.len());
+    for record in &records {
+        revisions.push(
+            state
+                .store
+                .get_app_revision(record.current_revision)
+                .await?,
+        );
+    }
+    let needed = crate::connected_apps::gateway_apps_bound_by(
+        revisions
+            .iter()
+            .flatten()
+            .flat_map(|revision| &revision.manifest.bindings),
+    );
+    let current = crate::connected_apps::current_fingerprints(&state, &needed).await?;
     let mut apps = Vec::with_capacity(records.len());
-    for record in records {
+    for (record, revision) in records.into_iter().zip(revisions) {
         // The same computation the grant surface performs, so the badge is
-        // the invoke gate's verdict rather than a cached approximation. An
-        // app whose current revision cannot be read fails closed: it lists,
-        // but never as granted.
-        let granted = match state
-            .store
-            .get_app_revision(record.current_revision)
-            .await?
-        {
+        // the invoke gate's verdict rather than a cached approximation.
+        let granted = match revision {
             Some(revision) => {
                 let grant = state.store.get_app_grant(record.id).await?;
                 super::grant_state(&revision.manifest, grant.as_ref(), &current).granted

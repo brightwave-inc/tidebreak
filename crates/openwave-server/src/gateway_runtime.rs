@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::connectors::{
-    CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayConnection, RESOURCE_LLM,
+    is_sign_in_required, CredentialVault, GatewayApp, GatewayAuth, GatewayAuthConfig,
+    GatewayConnection, GatewayOperationSummary, RESOURCE_LLM,
 };
 use async_trait::async_trait;
 use openwave_core::{AgentError, Result, SecretProvider, Store};
@@ -131,6 +132,10 @@ pub(crate) struct GatewayAppInfo {
     pub(crate) app_kind: String,
     pub(crate) enabled: bool,
     pub(crate) mcp_endpoint_slugs: Vec<String>,
+    /// How many live local-app grants bind this gateway app — the same
+    /// "Used by N local apps" line the connected-apps page carries per record,
+    /// so a user can see what a revocation here would break.
+    pub(crate) used_by_app_count: usize,
 }
 
 impl GatewayRuntime {
@@ -238,24 +243,46 @@ impl GatewayRuntime {
     /// gateway without the JSON apps surface reports `supported: false`.
     pub(crate) async fn apps(&self) -> Result<GatewayApps> {
         let connection = self.managed_connection().await?;
-        Ok(match connection.apps().await? {
-            Some(apps) => GatewayApps {
-                supported: true,
-                apps: apps
-                    .into_iter()
-                    .map(|app| GatewayAppInfo {
-                        id: app.id,
-                        name: app.name,
-                        app_kind: app.app_kind,
-                        enabled: app.enabled,
-                        mcp_endpoint_slugs: app.mcp_endpoint_slugs,
-                    })
-                    .collect(),
-            },
-            None => GatewayApps {
+        let Some(apps) = connection.apps().await? else {
+            return Ok(GatewayApps {
                 supported: false,
                 apps: Vec::new(),
-            },
+            });
+        };
+        // How many local mini-apps currently bind each gateway app: distinct
+        // live grants naming the id. The binding grammar forbids a grant
+        // naming one gateway app twice, so grants and apps count one-to-one.
+        // Best-effort, like every other projection field here — an unreadable
+        // grant table leaves the counts at zero rather than failing the list.
+        let mut used_by: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        match self.store.list_live_app_grants().await {
+            Ok(grants) => {
+                for grant in grants {
+                    for binding in &grant.bindings {
+                        if let Some(gateway_app) = binding.gateway_app() {
+                            *used_by.entry(gateway_app.to_owned()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!("could not count local apps bound to gateway apps: {error}");
+            }
+        }
+        Ok(GatewayApps {
+            supported: true,
+            apps: apps
+                .into_iter()
+                .map(|app| GatewayAppInfo {
+                    used_by_app_count: used_by.get(&app.id).copied().unwrap_or_default(),
+                    id: app.id,
+                    name: app.name,
+                    app_kind: app.app_kind,
+                    enabled: app.enabled,
+                    mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                })
+                .collect(),
         })
     }
 
@@ -299,6 +326,106 @@ impl GatewayRuntime {
             tracing::info!("auto-mounted newly entitled gateway MCP endpoints");
         }
         Ok(())
+    }
+
+    /// The gateway's deployment URL and the apps the signed-in user is
+    /// entitled to, or `None` when this profile cannot answer that question.
+    ///
+    /// The non-refusing twin of [`apps`](Self::apps): every state where there
+    /// is nothing to read — unmanaged profile, misconfigured policy, no
+    /// session for the policy's deployment, a session the gateway has since
+    /// revoked, a gateway predating the apps surface — answers `None` rather
+    /// than an error, exactly as [`reconcile_endpoint_mounts`] treats them as
+    /// "nothing to do". Callers use this where a gateway that cannot answer
+    /// must degrade (an authoring roster) or fail closed (a fingerprint read),
+    /// never fault.
+    ///
+    /// The URL is the resolved policy's, the same string every other gateway
+    /// identity is stamped with — so a fingerprint taken from it moves when
+    /// and only when the profile is re-paired.
+    pub(crate) async fn entitled_apps_if_signed_in(
+        &self,
+    ) -> Result<Option<(String, Vec<GatewayApp>)>> {
+        let policy = self.policy().await?;
+        let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
+            return Ok(None);
+        };
+        let Some(connection) = self.connection_for(&policy).await? else {
+            return Ok(None);
+        };
+        if connection.stored_credentials().await?.is_none() {
+            return Ok(None);
+        }
+        match connection.apps().await {
+            Ok(Some(apps)) => Ok(Some((base_url, apps))),
+            Ok(None) => Ok(None),
+            // A revoked or expired session is "signed out", not a fault: the
+            // stored blob outlives the gateway's own session record.
+            Err(error) if is_sign_in_required(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One entitled app's declared operation catalog, under the same gating as
+    /// [`entitled_apps_if_signed_in`](Self::entitled_apps_if_signed_in): a
+    /// profile that cannot read it answers `None`, never an error.
+    pub(crate) async fn app_catalog(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<Vec<GatewayOperationSummary>>> {
+        let policy = self.policy().await?;
+        let Some(connection) = self.connection_for(&policy).await? else {
+            return Ok(None);
+        };
+        if connection.stored_credentials().await?.is_none() {
+            return Ok(None);
+        }
+        match connection.app_operations(app_id).await {
+            Ok(catalog) => Ok(catalog),
+            Err(error) if is_sign_in_required(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every bindable gateway connected app with the operation ids its
+    /// catalog declares — the one live read both the `create_app` roster and
+    /// the authoring door work from.
+    ///
+    /// `None` is "this profile has no gateway session to ask", which the door
+    /// turns into a teachable refusal; `Some(vec![])` is a session that
+    /// answered with nothing bindable. An app whose catalog cannot be read is
+    /// left out: nothing about it could be pinned, so listing it would only
+    /// invite a refusal one step later.
+    pub(crate) async fn app_roster(&self) -> Option<Vec<crate::mcp_config::GatewayRosterApp>> {
+        let entitled = match self.entitled_apps_if_signed_in().await {
+            Ok(Some((_, entitled))) => entitled,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!("could not read the gateway's entitled apps: {error}");
+                return None;
+            }
+        };
+        let mut roster = Vec::new();
+        for app in entitled.into_iter().filter(|app| app.enabled) {
+            match self.app_catalog(&app.id).await {
+                Ok(Some(operations)) => roster.push(crate::mcp_config::GatewayRosterApp {
+                    id: app.id,
+                    name: app.name,
+                    operation_ids: operations
+                        .into_iter()
+                        .map(|operation| operation.operation_id)
+                        .collect(),
+                }),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        gateway_app = %app.id,
+                        "could not read a gateway app's operation catalog: {error}"
+                    );
+                }
+            }
+        }
+        Some(roster)
     }
 
     /// Start a browser sign-in and return the URL to open.
@@ -389,6 +516,12 @@ impl GatewayRuntime {
                                      (the background sync will retry): {error}"
                                 );
                             }
+                            // The `create_app` roster's gateway section reads
+                            // through this same session, so a fresh sign-in
+                            // has to republish it — otherwise the door keeps
+                            // telling the model there is no gateway session
+                            // until something unrelated rebuilds the registry.
+                            mcp.refresh_connected_app_roster().await;
                             SignInProgress::Idle
                         }
                         Err(error) => SignInProgress::Failed {
@@ -740,6 +873,72 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
         connection
             .attested_mcp_access_token(slug, &chat.to_string())
             .await
+    }
+
+    /// The gateway apps the `create_app` roster lists, read live through the
+    /// stored session. Best-effort throughout: no session, an unreachable
+    /// gateway, or a gateway predating either read all answer empty, which
+    /// renders as an absent roster section rather than a failed registry
+    /// rebuild.
+    async fn entitled_app_catalogs(&self) -> Vec<crate::mcp_config::GatewayRosterApp> {
+        self.app_roster().await.unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl crate::connected_apps::GatewayCatalogSource for GatewayRuntime {
+    /// Resolve the requested gateway apps against the live session: one
+    /// entitled-apps read, then one catalog read per requested id that the
+    /// session actually reaches.
+    ///
+    /// Fail-closed and quiet. A profile that cannot answer at all — unmanaged,
+    /// signed out, a gateway predating either read — answers `None`, and any
+    /// single app that is disabled, unentitled, or catalog-less is simply
+    /// absent from the map. Both readings make a grant naming it stale rather
+    /// than matching a fingerprint over a catalog nobody read.
+    async fn gateway_app_catalogs(
+        &self,
+        needed: &std::collections::BTreeSet<String>,
+    ) -> Option<(
+        String,
+        std::collections::BTreeMap<String, crate::connected_apps::GatewayAppCatalog>,
+    )> {
+        let (base_url, entitled) = match self.entitled_apps_if_signed_in().await {
+            Ok(Some(answered)) => answered,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!("could not read the gateway's entitled apps: {error}");
+                return None;
+            }
+        };
+        let mut catalogs = std::collections::BTreeMap::new();
+        for app in entitled
+            .into_iter()
+            .filter(|app| app.enabled && needed.contains(&app.id))
+        {
+            match self.app_catalog(&app.id).await {
+                Ok(Some(operations)) => {
+                    catalogs.insert(
+                        app.id,
+                        crate::connected_apps::GatewayAppCatalog {
+                            name: app.name,
+                            operation_ids: operations
+                                .into_iter()
+                                .map(|operation| operation.operation_id)
+                                .collect(),
+                        },
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        gateway_app = %app.id,
+                        "could not read a gateway app's operation catalog: {error}"
+                    );
+                }
+            }
+        }
+        Some((base_url, catalogs))
     }
 }
 

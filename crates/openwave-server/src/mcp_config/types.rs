@@ -285,6 +285,17 @@ pub(crate) trait GatewayEndpoints: Send + Sync {
         let _ = chat;
         Ok(self.endpoint(slug).await?.bearer_token)
     }
+
+    /// The gateway connected apps this profile could bind, with the operation
+    /// ids the gateway declares for each — the `create_app` roster's gateway
+    /// section.
+    ///
+    /// Best-effort and never load-bearing: the default answers empty, which is
+    /// exactly what a profile with no gateway session should say. Implementors
+    /// degrade the same way rather than failing a registry rebuild.
+    async fn entitled_app_catalogs(&self) -> Vec<GatewayRosterApp> {
+        Vec::new()
+    }
 }
 
 /// [`openwave_mcp::CallBearerSource`] over the gateway resolver for one
@@ -788,41 +799,47 @@ pub(crate) struct RestRosterApp {
     pub(crate) operation_ids: Vec<String>,
 }
 
+/// One gateway connected app's roster inputs: the gateway's own id a binding
+/// names and the operation ids the gateway declares for it.
+pub(crate) struct GatewayRosterApp {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) operation_ids: Vec<String>,
+}
+
 /// The roster text appended to `create_app`'s description: every configured
 /// `rest_api` connected app with the id a manifest binding names and a
-/// bounded sample of its declared operation ids, plus every approved
-/// connected folder with the root id a folder binding names.
+/// bounded sample of its declared operation ids, every approved connected
+/// folder with the root id a folder binding names, and — when this profile
+/// holds a gateway session — every gateway connected app with the id a
+/// gateway binding names.
 ///
 /// `mcp_server` records are deliberately absent: mounted-tool bindings are
 /// retired (#1332), so listing them would invite the model to author
-/// manifests the door refuses.
+/// manifests the door refuses. A profile with no gateway session lists no
+/// gateway section at all, rather than an empty one: absence is what the
+/// door's refusal already says.
 pub(super) fn connected_app_roster(
     rest: &[RestRosterApp],
     folders: &[crate::host_folders::ApprovedFolder],
+    gateway: &[GatewayRosterApp],
 ) -> String {
-    if rest.is_empty() && folders.is_empty() {
+    if rest.is_empty() && folders.is_empty() && gateway.is_empty() {
         return "\n\nNo rest_api connected apps are configured and no folders are \
                 connected, so only manifests with an empty bindings list can be \
                 created."
             .to_owned();
     }
-    let mut roster =
-        String::from("\n\nAvailable bindings (set each binding's `app` or `folder` to an id):");
+    let mut roster = String::from(
+        "\n\nAvailable bindings (set each binding's `app`, `folder`, or `gateway_app` \
+         to an id):",
+    );
     for app in rest {
-        let mut listed: Vec<&str> = app
-            .operation_ids
-            .iter()
-            .take(ROSTER_OPERATION_IDS)
-            .map(String::as_str)
-            .collect();
-        if app.operation_ids.len() > ROSTER_OPERATION_IDS {
-            listed.push("…");
-        }
         roster.push_str(&format!(
             "\n- {id} — {name} (rest_api): bind with `operation_ids` from: {operations}",
             id = app.id,
             name = app.name,
-            operations = listed.join(", ")
+            operations = listed_operation_ids(&app.operation_ids).join(", ")
         ));
     }
     for folder in folders {
@@ -833,5 +850,28 @@ pub(super) fn connected_app_roster(
             name = folder.display_name,
         ));
     }
+    for app in gateway {
+        roster.push_str(&format!(
+            "\n- {id} — {name} (gateway app): bind with `{{\"gateway_app\": id, \
+             \"operation_ids\": [...]}}` from: {operations}",
+            id = app.id,
+            name = app.name,
+            operations = listed_operation_ids(&app.operation_ids).join(", ")
+        ));
+    }
     roster
+}
+
+/// The operation ids one roster line prints, elided past
+/// [`ROSTER_OPERATION_IDS`].
+fn listed_operation_ids(operation_ids: &[String]) -> Vec<&str> {
+    let mut listed: Vec<&str> = operation_ids
+        .iter()
+        .take(ROSTER_OPERATION_IDS)
+        .map(String::as_str)
+        .collect();
+    if operation_ids.len() > ROSTER_OPERATION_IDS {
+        listed.push("…");
+    }
+    listed
 }

@@ -65,6 +65,9 @@ struct FakeGateway {
     corrupt_state: AtomicBool,
     /// Serve 404 for `/api/v1/cli/apps`, like a gateway that predates it.
     apps_unsupported: AtomicBool,
+    /// Serve 404 for the per-app catalog read, like a gateway that predates
+    /// it while still listing entitlements.
+    catalogs_unsupported: AtomicBool,
     /// Attestation context ids observed on refresh grants, in order.
     contexts_seen: Mutex<Vec<String>>,
     /// Reject the next unseen attestation context with `invalid_target`,
@@ -310,6 +313,31 @@ async fn apps(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Re
     .into_response()
 }
 
+async fn app_operations(
+    State(gateway): State<Arc<FakeGateway>>,
+    axum::extract::Path(app_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if gateway.catalogs_unsupported.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if bearer_resource(&gateway, &headers).as_deref() != Some("control") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if app_id != "app-incident" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    Json(json!({
+        "operations": [
+            { "operation_id": "listIncidents", "method": "GET", "summary": "List incidents" },
+            // No summary, and a field this client does not know: the catalog
+            // read is additive at the gateway and must stay parseable here.
+            { "operation_id": "createIncident", "method": "POST", "document_sha256": "abc" },
+        ]
+    }))
+    .into_response()
+}
+
 async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
     let app = Router::new()
         .route("/api/v1/meta", get(meta))
@@ -319,6 +347,7 @@ async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
         .route("/api/v1/cli/me", get(me))
         .route("/api/v1/cli/models", get(models))
         .route("/api/v1/cli/apps", get(apps))
+        .route("/api/v1/cli/apps/{app_id}/operations", get(app_operations))
         .with_state(gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -595,4 +624,46 @@ async fn apps_lists_entitlements_and_degrades_when_the_surface_is_missing() {
     // error and not an empty entitlement list.
     gateway.apps_unsupported.store(true, Ordering::SeqCst);
     assert_eq!(connection.apps().await.unwrap(), None);
+}
+
+/// The per-app catalog read is what a gateway binding's fingerprint is taken
+/// over, so it has to answer with the ids a manifest pins — under a `control`
+/// bearer — and it has to degrade rather than fault against a deployment that
+/// does not serve it yet, since the gateway half is still shipping.
+#[tokio::test]
+async fn app_catalogs_read_declared_operations_and_degrade_when_the_surface_is_missing() {
+    let (gateway, connection) = signed_in_connection().await;
+
+    let operations = connection
+        .app_operations("app-incident")
+        .await
+        .unwrap()
+        .unwrap();
+    let ids: Vec<&str> = operations
+        .iter()
+        .map(|operation| operation.operation_id.as_str())
+        .collect();
+    assert_eq!(ids, ["listIncidents", "createIncident"]);
+    assert_eq!(operations[0].method, "GET");
+    assert_eq!(operations[0].summary.as_deref(), Some("List incidents"));
+    assert_eq!(operations[1].summary, None);
+
+    // An id nothing is entitled to reads as "no catalog" rather than an
+    // error, so a grant naming it fails closed to re-consent.
+    assert_eq!(
+        connection.app_operations("app-unknown").await.unwrap(),
+        None
+    );
+    // An id outside the binding grammar never reaches the wire at all, and a
+    // traversal-shaped one is a single escaped path segment — it can only
+    // ever address a missing app, never another CLI route.
+    assert!(connection.app_operations("").await.is_err());
+    assert_eq!(connection.app_operations("../models").await.unwrap(), None);
+
+    // A gateway predating the catalog read degrades the same way.
+    gateway.catalogs_unsupported.store(true, Ordering::SeqCst);
+    assert_eq!(
+        connection.app_operations("app-incident").await.unwrap(),
+        None
+    );
 }

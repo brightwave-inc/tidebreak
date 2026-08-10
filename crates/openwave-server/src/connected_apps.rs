@@ -9,7 +9,7 @@
 //! request — never cached across one — so enforcement always judges the
 //! definition an id resolves to *now*.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -320,8 +320,14 @@ impl CurrentFingerprints {
 }
 
 /// Read the whole current fingerprint surface, live per request.
+///
+/// `needed_gateway_apps` bounds the gateway half: each gateway app's catalog
+/// is a separate live read, so callers name exactly the ids the bindings they
+/// are about to judge mention. An id nothing readable answers to is simply
+/// absent from the result, which reads as stale.
 pub(crate) async fn current_fingerprints(
     state: &AppState,
+    needed_gateway_apps: &BTreeSet<String>,
 ) -> openwave_core::Result<CurrentFingerprints> {
     let apps = current_app_fingerprints(state).await?;
     let mut folders = BTreeMap::new();
@@ -330,7 +336,7 @@ pub(crate) async fn current_fingerprints(
             folders.insert(folder.root_id, folder.display_name);
         }
     }
-    let gateway_apps = current_gateway_app_fingerprints(state).await?;
+    let gateway_apps = current_gateway_app_fingerprints(state, needed_gateway_apps).await;
     Ok(CurrentFingerprints {
         apps,
         folders,
@@ -338,53 +344,85 @@ pub(crate) async fn current_fingerprints(
     })
 }
 
-/// One gateway connected app as a live read describes it: the origin that
-/// served it, the gateway's id for it, its display name, and the operation
-/// ids its catalog declares — exactly the fingerprint inputs.
-// Nothing constructs this yet: [`current_gateway_app_catalogs`] deliberately
-// reads nothing until the gateway serves per-app operation catalogs, and the
-// empty read is what keeps gateway grants failing closed. The shape is here
-// because it is the contract that read must answer in.
-#[allow(dead_code)]
+/// The gateway app ids a set of manifest bindings names.
+pub(crate) fn gateway_apps_bound_by<'a>(
+    bindings: impl IntoIterator<Item = &'a openwave_core::local_app::AppBinding>,
+) -> BTreeSet<String> {
+    bindings
+        .into_iter()
+        .filter_map(|binding| binding.gateway_app().map(str::to_owned))
+        .collect()
+}
+
+/// The gateway app ids a set of grant bindings names.
+pub(crate) fn gateway_apps_granted_by<'a>(
+    bindings: impl IntoIterator<Item = &'a AppGrantBinding>,
+) -> BTreeSet<String> {
+    bindings
+        .into_iter()
+        .filter_map(|binding| binding.gateway_app().map(str::to_owned))
+        .collect()
+}
+
+/// One gateway connected app's catalog as a live read describes it: the
+/// display name and the operation ids the gateway declares — the fingerprint
+/// input and the consent-sheet label, and nothing else. No URL, no credential
+/// material, and no upstream detail crosses this seam.
 pub(crate) struct GatewayAppCatalog {
-    pub(crate) gateway_base_url: String,
-    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) operation_ids: Vec<String>,
 }
 
-/// The gateway connected apps this profile could bind, read live.
+/// The live per-app gateway catalog read the fingerprint surface depends on.
 ///
-/// Answers empty: the gateway's entitled-apps listing carries no operation
-/// catalogs, and fingerprinting an app over a catalog nobody read would pin
-/// consent to a fiction. Reading nothing is the fail-closed direction —
-/// [`CurrentFingerprints::grant_binding_current`] treats a missing entry as
-/// stale, so a gateway grant re-prompts instead of matching.
-async fn current_gateway_app_catalogs(
-    state: &AppState,
-) -> openwave_core::Result<Vec<GatewayAppCatalog>> {
-    let _ = state;
-    Ok(Vec::new())
+/// A seam rather than a direct call into the gateway runtime for the reason
+/// [`RestOperationDispatcher`] is one: the grant, invoke, and library surfaces
+/// are driven end to end in tests, and they cannot each stand up an OAuth
+/// session against a fake deployment to do it. Production is the gateway
+/// runtime itself.
+#[async_trait]
+pub(crate) trait GatewayCatalogSource: Send + Sync {
+    /// The gateway's deployment URL and the catalog of each requested app
+    /// that is enabled, entitled, and catalog-readable.
+    ///
+    /// `None` means this profile has no gateway session to answer with at all
+    /// — unmanaged, misconfigured, signed out, or a gateway too old to serve
+    /// catalogs. A present pair with an id missing from the map means the
+    /// session answered and that app is not bindable, which reads the same way
+    /// downstream: fingerprints fail closed either way.
+    async fn gateway_app_catalogs(
+        &self,
+        needed: &BTreeSet<String>,
+    ) -> Option<(String, BTreeMap<String, GatewayAppCatalog>)>;
 }
 
-/// The current fingerprint of every readable gateway connected app, by the
-/// gateway's app id.
+/// The current fingerprint of every readable gateway connected app among
+/// `needed`, by the gateway's app id.
 async fn current_gateway_app_fingerprints(
     state: &AppState,
-) -> openwave_core::Result<BTreeMap<String, GatewayAppFingerprint>> {
-    let mut current = BTreeMap::new();
-    for app in current_gateway_app_catalogs(state).await? {
-        let catalog_sha256 = catalog_sha256_from_operation_ids(&app.operation_ids);
-        let fingerprint = gateway_app_fingerprint(&app.gateway_base_url, &app.id, &catalog_sha256);
-        current.insert(
-            app.id,
-            GatewayAppFingerprint {
-                name: app.name,
-                fingerprint,
-            },
-        );
+    needed: &BTreeSet<String>,
+) -> BTreeMap<String, GatewayAppFingerprint> {
+    if needed.is_empty() {
+        return BTreeMap::new();
     }
-    Ok(current)
+    let Some((base_url, catalogs)) = state.gateway_catalogs.gateway_app_catalogs(needed).await
+    else {
+        return BTreeMap::new();
+    };
+    catalogs
+        .into_iter()
+        .map(|(id, catalog)| {
+            let catalog_sha256 = catalog_sha256_from_operation_ids(&catalog.operation_ids);
+            let fingerprint = gateway_app_fingerprint(&base_url, &id, &catalog_sha256);
+            (
+                id,
+                GatewayAppFingerprint {
+                    name: catalog.name,
+                    fingerprint,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Every stored `rest_api` record whose definition parses, read live.
@@ -605,9 +643,10 @@ mod tests {
         );
     }
 
-    /// A gateway grant reads stale against the surface this build can see:
-    /// nothing populates the gateway map yet, and a missing entry is a
-    /// mismatch — so a gateway binding re-prompts rather than matching.
+    /// A gateway grant reads stale against a surface that answers nothing:
+    /// an unread gateway map is the shape a profile with no session (or an
+    /// app that lost its entitlement) produces, and a missing entry is a
+    /// mismatch — so the binding re-prompts rather than matching.
     #[test]
     fn gateway_grants_read_stale_against_an_unread_gateway_surface() {
         let current = CurrentFingerprints {

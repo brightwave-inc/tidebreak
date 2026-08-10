@@ -1100,6 +1100,7 @@ async fn bind_inner(
         store.clone(),
         config.data_dir.clone(),
         host_folders.clone(),
+        gateway.clone(),
     );
     let tools = Arc::new(tools);
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
@@ -1350,6 +1351,7 @@ fn agent_deps(
     source_store: Arc<dyn Store>,
     profile_data_dir: std::path::PathBuf,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    gateway: Arc<gateway_runtime::GatewayRuntime>,
 ) -> (ToolRegistry, AgentConfig) {
     /// The host-folder seam folded into `create_app`'s authoring-time folder
     /// lookup: approved roots as (id, name) pairs, empty on any error —
@@ -1372,8 +1374,36 @@ fn agent_deps(
         }
     }
 
+    /// The gateway session folded into `create_app`'s authoring-time gateway
+    /// lookup, over the same live reads the roster and the consent surface
+    /// use. `None` — no session, or a gateway that cannot answer — is what
+    /// makes the door refuse gateway bindings with a sentence the user can
+    /// act on.
+    struct GatewayAuthoringSource(Arc<gateway_runtime::GatewayRuntime>);
+
+    #[async_trait::async_trait]
+    impl openwave_core::local_app::GatewayAppSource for GatewayAuthoringSource {
+        async fn entitled_apps(
+            &self,
+        ) -> Option<Vec<openwave_core::local_app::GatewayAuthoringApp>> {
+            Some(
+                self.0
+                    .app_roster()
+                    .await?
+                    .into_iter()
+                    .map(|app| openwave_core::local_app::GatewayAuthoringApp {
+                        id: app.id,
+                        name: app.name,
+                        operation_ids: app.operation_ids,
+                    })
+                    .collect(),
+            )
+        }
+    }
+
     let create_app = {
-        let tool = CreateAppTool::new(source_store.clone(), profile_data_dir);
+        let tool = CreateAppTool::new(source_store.clone(), profile_data_dir)
+            .with_gateway_apps(Arc::new(GatewayAuthoringSource(gateway)));
         match host_folders {
             Some(host) => tool.with_approved_folders(Arc::new(HostFolderAuthoringSource(host))),
             None => tool,

@@ -131,6 +131,11 @@ pub struct AppState {
     /// resolver ([`crate::connected_apps::governed_rest_dispatcher`]); tests
     /// substitute a fake transport behind the same governed validation.
     pub(crate) rest_dispatch: Arc<dyn crate::connected_apps::RestOperationDispatcher>,
+    /// Reads the operation catalog of a gateway connected app a manifest
+    /// binds, live per request. The production assembly is the one gateway
+    /// runtime below; tests substitute a static roster behind the same seam
+    /// rather than standing up an OAuth session against a fake deployment.
+    pub(crate) gateway_catalogs: Arc<dyn crate::connected_apps::GatewayCatalogSource>,
     /// Outstanding single-use tokens redeemed by the sandboxed view frames —
     /// prefetched MCP views and stored local-app revisions alike.
     pub(crate) view_frames: Arc<ViewFrameTokens>,
@@ -339,6 +344,7 @@ impl AppState {
             os_policy.clone(),
         ));
         let rest_dispatch = crate::connected_apps::governed_rest_dispatcher(secrets.clone());
+        let gateway_catalogs = gateway.clone();
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),
@@ -348,6 +354,7 @@ impl AppState {
             tools,
             mcp,
             rest_dispatch,
+            gateway_catalogs,
             view_frames: Arc::default(),
             gateway,
             chatgpt,

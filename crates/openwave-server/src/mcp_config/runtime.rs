@@ -1083,7 +1083,8 @@ impl McpRuntime {
     ) {
         let rest = self.rest_roster().await;
         let folders = self.folder_roster().await;
-        let registry = self.registry_with(&servers, &rest, &folders);
+        let gateway = self.gateway.entitled_app_catalogs().await;
+        let registry = self.registry_with(&servers, &rest, &folders, &gateway);
         let mut state = self.state.lock().await;
         state.definitions = definitions;
         state.ids = ids;
@@ -1149,7 +1150,8 @@ impl McpRuntime {
     async fn registry_for(&self, state: &RuntimeState) -> ToolRegistry {
         let rest = self.rest_roster().await;
         let folders = self.folder_roster().await;
-        self.registry_with(&state.servers, &rest, &folders)
+        let gateway = self.gateway.entitled_app_catalogs().await;
+        self.registry_with(&state.servers, &rest, &folders, &gateway)
     }
 
     /// Every approved connected folder, for the roster's folders section.
@@ -1175,6 +1177,7 @@ impl McpRuntime {
         servers: &HashMap<String, ManagedServer>,
         rest: &[RestRosterApp],
         folders: &[crate::host_folders::ApprovedFolder],
+        gateway: &[GatewayRosterApp],
     ) -> ToolRegistry {
         let mut registry = self.base_tools.clone();
         for (name, server) in servers {
@@ -1194,7 +1197,7 @@ impl McpRuntime {
         if let Some(inner) = registry.server_tool(CREATE_APP_TOOL) {
             registry.register(Box::new(CreateAppWithRoster {
                 inner,
-                roster: connected_app_roster(rest, folders),
+                roster: connected_app_roster(rest, folders, gateway),
             }));
         }
         registry
