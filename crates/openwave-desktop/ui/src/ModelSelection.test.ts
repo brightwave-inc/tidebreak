@@ -9,7 +9,6 @@ import {
 const base = {
   display_name: "Shared",
   verification: "verified" as const,
-  recommended: false,
   context_window: 32_000,
   max_output_tokens: 4_000,
   input_modalities: ["text"] as const,
