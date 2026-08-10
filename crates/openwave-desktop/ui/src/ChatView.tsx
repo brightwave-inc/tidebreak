@@ -142,9 +142,14 @@ export function ChatView({
     draftRef,
     () => {
       onDraftChange("");
+      // Pills go with the text they were attached to: accepted guidance has
+      // already carried them, and leaving them behind would silently re-invoke
+      // the same skills on whatever is typed next.
+      useComposerDrafts.getState().setSkills(chat.id, []);
       onVoiceInputAccepted();
     },
     voiceInputUsed,
+    invokedSkills,
   );
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);

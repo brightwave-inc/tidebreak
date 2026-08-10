@@ -985,6 +985,14 @@ fn validate_turn_input(
             "turn content must be non-empty and contain no NUL characters".into(),
         ));
     }
+    validate_invoked_skills(invoked_skills)
+}
+
+/// The bounds an invoked-skill list must satisfy to be stored.
+///
+/// Shared by the turn's opening message and by a steer, which carries its own
+/// list under the same budget — one rule, so the two cannot drift apart.
+pub(in crate::db) fn validate_invoked_skills(invoked_skills: &[String]) -> Result<()> {
     if invoked_skills.len() > TurnRun::MAX_INVOKED_SKILLS {
         return Err(AgentError::Store(format!(
             "a turn may invoke at most {} skills",

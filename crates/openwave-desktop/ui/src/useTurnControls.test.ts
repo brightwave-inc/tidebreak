@@ -38,6 +38,7 @@ function mount(
   draft = "change course",
   chatId = "chat-1",
   voiceInputUsed = false,
+  invokedSkills: readonly string[] = [],
 ) {
   const draftRef = { current: draft };
   const onDraftAccepted = vi.fn(() => {
@@ -51,6 +52,7 @@ function mount(
         draftRef,
         onDraftAccepted,
         voiceInputUsed,
+        invokedSkills,
       ),
     { initialProps: { id: chatId } },
   );
@@ -111,6 +113,7 @@ describe("useTurnControls", () => {
       "go left",
       true,
       false,
+      [],
     );
     expect(onDraftAccepted).toHaveBeenCalledTimes(1);
     expect(draftRef.current).toBe("");
@@ -131,6 +134,27 @@ describe("useTurnControls", () => {
       "change course",
       true,
       true,
+      [],
+    );
+  });
+
+  it("carries the pills on the draft with the guidance", async () => {
+    const client = stubClient();
+    const { result } = mount(client, "use the deck skill", "chat-1", false, [
+      "pptx",
+    ]);
+    act(() => runTurn());
+
+    await act(async () => result.current.steer());
+
+    expect(client.steer).toHaveBeenCalledWith(
+      "chat-1",
+      "turn-1",
+      expect.any(String),
+      "use the deck skill",
+      true,
+      false,
+      ["pptx"],
     );
   });
 

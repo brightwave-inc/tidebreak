@@ -565,6 +565,7 @@ pub(crate) enum TurnSteer {
     TurnId,
     ChatId,
     Content,
+    InvokedSkills,
     VoiceInputUsed,
     Interrupt,
     Status,

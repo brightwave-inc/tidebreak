@@ -1216,6 +1216,7 @@ export class ApiClient {
     content: string,
     interrupt = false,
     voiceInputUsed = false,
+    invokedSkills: readonly string[] = [],
   ): Promise<void> {
     return this.json(`/chats/${chatId}/steer`, {
       method: "POST",
@@ -1226,6 +1227,7 @@ export class ApiClient {
         content,
         interrupt,
         voice_input_used: voiceInputUsed,
+        invoked_skills: invokedSkills,
       }),
     });
   }

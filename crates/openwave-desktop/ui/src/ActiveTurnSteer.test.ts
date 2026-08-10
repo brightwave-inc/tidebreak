@@ -40,9 +40,30 @@ describe("ActiveTurnSteerFence", () => {
       draftSnapshot: "  change course  ",
       steerId: "steer-1",
       voiceInputUsed: false,
+      invokedSkills: [],
     });
     expect(fence.begin(target, "another direction", createId)).toBeNull();
     expect(createId).toHaveBeenCalledTimes(1);
+  });
+
+  it("allocates a new identity when a retry names different skills", () => {
+    // The server compares the skill list as part of the steer's identity, so
+    // reusing the id would have a changed list reported as already accepted
+    // and quietly dropped.
+    const createId = vi.fn(() => `steer-${createId.mock.calls.length}`);
+    const fence = new ActiveTurnSteerFence();
+    const first = fence.begin(target, "change course", createId, false, [
+      "docx",
+    ])!;
+    fence.fail(first);
+
+    const retry = fence.begin(target, "change course", createId, false, [
+      "docx",
+      "notes",
+    ])!;
+
+    expect(retry.steerId).not.toBe(first.steerId);
+    expect(retry.invokedSkills).toEqual(["docx", "notes"]);
   });
 
   it("reuses the exact identity when unchanged guidance is retried", () => {

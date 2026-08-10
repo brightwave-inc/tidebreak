@@ -408,6 +408,10 @@ pub struct SteerBody {
     pub turn_id: TurnId,
     /// User text to inject into the running turn.
     pub content: String,
+    /// Skills the user named for this instruction alone. A steer neither
+    /// inherits the turn's opening list nor spends its budget.
+    #[serde(default)]
+    pub invoked_skills: Vec<String>,
     /// When true, preempt the provider stream immediately; otherwise the message
     /// waits for the next step boundary.
     #[serde(default)]
@@ -441,6 +445,7 @@ pub async fn post_steer(
             "steer content must be non-empty, contain no NUL characters, and fit the size limit",
         ));
     }
+    require_invocable_skills(&state, &body.invoked_skills).await?;
     store.require_chat(id).await?;
     match store
         .accept_turn_steer_with_message_context(
@@ -448,6 +453,7 @@ pub async fn post_steer(
             body.turn_id,
             id,
             &body.content,
+            &body.invoked_skills,
             body.interrupt,
             body.voice_input_used,
         )

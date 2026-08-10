@@ -708,6 +708,7 @@ describe("active turn steering", () => {
       "change course",
       true,
       true,
+      ["docx"],
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -720,6 +721,7 @@ describe("active turn steering", () => {
       content: "change course",
       interrupt: true,
       voice_input_used: true,
+      invoked_skills: ["docx"],
     });
   });
 });

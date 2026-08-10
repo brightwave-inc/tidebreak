@@ -1499,15 +1499,18 @@ impl Store for DbStore {
         content: &str,
         interrupt: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
-        ops::turn::accept_turn_steer(self, id, turn_id, chat_id, content, interrupt, false).await
+        ops::turn::accept_turn_steer(self, id, turn_id, chat_id, content, &[], interrupt, false)
+            .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn accept_turn_steer_with_message_context(
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
         chat_id: ChatId,
         content: &str,
+        invoked_skills: &[String],
         interrupt: bool,
         voice_input_used: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
@@ -1517,6 +1520,7 @@ impl Store for DbStore {
             turn_id,
             chat_id,
             content,
+            invoked_skills,
             interrupt,
             voice_input_used,
         )

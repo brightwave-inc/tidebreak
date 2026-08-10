@@ -4895,6 +4895,130 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
     assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
 }
 
+/// POST guidance into a running turn that explicitly invokes skills by name.
+async fn steer_invoking(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    turn: TurnId,
+    steer_id: TurnSteerId,
+    invoked: &[&str],
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{chat}/steer"))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "steer_id": steer_id,
+                        "turn_id": turn,
+                        "content": "use the deck skill instead",
+                        "invoked_skills": invoked,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Contract: guidance sent into a running turn may name skills of its own, and
+/// they are held to the same catalog check the opening message is held to.
+///
+/// A steer becomes a real user message, so the names it carries end up in that
+/// message's model projection exactly as the turn's own do. Checking them here
+/// is what stops a name the reader picked moments earlier — and the install has
+/// since switched off — from directing the model at a manifest staging has
+/// already removed.
+#[tokio::test]
+async fn steering_guidance_may_invoke_skills_and_is_held_to_the_same_catalog() {
+    let (dir, store) = temp_db_store("steer-invoked-skills.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (router, token) = plugin_app(store.clone(), dir.path());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message_invoking(&router, &bearer, chat.id, &[])
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    let turn = store.list_turn_runs(chat.id).await.unwrap()[0].id;
+
+    let steer_id = TurnSteerId::new();
+    let accepted = steer_invoking(
+        &router,
+        &bearer,
+        chat.id,
+        turn,
+        steer_id,
+        &["presentations"],
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    // The list is durably part of what was accepted, not just prompt material:
+    // the same identity repeated with the same skills is the same instruction,
+    // and repeated with different ones is a different one.
+    assert_eq!(
+        steer_invoking(
+            &router,
+            &bearer,
+            chat.id,
+            turn,
+            steer_id,
+            &["presentations"]
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        steer_invoking(&router, &bearer, chat.id, turn, steer_id, &["charts"])
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+
+    let unknown = steer_invoking(
+        &router,
+        &bearer,
+        chat.id,
+        turn,
+        TurnSteerId::new(),
+        &["no-such-skill"],
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(unknown).await;
+    assert_eq!(error.kind, "invoked_skill_unavailable");
+
+    let toggled = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"skills": {"presentations": false}}),
+    )
+    .await;
+    assert_eq!(toggled.status(), StatusCode::OK);
+    let refused = steer_invoking(
+        &router,
+        &bearer,
+        chat.id,
+        turn,
+        TurnSteerId::new(),
+        &["presentations"],
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(refused).await;
+    assert_eq!(error.kind, "invoked_skill_unavailable");
+}
+
 /// A stdio MCP server small enough to write into a plugin package: POSIX sh
 /// answering the three requests a connection makes, plus the health probe. It
 /// records the environment it was launched with on startup, which is what

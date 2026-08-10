@@ -23,6 +23,12 @@ export type SlashOption = {
   category?: PluginCategory;
   /** A bundle row's invocable member skills, in manifest order. */
   skills?: readonly string[];
+  /**
+   * Whether a bundle row's own flag is on. A row is offered either way at rest,
+   * because picking a disabled one turns it on; mid-turn that is not available,
+   * so the flag is what tells the two cases apart.
+   */
+  enabled?: boolean;
 };
 
 /**
@@ -157,6 +163,7 @@ export function slashOptionsFromCatalog(
         description: plugin.description,
         category: plugin.category,
         skills: members,
+        enabled: plugin.enabled,
       });
     }
     if (!plugin.enabled) continue;
@@ -210,9 +217,11 @@ export function skillsToInvoke(
  * What the panel can still reach, given what this message already carries.
  *
  * A skill already on the message is not offered again, and neither is anything
- * that invokes once the turn's cap is reached, or while a turn is running:
- * steering carries no invocation, so a pill picked there would silently apply
- * to some later message. Prompts are text and stay available throughout.
+ * that invokes once the cap is reached. A steer carries its own invocation
+ * under its own budget, so skills stay reachable while a turn runs — but a
+ * *disabled* bundle's row does not: picking one turns the bundle on
+ * install-wide and names a manifest the running turn's workspace never staged.
+ * Prompts are text and stay available throughout.
  */
 export function availableSlashOptions(
   options: readonly SlashOption[],
@@ -221,7 +230,10 @@ export function availableSlashOptions(
 ): SlashOption[] {
   return options.filter((option) => {
     if (option.kind === "prompt") return true;
-    if (steering || invoked.length >= MAX_INVOKED_SKILLS) return false;
+    if (steering && option.kind === "plugin" && option.enabled === false) {
+      return false;
+    }
+    if (invoked.length >= MAX_INVOKED_SKILLS) return false;
     return skillsToInvoke(option, invoked).length > 0;
   });
 }
