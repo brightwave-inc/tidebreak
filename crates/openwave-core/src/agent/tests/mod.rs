@@ -2977,6 +2977,30 @@ impl Tool for SchemaRecordingTool {
     }
 }
 
+struct InvalidSchemaCountingTool {
+    ran: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for InvalidSchemaCountingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "invalid_server_schema".into(),
+            description: "a tool whose advertised schema cannot compile".into(),
+            input_schema: serde_json::json!({"type": "nonsense"}),
+        }
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::text("ran"))
+    }
+}
+
 #[tokio::test]
 async fn registry_dispatch_rejects_schema_mismatches_and_preserves_valid_arguments() {
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -3047,8 +3071,8 @@ fn registry_refuses_schema_mismatches_for_server_and_client_tools() {
         .is_some());
 }
 
-#[test]
-fn registry_fails_open_when_a_tool_schema_does_not_compile() {
+#[tokio::test]
+async fn registry_fails_closed_for_every_consumer_when_a_tool_schema_is_unusable() {
     let mut registry = ToolRegistry::new();
     registry.register_client(
         ToolSpec {
@@ -3058,11 +3082,54 @@ fn registry_fails_open_when_a_tool_schema_does_not_compile() {
         },
         ApprovalClass::ReadOnly,
     );
-
-    assert_eq!(
-        registry.schema_mismatch("invalid_schema", &serde_json::json!({})),
-        None
+    registry.register_client(
+        ToolSpec {
+            name: "unsupported_schema".into(),
+            description: "a tool declaring an unsupported schema dialect".into(),
+            input_schema: serde_json::json!({
+                "$schema": "https://example.com/unknown-json-schema-dialect",
+                "type": "object"
+            }),
+        },
+        ApprovalClass::ReadOnly,
     );
+    let ran = Arc::new(AtomicUsize::new(0));
+    registry.register(Box::new(InvalidSchemaCountingTool { ran: ran.clone() }));
+
+    assert!(registry
+        .schema_mismatch("invalid_schema", &serde_json::json!({}))
+        .is_some_and(|mismatch| mismatch.contains("could not be compiled")));
+    assert!(!registry.client_arguments_are_valid("invalid_schema", &serde_json::json!({})));
+    assert!(registry
+        .schema_mismatch("unsupported_schema", &serde_json::json!({}))
+        .is_some_and(|mismatch| mismatch.contains("unsupported")));
+    assert!(!registry.client_arguments_are_valid("unsupported_schema", &serde_json::json!({})));
+    let advertised = registry.specs_for_surface(true, false);
+    assert!(!advertised.iter().any(|spec| spec.name == "invalid_schema"));
+    assert!(!advertised
+        .iter()
+        .any(|spec| spec.name == "unsupported_schema"));
+    assert!(!advertised
+        .iter()
+        .any(|spec| spec.name == "invalid_server_schema"));
+
+    let context = ToolCtx::new_legacy_workspace(
+        ChatId::new(),
+        None,
+        std::path::PathBuf::from("unused-by-invalid-schema-tool"),
+    );
+    let refused = registry
+        .get("invalid_server_schema")
+        .unwrap()
+        .execute(&context, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(refused.is_error);
+    assert_eq!(
+        refused.error_category,
+        Some(ToolErrorCategory::InvalidArguments)
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
