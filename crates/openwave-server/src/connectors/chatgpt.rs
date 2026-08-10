@@ -599,7 +599,8 @@ async fn callback(
         // retire the attempt before the real browser redirect arrives.
         return (
             axum::http::StatusCode::BAD_REQUEST,
-            Html(callback_page(
+            Html(super::callback_page::callback_page(
+                super::callback_page::CallbackOutcome::Failed,
                 "Sign-in failed",
                 "The authorization state did not match. Return to OpenWave and try again.",
             )),
@@ -611,45 +612,26 @@ async fn callback(
         code: query.code,
         error: query.error,
     });
-    let (heading, message) = if success {
+    let (outcome, heading, message) = if success {
         (
-            "Signed in",
-            "You can close this window and return to OpenWave.",
+            super::callback_page::CallbackOutcome::Success,
+            "You're signed in",
+            "",
         )
     } else {
-        ("Sign-in denied", "Return to OpenWave for details.")
+        (
+            super::callback_page::CallbackOutcome::Denied,
+            "Sign-in was denied",
+            "Nothing was connected. Return to OpenWave for details, or try again.",
+        )
     };
     (
         axum::http::StatusCode::OK,
-        Html(callback_page(heading, message)),
+        Html(super::callback_page::callback_page(
+            outcome, heading, message,
+        )),
     )
         .into_response()
-}
-
-fn callback_page(heading: &str, message: &str) -> String {
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{heading}</title>
-<style>
-  :root {{ color-scheme: light dark; --bg:#f4f4f5; --card:#fff; --border:#e4e4e7; --text:#18181b; --muted:#52525b; }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{ --bg:#18181b; --card:#232326; --border:#3f3f46; --text:#fafafa; --muted:#a1a1aa; }}
-  }}
-  body {{ margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; }}
-  main {{ background:var(--card); border:1px solid var(--border); border-radius:12px; padding:2.5rem 3rem;
-    margin:1rem; max-width:24rem; text-align:center; }}
-  .product {{ font-size:0.8125rem; font-weight:600; letter-spacing:0.08em; text-transform:uppercase;
-    color:var(--muted); margin:0 0 1rem; }}
-  h1 {{ font-size:1.375rem; font-weight:600; margin:0 0 0.5rem; }}
-  p {{ color:var(--muted); font-size:0.9375rem; line-height:1.5; margin:0; }}
-</style></head><body><main>
-<p class="product">OpenWave</p>
-<h1>{heading}</h1>
-<p>{message}</p>
-</main></body></html>"#
-    )
 }
 
 #[derive(Clone)]
