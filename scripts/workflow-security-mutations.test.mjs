@@ -24,6 +24,7 @@ const fixturePaths = [
   "crates/openwave-desktop/src/lib.rs",
   "crates/openwave-desktop/src/updater.rs",
   "deploy/self-host/Dockerfile.dockerignore",
+  "scripts/stage-self-host-build-context.sh",
   "deny.toml",
   "README.md",
 ];
@@ -106,6 +107,16 @@ const mutations = [
       ),
   },
   {
+    name: "E2B pin provenance source checkout",
+    file: ".github/workflows/publish-e2b-template.yml",
+    expected: "E2B template pin provenance",
+    mutate: (source) =>
+      source.replace(
+        "          ref: ${{ needs.resolve.outputs.source_sha }}\n          path: .release-source\n          fetch-depth: 1\n          sparse-checkout: |\n            crates/openwave-sandbox-agent/e2b\n          sparse-checkout-cone-mode: false\n\n      - name: Point the client at the published template",
+        "          ref: main\n          path: .release-source\n          fetch-depth: 1\n          sparse-checkout: |\n            crates/openwave-sandbox-agent/e2b\n          sparse-checkout-cone-mode: false\n\n      - name: Point the client at the published template",
+      ),
+  },
+  {
     name: "source validation without credentials",
     file: ".github/workflows/publish-e2b-template.yml",
     expected: "production secrets remain isolated",
@@ -177,6 +188,12 @@ const mutations = [
     file: "deploy/self-host/Dockerfile.dockerignore",
     expected: "Docker context is allowlisted",
     mutate: (source) => source.replace("**/.*\n", ""),
+  },
+  {
+    name: "Docker tracked-context staging",
+    file: "scripts/stage-self-host-build-context.sh",
+    expected: "self-host build context excludes",
+    mutate: (source) => source.replace("git -C \"$root\" archive --format=tar \"$revision\"", "tar -cf - \"$root\""),
   },
   {
     name: "Docker private-key filename denial",

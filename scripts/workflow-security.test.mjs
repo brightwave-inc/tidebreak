@@ -443,6 +443,17 @@ test("dependency policy covers advisories, licenses, sources, and the locked gra
   );
 });
 
+test("E2B template pin provenance and writes share the validated source revision", () => {
+  const pin = workflowJob(workflows["publish-e2b-template.yml"], "pin");
+
+  assert.match(pin, /SOURCE_SHA: \$\{\{ needs\.resolve\.outputs\.source_sha \}\}/);
+  assert.match(pin, /name: Check out the validated template provenance/);
+  assert.match(pin, /ref: \$\{\{ needs\.resolve\.outputs\.source_sha \}\}/);
+  assert.match(pin, /path: \.release-source/);
+  assert.match(pin, /git diff --quiet --no-index "\.release-source\/\$TEMPLATE_PATH" "\$TEMPLATE_PATH"/);
+  assert.match(pin, /directory = f"\.release-source\/\{os\.environ\['TEMPLATE_PATH'\]\}"/);
+});
+
 test("the self-host Docker context is allowlisted and denies hidden credentials", () => {
   assert.match(dockerIgnore, /^\*\*$/m);
   assert.doesNotMatch(dockerIgnore, /^!crates\/\*\*$/m);
@@ -478,10 +489,14 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
   ]) {
     assert.ok(dockerIgnore.includes(`${denied}\n`), `missing deny rule ${denied}`);
   }
+  assert.match(
+    readFileSync(repositoryFile("scripts", "stage-self-host-build-context.sh"), "utf8"),
+    /git -C "\$root" archive --format=tar "\$revision" \| tar -x -C "\$destination"/,
+  );
 });
 
 test(
-  "BuildKit excludes exact hidden and credential probes from allowed source paths",
+  "BuildKit admits only exact source inputs from allowed source paths",
   { skip: process.env.OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE === "1" },
   () => {
     const context = mkdtempSync(join(tmpdir(), "openwave-docker-context-"));
@@ -552,6 +567,32 @@ test(
         );
       }
     } finally {
+      rmSync(context, { recursive: true, force: true });
+      rmSync(output, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "the self-host build context excludes arbitrary untracked source files",
+  { skip: process.env.OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE === "1" },
+  () => {
+    const context = mkdtempSync(join(tmpdir(), "openwave-self-host-context-"));
+    const output = mkdtempSync(join(tmpdir(), "openwave-self-host-output-"));
+    const probe = repositoryFile("crates", "openwave-cli", "src", "cloud-token.txt");
+    try {
+      writeFileSync(probe, "untracked probe\n");
+      execFileSync("bash", [repositoryFile("scripts", "stage-self-host-build-context.sh"), context]);
+      writeFileSync(join(context, "Probe.Dockerfile"), "FROM scratch\nCOPY . /context\n");
+      execFileSync(
+        "docker",
+        ["buildx", "build", "--file", join(context, "Probe.Dockerfile"), "--output", `type=local,dest=${output}`, context],
+        { stdio: "pipe" },
+      );
+      assert.ok(existsSync(join(output, "context", "crates", "openwave-cli", "src", "main.rs")));
+      assert.ok(!existsSync(join(output, "context", "crates", "openwave-cli", "src", "cloud-token.txt")));
+    } finally {
+      rmSync(probe, { force: true });
       rmSync(context, { recursive: true, force: true });
       rmSync(output, { recursive: true, force: true });
     }

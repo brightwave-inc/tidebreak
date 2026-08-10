@@ -479,6 +479,7 @@ jobs:
       # From whichever job actually resolved the alias: `publish` when this
       # run built the template, `resolve` when it was already public.
       TEMPLATE_ID: ${{ needs.publish.outputs.template_id || needs.resolve.outputs.template_id }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       PIN_BRANCH: automation/e2b-template-pin
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -486,18 +487,36 @@ jobs:
         with:
           ref: main
 
+      # Keep provenance tied to the exact tree that resolve validated. `main`
+      # above is only the branch the automation PR will modify; it must never
+      # supply the image reference claimed for an older publication run.
+      - name: Check out the validated template provenance
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          path: .release-source
+          fetch-depth: 1
+          sparse-checkout: |
+            crates/openwave-sandbox-agent/e2b
+          sparse-checkout-cone-mode: false
+
       - name: Point the client at the published template
         run: |
           if [[ -z "$TEMPLATE_ID" ]]; then
             echo "No template ID reached the pin job; refusing to guess." >&2
             exit 1
           fi
+          git diff --quiet --no-index ".release-source/$TEMPLATE_PATH" "$TEMPLATE_PATH" || {
+            echo "The template source advanced on main after $SOURCE_SHA; the newer publication run owns the pin." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
           python3 - <<'EOF'
           import os
           import re
           import sys
 
-          directory = os.environ["TEMPLATE_PATH"]
+          directory = f".release-source/{os.environ['TEMPLATE_PATH']}"
           alias = os.environ["ALIAS"]
           template_id = os.environ["TEMPLATE_ID"]
 
