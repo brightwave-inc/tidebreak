@@ -98,6 +98,10 @@ impl RegisteredSpec {
             SchemaValidator::Invalid(error) => Some(error.to_string()),
         }
     }
+
+    fn is_advertisable(&self) -> bool {
+        matches!(self.validator, SchemaValidator::Compiled(_))
+    }
 }
 
 fn advertised_schema_draft(schema: &Value) -> std::result::Result<jsonschema::Draft, String> {
@@ -413,51 +417,62 @@ impl ToolRegistry {
     ) -> Vec<ToolSpec> {
         self.tools
             .values()
-            .filter_map(|tool| match tool {
-                RegisteredTool::Server { tool, .. }
-                    if read_only && tool.approval_class() != ApprovalClass::ReadOnly =>
-                {
-                    None
+            .filter_map(|tool| {
+                let registered = match tool {
+                    RegisteredTool::Server { registered, .. }
+                    | RegisteredTool::Client { registered, .. }
+                    | RegisteredTool::ForegroundClient { registered, .. }
+                    | RegisteredTool::ForegroundOrchestration { registered, .. } => registered,
+                };
+                if !registered.is_advertisable() {
+                    return None;
                 }
-                // Read-only by consent class, because it reaches nothing
-                // outside the conversation's own display state — but it does
-                // commit a row, and a plan-mode turn is drafting a proposal
-                // the reader has not accepted yet. Leaving it advertised would
-                // let a rejected proposal leave a live task plan behind.
-                RegisteredTool::Server { registered, .. }
-                    if read_only && registered.spec.name == crate::UPDATE_TASK_PLAN_TOOL =>
-                {
-                    None
+                match tool {
+                    RegisteredTool::Server { tool, .. }
+                        if read_only && tool.approval_class() != ApprovalClass::ReadOnly =>
+                    {
+                        None
+                    }
+                    // Read-only by consent class, because it reaches nothing
+                    // outside the conversation's own display state — but it does
+                    // commit a row, and a plan-mode turn is drafting a proposal
+                    // the reader has not accepted yet. Leaving it advertised would
+                    // let a rejected proposal leave a live task plan behind.
+                    RegisteredTool::Server { registered, .. }
+                        if read_only && registered.spec.name == crate::UPDATE_TASK_PLAN_TOOL =>
+                    {
+                        None
+                    }
+                    RegisteredTool::Server { registered, .. } => Some(registered.spec.clone()),
+                    RegisteredTool::Client { class, .. }
+                    | RegisteredTool::ForegroundClient { class, .. }
+                    | RegisteredTool::ForegroundOrchestration { class, .. }
+                        if read_only && *class != ApprovalClass::ReadOnly =>
+                    {
+                        None
+                    }
+                    RegisteredTool::Client { registered, .. } => Some(registered.spec.clone()),
+                    // The plan continuation exists only where a plan can be
+                    // proposed: outside plan mode the tool would park a turn on a
+                    // decision whose accept is meaningless.
+                    RegisteredTool::ForegroundClient { registered, .. }
+                        if !read_only && registered.spec.name == crate::EXIT_PLAN_MODE_TOOL =>
+                    {
+                        None
+                    }
+                    RegisteredTool::ForegroundClient { registered, .. }
+                        if allow_agent_orchestration =>
+                    {
+                        Some(registered.spec.clone())
+                    }
+                    RegisteredTool::ForegroundClient { .. } => None,
+                    RegisteredTool::ForegroundOrchestration { registered, .. }
+                        if allow_agent_orchestration =>
+                    {
+                        Some(registered.spec.clone())
+                    }
+                    RegisteredTool::ForegroundOrchestration { .. } => None,
                 }
-                RegisteredTool::Server { registered, .. } => Some(registered.spec.clone()),
-                RegisteredTool::Client { class, .. }
-                | RegisteredTool::ForegroundClient { class, .. }
-                | RegisteredTool::ForegroundOrchestration { class, .. }
-                    if read_only && *class != ApprovalClass::ReadOnly =>
-                {
-                    None
-                }
-                RegisteredTool::Client { registered, .. } => Some(registered.spec.clone()),
-                // The plan continuation exists only where a plan can be
-                // proposed: outside plan mode the tool would park a turn on a
-                // decision whose accept is meaningless.
-                RegisteredTool::ForegroundClient { registered, .. }
-                    if !read_only && registered.spec.name == crate::EXIT_PLAN_MODE_TOOL =>
-                {
-                    None
-                }
-                RegisteredTool::ForegroundClient { registered, .. }
-                    if allow_agent_orchestration =>
-                {
-                    Some(registered.spec.clone())
-                }
-                RegisteredTool::ForegroundClient { .. } => None,
-                RegisteredTool::ForegroundOrchestration { registered, .. }
-                    if allow_agent_orchestration =>
-                {
-                    Some(registered.spec.clone())
-                }
-                RegisteredTool::ForegroundOrchestration { .. } => None,
             })
             .collect()
     }

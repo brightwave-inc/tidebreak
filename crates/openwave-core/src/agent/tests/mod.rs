@@ -3104,6 +3104,14 @@ async fn registry_fails_closed_for_every_consumer_when_a_tool_schema_is_unusable
         .schema_mismatch("unsupported_schema", &serde_json::json!({}))
         .is_some_and(|mismatch| mismatch.contains("unsupported")));
     assert!(!registry.client_arguments_are_valid("unsupported_schema", &serde_json::json!({})));
+    let advertised = registry.specs_for_surface(true, false);
+    assert!(!advertised.iter().any(|spec| spec.name == "invalid_schema"));
+    assert!(!advertised
+        .iter()
+        .any(|spec| spec.name == "unsupported_schema"));
+    assert!(!advertised
+        .iter()
+        .any(|spec| spec.name == "invalid_server_schema"));
 
     let context = ToolCtx::new_legacy_workspace(
         ChatId::new(),
