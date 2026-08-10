@@ -23,9 +23,12 @@
 //! fresh chat, and `--chat` resumes one by id.
 //!
 //! `openwave -p "<prompt>"` runs one turn without a terminal: same engine, no
-//! interaction. stdout carries the assistant's text (or, with
+//! terminal. stdout carries the assistant's text (or, with
 //! `--output-format json`, the turn's event stream as NDJSON), and the exit
-//! status says whether the turn completed.
+//! status says whether the turn completed. `--permission-mode` sets the chat's
+//! permission mode for the run, and under `--output-format json` a driving
+//! process answers approvals, plans, and questions over stdin — see
+//! [`print::protocol`].
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -42,7 +45,8 @@ use print::OutputFormat;
 
 const USAGE: &str = "usage: openwave serve\n       openwave mcp <workspace>\n       openwave \
                      rehome-secrets\n       openwave tui [--chat <id> | --new]\n       openwave -p \
-                     <prompt> [--chat <id>] [--output-format text|json]";
+                     <prompt> [--chat <id>] [--output-format text|json]\n                  \
+                     [--permission-mode ask|auto|allow|plan]";
 
 #[tokio::main]
 async fn main() {
@@ -121,6 +125,7 @@ async fn run() -> Result<i32> {
             };
             let mut chat = None;
             let mut format = OutputFormat::Text;
+            let mut permission_mode = None;
             while let Some(flag) = args.next() {
                 if flag == OsStr::new("--chat") {
                     let Some(id) = args.next() else {
@@ -138,11 +143,23 @@ async fn run() -> Result<i32> {
                         Some(value) => format = value,
                         None => usage_error("--output-format expects text or json"),
                     }
+                } else if flag == OsStr::new("--permission-mode") {
+                    let Some(value) = args.next() else {
+                        usage_error("--permission-mode requires ask, auto, allow, or plan");
+                    };
+                    // The wire tokens are the chat's own permission-mode
+                    // vocabulary; the CLI adds nothing to it.
+                    match value.to_string_lossy().as_ref() {
+                        mode @ ("ask" | "auto" | "allow" | "plan") => {
+                            permission_mode = Some(mode.to_owned());
+                        }
+                        _ => usage_error("--permission-mode expects ask, auto, allow, or plan"),
+                    }
                 } else {
                     usage_error(&format!("unknown print-mode argument {flag:?}"));
                 }
             }
-            print::run(prompt, chat, format).await
+            print::run(prompt, chat, format, permission_mode).await
         }
         Some(other) => {
             usage_error(&format!("unknown command {other:?}"));

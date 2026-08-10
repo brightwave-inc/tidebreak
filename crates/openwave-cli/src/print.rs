@@ -1,4 +1,4 @@
-//! `openwave -p "<prompt>"` — one non-interactive turn.
+//! `openwave -p "<prompt>"` — one unattended turn.
 //!
 //! Boots the same in-process server `openwave serve` runs and drives one turn
 //! over the loopback API, then exits with a status that says how the turn ended.
@@ -6,13 +6,17 @@
 //! `--output-format json`) and nothing else: logging is file-only and every
 //! notice goes to stderr, so `openwave -p … > answer.txt` is exactly the answer.
 //!
-//! Nothing here can wait for a human. A parked approval is rejected as soon as
-//! it arrives, which lets the model adapt and finish rather than hang; a turn
-//! that asks the user a question or proposes a plan has no answer available at
-//! all, so it is cancelled and reported.
+//! The turn can still reach a point only someone else can settle — an approval,
+//! a proposed plan, a question. Two things answer those. A **driver** — another
+//! process holding this one's stdin, opted in with `--output-format json` — is
+//! asked over the NDJSON protocol in [`protocol`]. With no driver attached, the
+//! standing policy answers instead: approvals are rejected, so the model can
+//! choose another route rather than hang, and a plan or a question ends the run
+//! with a distinct exit status and a machine-readable reason. Nothing is ever
+//! cancelled silently.
 
 use std::collections::HashMap;
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 
 use futures::StreamExt as _;
 use openwave_core::{AgentError, CallId, ChatId, Result, TurnId};
@@ -21,15 +25,23 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::api::client::{Client, EventSocket};
 use crate::api::wire::{ChatFrame, ClientEvent, ToolCallStatus};
 
+mod driver;
+pub mod protocol;
+
+use driver::Driver;
+use protocol::{Decision, Halt, HaltReason, Interaction, Undriven};
+
 /// Exit status for a turn that ended without completing.
 const EXIT_TURN_UNSUCCESSFUL: i32 = 1;
+/// Exit status for a turn that parked on something no driver was there to
+/// answer. Distinct from a failed turn: nothing went wrong, nobody answered.
+const EXIT_INTERACTION_UNDRIVEN: i32 = 3;
+/// Exit status for a decision that was made but could not be applied — the
+/// driver answered and the server refused or was unreachable.
+const EXIT_DECISION_FAILED: i32 = 4;
 /// Exit status for interruption by SIGINT, following the shell's 128+signal
 /// convention.
 const EXIT_INTERRUPTED: i32 = 130;
-
-/// The reason recorded against every approval this mode rejects. It reaches the
-/// model, which is what lets it choose another route rather than retry.
-const REJECTION_REASON: &str = "non-interactive print mode";
 
 /// Attempts to re-open the event socket after it closes mid-turn before giving
 /// up. The server is in-process, so a close means something is badly wrong; the
@@ -58,7 +70,12 @@ impl OutputFormat {
 }
 
 /// Boot the engine, run one turn, and return the process exit status.
-pub async fn run(prompt: String, chat: Option<ChatId>, format: OutputFormat) -> Result<i32> {
+pub async fn run(
+    prompt: String,
+    chat: Option<ChatId>,
+    format: OutputFormat,
+    permission_mode: Option<String>,
+) -> Result<i32> {
     let config = crate::profile_config()?;
     // stdout belongs to the output, so logs go to the profile's log file only.
     openwave_server::logging::init_logging_file_only(&config.data_dir);
@@ -77,8 +94,19 @@ pub async fn run(prompt: String, chat: Option<ChatId>, format: OutputFormat) -> 
         }
         None => client.create_chat().await?,
     };
+    if let Some(mode) = permission_mode.as_deref() {
+        // Fail before the turn starts: a run that asked for `allow` and got
+        // `ask` would quietly do something else.
+        client.set_chat_permission_mode(chat, Some(mode)).await?;
+    }
 
-    let result = one_turn(&client, chat, &prompt, format).await;
+    // Driving needs somewhere to put the events and something on the other end
+    // of stdin. A terminal on stdin means a person ran this by hand, and no
+    // decision lines are coming.
+    let driving = format == OutputFormat::Json && !std::io::stdin().is_terminal();
+    let mut driver = Driver::from_stdin(driving);
+
+    let result = one_turn(&client, chat, &prompt, format, &mut driver).await;
     serve.abort();
     result
 }
@@ -89,6 +117,7 @@ async fn one_turn(
     chat: ChatId,
     prompt: &str,
     format: OutputFormat,
+    driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
 ) -> Result<i32> {
     let turn_id = TurnId::new();
     // Subscribe before posting: the turn can start before this returns, and the
@@ -142,30 +171,43 @@ async fn one_turn(
                 printer.tool_completed(call_id, status);
             }
             ClientEvent::ApprovalRequired {
-                call_id, action, ..
+                call_id,
+                action,
+                approval,
+                grant_rungs,
+                preview,
+                ..
             } => {
-                printer.notice(&format!(
-                    "approval for {action} rejected: {REJECTION_REASON}"
-                ));
-                if let Err(error) = client
-                    .decide_approval(chat, call_id, false, REJECTION_REASON, None)
-                    .await
-                {
-                    // A decision that races the approval judge or a cancelled
-                    // call is not this process's failure; the turn continues.
-                    printer.notice(&format!("could not reject the approval: {error}"));
+                let interaction = Interaction::Approval {
+                    call_id,
+                    action,
+                    approval,
+                    grant_rungs,
+                    preview,
+                };
+                if let Some(halt) = settle(client, chat, &interaction, driver, &mut printer).await {
+                    break halted(client, chat, turn_id, &halt, &mut printer).await;
                 }
             }
-            // Neither can be answered without a human. Cancelling is what stops
-            // the parked turn from outliving this process.
-            ClientEvent::UserQuestionsAsked { .. } | ClientEvent::PlanProposed { .. } => {
-                printer.finish();
-                eprintln!(
-                    "openwave: the turn needs an interactive answer, which print mode cannot \
-                     give; cancelling"
-                );
-                let _ = client.cancel_turn(chat, turn_id).await;
-                break EXIT_TURN_UNSUCCESSFUL;
+            // Neither can be answered from the standing policy, so both reach
+            // for the driver first and end the run loudly if there is none.
+            ClientEvent::PlanProposed { call_id } => {
+                if let Some(interaction) = pending_plan(client, chat, call_id).await {
+                    if let Some(halt) =
+                        settle(client, chat, &interaction, driver, &mut printer).await
+                    {
+                        break halted(client, chat, turn_id, &halt, &mut printer).await;
+                    }
+                }
+            }
+            ClientEvent::UserQuestionsAsked { call_id } => {
+                if let Some(interaction) = pending_questions(client, chat, call_id).await {
+                    if let Some(halt) =
+                        settle(client, chat, &interaction, driver, &mut printer).await
+                    {
+                        break halted(client, chat, turn_id, &halt, &mut printer).await;
+                    }
+                }
             }
             ClientEvent::TurnCompleted { .. } => break 0,
             ClientEvent::TurnFailed { category, .. } => {
@@ -190,6 +232,141 @@ async fn one_turn(
 
     printer.finish();
     Ok(outcome)
+}
+
+/// Settle one parked interaction: ask the driver, fall back to the standing
+/// policy, and carry the decision out. `Some(halt)` ends the run.
+async fn settle(
+    client: &Client,
+    chat: ChatId,
+    interaction: &Interaction,
+    driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
+    printer: &mut Printer,
+) -> Option<Halt> {
+    let mut control = |event| printer.control(event);
+    let decision = match driver.decide(interaction, &mut control).await {
+        Some(decision) => decision,
+        None => match interaction.undriven() {
+            Undriven::Decide(decision) => {
+                printer.notice(&format!(
+                    "no driver attached; {} answered by standing policy",
+                    interaction.kind()
+                ));
+                decision
+            }
+            Undriven::Halt(halt) => return Some(halt),
+        },
+    };
+    apply(client, chat, interaction, decision, printer).await
+}
+
+/// Send one decision to the route that owns it.
+///
+/// A rejected approval that races the judge or a cancelled call is not this
+/// process's failure — the turn carries on. A plan or answer that cannot be
+/// delivered is different: the turn stays parked forever, so the run ends
+/// rather than hanging.
+async fn apply(
+    client: &Client,
+    chat: ChatId,
+    interaction: &Interaction,
+    decision: Decision,
+    printer: &mut Printer,
+) -> Option<Halt> {
+    let call_id = interaction.call_id();
+    let outcome = match &decision {
+        Decision::Approval {
+            approve,
+            reason,
+            grant,
+        } => {
+            client
+                .decide_approval(chat, call_id, *approve, reason, *grant)
+                .await
+        }
+        Decision::Plan {
+            accept,
+            feedback,
+            permission_mode,
+        } => {
+            client
+                .decide_plan(
+                    chat,
+                    call_id,
+                    *accept,
+                    feedback.as_deref(),
+                    permission_mode.as_deref(),
+                )
+                .await
+        }
+        Decision::Questions { body } => client.answer_questions(chat, call_id, body.clone()).await,
+    };
+    match outcome {
+        Ok(()) => None,
+        Err(error) => {
+            let message = format!(
+                "the {} decision for call {call_id} could not be applied: {error}",
+                interaction.kind()
+            );
+            if matches!(decision, Decision::Approval { .. }) {
+                printer.notice(&message);
+                return None;
+            }
+            Some(Halt {
+                reason: HaltReason::DecisionFailed,
+                call_id: Some(call_id),
+                message,
+            })
+        }
+    }
+}
+
+/// Report a halt in both directions and cancel the parked turn, returning the
+/// exit status it produces.
+async fn halted(
+    client: &Client,
+    chat: ChatId,
+    turn_id: TurnId,
+    halt: &Halt,
+    printer: &mut Printer,
+) -> i32 {
+    printer.finish();
+    printer.notice(&format!(
+        "halted ({}): {}",
+        halt.reason.as_str(),
+        halt.message
+    ));
+    printer.halt(halt.event());
+    // The parked turn must not outlive this process.
+    let _ = client.cancel_turn(chat, turn_id).await;
+    halt.reason.exit_code()
+}
+
+/// The proposed plan behind a `PlanProposed` event. `None` when it is already
+/// settled — a decision raced the event, and there is nothing left to answer.
+async fn pending_plan(
+    client: &Client,
+    chat: ChatId,
+    call_id: Option<CallId>,
+) -> Option<Interaction> {
+    let pending = client.list_pending_plans(chat).await.ok()?;
+    pending
+        .into_iter()
+        .find(|plan| call_id.is_none_or(|id| plan.call_id == id))
+        .map(Interaction::from_plan)
+}
+
+/// The question block behind a `UserQuestionsAsked` event, on the same terms.
+async fn pending_questions(
+    client: &Client,
+    chat: ChatId,
+    call_id: Option<CallId>,
+) -> Option<Interaction> {
+    let pending = client.list_pending_questions(chat).await.ok()?;
+    pending
+        .into_iter()
+        .find(|block| call_id.is_none_or(|id| block.call_id == id))
+        .map(Interaction::from_questions)
 }
 
 /// The event socket plus the cursor a reconnect resumes from.
@@ -313,6 +490,29 @@ impl Printer {
     /// exactly the output the caller asked for.
     fn notice(&self, message: &str) {
         eprintln!("openwave: {message}");
+    }
+
+    /// A protocol event for the driver. Only the NDJSON stream carries these;
+    /// text output has no driver to talk to.
+    fn control(&mut self, event: serde_json::Value) {
+        if self.format != OutputFormat::Json {
+            return;
+        }
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{event}");
+        let _ = stdout.flush();
+    }
+
+    /// The terminating reason. Unlike other control events this one is emitted
+    /// in both formats — a text-mode caller still has to be able to tell a halt
+    /// apart from a failed turn without parsing prose, so the same object goes
+    /// to stderr there.
+    fn halt(&mut self, event: serde_json::Value) {
+        if self.format == OutputFormat::Json {
+            self.control(event);
+        } else {
+            eprintln!("{event}");
+        }
     }
 
     /// Close out stdout before anything is written to stderr or the process

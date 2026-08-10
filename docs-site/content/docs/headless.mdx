@@ -23,6 +23,7 @@ openwave mcp <workspace>
 openwave rehome-secrets
 openwave tui [--chat <id> | --new]
 openwave -p <prompt> [--chat <id>] [--output-format text|json]
+           [--permission-mode ask|auto|allow|plan]
 ```
 
 A bare `openwave` with no arguments runs `serve`.
@@ -69,16 +70,121 @@ picks the model for the current chat.
 
 ### `-p` (one-shot)
 
-Runs a single turn with no interaction. stdout carries the assistant's text,
-and the exit status says whether the turn completed.
+Runs a single turn without a terminal. stdout carries the assistant's text, and
+the exit status says how the turn ended.
 
 ```sh
 cargo run -p openwave-cli -- -p "summarize the CSV in output/"
 cargo run -p openwave-cli -- -p "…" --output-format json
+cargo run -p openwave-cli -- -p "…" --permission-mode allow
 ```
 
-`--output-format json` emits the turn's event stream as NDJSON instead of
-plain text. `--chat <id>` continues an existing conversation.
+`--output-format json` emits the turn's event stream as NDJSON instead of plain
+text. `--chat <id>` continues an existing conversation.
+
+`--permission-mode` sets the chat's permission mode for the run — the same four
+modes the desktop offers, applied before the turn starts:
+
+| Mode | Effect |
+| --- | --- |
+| `ask` | Default. Uncovered mutating calls park on an approval. |
+| `auto` | Workspace writes proceed; sensitive calls still ask. |
+| `allow` | Nothing asks. Explicit full autonomy for this chat. |
+| `plan` | Read-only exploration; the agent proposes a plan instead of acting. |
+
+The mode is stored on the chat, so `--chat <id>` on a later run inherits
+whatever the last run set unless it passes `--permission-mode` again.
+
+#### Driving a turn
+
+A turn can reach a point only someone else can settle: an approval, a proposed
+plan, a question. Attach a **driver** — a process holding this one's stdin —
+and it answers them over a line protocol. Driving is on when
+`--output-format json` is set and stdin is not a terminal; a terminal on stdin
+means a person ran the command by hand, and no decision lines are coming.
+
+Requests are emitted on stdout, mixed into the NDJSON event stream. Every line
+the CLI authors carries an `openwave` version tag, which is what tells it apart
+from a journal frame (those carry `seq` and `event`):
+
+```json
+{"openwave":"v1","type":"approval_request","call_id":"…","action":"exec","approval":"exec_may_run_networked_command","grant_rungs":["exact_action",{"command_prefix":{"tokens":1}}],"preview":{…}}
+{"openwave":"v1","type":"plan_proposal","call_id":"…","title":"Rewrite the importer","plan":"1. …"}
+{"openwave":"v1","type":"questions_asked","call_id":"…","questions":[{"id":"target","question":"Which environment?","header":"","question_type":"single","allow_free_form":true,"options":[{"id":"staging","label":"Staging"}]}]}
+{"openwave":"v1","type":"error","message":"a plan decision does not answer the pending approval request"}
+{"openwave":"v1","type":"halted","reason":"plan_undriven","exit_code":3,"call_id":"…","message":"…"}
+```
+
+The driver answers by writing one JSON object per line to stdin:
+
+```json
+{"type":"approval","call_id":"…","decision":"approve","grant":"exact_action"}
+{"type":"approval","call_id":"…","decision":"reject","reason":"not in this run"}
+{"type":"plan","call_id":"…","decision":"accept","permission_mode":"auto"}
+{"type":"plan","call_id":"…","decision":"reject","feedback":"split it in two"}
+{"type":"questions","call_id":"…","answers":[{"question_id":"target","selected_option_ids":["staging"],"custom_answer":"canary first"}]}
+```
+
+`call_id` may be omitted — only one interaction is ever outstanding — but
+naming a *different* call is an error, not a redirect. `reason` (approval
+rejections), `feedback` and `permission_mode` (plan), `grant` (approval), and
+`custom_answer` are optional. Unknown fields are ignored so a newer driver can
+send more; an unknown `type` or verdict is refused with an `error` event and
+the next line is read, so one malformed line never decides anything by itself.
+
+#### Undriven defaults
+
+With no driver — text output, a terminal on stdin, or an input stream that ends
+without answering — the standing policy applies:
+
+- **Approvals are rejected**, with the reason `non-interactive print mode`.
+  The model sees the rejection and can choose another route rather than hang.
+- **Plans and questions end the run.** There is no answer to invent, so the
+  turn is cancelled *and reported*: a `halted` object naming the reason, and a
+  distinct exit status.
+
+The `halted` object goes to stdout under `--output-format json` and to stderr
+under text output, so an undriven run is always machine-diagnosable.
+
+#### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The turn completed. |
+| `1` | The turn failed, was refused, or was cancelled. |
+| `2` | Usage error — a bad flag or argument. |
+| `3` | The turn parked on a plan or question and no driver answered. `reason` is `plan_undriven` or `questions_undriven`. |
+| `4` | A decision was made but could not be applied. `reason` is `decision_failed`. |
+| `130` | Interrupted (SIGINT). |
+
+#### A dev harness
+
+To drive OpenWave from a script or a coding agent, give it its own data
+directory so it cannot touch the desktop's chats, and let it act without
+parking:
+
+```sh
+export OPENWAVE_DATA_DIR="$(mktemp -d)/openwave"
+export OPENWAVE_KEYCHAIN_MOCK=1   # debug builds only — see below
+export ANTHROPIC_API_KEY=sk-...
+
+cargo run -p openwave-cli -- -p "run the tests and summarize what failed" \
+  --permission-mode allow --output-format json < /dev/null
+```
+
+`OPENWAVE_KEYCHAIN_MOCK=1` keeps credentials in memory instead of the OS
+keychain, which is what stops a headless run prompting for keychain access. It
+is honored by debug builds only; a release binary always uses the real
+keychain. Redirecting stdin from `/dev/null` states plainly that nothing is
+driving, so the run takes the undriven defaults instead of waiting.
+
+To drive it instead, hold both pipes — read stdout line by line, and write a
+decision line when a request arrives:
+
+```sh
+cargo run -p openwave-cli -- -p "plan the migration" \
+  --permission-mode plan --output-format json < decisions.pipe
+```
 
 ### `mcp`
 
@@ -112,6 +218,7 @@ cargo run -p openwave-cli -- rehome-secrets
 | `OPENWAVE_DATABASE_URL` | Required for `self_host`. |
 | `OPENWAVE_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
 | `OPENWAVE_MCP_CONFIG` | JSON file of external MCP server definitions to load at boot. |
+| `OPENWAVE_KEYCHAIN_MOCK` | **Debug builds only.** Any non-empty value routes credentials to an in-memory store instead of the OS keychain, so a headless run never triggers a keychain prompt. Secrets do not survive the process. Release binaries ignore it. |
 | `OPENWAVE_MODEL` | Overrides the model the process launches with. |
 | `OPENWAVE_CONTAINER_EXECUTION_ENABLED` | Enables the container execution backend. Default `false`. |
 | `OPENWAVE_CONTAINER_IMAGE` | Overrides the container image. |
