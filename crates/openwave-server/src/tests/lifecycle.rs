@@ -3021,7 +3021,11 @@ async fn self_host_tokens_resolve_named_principals() {
     let (dir, store) = temp_db_store("self-host-auth.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
     let tokens_file = dir.path().join("tokens");
-    std::fs::write(&tokens_file, "# staff\nalice aaaaaaaaaaaaaaaa\n").unwrap();
+    std::fs::write(
+        &tokens_file,
+        format!("# staff\nalice {ALICE_TOKEN} admin\n"),
+    )
+    .unwrap();
     let mut config = Config::desktop(dir.path());
     config.profile = openwave_core::Profile::SelfHost;
     config.auth_tokens_file = Some(tokens_file);
@@ -3040,7 +3044,7 @@ async fn self_host_tokens_resolve_named_principals() {
 
     let whoami = |auth: AuthContext| async move {
         match auth.principal {
-            Principal::User(user) => user.to_string(),
+            Principal::User { id, .. } => id.to_string(),
             other => format!("unexpected principal {other:?}"),
         }
     };
@@ -3058,20 +3062,12 @@ async fn self_host_tokens_resolve_named_principals() {
             .unwrap()
     };
 
-    let response = probe
-        .clone()
-        .oneshot(request("aaaaaaaaaaaaaaaa"))
-        .await
-        .unwrap();
+    let response = probe.clone().oneshot(request(ALICE_TOKEN)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), 1024).await.unwrap();
     assert_eq!(&body[..], b"alice", "the named token identifies its user");
 
-    let response = probe
-        .clone()
-        .oneshot(request("bbbbbbbbbbbbbbbb"))
-        .await
-        .unwrap();
+    let response = probe.clone().oneshot(request(BOB_TOKEN)).await.unwrap();
     assert_eq!(
         response.status(),
         StatusCode::UNAUTHORIZED,
@@ -3103,7 +3099,7 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
     let tokens_file = dir.path().join("tokens");
     std::fs::write(
         &tokens_file,
-        "alice aaaaaaaaaaaaaaaa\nbob bbbbbbbbbbbbbbbb\n",
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
     )
     .unwrap();
     let mut config = Config::desktop(dir.path());
@@ -3121,13 +3117,14 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
         },
     );
     let router = app(state);
-    let alice = "Bearer aaaaaaaaaaaaaaaa";
-    let bob = "Bearer bbbbbbbbbbbbbbbb";
+    let alice = format!("Bearer {ALICE_TOKEN}");
+    let bob = format!("Bearer {BOB_TOKEN}");
 
-    let chat = make_chat(&router, alice).await;
+    let chat = make_chat(&router, &alice).await;
 
     // Alice sees her chat; Bob's view holds no trace of it.
-    let get = |bearer: &'static str, uri: String| {
+    let get = |bearer: &str, uri: String| {
+        let bearer = bearer.to_owned();
         let router = router.clone();
         async move {
             router
@@ -3143,22 +3140,22 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
         }
     };
     assert_eq!(
-        get(alice, format!("/chats/{}", chat.id)).await.status(),
+        get(&alice, format!("/chats/{}", chat.id)).await.status(),
         StatusCode::OK
     );
     assert_eq!(
-        get(bob, format!("/chats/{}", chat.id)).await.status(),
+        get(&bob, format!("/chats/{}", chat.id)).await.status(),
         StatusCode::NOT_FOUND,
         "another owner's chat must be indistinguishable from a missing one"
     );
     assert_eq!(
-        get(bob, format!("/chats/{}/messages", chat.id))
+        get(&bob, format!("/chats/{}/messages", chat.id))
             .await
             .status(),
         StatusCode::NOT_FOUND,
         "the transcript behind the chat is equally invisible"
     );
-    let listed: Vec<Chat> = json_body(get(bob, "/chats".to_owned()).await).await;
+    let listed: Vec<Chat> = json_body(get(&bob, "/chats".to_owned()).await).await;
     assert!(
         listed.is_empty(),
         "a listing never carries another owner's rows"
@@ -3168,13 +3165,13 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
     // approval or question set is only reachable through the chat that owns it.
     for path in ["plans/pending", "questions/pending", "task-plan"] {
         assert_eq!(
-            get(alice, format!("/chats/{}/{path}", chat.id))
+            get(&alice, format!("/chats/{}/{path}", chat.id))
                 .await
                 .status(),
             StatusCode::OK
         );
         assert_eq!(
-            get(bob, format!("/chats/{}/{path}", chat.id))
+            get(&bob, format!("/chats/{}/{path}", chat.id))
                 .await
                 .status(),
             StatusCode::NOT_FOUND,
@@ -3187,7 +3184,7 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
     // hers alone, and Bob's inbox does not even learn her chat exists.
     park_user_questions_for_route_test(&*prompts_store, chat.id).await;
     let alice_prompts: Vec<serde_json::Value> =
-        json_body(get(alice, "/chats/pending-prompts".to_owned()).await).await;
+        json_body(get(&alice, "/chats/pending-prompts".to_owned()).await).await;
     assert_eq!(
         alice_prompts
             .iter()
@@ -3197,7 +3194,7 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
         "the owner still sees her own parked prompt"
     );
     let bob_prompts: Vec<serde_json::Value> =
-        json_body(get(bob, "/chats/pending-prompts".to_owned()).await).await;
+        json_body(get(&bob, "/chats/pending-prompts".to_owned()).await).await;
     assert!(
         bob_prompts.is_empty(),
         "the prompt inbox never carries another owner's parked prompts"
@@ -3210,7 +3207,7 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
             Request::builder()
                 .method("PATCH")
                 .uri(format!("/chats/{}", chat.id))
-                .header(header::AUTHORIZATION, bob)
+                .header(header::AUTHORIZATION, &bob)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({"title": "taken over"}).to_string(),
@@ -3226,7 +3223,7 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
             Request::builder()
                 .method("DELETE")
                 .uri(format!("/chats/{}", chat.id))
-                .header(header::AUTHORIZATION, bob)
+                .header(header::AUTHORIZATION, &bob)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3235,7 +3232,7 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
     assert_eq!(delete.status(), StatusCode::NOT_FOUND);
 
     // The chat survives the failed takeover, untouched.
-    let survived = get(alice, format!("/chats/{}", chat.id)).await;
+    let survived = get(&alice, format!("/chats/{}", chat.id)).await;
     assert_eq!(survived.status(), StatusCode::OK);
     let survived: Chat = json_body(survived).await;
     assert_eq!(survived.title, None, "a cross-owner patch changed nothing");

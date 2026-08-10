@@ -16,19 +16,27 @@
 //! # Self-host token file
 //!
 //! `OPENWAVE_AUTH_TOKENS_FILE` points at a plain-text file, one mapping per
-//! line — `<user-id> <token>`, whitespace-separated. Blank lines and lines
-//! starting with `#` are ignored. A user may hold several tokens (rotation);
-//! a token may name only one user, and duplicates fail the load. Tokens are
-//! opaque secrets matched exactly (no hashing scheme to misconfigure): at
-//! least 16 characters from `[A-Za-z0-9._~-]`, so they stay valid in both the
-//! `Authorization` header and the WebSocket subprotocol below. Generate them
-//! with e.g. `openssl rand -hex 32`. Gateway-derived identity (#578) later
-//! replaces this file behind the same credential-to-principal seam.
+//! line — `<user-id> <token> [admin]`, whitespace-separated. Blank lines and
+//! lines starting with `#` are ignored. A user may hold several tokens
+//! (rotation); a token may name only one user, and duplicates fail the load.
+//! Tokens are opaque secrets matched exactly (no hashing scheme to
+//! misconfigure): at least 32 characters from `[A-Za-z0-9._~-]`, so they stay
+//! valid in both the `Authorization` header and the WebSocket subprotocol
+//! below. Generate them with e.g. `openssl rand -hex 32`. Gateway-derived
+//! identity (#578) later replaces this file behind the same
+//! credential-to-principal seam.
+//!
+//! The optional third field is the user's [`Role`]: `admin` puts them on the
+//! deployment plane (configuration and shared secrets), and its absence makes
+//! them a member. A user's lines must agree about the role, and a file naming
+//! no admin at all fails to load — a deployment nobody can configure must not
+//! start, for the same reason an empty file must not. See
+//! `docs/decisions/0004-self-host-deployment-plane-authorization.md`.
 //!
 //! ```text
-//! # user-id  token
-//! alice  4f9c0e9b2d5a4c1e8f7b6a5d4c3b2a1f
-//! bob    0123456789abcdef0123456789abcdef
+//! # user-id  token                                              role
+//! alice  4f9c0e9b2d5a4c1e8f7b6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a99  admin
+//! bob    0123456789abcdef0123456789abcdef0123456789abcdef01234567
 //! ```
 //!
 //! Browsers can't set an `Authorization` header on a WebSocket upgrade, so on
@@ -36,7 +44,15 @@
 //! `openwave-token.<token>` (alongside the handshake subprotocol `openwave-v1`).
 //! Non-browser clients keep using `Authorization: Bearer`. Subprotocol auth is
 //! ignored on ordinary HTTP requests.
+//!
+//! Operators should know that this second channel is noisier than the first:
+//! `Sec-WebSocket-Protocol` is an ordinary request header that intermediary
+//! proxies and load balancers log far more readily than `Authorization`, which
+//! their default redaction lists usually cover. A self-host deployment behind
+//! someone else's fronting infrastructure should assume the WebSocket token
+//! can end up in that infrastructure's access logs, and rotate accordingly.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use axum::extract::{Request, State};
@@ -48,7 +64,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use openwave_core::{AgentError, Profile, Result};
 
-use crate::principal::{AuthContext, Principal, UserId};
+use crate::principal::{AuthContext, Principal, Role, UserId};
 use crate::state::AppState;
 
 /// Handshake subprotocol the server selects when the client offered it.
@@ -108,7 +124,7 @@ fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
         Profile::SelfHost => state
             .principal_tokens
             .resolve(presented)
-            .map(Principal::User),
+            .map(|(id, role)| Principal::User { id, role }),
         _ => None,
     }
 }
@@ -121,13 +137,19 @@ fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
 /// stays "which [`UserId`] is asking".
 #[derive(Debug, Default)]
 pub struct TokenMap {
-    /// `(token, user)` pairs; tokens are unique, users may repeat.
-    entries: Vec<(Box<str>, UserId)>,
+    /// `(token, user, role)` triples; tokens are unique, users may repeat —
+    /// and every line a user holds agrees about their role.
+    entries: Vec<(Box<str>, UserId, Role)>,
 }
 
 /// Tokens shorter than this are refused at load: a guessable credential names
-/// someone without authenticating them.
-const MIN_TOKEN_LEN: usize = 16;
+/// someone without authenticating them. Tokens are operator-generated, so the
+/// floor costs nothing but a longer `openssl rand -hex 32`.
+const MIN_TOKEN_LEN: usize = 32;
+
+/// The third field that marks a line's user as an administrator of the
+/// deployment. Any other value is a parse error rather than a silent member.
+const ADMIN_FIELD: &str = "admin";
 
 impl TokenMap {
     /// Load and validate the token file at `path`.
@@ -142,11 +164,13 @@ impl TokenMap {
     }
 
     /// Parse the token-file format. Rejects malformed lines, invalid ids,
-    /// weak or header-unsafe tokens, duplicate tokens, and a file that names
-    /// nobody — an empty authenticator must fail loudly at boot, not admit
-    /// nobody silently.
+    /// weak or header-unsafe tokens, duplicate tokens, a user whose lines
+    /// disagree about their role, a file that names nobody, and a file that
+    /// names no administrator — an authenticator that admits nobody, and a
+    /// deployment nobody can configure, must both fail loudly at boot.
     pub fn parse(text: &str) -> Result<Self> {
-        let mut entries: Vec<(Box<str>, UserId)> = Vec::new();
+        let mut entries: Vec<(Box<str>, UserId, Role)> = Vec::new();
+        let mut roles: HashMap<UserId, Role> = HashMap::new();
         for (index, raw) in text.lines().enumerate() {
             let line_no = index + 1;
             let line = raw.trim();
@@ -154,11 +178,22 @@ impl TokenMap {
                 continue;
             }
             let mut fields = line.split_whitespace();
-            let (Some(user), Some(token), None) = (fields.next(), fields.next(), fields.next())
+            let (Some(user), Some(token), marker, None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 return Err(AgentError::config(format!(
-                    "auth tokens file line {line_no}: expected `<user-id> <token>`"
+                    "auth tokens file line {line_no}: expected `<user-id> <token> [admin]`"
                 )));
+            };
+            let role = match marker {
+                None => Role::Member,
+                Some(ADMIN_FIELD) => Role::Admin,
+                Some(other) => {
+                    return Err(AgentError::config(format!(
+                        "auth tokens file line {line_no}: unknown role field {other:?}: the \
+                         optional third field is `admin` or nothing"
+                    )))
+                }
             };
             let user = UserId::new(user)
                 .map_err(|e| AgentError::config(format!("auth tokens file line {line_no}: {e}")))?;
@@ -175,13 +210,28 @@ impl TokenMap {
             }
             if entries
                 .iter()
-                .any(|(existing, _)| existing.as_ref() == token)
+                .any(|(existing, _, _)| existing.as_ref() == token)
             {
                 return Err(AgentError::config(format!(
                     "auth tokens file line {line_no}: duplicate token"
                 )));
             }
-            entries.push((token.into(), user));
+            // One user, one role. Rotation means several lines per user, and
+            // a rotation that silently changed someone's authority — in
+            // whichever direction the last line happened to win — is exactly
+            // the failure this file must not have.
+            match roles.get(&user) {
+                Some(known) if *known != role => {
+                    return Err(AgentError::config(format!(
+                        "auth tokens file line {line_no}: user {user} is listed with conflicting \
+                         roles; every line for a user must agree"
+                    )))
+                }
+                _ => {
+                    roles.insert(user.clone(), role);
+                }
+            }
+            entries.push((token.into(), user, role));
         }
         if entries.is_empty() {
             return Err(AgentError::config(
@@ -189,19 +239,50 @@ impl TokenMap {
                  authenticate to must not start",
             ));
         }
+        if !entries.iter().any(|(_, _, role)| *role == Role::Admin) {
+            return Err(AgentError::config(
+                "auth tokens file names no administrator; a self-host server nobody can \
+                 configure must not start — mark at least one user's lines `admin` \
+                 (`<user-id> <token> admin`)",
+            ));
+        }
         Ok(Self { entries })
     }
 
-    /// The user the presented credential names, if any. Exact match; every
-    /// entry is compared in constant time regardless of where a match lands.
-    pub fn resolve(&self, presented: &str) -> Option<UserId> {
+    /// The user the presented credential names and the role they hold, if
+    /// any. Exact match; every entry is compared in constant time regardless
+    /// of where a match lands.
+    pub fn resolve(&self, presented: &str) -> Option<(UserId, Role)> {
         let mut resolved = None;
-        for (token, user) in &self.entries {
+        for (token, user, role) in &self.entries {
             if constant_time_eq(token.as_bytes(), presented.as_bytes()) && resolved.is_none() {
-                resolved = Some(user.clone());
+                resolved = Some((user.clone(), *role));
             }
         }
         resolved
+    }
+}
+
+/// Require the deployment plane's role over the identity already resolved.
+///
+/// Like [`require_client_executor_token`], this reads the [`AuthContext`] the
+/// bearer middleware attached and never mints one: no context means the
+/// request reached an admin route without ever being authenticated, which is a
+/// `401`, not a defaulted identity. A member's request is a `403` — the route
+/// exists, they may not use it.
+///
+/// This is a router property, not a handler habit: everything assembled into
+/// the deployment-plane sub-router is gated by construction, so a new config
+/// route is admin-gated by where it is registered rather than by whether its
+/// author remembered a check.
+pub async fn require_admin(request: Request, next: Next) -> Response {
+    let Some(auth) = request.extensions().get::<AuthContext>() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if auth.principal.is_admin() {
+        next.run(request).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
     }
 }
 
@@ -477,26 +558,38 @@ mod tests {
         assert!(host_is_loopback(&HeaderMap::new()));
     }
 
+    /// Tokens are 32 characters at minimum, so the fixtures are too; the
+    /// literals are named rather than inline so the secret scanner has
+    /// nothing high-entropy to trip over.
+    const ALICE_FIRST: &str = "alice-token-one-padded-to-thirty-two";
+    const ALICE_SECOND: &str = "alice-token-two-padded-to-thirty-two";
+    const BOB_TOKEN: &str = "bob-token-padded-out-to-thirty-two-x";
+
     #[test]
     fn token_map_parses_the_documented_format_and_resolves_exactly() {
-        let map = TokenMap::parse(
-            "# staff\n\nalice aaaaaaaaaaaaaaaa\nbob\tbbbbbbbbbbbbbbbb\nalice cccccccccccccccc\n",
-        )
+        let map = TokenMap::parse(&format!(
+            "# staff\n\nalice {ALICE_FIRST} admin\nbob\t{BOB_TOKEN}\nalice {ALICE_SECOND} admin\n"
+        ))
         .unwrap();
         let alice = UserId::new("alice").unwrap();
-        assert_eq!(map.resolve("aaaaaaaaaaaaaaaa"), Some(alice.clone()));
         assert_eq!(
-            map.resolve("cccccccccccccccc"),
-            Some(alice),
+            map.resolve(ALICE_FIRST),
+            Some((alice.clone(), Role::Admin)),
+            "the third field puts the user on the deployment plane"
+        );
+        assert_eq!(
+            map.resolve(ALICE_SECOND),
+            Some((alice, Role::Admin)),
             "a user may hold several tokens"
         );
         assert_eq!(
-            map.resolve("bbbbbbbbbbbbbbbb"),
-            Some(UserId::new("bob").unwrap())
+            map.resolve(BOB_TOKEN),
+            Some((UserId::new("bob").unwrap(), Role::Member)),
+            "no third field is a member"
         );
-        assert_eq!(map.resolve("dddddddddddddddd"), None);
+        assert_eq!(map.resolve("d".repeat(36).as_str()), None);
         assert_eq!(
-            map.resolve("aaaaaaaaaaaaaaa"),
+            map.resolve(&ALICE_FIRST[..ALICE_FIRST.len() - 1]),
             None,
             "prefixes do not match"
         );
@@ -505,20 +598,55 @@ mod tests {
     #[test]
     fn token_map_rejects_files_that_cannot_name_someone_safely() {
         for (text, why) in [
-            ("", "names nobody"),
-            ("# only comments\n", "names nobody"),
-            ("alice\n", "missing token"),
-            ("alice aaaaaaaaaaaaaaaa extra\n", "trailing field"),
-            ("alice short\n", "guessably short token"),
-            ("alice aaaaaaaa,aaaaaaaa\n", "header-unsafe token character"),
-            ("al!ce aaaaaaaaaaaaaaaa\n", "invalid user id"),
+            (String::new(), "names nobody"),
+            ("# only comments\n".into(), "names nobody"),
+            ("alice\n".into(), "missing token"),
             (
-                "alice aaaaaaaaaaaaaaaa\nbob aaaaaaaaaaaaaaaa\n",
+                format!("alice {ALICE_FIRST} admin extra\n"),
+                "trailing field",
+            ),
+            ("alice short\n".into(), "guessably short token"),
+            (
+                format!("alice {}\n", "a".repeat(31)),
+                "token below the 32-character floor",
+            ),
+            (
+                format!("alice {},{}\n", "a".repeat(16), "b".repeat(16)),
+                "header-unsafe token character",
+            ),
+            (format!("al!ce {ALICE_FIRST} admin\n"), "invalid user id"),
+            (
+                format!("alice {ALICE_FIRST} admin\nbob {ALICE_FIRST} admin\n"),
                 "one token must name one user",
             ),
+            (
+                format!("alice {ALICE_FIRST} owner\n"),
+                "the only role field is `admin`",
+            ),
+            (
+                format!("alice {ALICE_FIRST} admin\nalice {ALICE_SECOND}\n"),
+                "a user's lines must agree about their role",
+            ),
+            (
+                format!("alice {ALICE_FIRST}\nbob {BOB_TOKEN}\n"),
+                "a deployment nobody can configure must not start",
+            ),
         ] {
-            assert!(TokenMap::parse(text).is_err(), "{why}: {text:?}");
+            assert!(TokenMap::parse(&text).is_err(), "{why}: {text:?}");
         }
+    }
+
+    /// The two refusals an operator has to act on name the remedy, and the
+    /// zero-admin one is distinguishable from the empty-file one.
+    #[test]
+    fn refusals_that_need_an_operator_edit_say_what_to_add() {
+        let refusal = TokenMap::parse(&format!("alice {ALICE_FIRST}\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("names no administrator") && refusal.contains("admin"),
+            "the zero-admin refusal must name the fix: {refusal}"
+        );
     }
 
     #[test]

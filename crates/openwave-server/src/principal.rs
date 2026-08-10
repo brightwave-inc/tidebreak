@@ -15,6 +15,12 @@
 //!   marks a bit on an existing context; it cannot conjure an identity on its
 //!   own. [`ClientExecutor`] types that requirement into handler signatures so
 //!   it survives router refactors.
+//!
+//! A principal also carries a [`Role`]: the split between the member plane
+//! (owner-scoped data and capability discovery) and the deployment plane
+//! (what the deployment *is*, and its shared secrets) is enforced by
+//! [`crate::auth::require_admin`] over the role resolved here — see
+//! `docs/decisions/0004-self-host-deployment-plane-authorization.md`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -23,6 +29,21 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use openwave_core::{AgentError, OwnerId, Result};
+
+/// What a principal is permitted to reach.
+///
+/// Two values, deliberately: the concrete gap the split closes is binary —
+/// host command execution and shared-secret custody versus everything else.
+/// A grant vocabulary would be guessed until someone asks for delegated
+/// partial administration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// May reconfigure the deployment and hold its shared secrets.
+    Admin,
+    /// May use the deployment and see their own data. Everything else is a
+    /// `403`.
+    Member,
+}
 
 /// The authenticated identity a request acts as.
 ///
@@ -39,7 +60,12 @@ pub enum Principal {
     LocalOwner,
     /// A named user on a shared deployment, resolved from a configured
     /// credential (today the self-host token file — see [`crate::auth`]).
-    User(UserId),
+    User {
+        /// Who the credential names.
+        id: UserId,
+        /// What the token file says they may reconfigure.
+        role: Role,
+    },
 }
 
 impl Principal {
@@ -54,8 +80,20 @@ impl Principal {
     pub fn owner_id(&self) -> OwnerId {
         match self {
             Self::LocalOwner => OwnerId::local(),
-            Self::User(id) => OwnerId::new(&format!("user:{id}"))
+            Self::User { id, .. } => OwnerId::new(&format!("user:{id}"))
                 .expect("a validated user id forms a valid owner key"),
+        }
+    }
+
+    /// Whether this principal may reach the deployment plane.
+    ///
+    /// The local owner is unconditionally admin: the desktop profile is one
+    /// person at one machine, and there is nobody to be an administrator over.
+    #[must_use]
+    pub fn is_admin(&self) -> bool {
+        match self {
+            Self::LocalOwner => true,
+            Self::User { role, .. } => *role == Role::Admin,
         }
     }
 }
