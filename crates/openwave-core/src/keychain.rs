@@ -8,7 +8,8 @@
 //! The blocking `keyring` calls run on a blocking thread (`spawn_blocking`) so
 //! they don't stall the async runtime.
 
-use std::sync::Once;
+use std::collections::HashMap;
+use std::sync::{Mutex, Once, OnceLock};
 
 use async_trait::async_trait;
 
@@ -30,6 +31,24 @@ pub struct KeychainSecretProvider {
 
 static MOCK_INIT: Once = Once::new();
 
+/// The mock's credential store, keyed by (service, key).
+///
+/// `keyring`'s own mock keeps a password on the entry object and has no store
+/// behind it, so a value written through one `Entry` is invisible to the next
+/// one — a mocked process could store a credential and never read it back.
+/// Everything that writes a secret then uses it (a headless run configuring a
+/// provider and then taking a turn with it) depends on the two agreeing, so
+/// the mock keeps its own map.
+fn mock_store() -> &'static Mutex<HashMap<(String, String), String>> {
+    static STORE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    STORE.get_or_init(Mutex::default)
+}
+
+/// Whether this process routes secrets to [`mock_store`] instead of the OS.
+fn mocked() -> bool {
+    MOCK_INIT.is_completed()
+}
+
 impl KeychainSecretProvider {
     /// Use the default service name (`openwave`).
     ///
@@ -50,8 +69,8 @@ impl KeychainSecretProvider {
         // Debug-only on purpose. In a shipped build this env var would let
         // anything that can set the app's environment silently swap the OS
         // keychain for a process-local store: secrets written during the run
-        // evaporate, and reads that should have returned a stored credential
-        // return nothing. Only debug-binary tests consume it, so a release
+        // are lost when it exits, and a credential the user stored earlier
+        // reads as absent. Only debug-binary tests consume it, so a release
         // binary has no reason to honor it and every reason not to.
         #[cfg(debug_assertions)]
         if std::env::var("OPENWAVE_KEYCHAIN_MOCK").is_ok_and(|v| !v.is_empty()) {
@@ -62,11 +81,17 @@ impl KeychainSecretProvider {
         }
     }
 
-    /// Route all keyring operations to an in-memory mock. Call this before any
-    /// `KeychainSecretProvider` is used. Safe to call from multiple threads;
-    /// only the first call has effect.
+    /// Route every secret operation to an in-memory store for the rest of the
+    /// process. Call this before any `KeychainSecretProvider` is used. Safe to
+    /// call from multiple threads; only the first call has effect.
+    ///
+    /// Values written this way behave like stored credentials — they read back
+    /// under the same (service, key) — and are gone when the process exits.
     pub fn use_mock() {
         MOCK_INIT.call_once(|| {
+            // Also point `keyring` itself away from the OS credential store,
+            // so nothing that builds an `Entry` some other way can reach a
+            // developer's real keychain from a mocked process.
             keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         });
     }
@@ -82,6 +107,9 @@ impl Default for KeychainSecretProvider {
 impl SecretProvider for KeychainSecretProvider {
     async fn get_secret(&self, key: &str) -> Result<Option<String>> {
         let (service, key) = (self.service.clone(), key.to_string());
+        if mocked() {
+            return Ok(mock_store().lock().unwrap().get(&(service, key)).cloned());
+        }
         tokio::task::spawn_blocking(move || {
             let entry = keyring::Entry::new(&service, &key).map_err(secret_err)?;
             match entry.get_password() {
@@ -96,6 +124,10 @@ impl SecretProvider for KeychainSecretProvider {
 
     async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
         let (service, key, value) = (self.service.clone(), key.to_string(), value.to_string());
+        if mocked() {
+            mock_store().lock().unwrap().insert((service, key), value);
+            return Ok(());
+        }
         tokio::task::spawn_blocking(move || {
             keyring::Entry::new(&service, &key)
                 .map_err(secret_err)?
@@ -108,6 +140,10 @@ impl SecretProvider for KeychainSecretProvider {
 
     async fn delete_secret(&self, key: &str) -> Result<()> {
         let (service, key) = (self.service.clone(), key.to_string());
+        if mocked() {
+            mock_store().lock().unwrap().remove(&(service, key));
+            return Ok(());
+        }
         tokio::task::spawn_blocking(move || {
             let entry = keyring::Entry::new(&service, &key).map_err(secret_err)?;
             match entry.delete_credential() {
@@ -124,15 +160,29 @@ impl SecretProvider for KeychainSecretProvider {
 mod tests {
     use super::*;
 
+    /// The mock has to behave like a credential store, not just accept writes:
+    /// code that stores a secret and then uses it — a headless run configuring
+    /// a provider before taking a turn — only works if a written value reads
+    /// back.
     #[tokio::test]
-    async fn operations_succeed_and_missing_reads_as_none() {
+    async fn the_mock_stores_what_it_is_given() {
         KeychainSecretProvider::use_mock();
         let secrets = KeychainSecretProvider::with_service("openwave-test");
         let key = "provider.anthropic.api_key";
 
         assert_eq!(secrets.get_secret(key).await.unwrap(), None);
         secrets.set_secret(key, "sk-123").await.unwrap();
-        // Deleting is a no-op when nothing is persisted (mock is per-entry).
+        assert_eq!(
+            secrets.get_secret(key).await.unwrap().as_deref(),
+            Some("sk-123")
+        );
+        // A second service name is a separate namespace, as on the real thing.
+        let other = KeychainSecretProvider::with_service("openwave-test-other");
+        assert_eq!(other.get_secret(key).await.unwrap(), None);
+
+        secrets.delete_secret(key).await.unwrap();
+        assert_eq!(secrets.get_secret(key).await.unwrap(), None);
+        // Deleting an absent entry is a no-op, not an error.
         secrets.delete_secret(key).await.unwrap();
     }
 

@@ -24,6 +24,23 @@ openwave rehome-secrets
 openwave tui [--chat <id> | --new]
 openwave -p <prompt> [--chat <id>] [--output-format text|json]
            [--permission-mode ask|auto|allow|plan]
+
+openwave provider list
+openwave provider set-key <kind> [--from-env <var>]
+openwave provider remove-key <kind>
+openwave model list
+openwave model roles
+openwave model select <key|auto> [--role <role>]
+openwave settings show
+openwave settings web-search select <provider|off>
+openwave settings web-search set-key <provider> [--from-env <var>]
+openwave settings web-search remove-key <provider>
+openwave settings exec select <provider|off>
+openwave settings exec set-key <provider> [--from-env <var>]
+openwave settings exec remove-key <provider>
+openwave mcp-server list
+openwave mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
+openwave mcp-server remove <name>
 ```
 
 A bare `openwave` with no arguments runs `serve`.
@@ -185,6 +202,67 @@ decision line when a request arrives:
 cargo run -p openwave-cli -- -p "plan the migration" \
   --permission-mode plan --output-format json < decisions.pipe
 ```
+
+### Setup commands
+
+`provider`, `model`, `settings`, and `mcp-server` configure a profile without
+the desktop app. Each one boots the same in-process server the other commands
+do, calls the route the desktop's settings pages call, and prints the answer —
+they hold no configuration logic of their own, so both surfaces stay in step.
+All of them accept `--output-format text|json`, and `json` prints the route's
+response object on one line.
+
+```sh
+# Providers and credentials
+cargo run -p openwave-cli -- provider list
+cargo run -p openwave-cli -- provider set-key anthropic < key.txt
+ANTHROPIC_KEY=sk-... cargo run -p openwave-cli -- \
+  provider set-key anthropic --from-env ANTHROPIC_KEY
+cargo run -p openwave-cli -- provider remove-key anthropic
+
+# Models
+cargo run -p openwave-cli -- model list
+cargo run -p openwave-cli -- model roles
+cargo run -p openwave-cli -- model select anthropic::claude-opus-5
+cargo run -p openwave-cli -- model select auto --role utility
+
+# Web search and code execution
+cargo run -p openwave-cli -- settings show
+cargo run -p openwave-cli -- settings web-search select exa
+cargo run -p openwave-cli -- settings web-search set-key exa --from-env EXA_KEY
+cargo run -p openwave-cli -- settings exec select e2b
+cargo run -p openwave-cli -- settings exec set-key e2b --from-env E2B_KEY
+
+# MCP servers
+cargo run -p openwave-cli -- mcp-server list
+cargo run -p openwave-cli -- mcp-server add docs \
+  --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
+cargo run -p openwave-cli -- mcp-server remove docs
+```
+
+**A key is never a command-line argument.** `set-key` reads it from stdin, or
+from the environment variable named by `--from-env`. Arguments are visible to
+every process on the machine through the process list and land in shell
+history; a pipe and an exported variable do not. Stored keys go to the same
+place the desktop puts them — the OS keychain on a desktop profile — and no
+command here ever prints one back.
+
+Storing a provider key also enables that provider for routing, matching what
+saving a key in the app does. `model select` writes the same role selections
+the settings page does: a catalog key pins the role, and `auto` returns it to
+automatic resolution.
+
+`settings show` reports the runtime settings alongside web-search and
+code-execution selection, availability, and which credential slots are filled.
+
+`mcp-server add` and `remove` edit the *user-configured* server set. Servers
+that come from an installed plugin appear in `list` and are managed by turning
+that plugin on or off — the server rebuilds them, so the config route refuses
+to edit them. `--command` (with repeatable `--arg`), `--url`, and
+`--gateway-endpoint` are the three transports, and exactly one is required.
+Secret material is named, not given: `--env-from` forwards a variable from the
+parent environment, and `--bearer-token-env` names the variable holding a
+remote server's token. Both are resolved when the server connects.
 
 ### `mcp`
 

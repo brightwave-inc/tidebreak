@@ -29,8 +29,13 @@
 //! permission mode for the run, and under `--output-format json` a driving
 //! process answers approvals, plans, and questions over stdin — see
 //! [`print::protocol`].
+//!
+//! `openwave provider|model|settings|mcp-server …` configure the profile the
+//! same way the desktop's settings pages do — over the server's own routes.
+//! See [`setup`]; secrets are read from stdin or a named environment variable,
+//! never from a command-line argument.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -39,14 +44,42 @@ use openwave_core::{AgentError, ChatId, Config, ListDir, ReadFile, Result, ToolC
 
 mod api;
 mod print;
+mod setup;
 mod tui;
 
 use print::OutputFormat;
+use setup::{Command as SetupCommand, SecretSource};
 
-const USAGE: &str = "usage: openwave serve\n       openwave mcp <workspace>\n       openwave \
-                     rehome-secrets\n       openwave tui [--chat <id> | --new]\n       openwave -p \
-                     <prompt> [--chat <id>] [--output-format text|json]\n                  \
-                     [--permission-mode ask|auto|allow|plan]";
+const USAGE: &str = "\
+usage: openwave serve
+       openwave mcp <workspace>
+       openwave rehome-secrets
+       openwave tui [--chat <id> | --new]
+       openwave -p <prompt> [--chat <id>] [--output-format text|json]
+                  [--permission-mode ask|auto|allow|plan]
+
+       openwave provider list
+       openwave provider set-key <kind> [--from-env <var>]
+       openwave provider remove-key <kind>
+       openwave model list
+       openwave model roles
+       openwave model select <key|auto> [--role <role>]
+       openwave settings show
+       openwave settings web-search select <provider|off>
+       openwave settings web-search set-key <provider> [--from-env <var>]
+       openwave settings web-search remove-key <provider>
+       openwave settings exec select <provider|off>
+       openwave settings exec set-key <provider> [--from-env <var>]
+       openwave settings exec remove-key <provider>
+       openwave mcp-server list
+       openwave mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
+                  [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var>]
+                  [--timeout-ms <ms>] [--disabled]
+       openwave mcp-server remove <name>
+
+The setup commands take --output-format text|json. A key is read from stdin, or
+from the environment variable named by --from-env — never from an argument,
+which every process on the machine can read.";
 
 #[tokio::main]
 async fn main() {
@@ -161,10 +194,243 @@ async fn run() -> Result<i32> {
             }
             print::run(prompt, chat, format, permission_mode).await
         }
+        Some(command)
+            if command == OsStr::new("provider")
+                || command == OsStr::new("model")
+                || command == OsStr::new("settings")
+                || command == OsStr::new("mcp-server") =>
+        {
+            let family = command.to_string_lossy().into_owned();
+            let (command, format) = parse_setup(&family, text_args(args));
+            setup::run(command, format).await.map(|()| 0)
+        }
         Some(other) => {
             usage_error(&format!("unknown command {other:?}"));
         }
     }
+}
+
+/// The remaining arguments as UTF-8. Setup arguments are provider names, model
+/// keys, URLs, and variable names; a path that is not valid UTF-8 is refused
+/// here rather than silently mangled.
+fn text_args(args: impl Iterator<Item = OsString>) -> Vec<String> {
+    args.map(|arg| {
+        arg.into_string()
+            .unwrap_or_else(|arg| usage_error(&format!("{arg:?} is not valid UTF-8")))
+    })
+    .collect()
+}
+
+/// A cursor over one setup subcommand's arguments.
+///
+/// The setup families share a shape — a verb, positional names, then flags —
+/// so they share a reader rather than each re-deriving "the next argument, or
+/// a usage error naming the flag that wanted it".
+struct Cursor {
+    args: Vec<String>,
+    at: usize,
+}
+
+impl Cursor {
+    fn new(args: Vec<String>) -> Self {
+        Self { args, at: 0 }
+    }
+
+    fn next(&mut self) -> Option<String> {
+        let value = self.args.get(self.at).cloned();
+        if value.is_some() {
+            self.at += 1;
+        }
+        value
+    }
+
+    /// The next argument, which must be there and must not be another flag.
+    fn value(&mut self, flag: &str) -> String {
+        match self.next() {
+            Some(value) if !value.starts_with("--") => value,
+            _ => usage_error(&format!("{flag} requires a value")),
+        }
+    }
+
+    /// The next positional argument, named for the error message.
+    fn positional(&mut self, what: &str) -> String {
+        match self.next() {
+            Some(value) if !value.starts_with("--") => value,
+            _ => usage_error(&format!("expected {what}")),
+        }
+    }
+}
+
+/// Parse one `provider`/`model`/`settings`/`mcp-server` invocation.
+fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) {
+    let mut cursor = Cursor::new(args);
+    let verb = cursor.positional(&format!("a {family} subcommand"));
+    let command = match (family, verb.as_str()) {
+        ("provider", "list") => SetupCommand::ProviderList,
+        ("provider", "set-key") => SetupCommand::ProviderSetKey {
+            kind: cursor.positional("a provider kind"),
+            secret: parse_secret_source(&mut cursor),
+        },
+        ("provider", "remove-key") => SetupCommand::ProviderRemoveKey {
+            kind: cursor.positional("a provider kind"),
+        },
+        ("model", "list") => SetupCommand::ModelList,
+        ("model", "roles") => SetupCommand::ModelRoles,
+        ("model", "select") => {
+            let selection = cursor.positional("a model key, or `auto`");
+            let mut role = "chat".to_owned();
+            let mut format = None;
+            while let Some(flag) = cursor.next() {
+                match flag.as_str() {
+                    "--role" => role = cursor.value("--role"),
+                    "--output-format" => format = Some(parse_format(cursor.value(flag.as_str()))),
+                    other => usage_error(&format!("unknown model select argument {other:?}")),
+                }
+            }
+            return (
+                SetupCommand::ModelSelect {
+                    role,
+                    selection: (selection != "auto").then_some(selection),
+                },
+                format.unwrap_or(OutputFormat::Text),
+            );
+        }
+        ("settings", "show") => SetupCommand::SettingsShow,
+        ("settings", "web-search") => match cursor.positional("a web-search subcommand").as_str() {
+            "select" => SetupCommand::WebSearchSelect {
+                provider: parse_selection(cursor.positional("a web-search provider, or `off`")),
+            },
+            "set-key" => SetupCommand::WebSearchSetKey {
+                provider: cursor.positional("a web-search provider"),
+                secret: parse_secret_source(&mut cursor),
+            },
+            "remove-key" => SetupCommand::WebSearchRemoveKey {
+                provider: cursor.positional("a web-search provider"),
+            },
+            other => usage_error(&format!("unknown settings web-search subcommand {other:?}")),
+        },
+        ("settings", "exec") => match cursor.positional("an exec subcommand").as_str() {
+            "select" => SetupCommand::ExecSelect {
+                provider: parse_selection(cursor.positional("an execution provider, or `off`")),
+            },
+            "set-key" => SetupCommand::ExecSetKey {
+                provider: cursor.positional("an execution provider"),
+                secret: parse_secret_source(&mut cursor),
+            },
+            "remove-key" => SetupCommand::ExecRemoveKey {
+                provider: cursor.positional("an execution provider"),
+            },
+            other => usage_error(&format!("unknown settings exec subcommand {other:?}")),
+        },
+        ("mcp-server", "list") => SetupCommand::McpList,
+        ("mcp-server", "add") => SetupCommand::McpAdd {
+            definition: parse_mcp_definition(&mut cursor),
+        },
+        ("mcp-server", "remove") => SetupCommand::McpRemove {
+            name: cursor.positional("an MCP server name"),
+        },
+        (family, other) => usage_error(&format!("unknown {family} subcommand {other:?}")),
+    };
+    let format = parse_trailing_format(&mut cursor, &format!("{family} {verb}"));
+    (command, format)
+}
+
+/// `--from-env <var>` names an environment variable holding the secret;
+/// without it the secret is read from stdin. A value never rides argv.
+fn parse_secret_source(cursor: &mut Cursor) -> SecretSource {
+    match cursor.next().as_deref() {
+        None => SecretSource::Stdin,
+        Some("--from-env") => SecretSource::Env(cursor.value("--from-env")),
+        Some("--output-format") => {
+            // Put it back for the trailing-flag pass.
+            cursor.at -= 1;
+            SecretSource::Stdin
+        }
+        Some(other) => usage_error(&format!(
+            "unknown argument {other:?}; a key is read from stdin or --from-env <var>"
+        )),
+    }
+}
+
+/// A positional selection where `off` (or `none`) clears the setting.
+fn parse_selection(value: String) -> Option<String> {
+    (value != "off" && value != "none").then_some(value)
+}
+
+/// The trailing `--output-format`, the only flag every setup command shares.
+fn parse_trailing_format(cursor: &mut Cursor, context: &str) -> OutputFormat {
+    let mut format = OutputFormat::Text;
+    while let Some(flag) = cursor.next() {
+        match flag.as_str() {
+            "--output-format" => format = parse_format(cursor.value("--output-format")),
+            other => usage_error(&format!("unexpected argument {other:?} after {context}")),
+        }
+    }
+    format
+}
+
+fn parse_format(value: String) -> OutputFormat {
+    match OutputFormat::parse(&value) {
+        Some(format) => format,
+        None => usage_error("--output-format expects text or json"),
+    }
+}
+
+/// Build one MCP server definition from flags, in the shape
+/// `PUT /mcp/servers` takes. Values the server keeps out of its definitions —
+/// environment values, bearer tokens — are named here, never given.
+fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
+    let name = cursor.positional("an MCP server name");
+    let mut definition = serde_json::json!({ "name": name });
+    let mut args: Vec<String> = Vec::new();
+    let mut env_from: Vec<String> = Vec::new();
+    let mut transports = 0;
+    while let Some(flag) = cursor.next() {
+        match flag.as_str() {
+            "--command" => {
+                transports += 1;
+                definition["command"] = cursor.value("--command").into();
+            }
+            "--arg" => args.push(cursor.value("--arg")),
+            "--env-from" => env_from.push(cursor.value("--env-from")),
+            "--cwd" => definition["cwd"] = cursor.value("--cwd").into(),
+            "--url" => {
+                transports += 1;
+                definition["url"] = cursor.value("--url").into();
+            }
+            "--bearer-token-env" => {
+                definition["bearer_token_env"] = cursor.value("--bearer-token-env").into();
+            }
+            "--gateway-endpoint" => {
+                transports += 1;
+                definition["gateway_endpoint"] = cursor.value("--gateway-endpoint").into();
+            }
+            "--timeout-ms" => {
+                let value = cursor.value("--timeout-ms");
+                let Ok(timeout) = value.parse::<u64>() else {
+                    usage_error("--timeout-ms expects a whole number of milliseconds");
+                };
+                definition["request_timeout_ms"] = timeout.into();
+            }
+            "--disabled" => definition["enabled"] = false.into(),
+            "--output-format" => {
+                // Belongs to the trailing pass; hand it back.
+                cursor.at -= 1;
+                break;
+            }
+            other => usage_error(&format!("unknown mcp-server add argument {other:?}")),
+        }
+    }
+    if transports != 1 {
+        usage_error("mcp-server add takes exactly one of --command, --url, or --gateway-endpoint");
+    }
+    if !args.is_empty() {
+        definition["args"] = args.into();
+    }
+    if !env_from.is_empty() {
+        definition["env_from"] = env_from.into();
+    }
+    definition
 }
 
 fn usage_error(message: &str) -> ! {
