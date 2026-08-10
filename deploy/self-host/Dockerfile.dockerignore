@@ -1,0 +1,8 @@
+# Build-context exclusions for deploy/self-host/Dockerfile (BuildKit reads the
+# file named after the Dockerfile). Build artifacts and installed JavaScript
+# dependencies are large and never part of a `cargo build --locked`.
+.git
+target
+**/node_modules
+crates/openwave-desktop/ui/dist
+docs-site/.next
