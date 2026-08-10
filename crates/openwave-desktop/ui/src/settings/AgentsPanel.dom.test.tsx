@@ -20,7 +20,6 @@ describe("AgentsPanel", () => {
         network_policy: null,
       },
       max_active_background_agents: 5,
-      model_visibility_overrides: {},
       compaction: {
         threshold_fraction: 0.75,
         target_fraction: 0.25,
