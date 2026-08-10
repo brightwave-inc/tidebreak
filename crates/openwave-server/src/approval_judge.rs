@@ -1,19 +1,25 @@
 //! Fail-closed small-model judge for Auto-mode approvals.
 //!
-//! When an Auto-mode chat parks an uncovered, judgeable call (today: the two
-//! query-egress kinds — document search and web search), the park stamps the
-//! row `judging` and this worker picks it up: a small utility-role model reads
-//! the query and a bounded slice of recent conversation and answers whether
-//! sending that query is a routine, expected step. It approves only on a
-//! confident yes; any error, refusal, timeout, unusable answer, or missing
-//! utility model is a decline, which moves the card to the human — the judge
-//! can shorten the path to "yes", never widen it.
+//! When an Auto-mode chat parks an uncovered, judgeable call — the three
+//! egress kinds (document search, web search, web extract) and a networked
+//! `exec` — the park stamps the row `judging` and this worker picks it up: a
+//! small utility-role model reads the action and a bounded slice of recent
+//! conversation and answers whether taking it is a routine, expected step. It
+//! approves only on a confident yes; any error, refusal, timeout, unusable
+//! answer, or missing utility model is a decline, which moves the card to the
+//! human — the judge can shorten the path to "yes", never widen it.
 //!
-//! Deliberately absent: `exec`. There is no deterministic command floor or
-//! guaranteed jail here, so a judge would be the sole gate on arbitrary
-//! networked shell. Storage enforces the same line
-//! ([`openwave_core::ToolApprovalKind::is_auto_judgeable`]), so no caller can
-//! put such a call in front of the model.
+//! A command reaches the judge only through a deterministic floor, so the
+//! model is never the sole gate on arbitrary networked shell. The argv must
+//! first clear the static shell analyzer under the broadest possible rule —
+//! the same bar a blanket allow-grant is held to, which refuses interpreters,
+//! destructive operations, sensitive reads and writes, and anything reaching
+//! outside the folder. What is judged is therefore a named program with
+//! ordinary operands, and a model that answers badly can only fail towards
+//! asking. Storage decides eligibility when the row parks
+//! ([`openwave_core::approval::is_auto_judge_candidate`], gating on
+//! [`openwave_core::ToolApprovalKind::is_auto_judgeable`]), and this worker
+//! re-derives the floor immediately before the model sees anything.
 //!
 //! The judge holds no lock and owns nothing durable: a human decision always
 //! wins the compare-and-set, and a worker that dies leaves rows at `judging`
