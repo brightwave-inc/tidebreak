@@ -96,7 +96,10 @@ jobs:
             echo "This job must not fall back to the pull request's own copy." >&2
             exit 1
           fi
-          cp "$trusted" "$GITHUB_WORKSPACE/scripts/workflow-security.test.mjs"
+          cp "$trusted" "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
+      - name: Test trusted base-branch release policy
+        if: ${{ github.event_name == 'pull_request' }}
+        run: node --test scripts/.trusted-workflow-security.test.mjs
       - name: Test semantic title and tag policy
         run: node --test scripts/*.test.mjs
 
@@ -104,6 +107,8 @@ jobs:
     name: change scope
     runs-on: ubuntu-latest
     outputs:
+      docs_site: ${{ steps.scope.outputs.docs_site }}
+      e2b_cli: ${{ steps.scope.outputs.e2b_cli }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
       workspace: ${{ steps.scope.outputs.workspace }}
@@ -122,6 +127,8 @@ jobs:
         run: |
           full_validation() {
             {
+              echo "docs_site=true"
+              echo "e2b_cli=true"
               echo "rust=true"
               echo "ui=true"
               echo "workspace=true"
@@ -161,6 +168,8 @@ jobs:
           # cover everything *except* openwave-desktop, so it can stay false
           # when a change cannot reach them. `workspace` implies `rust`; the
           # gate below asserts that.
+          docs_site=false
+          e2b_cli=false
           rust=false
           ui=false
           workspace=false
@@ -168,8 +177,13 @@ jobs:
             > "$RUNNER_TEMP/changed-files"
           while IFS= read -r -d '' file; do
             case "$file" in
-              *.md|docs/*|assets/*|.githooks/*|docs-site/*|LICENSE|NOTICE) ;;
+              docs-site/*) docs_site=true ;;
+              .github/e2b-cli/*|.github/workflows/publish-e2b-template.yml)
+                e2b_cli=true ;;
+              *.md|docs/*|assets/*|.githooks/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
+                docs_site=true
+                e2b_cli=true
                 rust=true
                 ui=true
                 workspace=true
@@ -199,6 +213,8 @@ jobs:
           fi
 
           {
+            echo "docs_site=$docs_site"
+            echo "e2b_cli=$e2b_cli"
             echo "rust=$rust"
             echo "ui=$ui"
             echo "workspace=$workspace"
@@ -219,6 +235,33 @@ jobs:
             ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             detect --source=/repo --redact --verbose
 
+  e2b-cli:
+    name: E2B publication tooling
+    needs: changes
+    if: ${{ needs.changes.outputs.e2b_cli == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: .github/e2b-cli/pnpm-lock.yaml
+      - name: Install the locked E2B CLI
+        run: pnpm --dir .github/e2b-cli install --frozen-lockfile --ignore-scripts
+      - name: Verify the local E2B CLI pin
+        run: |
+          expected="$(node -p "require('./.github/e2b-cli/package.json').dependencies['@e2b/cli']")"
+          actual="$(.github/e2b-cli/node_modules/.bin/e2b --version)"
+          [[ "$actual" == "$expected" ]] || {
+            echo "Expected E2B CLI $expected, got $actual" >&2
+            exit 1
+          }
+
   advisories:
     name: supply-chain advisories (cargo-deny)
     needs: changes
@@ -237,8 +280,8 @@ jobs:
           tool: cargo-deny@0.20.2
       # Posture and exceptions live in deny.toml. `--all-features` covers
       # optional dependencies that a default-feature graph would miss.
-      - name: Check RustSec advisories
-        run: cargo deny --all-features check advisories
+      - name: Check advisories, licenses, and dependency sources
+        run: cargo deny --all-features --locked check advisories licenses sources
 
 
   unused-deps:
@@ -581,5 +624,33 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Test
         run: pnpm test
+      - name: Build
+        run: pnpm build
+
+  docs-site:
+    name: documentation site
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_site == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: docs-site/pnpm-lock.yaml
+      - name: Install documentation dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type-check
+        run: pnpm types:check
+      - name: Lint
+        run: pnpm lint
       - name: Build
         run: pnpm build

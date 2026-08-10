@@ -1,38 +1,63 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
+const repositoryRoot = resolve(
+  process.env.OPENWAVE_POLICY_ROOT ??
+    fileURLToPath(new URL("..", import.meta.url)),
+);
+const repositoryFile = (...parts) => join(repositoryRoot, ...parts);
+const workflowDirectory = repositoryFile(".github", "workflows");
 const workflows = Object.fromEntries(
   readdirSync(workflowDirectory)
     .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
-    .map((name) => [name, readFileSync(new URL(name, workflowDirectory), "utf8")]),
+    .map((name) => [name, readFileSync(join(workflowDirectory, name), "utf8")]),
 );
 const releaseDrafterConfig = readFileSync(
-  new URL("../.github/release-drafter.yml", import.meta.url),
+  repositoryFile(".github", "release-drafter.yml"),
   "utf8",
 );
 const tauriConfig = JSON.parse(
   readFileSync(
-    new URL("../crates/openwave-desktop/tauri.conf.json", import.meta.url),
+    repositoryFile("crates", "openwave-desktop", "tauri.conf.json"),
     "utf8",
   ),
 );
 const desktopCargo = readFileSync(
-  new URL("../crates/openwave-desktop/Cargo.toml", import.meta.url),
+  repositoryFile("crates", "openwave-desktop", "Cargo.toml"),
   "utf8",
 );
 const desktopHost = readFileSync(
-  new URL("../crates/openwave-desktop/src/lib.rs", import.meta.url),
+  repositoryFile("crates", "openwave-desktop", "src", "lib.rs"),
   "utf8",
 );
 const desktopUpdater = readFileSync(
-  new URL("../crates/openwave-desktop/src/updater.rs", import.meta.url),
+  repositoryFile("crates", "openwave-desktop", "src", "updater.rs"),
   "utf8",
 );
 const desktopBroker = readFileSync(
-  new URL("../crates/openwave-desktop/src/broker.rs", import.meta.url),
+  repositoryFile("crates", "openwave-desktop", "src", "broker.rs"),
   "utf8",
+);
+const dockerIgnore = readFileSync(
+  repositoryFile("deploy", "self-host", "Dockerfile.dockerignore"),
+  "utf8",
+);
+const denyConfig = readFileSync(repositoryFile("deny.toml"), "utf8");
+const e2bPackage = JSON.parse(
+  readFileSync(repositoryFile(".github", "e2b-cli", "package.json"), "utf8"),
 );
 
 function workflowJob(source, name) {
@@ -44,6 +69,108 @@ function workflowJob(source, name) {
   const end =
     next === -1 ? source.length : start + marker.length + next;
   return source.slice(start, end);
+}
+
+function stripRustCommentsAndStrings(source) {
+  const masked = [...source];
+  const erase = (start, end) => {
+    for (let index = start; index < end; index += 1) {
+      if (masked[index] !== "\n") masked[index] = " ";
+    }
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    if (source.startsWith("//", index)) {
+      const end = source.indexOf("\n", index);
+      erase(index, end === -1 ? source.length : end);
+      index = end === -1 ? source.length : end;
+    } else if (source.startsWith("/*", index)) {
+      const end = source.indexOf("*/", index + 2);
+      erase(index, end === -1 ? source.length : end + 2);
+      index = end === -1 ? source.length : end + 1;
+    } else if (source[index] === '"' || source[index] === "'") {
+      const quote = source[index];
+      let end = index + 1;
+      while (end < source.length) {
+        if (source[end] === "\\") end += 2;
+        else if (source[end++] === quote) break;
+      }
+      erase(index, end);
+      index = end - 1;
+    }
+  }
+  return masked.join("");
+}
+
+function rustDelimitedBody(source, marker) {
+  const stripped = stripRustCommentsAndStrings(source);
+  const match = stripped.match(marker);
+  assert.ok(match, `missing Rust body for ${marker}`);
+  const start = match.index + match[0].length;
+  const open = stripped.indexOf("{", start);
+  assert.notEqual(open, -1, `missing opening brace for ${marker}`);
+  let depth = 1;
+  for (let index = open + 1; index < stripped.length; index += 1) {
+    if (stripped[index] === "{") depth += 1;
+    if (stripped[index] === "}" && --depth === 0) {
+      return stripped.slice(open + 1, index);
+    }
+  }
+  throw new Error(`unbalanced Rust body for ${marker}`);
+}
+
+function rustFunctionBody(source, name) {
+  return rustDelimitedBody(source, new RegExp(`\\b(?:async\\s+)?fn\\s+${name}\\b`));
+}
+
+function hasOrderedUniqueTokens(body, tokens) {
+  let previous = -1;
+  return tokens.every((token) => {
+    const position = body.indexOf(token);
+    if (position === -1 || position <= previous || body.indexOf(token, position + token.length) !== -1) {
+      return false;
+    }
+    previous = position;
+    return true;
+  });
+}
+
+function updaterTransitionIsSafe(updater, broker) {
+  const restart = rustFunctionBody(updater, "take_staged_and_restart");
+  const reversibleMarker = /\b(?:async\s+)?fn\s+install_behind_broker_barrier\b/;
+  if (!reversibleMarker.test(stripRustCommentsAndStrings(updater))) {
+    return false;
+  }
+  const barrier = rustFunctionBody(updater, "install_behind_broker_barrier");
+  const quiesce = "quiesce().await?";
+  const installCall = "match install()";
+  const resume = "resume().await";
+  const shutdown = "shutdown().await";
+  const barrierOrdered =
+    hasOrderedUniqueTokens(barrier, [quiesce, installCall, shutdown, resume]) &&
+    (barrier.match(/\binstall\(\)/g) ?? []).length === 1;
+  const bindings = /install_behind_broker_barrier\(\s*\|\| host_access\.quiesce_for_update\(\),\s*\|\| staged\.update\.install\(&staged\.bytes\),\s*\|\| host_access\.resume_after_failed_update\(\),\s*\|\| host_access\.shutdown\(\),\s*\)/s;
+  const admit = rustFunctionBody(broker, "admit");
+  const quiesceArm = rustDelimitedBody(broker, /BrokerCommand::Quiesce\s*\{\s*reply\s*\}\s*=>/);
+  const resumeArm = rustDelimitedBody(
+    broker,
+    /BrokerCommand::ResumeAfterFailedUpdate\s*\{\s*reply\s*\}\s*=>/,
+  );
+  const session = rustFunctionBody(broker, "ensure_session");
+  return (
+    barrierOrdered &&
+    bindings.test(restart) &&
+    !admit.includes("drop(admission)") &&
+    hasOrderedUniqueTokens(admit, [
+      "BrokerAdmission::Running",
+      "self.commands.try_send(command)",
+    ]) &&
+    hasOrderedUniqueTokens(quiesceArm, ["self.ensure_session().await", "reply.send("]) &&
+    hasOrderedUniqueTokens(resumeArm, ["self.allow_session_start = false", "reply.send("]) &&
+    hasOrderedUniqueTokens(session, [
+      "if !self.allow_session_start",
+      "return Err(BrokerClientError::UpdateRecovery)",
+    ])
+  );
 }
 
 test("third-party workflow actions use immutable commit SHAs", () => {
@@ -99,6 +226,8 @@ test("workflow container images are pinned by digest", () => {
 test("PR lanes are scope-gated, never label-gated", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");
+  const docsSite = workflowJob(ci, "docs-site");
+  const e2bCli = workflowJob(ci, "e2b-cli");
   const fmt = workflowJob(ci, "fmt");
   const postgres = workflowJob(ci, "postgres");
   const testJob = workflowJob(ci, "test");
@@ -112,6 +241,19 @@ test("PR lanes are scope-gated, never label-gated", () => {
     /pull_request:\n\s+types:\n\s+\[[^\]]*labeled, unlabeled[^\]]*\]/,
   );
   assert.doesNotMatch(ci, /^  build:$/m);
+  assert.match(
+    ci,
+    /cp "\$trusted" "\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
+  );
+  assert.match(
+    ci,
+    /node --test scripts\/\.trusted-workflow-security\.test\.mjs/,
+  );
+  assert.match(ci, /node --test scripts\/\*\.test\.mjs/);
+  assert.doesNotMatch(
+    ci,
+    /cp "\$trusted" "\$GITHUB_WORKSPACE\/scripts\/workflow-security\.test\.mjs"/,
+  );
   // A pull request's green checks must prove the same commits stay green on
   // main: no platform-neutral lane may hide behind an opt-in label. The
   // `windows-ci` opt-in below is the one deliberate exception.
@@ -133,6 +275,8 @@ test("PR lanes are scope-gated, never label-gated", () => {
     [testJob, "workspace"],
     [postgres, "workspace"],
     [workflowJob(ci, "ui"), "ui"],
+    [docsSite, "docs_site"],
+    [e2bCli, "e2b_cli"],
   ]) {
     assert.match(
       job,
@@ -164,6 +308,38 @@ test("PR lanes are scope-gated, never label-gated", () => {
   assert.doesNotMatch(ci, /^  parsers:$/m);
   assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
   assert.match(changes, /\*\.md\|docs\/\*\|assets\/\*\|\.githooks\/\*/);
+
+  // Documentation and publication tooling each have a pre-merge execution
+  // lane. A tooling-only Dependabot update must not fall through to unrelated
+  // Rust jobs, and edits to either workflow force its own lane.
+  assert.match(changes, /docs-site\/\*\) docs_site=true/);
+  assert.match(
+    changes,
+    /\.github\/e2b-cli\/\*\|\.github\/workflows\/publish-e2b-template\.yml\)\n\s+e2b_cli=true/,
+  );
+  assert.match(changes, /echo "docs_site=true"/);
+  assert.match(changes, /echo "e2b_cli=true"/);
+  assert.match(docsSite, /pnpm install --frozen-lockfile/);
+  assert.match(docsSite, /run: pnpm types:check/);
+  assert.match(docsSite, /run: pnpm lint/);
+  assert.match(docsSite, /run: pnpm build/);
+
+  assert.equal(e2bPackage.packageManager, "pnpm@10.18.3");
+  assert.match(e2bCli, /version: 10\.18\.3/);
+  assert.match(e2bCli, /node-version: 22/);
+  assert.match(
+    e2bCli,
+    /pnpm --dir \.github\/e2b-cli install --frozen-lockfile --ignore-scripts/,
+  );
+  assert.match(
+    e2bCli,
+    /\.github\/e2b-cli\/node_modules\/\.bin\/e2b --version/,
+  );
+  assert.match(
+    e2bCli,
+    /dependencies\['@e2b\/cli'\]/,
+  );
+  assert.doesNotMatch(e2bCli, /npm install|@latest/);
 
   const desktop = workflowJob(ci, "desktop");
   assert.match(
@@ -262,8 +438,15 @@ test("production secrets remain isolated to the release workflow", () => {
   // to main touching the template definition, plus manual dispatch. Its
   // credential is scoped to E2B — it must not reach the signing secrets.
   const e2b = workflows["publish-e2b-template.yml"];
+  const resolveJob = workflowJob(e2b, "resolve");
+  const publishJob = workflowJob(e2b, "publish");
   assert.match(e2b, /^on:\n  push:\n    branches: \[main\]\n    paths:\n/m);
+  assert.match(e2b, /^      - "\.github\/e2b-cli\/\*\*"$/m);
   assert.match(e2b, /^  workflow_dispatch:\n/m);
+  assert.match(
+    e2b,
+    /^      release_tag:\n(?:        .*\n)+?        type: string$/m,
+  );
   assert.doesNotMatch(e2b, /^\s*pull_request(?:_target)?:/m);
   assert.match(e2b, /^permissions:\n  contents: read$/m);
   assert.deepEqual(
@@ -272,7 +455,251 @@ test("production secrets remain isolated to the release workflow", () => {
     // secret-shaped names reads as a credential to the secret scanner.
     ["ACCESS_TOKEN", "API_KEY"].map((suffix) => `secrets.E2B_${suffix}`),
   );
+
+  // A manual run must execute the current default-branch workflow. A release
+  // tag is validated as input and resolved to a commit for a sparse source-only
+  // checkout; it can never supply the workflow or locked CLI definition.
+  assert.match(resolveJob, /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  assert.equal(
+    resolveJob.match(
+      /SOURCE_REF" == "refs\/heads\/\$DEFAULT_BRANCH" &&\n\s+"\$SOURCE_REF_NAME" == "\$DEFAULT_BRANCH"/g,
+    )?.length,
+    2,
+    "both push and workflow_dispatch must require the default-branch ref",
+  );
+  assert.doesNotMatch(resolveJob, /SOURCE_REF" == "refs\/tags\//);
+  assert.match(resolveJob, /RELEASE_TAG: \$\{\{ inputs\.release_tag \}\}/);
+  assert.match(resolveJob, /node scripts\/check-release-tag\.mjs "\$RELEASE_TAG"/);
+  assert.match(
+    resolveJob,
+    /repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$RELEASE_TAG/,
+  );
+  assert.match(resolveJob, /refs\/tags\/\$RELEASE_TAG\^\{commit\}/);
+  assert.match(
+    resolveJob,
+    /git merge-base --is-ancestor "\$template_sha" "origin\/\$DEFAULT_BRANCH"/,
+  );
+  assert.match(resolveJob, /echo "sha=\$template_sha" >> "\$GITHUB_OUTPUT"/);
+  assert.match(resolveJob, /ref: \$\{\{ steps\.source\.outputs\.sha \}\}/);
+  assert.match(
+    resolveJob,
+    /sparse-checkout: \|\n\s+crates\/openwave-sandbox-agent\/e2b/,
+  );
+  assert.match(publishJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(
+    publishJob,
+    /ref: \$\{\{ needs\.resolve\.outputs\.source_sha \}\}/,
+  );
+  assert.match(
+    publishJob,
+    /working-directory: \$\{\{ env\.SOURCE_TEMPLATE_DIR \}\}/,
+  );
+
+  // Source validation and all dependency setup happen before any secret-bearing
+  // step. Credentials remain step-scoped to the API calls that require them.
+  assert.ok(
+    resolveJob.indexOf("Validate the publication source") <
+      resolveJob.indexOf("Require the E2B credential"),
+  );
+  assert.ok(
+    resolveJob.indexOf("Check out the validated template source") <
+      resolveJob.indexOf("Require the E2B credential"),
+  );
+  const sourceValidationStep = resolveJob.match(
+    /- name: Validate the publication source[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  const sourceCheckoutStep = resolveJob.match(
+    /- name: Check out the validated template source[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(sourceValidationStep);
+  assert.ok(sourceCheckoutStep);
+  assert.doesNotMatch(sourceValidationStep, /secrets\./);
+  assert.doesNotMatch(sourceCheckoutStep, /secrets\./);
+  assert.doesNotMatch(
+    publishJob.match(/^    env:\n[\s\S]*?(?=^    steps:)/m)?.[0] ?? "",
+    /secrets\./,
+  );
+  assert.ok(
+    publishJob.indexOf("Install the locked E2B CLI") <
+      publishJob.indexOf("secrets."),
+  );
+  assert.match(
+    publishJob,
+    /pnpm --dir \.github\/e2b-cli install --frozen-lockfile --ignore-scripts/,
+  );
+  assert.match(
+    publishJob,
+    /\.github\/e2b-cli\/node_modules\/\.bin\/e2b --version/,
+  );
+  assert.doesNotMatch(publishJob, /npm install|@latest/);
 });
+
+test("dependency policy covers advisories, licenses, sources, and the locked graph", () => {
+  const advisories = workflowJob(workflows["ci.yml"], "advisories");
+  assert.match(denyConfig, /^\[advisories\]$/m);
+  assert.match(denyConfig, /^\[licenses\]$/m);
+  assert.match(denyConfig, /^\[sources\]$/m);
+  assert.match(
+    advisories,
+    /cargo deny --all-features --locked check advisories licenses sources/,
+  );
+});
+
+test("E2B template pin provenance and writes share the validated source revision", () => {
+  const pin = workflowJob(workflows["publish-e2b-template.yml"], "pin");
+
+  assert.match(pin, /SOURCE_SHA: \$\{\{ needs\.resolve\.outputs\.source_sha \}\}/);
+  assert.match(pin, /name: Check out the validated template provenance/);
+  assert.match(pin, /ref: \$\{\{ needs\.resolve\.outputs\.source_sha \}\}/);
+  assert.match(pin, /path: \.release-source/);
+  assert.match(pin, /git diff --quiet --no-index "\.release-source\/\$TEMPLATE_PATH" "\$TEMPLATE_PATH"/);
+  assert.match(pin, /directory = f"\.release-source\/\{os\.environ\['TEMPLATE_PATH'\]\}"/);
+});
+
+test("the self-host Docker context is allowlisted and denies hidden credentials", () => {
+  assert.match(dockerIgnore, /^\*\*$/m);
+  assert.doesNotMatch(dockerIgnore, /^!crates\/\*\*$/m);
+  assert.doesNotMatch(dockerIgnore, /^!skills\/\*\*$/m);
+  assert.doesNotMatch(dockerIgnore, /^!plugins\/\*\*$/m);
+
+  for (const required of [
+    "!Cargo.toml",
+    "!Cargo.lock",
+    "!rust-toolchain.toml",
+    "!crates/*/Cargo.toml",
+    "!crates/*/build.rs",
+    "!crates/*/src/**",
+    "!crates/openwave-code-execution/baseline_python_deps.txt",
+    "!crates/openwave-sandbox-agent/documents-requirements.txt",
+    "!skills/*/SKILL.md",
+    "!plugins/*/PLUGIN.md",
+  ]) {
+    assert.ok(dockerIgnore.includes(`${required}\n`), `missing allow rule ${required}`);
+  }
+
+  for (const denied of [
+    "**/.npmrc",
+    "**/.netrc",
+    "**/.pypirc",
+    "**/.cargo/credentials",
+    "**/.cargo/credentials.toml",
+    "**/id_*",
+    "**/credentials",
+    "**/credentials.*",
+    "**/.*",
+    "**/.*/**",
+  ]) {
+    assert.ok(dockerIgnore.includes(`${denied}\n`), `missing deny rule ${denied}`);
+  }
+  assert.match(
+    readFileSync(repositoryFile("scripts", "stage-self-host-build-context.sh"), "utf8"),
+    /git -C "\$root" archive --format=tar "\$revision" \| tar -x -C "\$destination"/,
+  );
+});
+
+test(
+  "BuildKit admits only exact source inputs from allowed source paths",
+  { skip: process.env.OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE === "1" },
+  () => {
+    const context = mkdtempSync(join(tmpdir(), "openwave-docker-context-"));
+    const output = mkdtempSync(join(tmpdir(), "openwave-docker-output-"));
+    const write = (path, contents = "probe\n") => {
+      const target = join(context, path);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, contents);
+    };
+
+    const included = [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "crates/demo/Cargo.toml",
+      "crates/demo/build.rs",
+      "crates/demo/src/lib.rs",
+      "crates/openwave-code-execution/baseline_python_deps.txt",
+      "crates/openwave-sandbox-agent/documents-requirements.txt",
+      "skills/demo/SKILL.md",
+      "plugins/demo/PLUGIN.md",
+    ];
+    const excluded = [
+      "crates/demo/.npmrc",
+      "crates/demo/src/.netrc",
+      "crates/demo/src/deep/.pypirc",
+      "crates/demo/src/id_rsa",
+      "crates/demo/src/deep/id_ed25519",
+      "crates/demo/src/.cargo/credentials",
+      "crates/demo/src/.cargo/credentials.toml",
+      "crates/demo/src/deep/.harmless-hidden-file",
+      "skills/demo/.draft",
+      "plugins/demo/credentials.json",
+      "outside/secret.txt",
+    ];
+
+    try {
+      for (const path of [...included, ...excluded]) {
+        write(path);
+      }
+      writeFileSync(
+        join(context, "Dockerfile"),
+        "FROM scratch\nCOPY . /context\n",
+      );
+      writeFileSync(join(context, "Dockerfile.dockerignore"), dockerIgnore);
+
+      execFileSync(
+        "docker",
+        [
+          "buildx",
+          "build",
+          "--file",
+          join(context, "Dockerfile"),
+          "--output",
+          `type=local,dest=${output}`,
+          context,
+        ],
+        { stdio: "pipe" },
+      );
+
+      for (const path of included) {
+        assert.ok(existsSync(join(output, "context", path)), `missing ${path}`);
+      }
+      for (const path of excluded) {
+        assert.ok(
+          !existsSync(join(output, "context", path)),
+          `credential probe escaped the context: ${path}`,
+        );
+      }
+    } finally {
+      rmSync(context, { recursive: true, force: true });
+      rmSync(output, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "the self-host build context excludes arbitrary untracked source files",
+  { skip: process.env.OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE === "1" },
+  () => {
+    const context = mkdtempSync(join(tmpdir(), "openwave-self-host-context-"));
+    const output = mkdtempSync(join(tmpdir(), "openwave-self-host-output-"));
+    const probe = repositoryFile("crates", "openwave-cli", "src", "cloud-token.txt");
+    try {
+      writeFileSync(probe, "untracked probe\n");
+      execFileSync("bash", [repositoryFile("scripts", "stage-self-host-build-context.sh"), context]);
+      writeFileSync(join(context, "Probe.Dockerfile"), "FROM scratch\nCOPY . /context\n");
+      execFileSync(
+        "docker",
+        ["buildx", "build", "--file", join(context, "Probe.Dockerfile"), "--output", `type=local,dest=${output}`, context],
+        { stdio: "pipe" },
+      );
+      assert.ok(existsSync(join(output, "context", "crates", "openwave-cli", "src", "main.rs")));
+      assert.ok(!existsSync(join(output, "context", "crates", "openwave-cli", "src", "cloud-token.txt")));
+    } finally {
+      rmSync(probe, { force: true });
+      rmSync(context, { recursive: true, force: true });
+      rmSync(output, { recursive: true, force: true });
+    }
+  },
+);
 
 test("sandbox image publishing is tag-driven, immutable, and secret-free", () => {
   const publish = workflows["publish-sandbox-image.yml"];
@@ -762,7 +1189,7 @@ test("GitHub release downloads are copied from the hosted release", () => {
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
 
   assert.match(
-    readFileSync(new URL("../README.md", import.meta.url), "utf8"),
+    readFileSync(repositoryFile("README.md"), "utf8"),
     /releases\/latest\/download\/OpenWave-macos-apple-silicon\.dmg/,
     "the README download link must match the published asset name",
   );
@@ -812,6 +1239,122 @@ test("the packaged updater trusts the production signing key and endpoint", () =
   ]);
 });
 
+test("updater transition policy rejects unsafe ordering mutations", () => {
+  // The shutdown-before-install boundary #1907 replaced. Kept as a fixture to
+  // prove the policy no longer admits it now that the barrier is mandatory.
+  const legacy = `
+    async fn take_staged_and_restart() {
+      app.state::<HostAccess>().shutdown().await;
+      staged.update.install(&staged.bytes);
+    }
+  `;
+  // This mirrors #1907: the generic helper owns the transition order, while
+  // the Tauri call site supplies the concrete host and staged-update actions.
+  const reversibleUpdater = `
+    async fn take_staged_and_restart() {
+      install_behind_broker_barrier(
+        || host_access.quiesce_for_update(),
+        || staged.update.install(&staged.bytes),
+        || host_access.resume_after_failed_update(),
+        || host_access.shutdown(),
+      ).await;
+    }
+    async fn install_behind_broker_barrier(quiesce: Q, install: I, resume: R, shutdown: S) {
+      quiesce().await?;
+      match install() {
+        Ok(()) => { shutdown().await; }
+        Err(_) => { resume().await; }
+      }
+    }
+  `;
+  const reversibleBroker = `
+    async fn admit(&self, command: BrokerCommand) {
+      let admission = self.admission.lock().await;
+      if *admission != BrokerAdmission::Running { return Err(()); }
+      self.commands.try_send(command)?;
+    }
+    async fn run(&mut self) {
+      match command {
+        BrokerCommand::Quiesce { reply } => {
+          self.ensure_session().await?;
+          reply.send(());
+        }
+        BrokerCommand::ResumeAfterFailedUpdate { reply } => {
+          self.allow_session_start = false;
+          reply.send(());
+        }
+      }
+    }
+    async fn ensure_session(&mut self) {
+      if !self.allow_session_start {
+        return Err(BrokerClientError::UpdateRecovery);
+      }
+    }
+  `;
+  assert.ok(updaterTransitionIsSafe(reversibleUpdater, reversibleBroker));
+
+  const unsafeCases = [
+    [
+      "legacy shutdown-before-install boundary without the broker barrier",
+      legacy,
+      "",
+    ],
+    [
+      "legacy install before shutdown",
+      `async fn take_staged_and_restart() { staged.update.install(&staged.bytes); app.state::<HostAccess>().shutdown().await; }`,
+      "",
+    ],
+    [
+      "legacy comment decoy",
+      `async fn take_staged_and_restart() { staged.update.install(&staged.bytes); // app.state::<HostAccess>().shutdown().await\n }`,
+      "",
+    ],
+    [
+      "install before the broker barrier",
+      reversibleUpdater.replace(
+        "quiesce().await?;",
+        "install(); quiesce().await?;",
+      ),
+      reversibleBroker,
+    ],
+    [
+      "admission unlock before enqueue",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "self.commands.try_send(command)?;",
+        "drop(admission); self.commands.try_send(command)?;",
+      ),
+    ],
+    [
+      "quiesce acknowledgement before session pinning",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "self.ensure_session().await?;\n          reply.send(());",
+        "reply.send(());\n          self.ensure_session().await?;",
+      ),
+    ],
+    [
+      "resume acknowledgement before recovery gate",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "self.allow_session_start = false;\n          reply.send(());",
+        "reply.send(());\n          self.allow_session_start = false;",
+      ),
+    ],
+    [
+      "missing recovery gate",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "if !self.allow_session_start {\n        return Err(BrokerClientError::UpdateRecovery);\n      }",
+        "",
+      ),
+    ],
+  ];
+  for (const [name, updater, broker] of unsafeCases) {
+    assert.equal(updaterTransitionIsSafe(updater, broker), false, name);
+  }
+});
+
 test("the packaged desktop activates the signed updater feed", () => {
   assert.match(desktopCargo, /tauri-plugin-updater = "=[^"]+"/);
   assert.match(
@@ -826,26 +1369,9 @@ test("the packaged desktop activates the signed updater feed", () => {
   assert.match(desktopUpdater, /updater\.check\(\)\.await/);
   assert.match(desktopUpdater, /update\.download\(/);
   assert.doesNotMatch(desktopUpdater, /download_and_install/);
-  assert.match(desktopUpdater, /install_behind_broker_barrier\(/);
-  assert.match(
-    desktopUpdater,
-    /quiesce\(\)\.await\?;[\s\S]*match install\(\)[\s\S]*Ok\(\(\)\) => \{[\s\S]*shutdown\(\)\.await[\s\S]*Err\(install_error\) => \{[\s\S]*resume\(\)\.await/,
-  );
-  assert.match(
-    desktopUpdater,
-    /\|\| host_access\.quiesce_for_update\(\)[\s\S]*\|\| staged\.update\.install\(&staged\.bytes\)[\s\S]*\|\| host_access\.resume_after_failed_update\(\)[\s\S]*\|\| host_access\.shutdown\(\)/,
-  );
-  assert.match(
-    desktopBroker,
-    /if \*admission != BrokerAdmission::Running[\s\S]*self\.commands\.try_send\(command\)/,
-  );
-  assert.match(
-    desktopBroker,
-    /BrokerCommand::Quiesce \{ reply \} => \{[\s\S]*self\.ensure_session\(\)\.await/,
-  );
-  assert.match(
-    desktopBroker,
-    /BrokerCommand::ResumeAfterFailedUpdate \{ reply \} => \{[\s\S]*self\.allow_session_start = false/,
+  assert.ok(
+    updaterTransitionIsSafe(desktopUpdater, desktopBroker),
+    "updates must install behind the reversible broker barrier",
   );
   assert.match(desktopUpdater, /app\.restart\(\)/);
   assert.match(
