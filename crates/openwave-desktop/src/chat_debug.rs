@@ -23,8 +23,12 @@
 //! below returns provider credentials.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 use chrono::{DateTime, Utc};
 use openwave_core::event::{AgentEvent, SequencedEvent};
 use openwave_core::model::{Chat, Message, TurnRun};
@@ -133,32 +137,352 @@ const SECRET_KEY_SUFFIXES: &[&str] = &[
 /// token in a bug report, a false negative publishes a live key.
 #[must_use]
 pub(crate) fn scrub_credentials(input: &str) -> String {
+    let input = redact_private_key_blocks(input);
+    let input = redact_credential_urls(&input);
+    let input = redact_keyed_values(&input);
+    redact_intrinsic_tokens(&input)
+}
+
+/// Redact the complete scalar introduced by a credential key. Treating a
+/// keyed value as one token is unsafe: authorization schemes and quoted shell,
+/// JSON, or TOML values can all contain spaces and punctuation.
+fn redact_keyed_values(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    // The token that could name the value about to be read, if the separators
-    // since have all been "still the same key/value pair" characters.
-    let mut key: Option<String> = None;
+    let mut copied_through = 0;
+    let mut cursor = 0;
+
+    while cursor < input.len() {
+        let next = input[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a character boundary");
+        if !is_token_char(next) {
+            cursor += next.len_utf8();
+            continue;
+        }
+        let token_end = input[cursor..]
+            .find(|character| !is_token_char(character))
+            .map_or(input.len(), |offset| cursor + offset);
+        let key = input[cursor..token_end].to_ascii_lowercase();
+        if is_secret_key_name(&key) {
+            if let Some(value) = keyed_value(input, token_end, &key) {
+                if let Some(redacted) = redact_scalar(&key, &input[value.start..value.end]) {
+                    out.push_str(&input[copied_through..value.start]);
+                    out.push_str(&redacted);
+                    copied_through = value.end;
+                    cursor = value.end;
+                    continue;
+                }
+            }
+        }
+        cursor = token_end;
+    }
+
+    out.push_str(&input[copied_through..]);
+    out
+}
+
+#[derive(Clone, Copy)]
+struct ScalarRange {
+    start: usize,
+    end: usize,
+}
+
+fn keyed_value(input: &str, key_end: usize, key: &str) -> Option<ScalarRange> {
+    let mut cursor = key_end;
+    cursor = skip_horizontal_space(input, cursor);
+    cursor = skip_quote_delimiter(input, cursor);
+    cursor = skip_horizontal_space(input, cursor);
+    let delimiter = input[cursor..].chars().next()?;
+    if !matches!(delimiter, ':' | '=') {
+        return None;
+    }
+    cursor += delimiter.len_utf8();
+    cursor = skip_horizontal_space(input, cursor);
+
+    if input[cursor..].starts_with("\\\"") || input[cursor..].starts_with("\\'") {
+        let quote = input[cursor + 1..]
+            .chars()
+            .next()
+            .expect("escaped quote exists");
+        let start = cursor + 2;
+        let end = find_rendered_quote(input, start, quote).unwrap_or(input.len());
+        return Some(ScalarRange { start, end });
+    }
+    if matches!(input[cursor..].chars().next(), Some('"' | '\'')) {
+        let quote = input[cursor..].chars().next().expect("quote exists");
+        let start = cursor + quote.len_utf8();
+        let end = find_unescaped_quote(input, start, quote).unwrap_or(input.len());
+        return Some(ScalarRange { start, end });
+    }
+
+    let end = if delimiter == ':' || is_authorization_key(key) {
+        find_line_end(input, cursor)
+    } else {
+        input[cursor..]
+            .find(is_unquoted_value_boundary)
+            .map_or(input.len(), |offset| cursor + offset)
+    };
+    Some(ScalarRange { start: cursor, end })
+}
+
+fn skip_horizontal_space(input: &str, mut cursor: usize) -> usize {
+    while matches!(input[cursor..].chars().next(), Some(' ' | '\t')) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn skip_quote_delimiter(input: &str, cursor: usize) -> usize {
+    if input[cursor..].starts_with("\\\"") || input[cursor..].starts_with("\\'") {
+        cursor + 2
+    } else if matches!(input[cursor..].chars().next(), Some('"' | '\'')) {
+        cursor + 1
+    } else {
+        cursor
+    }
+}
+
+fn find_unescaped_quote(input: &str, start: usize, quote: char) -> Option<usize> {
+    let mut backslashes = 0;
+    for (offset, character) in input[start..].char_indices() {
+        if character == quote && backslashes % 2 == 0 {
+            return Some(start + offset);
+        }
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    None
+}
+
+/// Find the closing quote in text that has itself been escaped for rendering,
+/// such as `\"password\": \"value\"`. A quote preceded by three or more
+/// backslashes is content escaped inside that scalar, not its terminator.
+fn find_rendered_quote(input: &str, start: usize, quote: char) -> Option<usize> {
+    let mut backslashes = 0;
+    for (offset, character) in input[start..].char_indices() {
+        if character == quote && backslashes == 1 {
+            return Some(start + offset - 1);
+        }
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    None
+}
+
+fn find_line_end(input: &str, start: usize) -> usize {
+    let mut cursor = start;
+    while cursor < input.len() {
+        if input[cursor..].starts_with("\\n") || input[cursor..].starts_with("\\r") {
+            return cursor;
+        }
+        let character = input[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a character boundary");
+        if matches!(character, '\n' | '\r') {
+            return cursor;
+        }
+        cursor += character.len_utf8();
+    }
+    input.len()
+}
+
+const fn is_unquoted_value_boundary(character: char) -> bool {
+    // Unquoted `=` assignments end at shell whitespace or common collection
+    // punctuation. Values containing those characters need quotes; header and
+    // YAML-style `:` values are instead consumed through the line ending.
+    character.is_ascii_whitespace() || matches!(character, ',' | ';' | ')' | ']' | '}' | '"' | '\'')
+}
+
+fn redact_scalar(key: &str, value: &str) -> Option<String> {
+    if is_authorization_key(key) {
+        let trailing_start = value.trim_end_matches([' ', '\t']).len();
+        let (credential, trailing) = value.split_at(trailing_start);
+        let scheme_end = credential.find(char::is_whitespace);
+        if let Some(scheme_end) = scheme_end {
+            let scheme = &credential[..scheme_end];
+            let separator_end = credential[scheme_end..]
+                .find(|character: char| !character.is_whitespace())
+                .map_or(credential.len(), |offset| scheme_end + offset);
+            if is_preserved_authorization_scheme(scheme) && separator_end < credential.len() {
+                return Some(format!(
+                    "{}{}{}{}",
+                    scheme,
+                    &credential[scheme_end..separator_end],
+                    REDACTED,
+                    trailing
+                ));
+            }
+        }
+        return (!credential.is_empty()).then(|| format!("{REDACTED}{trailing}"));
+    }
+
+    (value.trim().len() >= MIN_KEYED_SECRET_LEN).then(|| REDACTED.to_owned())
+}
+
+fn is_secret_key_name(key: &str) -> bool {
+    SECRET_KEYS.contains(&key)
+        || SECRET_KEY_SUFFIXES
+            .iter()
+            .any(|suffix| key.ends_with(suffix))
+}
+
+fn is_authorization_key(key: &str) -> bool {
+    matches!(key, "authorization" | "proxy-authorization")
+}
+
+fn is_preserved_authorization_scheme(scheme: &str) -> bool {
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "bearer" | "basic" | "digest" | "negotiate" | "token"
+    )
+}
+
+fn redact_intrinsic_tokens(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(next) = rest.chars().next() {
         if is_token_char(next) {
             let end = rest.find(|c| !is_token_char(c)).unwrap_or(rest.len());
             let (token, tail) = rest.split_at(end);
-            if is_secret(token, key.as_deref()) {
+            if is_intrinsic_secret(token) {
                 out.push_str(REDACTED);
-                key = None;
             } else {
                 out.push_str(token);
-                key = Some(token.to_ascii_lowercase());
             }
             rest = tail;
         } else {
             out.push(next);
-            if !matches!(next, '"' | '\'' | ':' | '=' | ' ' | '\t' | '\\') {
-                key = None;
-            }
             rest = &rest[next.len_utf8()..];
         }
     }
     out
+}
+
+/// Remove complete PEM/OpenSSH/PGP private-key blocks before token scanning.
+/// Their base64 bodies have no vendor prefix, and JSON rendering may represent
+/// their newlines as `\n`, so line-based token heuristics cannot recognize them
+/// reliably. An unterminated block is redacted through EOF rather than risking
+/// disclosure of a damaged or partially copied key.
+fn redact_private_key_blocks(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    const BEGIN: &str = "-----BEGIN ";
+    const MARKER_END: &str = "-----";
+
+    while let Some(relative_begin) = input[cursor..].find(BEGIN) {
+        let begin = cursor + relative_begin;
+        let label_start = begin + BEGIN.len();
+        let line_end = find_line_end(input, label_start);
+        let Some(relative_label_end) = input[label_start..line_end].find(MARKER_END) else {
+            // A damaged private-key BEGIN marker must redact its body through
+            // EOF. A non-private marker still yields to a later valid key.
+            if input[label_start..line_end].contains("PRIVATE KEY") {
+                out.push_str(&input[cursor..begin]);
+                out.push_str(REDACTED);
+                return out;
+            }
+            out.push_str(&input[cursor..label_start]);
+            cursor = label_start;
+            continue;
+        };
+        let label_end = label_start + relative_label_end;
+        let label = &input[label_start..label_end];
+        let begin_end = label_end + MARKER_END.len();
+        if !label.contains("PRIVATE KEY") {
+            out.push_str(&input[cursor..begin_end]);
+            cursor = begin_end;
+            continue;
+        }
+
+        out.push_str(&input[cursor..begin]);
+        out.push_str(REDACTED);
+        let end_marker = format!("-----END {label}-----");
+        let Some(relative_end) = input[begin_end..].find(&end_marker) else {
+            return out;
+        };
+        cursor = begin_end + relative_end + end_marker.len();
+    }
+
+    out.push_str(&input[cursor..]);
+    out
+}
+
+/// Redact URLs whose authority embeds userinfo. Database, message-broker,
+/// proxy, and ordinary HTTP URLs all use this standard syntax for passwords or
+/// bearer tokens, and retaining the hostname is less important than making a
+/// copied connection string safe to share.
+fn redact_credential_urls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(relative_separator) = input[cursor..].find("://") {
+        let separator = cursor + relative_separator;
+        let scheme_start = input[..separator]
+            .rfind(|character: char| !is_url_scheme_char(character))
+            .map_or(0, |index| index + 1);
+        let scheme = &input[scheme_start..separator];
+        if scheme.is_empty()
+            || !scheme
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+        {
+            out.push_str(&input[cursor..separator + 3]);
+            cursor = separator + 3;
+            continue;
+        }
+
+        let url_end = find_url_end(input, separator + 3);
+        let candidate = &input[scheme_start..url_end];
+        let has_credentials = url::Url::parse(candidate)
+            .ok()
+            .is_some_and(|url| !url.username().is_empty() || url.password().is_some());
+        if has_credentials {
+            out.push_str(&input[cursor..scheme_start]);
+            out.push_str(REDACTED);
+        } else {
+            out.push_str(&input[cursor..url_end]);
+        }
+        cursor = url_end;
+    }
+
+    out.push_str(&input[cursor..]);
+    out
+}
+
+/// Find a URL boundary without mistaking brackets around an IPv6 authority
+/// host for surrounding prose delimiters.
+fn find_url_end(input: &str, authority_start: usize) -> usize {
+    let mut in_ipv6_host = false;
+    for (offset, character) in input[authority_start..].char_indices() {
+        match character {
+            '[' => in_ipv6_host = true,
+            ']' if in_ipv6_host => in_ipv6_host = false,
+            _ if !in_ipv6_host && is_url_boundary(character) => return authority_start + offset,
+            _ => {}
+        }
+    }
+    input.len()
+}
+
+const fn is_url_scheme_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+}
+
+const fn is_url_boundary(character: char) -> bool {
+    character.is_ascii_whitespace()
+        || matches!(
+            character,
+            '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '`' | '\\'
+        )
 }
 
 /// Whether a character continues the current token. `:` and `=` are excluded
@@ -169,33 +493,7 @@ const fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/' | '~')
 }
 
-fn is_secret(token: &str, key: Option<&str>) -> bool {
-    // An HTTP auth scheme word names the credential that follows it; redacting
-    // the word itself would consume the naming and leave the actual token in
-    // the clear. `Token` is a scheme in its own right (`Authorization: Token
-    // …`), and is also a key name below.
-    if matches!(
-        token.to_ascii_lowercase().as_str(),
-        "bearer" | "basic" | "digest" | "negotiate" | "token"
-    ) {
-        return false;
-    }
-    if token.len() >= MIN_KEYED_SECRET_LEN {
-        if let Some(key) = key {
-            // `Bearer <token>` / `Basic <token>`: the scheme word names the
-            // value the same way a JSON key does.
-            if key == "bearer"
-                || key == "basic"
-                || key == "digest"
-                || SECRET_KEYS.contains(&key)
-                || SECRET_KEY_SUFFIXES
-                    .iter()
-                    .any(|suffix| key.ends_with(suffix))
-            {
-                return true;
-            }
-        }
-    }
+fn is_intrinsic_secret(token: &str) -> bool {
     if SECRET_PREFIXES.iter().any(|prefix| {
         token.starts_with(prefix) && token.len() >= prefix.len() + MIN_PREFIXED_SECRET_TAIL
     }) {
@@ -280,9 +578,9 @@ fn render_header(
     let _ = writeln!(
         out,
         "This bundle contains the full conversation — every message, tool \
-         argument, tool result, and file path in this chat. API keys and \
-         other credential-shaped tokens are removed; nothing else is. Read \
-         it before sharing it.\n",
+         argument, tool result, and file path in this chat. Credential \
+         redaction is best-effort, including common tokens, credential URLs, \
+         and private-key blocks. Read the entire bundle before sharing it.\n",
     );
     let _ = writeln!(out, "## Chat\n");
     let _ = writeln!(out, "| Field | Value |");
@@ -760,7 +1058,270 @@ fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
     if !destination.is_absolute() {
         return Err("The save destination is invalid".to_owned());
     }
-    std::fs::write(destination, content).map_err(|_| "Could not write the debug bundle".to_owned())
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "The save destination is invalid".to_owned())?;
+    let filename = destination
+        .file_name()
+        .ok_or_else(|| "The save destination is invalid".to_owned())?;
+    let directory = Dir::open_ambient_dir(parent, ambient_authority())
+        .map_err(|_| "Could not open the selected folder".to_owned())?;
+    match directory.symlink_metadata(filename) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err("The selected destination is not a regular file".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not inspect the selected destination".to_owned()),
+    }
+
+    let temporary = format!(".openwave-debug-export-{}.tmp", Uuid::new_v4());
+    let result = (|| -> std::io::Result<()> {
+        #[cfg(windows)]
+        let mut file = create_private_windows_file(parent, &temporary)?;
+        #[cfg(not(windows))]
+        let mut file = {
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            directory.open_with(&temporary, &options)?
+        };
+        #[cfg(target_os = "macos")]
+        clear_macos_extended_acl(&file)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        directory.rename(&temporary, &directory, filename)?;
+        #[cfg(unix)]
+        directory.open(".")?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = directory.remove_file(&temporary);
+    }
+    result.map_err(|_| "Could not write the debug bundle".to_owned())
+}
+
+/// macOS inherits extended ACL entries even when the new file has mode 0600.
+/// Clear and verify them before sensitive content reaches the file.
+#[cfg(target_os = "macos")]
+fn clear_macos_extended_acl(file: &cap_std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let acl = unsafe { acl_init(1) };
+    if acl.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let status = unsafe { acl_set_fd_np(file.as_raw_fd(), acl, ACL_TYPE_EXTENDED) };
+    unsafe { acl_free(acl) };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if macos_file_has_extended_acl(file)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the selected filesystem did not clear inherited export ACLs",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_file_has_extended_acl(file: &cap_std::fs::File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENOENT) {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    let mut entry = std::ptr::null_mut();
+    let status = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    unsafe { acl_free(acl) };
+    match status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+#[cfg(target_os = "macos")]
+const ACL_FIRST_ENTRY: libc::c_int = 0;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+    fn acl_set_fd_np(fd: libc::c_int, acl: *mut libc::c_void, acl_type: libc::c_int)
+        -> libc::c_int;
+    fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> *mut libc::c_void;
+    fn acl_get_entry(
+        acl: *mut libc::c_void,
+        entry_id: libc::c_int,
+        entry: *mut *mut libc::c_void,
+    ) -> libc::c_int;
+}
+
+/// Create the temporary export with a protected DACL before any sensitive byte
+/// is written. `OW` is the Windows Owner Rights SID; the creator owns this new
+/// file, while LocalSystem and administrators retain recovery access.
+#[cfg(windows)]
+fn create_private_windows_file(parent: &Path, temporary: &str) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{FromRawHandle as _, RawHandle};
+
+    use windows_sys::Win32::Foundation::{
+        LocalFree, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_NONE,
+    };
+
+    let path: Vec<u16> = parent
+        .join(temporary)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: Windows owns the descriptor allocated by the conversion call;
+    // it remains live through CreateFileW and is released exactly once below.
+    unsafe {
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let handle = CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        );
+        let result = if handle == INVALID_HANDLE_VALUE {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(std::fs::File::from_raw_handle(handle as RawHandle))
+        };
+        LocalFree(descriptor);
+        let file = result?;
+        if !windows_file_has_private_dacl(&file)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the selected filesystem did not preserve the private export ACL",
+            ));
+        }
+        Ok(file)
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_has_private_dacl(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetAce, GetSecurityDescriptorControl, IsWellKnownSid, WinBuiltinAdministratorsSid,
+        WinCreatorOwnerRightsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: GetSecurityInfo owns the descriptor allocation. Every pointer
+    // read below is part of that descriptor and remains live until LocalFree.
+    unsafe {
+        let status = GetSecurityInfo(
+            file.as_raw_handle().cast(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+        let result = (|| -> std::io::Result<bool> {
+            let mut control = 0;
+            let mut revision = 0;
+            if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if control & SE_DACL_PROTECTED == 0 || dacl.is_null() || (*dacl).AceCount != 3 {
+                return Ok(false);
+            }
+
+            let mut allowed = [false; 3];
+            for index in 0..u32::from((*dacl).AceCount) {
+                let mut raw_ace = std::ptr::null_mut();
+                if GetAce(dacl, index, &mut raw_ace) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let ace = &*raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+                if u32::from(ace.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
+                    || ace.Header.AceFlags != 0
+                    || ace.Mask != FILE_ALL_ACCESS
+                {
+                    return Ok(false);
+                }
+                let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                let slot = if IsWellKnownSid(sid, WinLocalSystemSid) != 0 {
+                    0
+                } else if IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0 {
+                    1
+                } else if IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0 {
+                    2
+                } else {
+                    return Ok(false);
+                };
+                if allowed[slot] {
+                    return Ok(false);
+                }
+                allowed[slot] = true;
+            }
+            Ok(allowed.into_iter().all(|present| present))
+        })();
+        LocalFree(descriptor);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -987,6 +1548,27 @@ mod tests {
                 "Authorization: Token abcdef123456",
                 "Authorization: Token [redacted]",
             ),
+            (
+                "Authorization: Negotiate YIIGeAYGKwYBBQUCoIIGbDCCBmg=",
+                "Authorization: Negotiate [redacted]",
+            ),
+            (
+                "Authorization: ApiKey supersecretvalue",
+                "Authorization: [redacted]",
+            ),
+            (
+                "password=\"correct horse battery staple\"",
+                "password=\"[redacted]\"",
+            ),
+            ("secret=p@$$w0rd:with/slashes", "secret=[redacted]"),
+            (
+                r#"{\"proxy-authorization\": \"Negotiate opaque credential value\"}"#,
+                r#"{\"proxy-authorization\": \"Negotiate [redacted]\"}"#,
+            ),
+            (
+                r#"{\"password\": \"correct \\\"horse\\\" battery staple\"}"#,
+                r#"{\"password\": \"[redacted]\"}"#,
+            ),
             // Ordinary conversation and file paths are left alone: the chat
             // is the diagnostic.
             (
@@ -1011,6 +1593,132 @@ mod tests {
             "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
         );
         assert_eq!(scrub_credentials(&jwt), "[redacted]");
+    }
+
+    #[test]
+    fn private_key_blocks_and_credential_urls_are_redacted() {
+        for label in [
+            "PRIVATE KEY",
+            "RSA PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+        ] {
+            let begin = format!("-----BEGIN {label}-----");
+            let end = format!("-----END {label}-----");
+            let private_key = format!("before\n{begin}\nopaque-key-material\n{end}\nafter");
+            assert_eq!(
+                scrub_credentials(&private_key),
+                "before\n[redacted]\nafter",
+                "redacting {label}"
+            );
+        }
+
+        let begin = format!("-----BEGIN {} KEY-----", "OPENSSH PRIVATE");
+        let unterminated = format!("before\n{begin}\nopaque-key-material");
+        assert_eq!(scrub_credentials(&unterminated), "before\n[redacted]");
+
+        let escaped = r#"{"output":"-----BEGIN PRIVATE KEY-----\nopaque-key-material\n-----END PRIVATE KEY-----"}"#;
+        assert_eq!(scrub_credentials(escaped), r#"{"output":"[redacted]"}"#);
+
+        let malformed_then_private = "-----BEGIN CERTIFICATE\ntruncated\n-----BEGIN PRIVATE KEY-----\nLIVEPRIVATEKEYBODY\n-----END PRIVATE KEY-----";
+        assert_eq!(
+            scrub_credentials(malformed_then_private),
+            "-----BEGIN CERTIFICATE\ntruncated\n[redacted]"
+        );
+
+        let damaged_private = "-----BEGIN PRIVATE KEY\nLIVEPRIVATEKEYBODY";
+        assert_eq!(scrub_credentials(damaged_private), "[redacted]");
+
+        let password = "correct-horse-battery-staple";
+        let connection = format!("database=postgres://alice:{password}@db.example.test/openwave");
+        assert_eq!(scrub_credentials(&connection), "database=[redacted]");
+
+        let ipv4_connection = format!("database=postgres://alice:{password}@127.0.0.1/openwave");
+        assert_eq!(scrub_credentials(&ipv4_connection), "database=[redacted]");
+
+        let ipv6_connection = format!("database=postgres://alice:{password}@[::1]/openwave");
+        assert_eq!(scrub_credentials(&ipv6_connection), "database=[redacted]");
+
+        let token_url = "remote=https://ghp_abcdefghijklmnopqrstuvwxyz@github.com/openwave.git";
+        assert_eq!(scrub_credentials(token_url), "remote=[redacted]");
+
+        assert_eq!(
+            scrub_credentials("docs=https://example.test/reference"),
+            "docs=https://example.test/reference"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn debug_bundle_export_clears_inherited_macos_acl() {
+        use std::process::Command;
+
+        let directory = tempfile::tempdir().unwrap();
+        let acl =
+            "everyone allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit";
+        assert!(Command::new("chmod")
+            .args(["+a", acl, directory.path().to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+
+        let destination = directory.path().join("bundle.md");
+        write_bundle(&destination, b"private").unwrap();
+        let file = Dir::open_ambient_dir(directory.path(), ambient_authority())
+            .unwrap()
+            .open("bundle.md")
+            .unwrap();
+        assert!(!macos_file_has_extended_acl(&file).unwrap());
+    }
+
+    #[test]
+    fn debug_bundle_export_is_private_and_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("bundle.md");
+        write_bundle(&destination, b"first").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"first");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        write_bundle(&destination, b"replacement").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"replacement");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let file = std::fs::File::open(&destination).unwrap();
+            assert!(windows_file_has_private_dacl(&file).unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_bundle_export_rejects_destination_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.md");
+        let destination = directory.path().join("bundle.md");
+        std::fs::write(&target, b"private target").unwrap();
+        symlink(&target, &destination).unwrap();
+
+        assert!(write_bundle(&destination, b"replacement").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"private target");
     }
 
     /// The scrubber runs over the rendered document, not only over the
