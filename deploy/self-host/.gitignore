@@ -1,0 +1,3 @@
+# The operator's credential file. Never commit it; `.env` is already covered
+# by the repository-root .gitignore.
+tokens
