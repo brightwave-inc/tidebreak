@@ -33,7 +33,13 @@ pub struct ToolRegistry {
 #[derive(Clone)]
 struct RegisteredSpec {
     spec: ToolSpec,
-    validator: Option<jsonschema::Validator>,
+    validator: SchemaValidator,
+}
+
+#[derive(Clone)]
+enum SchemaValidator {
+    Compiled(jsonschema::Validator),
+    Invalid(Arc<str>),
 }
 
 impl RegisteredSpec {
@@ -56,18 +62,16 @@ impl RegisteredSpec {
                     .with_draft(draft)
                     .build(&spec.input_schema)
                 {
-                    Ok(validator) => Some(validator),
+                    Ok(validator) => SchemaValidator::Compiled(validator),
                     Err(error) => {
-                        // A bad advertised schema is the tool/server's bug, not
-                        // the model's. Bricking every call would break working
-                        // MCP servers, so compilation failures are observable
-                        // but fail open.
                         tracing::warn!(
                             tool = %spec.name,
                             %error,
-                            "tool argument schema could not be compiled; calls will proceed without schema validation"
+                            "tool argument schema could not be compiled; calls will be rejected"
                         );
-                        None
+                        SchemaValidator::Invalid(
+                            format!("advertised tool schema could not be compiled: {error}").into(),
+                        )
                     }
                 }
             }
@@ -75,20 +79,24 @@ impl RegisteredSpec {
                 tracing::warn!(
                     tool = %spec.name,
                     %error,
-                    "tool argument schema declares an unsupported dialect; calls will proceed without schema validation"
+                    "tool argument schema declares an unsupported dialect; calls will be rejected"
                 );
-                None
+                SchemaValidator::Invalid(
+                    format!("advertised tool schema is unsupported: {error}").into(),
+                )
             }
         };
         Self { spec, validator }
     }
 
     fn mismatch(&self, arguments: &Value) -> Option<String> {
-        self.validator
-            .as_ref()?
-            .validate(arguments)
-            .err()
-            .map(|error| error.to_string())
+        match &self.validator {
+            SchemaValidator::Compiled(validator) => validator
+                .validate(arguments)
+                .err()
+                .map(|error| error.to_string()),
+            SchemaValidator::Invalid(error) => Some(error.to_string()),
+        }
     }
 }
 
@@ -473,8 +481,9 @@ impl ToolRegistry {
     /// Validate arguments against the exact schema stored at registration.
     ///
     /// A returned string names the first failing instance path and constraint.
-    /// `None` means either that the arguments conform or that the tool supplied
-    /// an invalid schema, which remains a fail-open registration bug.
+    /// `None` means that the arguments conform. A tool with an invalid or
+    /// unsupported schema always returns a mismatch and therefore cannot cross
+    /// the dispatch boundary.
     #[must_use]
     pub fn schema_mismatch(&self, name: &str, arguments: &Value) -> Option<String> {
         let registered = match self.tools.get(name)? {
@@ -491,16 +500,20 @@ impl ToolRegistry {
     pub fn client_arguments_are_valid(&self, name: &str, arguments: &Value) -> bool {
         match self.tools.get(name) {
             Some(RegisteredTool::Client {
+                registered,
                 validate_arguments: Some(validate),
                 ..
-            }) => validate(arguments),
+            }) => registered.mismatch(arguments).is_none() && validate(arguments),
             Some(RegisteredTool::Client {
+                registered,
                 validate_arguments: None,
                 ..
-            }) => true,
+            }) => registered.mismatch(arguments).is_none(),
             Some(RegisteredTool::ForegroundClient {
-                validate_arguments, ..
-            }) => validate_arguments(arguments),
+                registered,
+                validate_arguments,
+                ..
+            }) => registered.mismatch(arguments).is_none() && validate_arguments(arguments),
             Some(RegisteredTool::Server { .. })
             | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => false,
@@ -533,6 +546,7 @@ impl ToolRegistry {
     #[must_use]
     pub fn sandbox_spawn_task(&self, name: &str, arguments: &Value) -> Option<String> {
         if !self.is_foreground_sandbox_spawn(name)
+            || self.schema_mismatch(name, arguments).is_some()
             || !validate_spawn_sandbox_agent_arguments(arguments)
         {
             return None;
@@ -557,7 +571,10 @@ impl ToolRegistry {
     /// Parse and validate one ordered foreground child wait.
     #[must_use]
     pub fn wait_for_agent_ids(&self, name: &str, arguments: &Value) -> Option<Vec<AgentRunId>> {
-        if !self.is_foreground_agent_wait(name) || !validate_wait_for_agents_arguments(arguments) {
+        if !self.is_foreground_agent_wait(name)
+            || self.schema_mismatch(name, arguments).is_some()
+            || !validate_wait_for_agents_arguments(arguments)
+        {
             return None;
         }
         serde_json::from_value::<WaitForAgentsArgs>(arguments.clone())
