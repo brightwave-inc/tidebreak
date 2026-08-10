@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/brightwave-inc/openwave/releases/latest"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
+  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
 </p>
 
 ---
@@ -83,8 +83,9 @@ PDFs under [`skills/`](skills) and [`plugins/`](plugins).
 OpenWave ships as a signed and notarized macOS app for **Apple Silicon**. Intel
 is paused while the product is in active development, and the release pipeline
 publishes one `aarch64` build ([`docs/releases.md`](docs/releases.md)). The
-[releases page](https://github.com/brightwave-inc/openwave/releases) carries the
-notes for each version.
+button above always resolves to the newest release; the
+[releases page](https://github.com/brightwave-inc/openwave/releases) has the
+notes and earlier versions.
 
 Every release is also published to the hosted download root, which is the
 authoritative source for artifact bytes and digests:
