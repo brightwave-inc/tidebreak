@@ -361,7 +361,11 @@ fn require_pinned_operation(
                 .operation_ids
                 .iter()
                 .any(|pinned| pinned == operation_id),
-            AppBinding::Folder(_) => false,
+            // A gateway binding pins operation ids too, but of an app only
+            // the gateway can execute. This surface dispatches to a local
+            // `rest_api` record, so a gateway pin must never admit a call to
+            // it — the relay is its own surface.
+            AppBinding::Folder(_) | AppBinding::GatewayOperations(_) => false,
         });
     if pinned {
         return Ok(());
@@ -390,7 +394,7 @@ fn require_pinned_folder(
                     && (!writes
                         || binding.access == openwave_core::local_app::FolderAccess::ReadWrite)
             }
-            AppBinding::Operations(_) => false,
+            AppBinding::Operations(_) | AppBinding::GatewayOperations(_) => false,
         });
     if pinned {
         return Ok(());
@@ -519,14 +523,20 @@ async fn require_app_grant(
         // a reconfigured connected app or a disconnected folder invalidates
         // the whole grant, failing closed to re-consent.
         if !current.grant_binding_current(binding) {
-            return Err(consent_required(match binding.app() {
-                Some(app) => format!(
-                    "connected app {app} was reconfigured after consent; the grant is \
-                     stale"
+            return Err(consent_required(match binding {
+                AppGrantBinding::Operations(binding) => format!(
+                    "connected app {} was reconfigured after consent; the grant is \
+                     stale",
+                    binding.app
                 ),
-                None => {
+                AppGrantBinding::Folder(_) => {
                     "a granted folder was disconnected after consent; the grant is stale".to_owned()
                 }
+                AppGrantBinding::GatewayOperations(binding) => format!(
+                    "gateway app {} no longer reads as it did at consent; the grant \
+                     is stale",
+                    binding.gateway_app
+                ),
             }));
         }
     }

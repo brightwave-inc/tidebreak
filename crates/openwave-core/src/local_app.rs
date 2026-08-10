@@ -8,7 +8,8 @@
 //!
 //! Each revision pairs an untrusted HTML bundle (bytes on disk, recorded here
 //! as length + digest) with a trusted, structurally validated manifest naming
-//! the connected-app operations and folders the app may call.
+//! the connected-app operations, folders, and gateway-app operations the app
+//! may call.
 
 use std::path::PathBuf;
 
@@ -52,6 +53,15 @@ pub const MAX_APP_NAME_CHARS: usize = 120;
 /// one. Duplicated here rather than imported because the manifest contract
 /// must not depend on server code.
 pub const MAX_OPERATION_ID_BYTES: usize = 128;
+/// Largest gateway connected-app id a gateway binding may name, in bytes.
+///
+/// The id is the gateway's own identifier for the app — opaque here, and
+/// deliberately not parsed as any particular identity shape: today's gateway
+/// mints UUIDs, and a manifest that pinned that assumption would break the
+/// day it mints anything else. The bound and charset only keep an id
+/// printable, loggable, and small enough to store beside the rest of the
+/// manifest.
+pub const MAX_GATEWAY_APP_ID_BYTES: usize = 128;
 
 /// Profile-data location of one immutable revision's bundle bytes.
 ///
@@ -196,9 +206,10 @@ pub struct CreateApp {
 }
 
 /// The durable consent object for one app: the granted binding set —
-/// `(app, operation_ids[])` per bound connected app, or `(folder, access)`
-/// per bound folder — with each bound connected app pinned to a fingerprint
-/// of its definition as it was configured at consent time.
+/// `(app, operation_ids[])` per bound connected app, `(folder, access)` per
+/// bound folder, or `(gateway_app, operation_ids[])` per bound gateway app —
+/// with each bound target pinned to a fingerprint of its definition as it
+/// stood at consent time.
 ///
 /// One grant per app, replaced wholesale by a fresh consent and deleted by
 /// revocation. The fingerprint is what keeps consent honest: a Settings edit
@@ -220,9 +231,10 @@ pub struct AppGrant {
 /// One granted binding: the capabilities the user consented to under one
 /// connected app, pinned to the definition that record carried at consent.
 ///
-/// Untagged, mirroring [`AppBinding`]: the variants differ in exactly one
-/// field name, and unknown fields refuse both shapes, so a persisted grant
-/// binding deserializes to exactly the vocabulary it was granted under.
+/// Untagged, mirroring [`AppBinding`]: the variants are told apart by the
+/// field naming their target (`app`, `folder`, `gateway_app`), and unknown
+/// fields refuse every shape, so a persisted grant binding deserializes to
+/// exactly the vocabulary it was granted under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AppGrantBinding {
@@ -230,16 +242,30 @@ pub enum AppGrantBinding {
     Operations(AppOperationsGrantBinding),
     /// `{ folder, access, fingerprint }` — granted folder access.
     Folder(AppFolderGrantBinding),
+    /// `{ gateway_app, operation_ids[], fingerprint }` — granted operations
+    /// of a connected app the model gateway holds.
+    GatewayOperations(AppGatewayOperationsGrantBinding),
 }
 
 impl AppGrantBinding {
-    /// The connected app the grant binding names, when it names one — a
-    /// folder grant binding names a broker root instead.
+    /// The locally configured connected app the grant binding names, when it
+    /// names one — a folder grant binding names a broker root and a gateway
+    /// grant binding names an app the gateway holds, neither of which is a
+    /// local record.
     #[must_use]
     pub fn app(&self) -> Option<ConnectedAppId> {
         match self {
             Self::Operations(binding) => Some(binding.app),
-            Self::Folder(_) => None,
+            Self::Folder(_) | Self::GatewayOperations(_) => None,
+        }
+    }
+
+    /// The gateway connected app the grant binding names, when it names one.
+    #[must_use]
+    pub fn gateway_app(&self) -> Option<&str> {
+        match self {
+            Self::GatewayOperations(binding) => Some(&binding.gateway_app),
+            Self::Operations(_) | Self::Folder(_) => None,
         }
     }
 
@@ -249,6 +275,7 @@ impl AppGrantBinding {
         match self {
             Self::Operations(binding) => binding.fingerprint,
             Self::Folder(binding) => binding.fingerprint,
+            Self::GatewayOperations(binding) => binding.fingerprint,
         }
     }
 }
@@ -282,6 +309,31 @@ pub struct AppFolderGrantBinding {
     /// SHA-256 fingerprint over the folder grant's canonical form — the root
     /// id and access level, never a path or display name. Persisted as
     /// lowercase hex.
+    #[serde(with = "hex_fingerprint")]
+    pub fingerprint: [u8; 32],
+}
+
+/// The granted operations of one connected app the model gateway holds.
+///
+/// The twin of [`AppGatewayOperationsBinding`], pinned like every other grant
+/// binding: consent named a gateway app *as the gateway described it*, so a
+/// re-ingested catalog or a re-pairing to a different gateway moves the
+/// fingerprint and re-prompts. Entitlement is deliberately outside the pin —
+/// it is the gateway's live predicate, re-evaluated per call, and losing it
+/// fails the call rather than revoking the consent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppGatewayOperationsGrantBinding {
+    /// Gateway connected-app id the consent names, matching the manifest
+    /// binding it covers.
+    pub gateway_app: String,
+    /// Operation ids the grant covers, as the gateway's catalog declares
+    /// them.
+    pub operation_ids: Vec<String>,
+    /// SHA-256 fingerprint over the gateway app's canonical form — the
+    /// gateway's origin, the app id, and the hash of the operation catalog it
+    /// declared at consent time, never a credential (none exists locally for
+    /// a gateway app). Persisted as lowercase hex.
     #[serde(with = "hex_fingerprint")]
     pub fingerprint: [u8; 32],
 }
@@ -331,6 +383,10 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
             BindingKey::Folder(binding.folder),
             BindingCapabilities::Folder,
         ),
+        AppGrantBinding::GatewayOperations(binding) => (
+            BindingKey::GatewayApp(&binding.gateway_app),
+            BindingCapabilities::Operations(&binding.operation_ids),
+        ),
     }))?;
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
 }
@@ -354,8 +410,8 @@ pub struct AppManifest {
 }
 
 /// The capabilities one binding contributes to a local app: declared REST
-/// operations of a `rest_api` connected app, or bounded access to a
-/// connected folder.
+/// operations of a `rest_api` connected app, bounded access to a connected
+/// folder, or declared operations of a connected app the model gateway holds.
 ///
 /// Untagged and closed: the shapes are distinguished by their differing
 /// field names, each variant refuses unknown fields, and a body mixing
@@ -368,16 +424,29 @@ pub enum AppBinding {
     Operations(AppOperationsBinding),
     /// `{ folder, access }` — bounded access to a connected folder.
     Folder(AppFolderBinding),
+    /// `{ gateway_app, operation_ids[] }` — declared operations of a
+    /// connected app the model gateway holds.
+    GatewayOperations(AppGatewayOperationsBinding),
 }
 
 impl AppBinding {
-    /// The connected app the binding names, when it names one — a folder
-    /// binding names a broker root instead.
+    /// The locally configured connected app the binding names, when it names
+    /// one — a folder binding names a broker root and a gateway binding names
+    /// an app the gateway holds, neither of which is a local record.
     #[must_use]
     pub fn app(&self) -> Option<ConnectedAppId> {
         match self {
             Self::Operations(binding) => Some(binding.app),
-            Self::Folder(_) => None,
+            Self::Folder(_) | Self::GatewayOperations(_) => None,
+        }
+    }
+
+    /// The gateway connected app the binding names, when it names one.
+    #[must_use]
+    pub fn gateway_app(&self) -> Option<&str> {
+        match self {
+            Self::GatewayOperations(binding) => Some(&binding.gateway_app),
+            Self::Operations(_) | Self::Folder(_) => None,
         }
     }
 }
@@ -395,6 +464,27 @@ pub struct AppOperationsBinding {
     /// document.
     #[schemars(description = "OpenAPI operationIds declared by the bound rest_api \
                        connected app's catalog.")]
+    pub operation_ids: Vec<String>,
+}
+
+/// The declared operations one connected app of the model gateway
+/// contributes to a local app.
+///
+/// The gateway app is named by the gateway's own connected-app id — the same
+/// identifier the gateway's shared-app manifests bind — and nothing about it
+/// resolves locally: no definition, no catalog, and no credential exists on
+/// this machine. A binding here is a network binding, executed by relaying to
+/// the gateway as the signed-in user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppGatewayOperationsBinding {
+    /// Id of the gateway connected app the operations belong to, opaque to
+    /// OpenWave.
+    #[schemars(description = "Id of the gateway connected app these operations belong to.")]
+    pub gateway_app: String,
+    /// Operation ids of the bound gateway app's declared catalog.
+    #[schemars(description = "Operation ids declared by the bound gateway connected \
+                       app's catalog.")]
     pub operation_ids: Vec<String>,
 }
 
@@ -496,6 +586,10 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
             BindingKey::Folder(binding.folder),
             BindingCapabilities::Folder,
         ),
+        AppBinding::GatewayOperations(binding) => (
+            BindingKey::GatewayApp(&binding.gateway_app),
+            BindingCapabilities::Operations(&binding.operation_ids),
+        ),
     }))?;
     let json =
         serde_json::to_value(manifest).map_err(|error| format!("unencodable manifest: {error}"))?;
@@ -509,11 +603,14 @@ pub fn validate_app_manifest(manifest: &AppManifest) -> Result<serde_json::Value
 }
 
 /// One binding's identity for the duplicate check: the connected app it
-/// binds, or the folder root it binds.
+/// binds, the folder root it binds, or the gateway app it binds. The three
+/// namespaces are disjoint by construction — a gateway app id that happens to
+/// spell a local record's id is still a different key.
 #[derive(PartialEq, Eq, Hash)]
-enum BindingKey {
+enum BindingKey<'a> {
     App(ConnectedAppId),
     Folder(HostRootId),
+    GatewayApp(&'a str),
 }
 
 /// One binding's capability list, by vocabulary, for the shared grammar check.
@@ -523,16 +620,17 @@ enum BindingCapabilities<'a> {
 }
 
 /// The binding grammar shared by manifests and grants: no duplicate connected
-/// apps or folders (one binding per record or root, whichever vocabulary),
-/// and every operation id within the ingest module's `operationId` grammar. A
-/// folder binding has no list to validate — its access level is closed by
-/// type.
+/// apps, folders, or gateway apps (one binding per record, root, or gateway
+/// app, whichever vocabulary), and every operation id within the ingest
+/// module's `operationId` grammar. A folder binding has no list to validate —
+/// its access level is closed by type.
 ///
 /// The grammar here is structural only; the catalog membership check for
 /// operation ids belongs to the host layers that resolve ids (the
-/// `create_app` door, grant computation, the invoke gate).
+/// `create_app` door, grant computation, the invoke gate), and for a gateway
+/// app the gateway resolves both the app and its catalog.
 fn validate_binding_set<'a>(
-    bindings: impl Iterator<Item = (BindingKey, BindingCapabilities<'a>)>,
+    bindings: impl Iterator<Item = (BindingKey<'a>, BindingCapabilities<'a>)>,
 ) -> Result<(), String> {
     let mut keys = std::collections::HashSet::new();
     for (key, capabilities) in bindings {
@@ -545,6 +643,23 @@ fn validate_binding_set<'a>(
             BindingKey::Folder(folder) => {
                 if keys.contains(&key) {
                     return Err(format!("duplicate binding for folder {folder}"));
+                }
+            }
+            BindingKey::GatewayApp(gateway_app) => {
+                // The id is the gateway's, so it is bounded and kept
+                // printable rather than parsed: OpenWave never interprets it.
+                if gateway_app.is_empty()
+                    || gateway_app.len() > MAX_GATEWAY_APP_ID_BYTES
+                    || !gateway_app.bytes().all(|byte| byte.is_ascii_graphic())
+                {
+                    return Err(format!(
+                        "gateway app id {gateway_app:?} must be 1 to \
+                         {MAX_GATEWAY_APP_ID_BYTES} bytes of printable, non-whitespace \
+                         ASCII"
+                    ));
+                }
+                if keys.contains(&key) {
+                    return Err(format!("duplicate binding for gateway app {gateway_app}"));
                 }
             }
         }
@@ -739,6 +854,118 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    /// The gateway vocabulary joins the same untagged, closed grammar: its
+    /// shape parses to its own arm, mixing it with a local app-keyed shape
+    /// matches nothing, its id lives in its own namespace for the duplicate
+    /// check, and its grant twin round-trips with the pinned fingerprint.
+    #[test]
+    fn gateway_bindings_parse_closed_and_keep_their_own_namespace() {
+        use serde_json::json;
+
+        let app = ConnectedAppId::new();
+        let gateway_app = "0f6d2f6a-1f0d-4a0e-9f6a-6f9d1d2f3a4b";
+        let binding: AppBinding = serde_json::from_value(
+            json!({ "gateway_app": gateway_app, "operation_ids": ["listIssues"] }),
+        )
+        .unwrap();
+        let AppBinding::GatewayOperations(gateway) = &binding else {
+            panic!("a gateway shape must parse as a gateway binding");
+        };
+        assert_eq!(gateway.gateway_app, gateway_app);
+        // A gateway binding names no local record; it names the gateway's.
+        assert!(binding.app().is_none());
+        assert_eq!(binding.gateway_app(), Some(gateway_app));
+
+        // Closed on every edge: a mixed shape, a bare id, and an unknown
+        // field all refuse.
+        for body in [
+            json!({ "gateway_app": gateway_app, "app": app, "operation_ids": [] }),
+            json!({ "gateway_app": gateway_app, "operation_ids": [], "extra": true }),
+            json!({ "gateway_app": gateway_app }),
+        ] {
+            assert!(
+                serde_json::from_value::<AppBinding>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
+
+        // The id grammar is bounded and printable, and its operation ids obey
+        // the same grammar the local operations arm does.
+        let manifest = |gateway_app: &str, operation_ids: &[&str]| AppManifest {
+            name: "Org issues".into(),
+            bindings: vec![AppBinding::GatewayOperations(AppGatewayOperationsBinding {
+                gateway_app: gateway_app.to_owned(),
+                operation_ids: operation_ids.iter().map(|id| (*id).to_owned()).collect(),
+            })],
+        };
+        assert!(validate_app_manifest(&manifest(gateway_app, &["listIssues"])).is_ok());
+        for bad_id in ["", "has space", &"x".repeat(MAX_GATEWAY_APP_ID_BYTES + 1)] {
+            assert!(
+                validate_app_manifest(&manifest(bad_id, &[])).is_err(),
+                "{bad_id:?}"
+            );
+        }
+        assert!(validate_app_manifest(&manifest(gateway_app, &["bad id"])).is_err());
+        assert!(
+            validate_app_manifest(&AppManifest {
+                name: "Twice".into(),
+                bindings: vec![
+                    AppBinding::GatewayOperations(AppGatewayOperationsBinding {
+                        gateway_app: gateway_app.to_owned(),
+                        operation_ids: Vec::new(),
+                    }),
+                    AppBinding::GatewayOperations(AppGatewayOperationsBinding {
+                        gateway_app: gateway_app.to_owned(),
+                        operation_ids: Vec::new(),
+                    }),
+                ],
+            })
+            .is_err(),
+            "duplicate gateway-app bindings are refused"
+        );
+        // The namespaces are disjoint: a gateway id that spells a local
+        // record's id binds a different thing, and the two coexist.
+        assert!(validate_app_manifest(&AppManifest {
+            name: "Both".into(),
+            bindings: vec![
+                AppBinding::Operations(AppOperationsBinding {
+                    app,
+                    operation_ids: vec!["listIssues".into()],
+                }),
+                AppBinding::GatewayOperations(AppGatewayOperationsBinding {
+                    gateway_app: app.to_string(),
+                    operation_ids: vec!["listIssues".into()],
+                }),
+            ],
+        })
+        .is_ok());
+
+        // The grant twin round-trips with its pinned fingerprint, keeps the
+        // untagged discrimination, and refuses the unpinned shape.
+        let fingerprint = "ef".repeat(32);
+        let granted: AppGrantBinding = serde_json::from_value(json!({
+            "gateway_app": gateway_app,
+            "operation_ids": ["listIssues"],
+            "fingerprint": fingerprint,
+        }))
+        .unwrap();
+        assert!(matches!(granted, AppGrantBinding::GatewayOperations(_)));
+        assert!(granted.app().is_none());
+        assert_eq!(granted.gateway_app(), Some(gateway_app));
+        assert_eq!(granted.fingerprint(), [0xef; 32]);
+        assert!(serde_json::from_value::<AppGrantBinding>(
+            json!({ "gateway_app": gateway_app, "operation_ids": [] })
+        )
+        .is_err());
+        // A local operations grant never reads as a gateway grant, whichever
+        // way the ids happen to spell.
+        let local: AppGrantBinding = serde_json::from_value(
+            json!({ "app": app, "operation_ids": [], "fingerprint": fingerprint }),
+        )
+        .unwrap();
+        assert!(local.gateway_app().is_none());
     }
 
     /// The folder vocabulary joins the same untagged, closed grammar: its

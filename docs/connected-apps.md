@@ -80,6 +80,13 @@ SHA-256 over base URL + OpenAPI document hash + credential *reference* +
 placement. Rotating the credential value behind the same reference does not
 invalidate consent; repointing the reference does.
 
+A manifest may also bind `{ gateway_app, operation_ids[] }` — an app the
+model gateway holds, named by the gateway's own id (record 7). It is not a
+connected-app record and nothing about it resolves locally, so it keys off
+its own namespace, carries its own canonical fingerprint form, and is refused
+by the authoring door until the gateway roster, consent, and relay surfaces
+exist.
+
 The consent sheet leads with the app's display name ("Sentry") and lists
 pinned capabilities under it — a legibility improvement over leading with
 mounted tool names.
