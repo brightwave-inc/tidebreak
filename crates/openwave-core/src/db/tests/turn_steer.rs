@@ -1442,3 +1442,88 @@ async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
     );
     assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
 }
+
+/// The transcript keys each invocation to the message that made it.
+///
+/// Two authorities feed one projection — the turn's row for its opening
+/// message, a steer's row for its own — so a join that crossed them would show
+/// a reader skills the message never named, and would send a retry out under
+/// the wrong list.
+#[tokio::test]
+async fn transcript_attributes_invoked_skills_to_the_message_that_named_them() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn_with_message_context(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "draft the deck",
+            &[],
+            &[],
+            &["documents".to_owned()],
+            false,
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        other => panic!("unexpected turn acceptance: {other:?}"),
+    };
+    let steer_id = crate::id::TurnSteerId::new();
+    accepted_steer(
+        store
+            .accept_turn_steer_with_message_context(
+                steer_id,
+                turn.id,
+                chat.id,
+                "make it shorter",
+                &["presentations".to_owned()],
+                false,
+                false,
+            )
+            .await
+            .unwrap(),
+    );
+    let claim_at = Utc::now();
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            lease_token,
+            claim_at,
+            claim_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    store
+        .apply_turn_steer(turn.id, lease_token, steer_id, 1, None, &[], Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    let by_message: std::collections::HashMap<_, _> = transcript
+        .message_invoked_skills
+        .iter()
+        .map(|invoked| (invoked.message_id, invoked.skills.clone()))
+        .collect();
+    let opening = transcript
+        .messages
+        .iter()
+        .find(|message| message.content == "draft the deck")
+        .expect("opening message");
+    let steered = transcript
+        .messages
+        .iter()
+        .find(|message| message.content == "make it shorter")
+        .expect("steer message");
+    assert_eq!(by_message.get(&opening.id), Some(&vec!["documents".into()]));
+    assert_eq!(
+        by_message.get(&steered.id),
+        Some(&vec!["presentations".into()])
+    );
+    // A message that named nothing contributes no entry at all, so the renderer
+    // can treat presence as meaning.
+    assert_eq!(by_message.len(), 2);
+}

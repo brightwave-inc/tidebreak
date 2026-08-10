@@ -629,4 +629,27 @@ describe("retryableTurn", () => {
     expect(turn?.invokedSkills).toEqual(["pdf-documents"]);
     expect(turn?.voiceInputUsed).toBe(true);
   });
+
+  // The message being resent is the newest one, which after a steer is the
+  // guidance rather than the opening prompt. Taking the turn's list here would
+  // resend one message's text under a different message's skills.
+  it("prefers the resent message's own skills over the turn's", () => {
+    const turn = retryableTurn([
+      { id: "u1", role: "user", text: "draft the deck" },
+      {
+        id: "u2",
+        role: "user",
+        text: "make it shorter",
+        invokedSkills: ["presentations"],
+      },
+      {
+        id: "f1",
+        role: "turn_failure",
+        category: "transient",
+        invokedSkills: ["documents"],
+      },
+    ]);
+    expect(turn?.text).toBe("make it shorter");
+    expect(turn?.invokedSkills).toEqual(["presentations"]);
+  });
 });
