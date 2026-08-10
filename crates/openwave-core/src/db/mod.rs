@@ -2309,6 +2309,14 @@ impl Store for DbStore {
         Ok(())
     }
 
+    async fn delete_setting(&self, key: &str) -> Result<()> {
+        entities::setting::Entity::delete_by_id(key.to_string())
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(())
+    }
+
     async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
         ops::conversation::append_event(self, chat_id, event).await
     }

@@ -827,6 +827,24 @@ pub(crate) async fn reprovision(
         .await
 }
 
+/// Delete the sticky provisioned row, compare-and-swap style: the delete
+/// lands only if the row still holds `expected_current` — the URL the user's
+/// disconnect confirmation actually named. A row that changed in between
+/// refuses rather than deletes, because the consent on record was given
+/// against a different state. Callers serialize the read-check-write under
+/// the pairing lock; this check is the belt to that suspender.
+///
+/// The OS authority is untouched by design: resolution precedence means an
+/// MDM-asserted gateway still wins after the row underneath is gone.
+pub(crate) async fn deprovision(store: &dyn Store, expected_current: &str) -> Result<()> {
+    if provisioned_url(store).await?.as_deref() != Some(expected_current) {
+        return Err(AgentError::config(
+            "the gateway managing this profile changed while disconnecting; nothing was changed",
+        ));
+    }
+    store.delete_setting(SETTING_KEY).await
+}
+
 /// The provisioned gateway URL currently on record, if readable.
 ///
 /// Unreadable stored state reads as `None`, not as an error: [`provision`]
@@ -945,6 +963,31 @@ mod tests {
             .await
             .is_err());
         assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+    }
+
+    /// Deprovision shares reprovision's CAS discipline: it deletes only the
+    /// row its confirmation named, refuses one that moved, and leaves the
+    /// profile open (never misconfigured) once the row is gone.
+    #[tokio::test]
+    async fn deprovision_deletes_only_the_row_the_confirmation_named() {
+        let (store, _directory) = test_store().await;
+        provision(&*store, "https://corp.gateway").await.unwrap();
+
+        let error = deprovision(&*store, "https://other.example")
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("changed while disconnecting"));
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+
+        deprovision(&*store, "https://corp.gateway/").await.unwrap();
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert!(!policy.managed && !policy.misconfigured);
+        assert!(store.get_setting(SETTING_KEY).await.unwrap().is_none());
+
+        // With no row left, any expectation refuses rather than pretends.
+        assert!(deprovision(&*store, "https://corp.gateway/").await.is_err());
     }
 
     #[tokio::test]

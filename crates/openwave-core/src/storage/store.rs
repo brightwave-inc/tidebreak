@@ -2653,6 +2653,9 @@ pub trait Store: Send + Sync {
     /// Write a setting.
     async fn set_setting(&self, key: &str, value: &Value) -> Result<()>;
 
+    /// Delete a setting. Deleting an absent key is not an error.
+    async fn delete_setting(&self, key: &str) -> Result<()>;
+
     /// Append an event for the legacy direct-execution path.
     ///
     /// Sequence numbers are per-chat and monotonic (starting at 1). This method

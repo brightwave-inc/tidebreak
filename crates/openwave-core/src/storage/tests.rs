@@ -1076,6 +1076,10 @@ impl Store for MemStore {
             .insert(key.to_string(), value.clone());
         Ok(())
     }
+    async fn delete_setting(&self, key: &str) -> Result<()> {
+        self.settings.lock().unwrap().remove(key);
+        Ok(())
+    }
     async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
         let mut events = self.events.lock().unwrap();
         let seq = events.iter().filter(|(id, _)| *id == chat_id).count() as i64 + 1;

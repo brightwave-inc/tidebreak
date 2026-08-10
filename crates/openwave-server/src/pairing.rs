@@ -236,6 +236,108 @@ pub async fn register_replacing_pairing(
     Ok(PendingRegistration::Registered)
 }
 
+/// What a deprovision link would act on, for the shell's dialog.
+///
+/// A probe, not a lock: the shell reads this to decide which dialog to show,
+/// and [`deprovision_provisioned_gateway`] re-checks everything under the
+/// pairing lock before deleting anything.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeprovisionTarget {
+    /// The sticky provisioned row: user-consented state the shell may
+    /// confirm-and-disconnect. Carries the normalized base URL the
+    /// confirmation must name — and the CAS anchors to.
+    Provisioned {
+        /// The normalized base URL this profile is provisioned to.
+        gateway_url: String,
+    },
+    /// The OS (MDM) asserts the gateway: never locally removable.
+    OsManaged {
+        /// The asserted base URL, when the artifact is readable.
+        gateway_url: Option<String>,
+    },
+    /// Nothing to disconnect: the open, bring-your-own-key experience.
+    Unprovisioned,
+    /// An authority asserts management but its state cannot be honored —
+    /// there is no URL a confirmation could name, so the shell surfaces a
+    /// repair message instead of a disconnect.
+    Misconfigured {
+        /// Whether the broken authority is the OS (MDM) tier.
+        source_is_os: bool,
+    },
+}
+
+/// Resolve what an `openwave://deprovision` link would act on.
+pub async fn deprovision_target(handle: &PairingHandle) -> Result<DeprovisionTarget> {
+    let policy = handle.gateway.policy().await?;
+    let source_is_os = policy.source == crate::managed_policy::ManagedPolicySource::Os;
+    Ok(if !policy.managed {
+        DeprovisionTarget::Unprovisioned
+    } else if source_is_os {
+        DeprovisionTarget::OsManaged {
+            gateway_url: policy.gateway_url,
+        }
+    } else {
+        match policy.gateway_url {
+            Some(gateway_url) => DeprovisionTarget::Provisioned { gateway_url },
+            None => DeprovisionTarget::Misconfigured { source_is_os },
+        }
+    })
+}
+
+/// Delete the provisioned row the user's native confirmation named, and
+/// retire everything that stood on it: the pending pairing, any in-flight
+/// sign-in, and the stored gateway session (best-effort revoke, unconditional
+/// local clear).
+///
+/// The consent ceremony mirrors provisioning's: as the browser sign-in is
+/// the consent to provision, the shell's native confirmation — which named
+/// `expected_current` — is the consent to deprovision, and the delete is
+/// compare-and-swap on exactly that URL under the same pairing lock as every
+/// other policy write. An OS (MDM) assertion refuses as the non-replaceable
+/// [`PairingError::Conflict`]; a row that moved since the confirmation
+/// refuses as the replaceable one, naming what the row now holds; a profile
+/// already unmanaged is a raced success, not an error.
+pub async fn deprovision_provisioned_gateway(
+    handle: &PairingHandle,
+    expected_current: &str,
+) -> Result<(), PairingError> {
+    let _guard = PAIRING.lock().await;
+    let policy = handle.gateway.policy().await?;
+    if policy.source == crate::managed_policy::ManagedPolicySource::Os {
+        return Err(PairingError::Conflict {
+            provisioned_url: policy.gateway_url.unwrap_or_default(),
+            replaceable: false,
+        });
+    }
+    if !policy.managed {
+        // The row vanished between the confirmation and this call (a
+        // profile reset): what the user asked for is already true.
+        return Ok(());
+    }
+    match policy.gateway_url {
+        Some(existing) if existing != expected_current => {
+            return Err(PairingError::Conflict {
+                provisioned_url: existing,
+                replaceable: true,
+            })
+        }
+        Some(_) => {}
+        None => {
+            return Err(PairingError::Other(AgentError::config(
+                "this device's managed policy is misconfigured; contact your administrator",
+            )))
+        }
+    }
+    managed_policy::deprovision(&*handle.store, expected_current).await?;
+    handle.gateway.abandon_sign_in_and_pairing().await;
+    // Retire against the newly-open policy. A revoke that fails must not
+    // resurrect the disconnect — the local clear inside is unconditional and
+    // the server-side session dies at refresh-token expiry — so only a store
+    // read could error here, and that is worth surfacing.
+    handle.gateway.retire_session_for_current_policy().await?;
+    Ok(())
+}
+
 /// Provision the profile a finished sign-in consented to.
 ///
 /// Called from the sign-in exchange task with a session already minted for
@@ -881,6 +983,191 @@ mod tests {
         assert_eq!(
             info.servers[0].diagnostic.as_deref(),
             Some(MANAGED_DISABLED_DIAGNOSTIC)
+        );
+    }
+
+    /// The disconnect's whole write: the CAS'd delete lands, resolution
+    /// returns the open experience, and the parked pairing an earlier link
+    /// left behind is dropped so the gate has nothing to stand on.
+    #[tokio::test]
+    async fn a_deprovision_deletes_the_row_and_drops_the_pending_pairing() {
+        let (store, _directory) = test_store().await;
+        let (handle, mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&*store, "https://managed.invalid/")
+            .await
+            .unwrap();
+        gateway
+            .register_pending_pairing("https://parked.invalid/".to_string(), mcp.clone(), None)
+            .await;
+
+        assert_eq!(
+            deprovision_target(&handle).await.unwrap(),
+            DeprovisionTarget::Provisioned {
+                gateway_url: "https://managed.invalid/".to_string()
+            }
+        );
+        deprovision_provisioned_gateway(&handle, "https://managed.invalid/")
+            .await
+            .unwrap();
+
+        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        assert!(!policy.managed && !policy.misconfigured);
+        assert!(store
+            .get_setting("managed_policy_v1")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(gateway.pending_pairing_url().await, None);
+        assert_eq!(
+            deprovision_target(&handle).await.unwrap(),
+            DeprovisionTarget::Unprovisioned
+        );
+    }
+
+    /// An OS (MDM) assertion refuses disconnection outright — the probe says
+    /// so and the write path refuses the same way — and a sticky row parked
+    /// underneath survives untouched.
+    #[tokio::test]
+    async fn a_deprovision_refuses_an_os_asserted_gateway() {
+        struct OsAsserted;
+
+        impl crate::managed_policy::OsPolicySource for OsAsserted {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some("https://mdm.invalid/".to_string()))
+            }
+        }
+
+        let (store, _directory) = test_store().await;
+        managed_policy::provision(&*store, "https://sticky.invalid/")
+            .await
+            .unwrap();
+        let mcp = Arc::new(McpRuntime::new(
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            Arc::new(TestSecrets::default()),
+            Arc::new(NoGateway),
+            Arc::new(OsAsserted),
+        ));
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            test_secrets(),
+            Arc::new(OsAsserted),
+        );
+        let handle = PairingHandle::new(store.clone(), mcp, gateway);
+
+        assert_eq!(
+            deprovision_target(&handle).await.unwrap(),
+            DeprovisionTarget::OsManaged {
+                gateway_url: Some("https://mdm.invalid/".to_string())
+            }
+        );
+        for expected in ["https://mdm.invalid/", "https://sticky.invalid/"] {
+            let error = deprovision_provisioned_gateway(&handle, expected)
+                .await
+                .err()
+                .unwrap();
+            match &error {
+                PairingError::Conflict {
+                    provisioned_url,
+                    replaceable: false,
+                } => assert_eq!(provisioned_url, "https://mdm.invalid/"),
+                other => panic!("expected the non-replaceable conflict, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            managed_policy::provisioned_url(&*store).await.unwrap(),
+            Some("https://sticky.invalid/".to_string()),
+            "an MDM refusal must not consume the sticky row underneath"
+        );
+    }
+
+    /// The compare-and-swap the confirmation rests on, in the delete
+    /// direction: a row that moved since the dialog named it refuses —
+    /// naming what the row now holds — and deletes nothing; a row that
+    /// vanished entirely is a raced success.
+    #[tokio::test]
+    async fn a_deprovision_refuses_a_row_that_moved_and_tolerates_one_that_vanished() {
+        let (store, _directory) = test_store().await;
+        let (handle, _mcp, _gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&*store, "https://managed.invalid/")
+            .await
+            .unwrap();
+
+        let error = deprovision_provisioned_gateway(&handle, "https://elsewhere.invalid/")
+            .await
+            .err()
+            .unwrap();
+        match &error {
+            PairingError::Conflict {
+                provisioned_url,
+                replaceable: true,
+            } => assert_eq!(provisioned_url, "https://managed.invalid/"),
+            other => panic!("expected the replaceable conflict, got {other:?}"),
+        }
+        assert_eq!(
+            managed_policy::provisioned_url(&*store).await.unwrap(),
+            Some("https://managed.invalid/".to_string())
+        );
+
+        store.delete_setting("managed_policy_v1").await.unwrap();
+        deprovision_provisioned_gateway(&handle, "https://managed.invalid/")
+            .await
+            .unwrap();
+    }
+
+    /// Disconnecting retires the stored session the way a re-pair retires a
+    /// superseded one: revoked at the gateway it was minted by, and gone
+    /// locally. Composes with sign-out — which deliberately does not
+    /// deprovision — so the sign-out-first path ends in the same open state.
+    #[tokio::test]
+    async fn a_deprovision_retires_the_stored_session() {
+        let (base, revoked) = serve_revocable_gateway().await;
+        let gateway_url = format!("{base}/");
+        let (store, _directory) = test_store().await;
+        managed_policy::provision(&*store, &gateway_url).await.unwrap();
+        let secrets = test_secrets();
+        let mcp = Arc::new(McpRuntime::new(
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            Arc::new(TestSecrets::default()),
+            Arc::new(NoGateway),
+            Arc::new(NoOsPolicy),
+        ));
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            Arc::new(NoOsPolicy),
+        );
+        let handle = PairingHandle::new(store.clone(), mcp, gateway);
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": gateway_url,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_disconnect",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        crate::connectors::CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+
+        deprovision_provisioned_gateway(&handle, &gateway_url)
+            .await
+            .unwrap();
+
+        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+        assert!(
+            revoked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body.contains("mg_rt_disconnect")),
+            "the session's refresh token must be revoked at the gateway"
+        );
+        assert!(
+            !crate::connectors::has_stored_credentials(&*secrets).await,
+            "the keychain session must not survive the disconnect"
         );
     }
 }
