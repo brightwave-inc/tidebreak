@@ -7,18 +7,24 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use openwave_core::NetworkPolicy;
 use openwave_egress::{DomainPattern, EgressDestination};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::Instant;
 
 use crate::{CodeExecutionError, PACKAGE_MANAGER_DOMAINS};
 
 const MAX_CONNECT_HEADERS: usize = 16 * 1024;
+const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One execution-scoped broker. Dropping it closes the listener and every
 /// tunnel, so network authority cannot outlive the command that received it.
@@ -57,6 +63,15 @@ impl Drop for LocalEgressBroker {
 }
 
 async fn serve(listener: TcpListener, policy: NetworkPolicy) {
+    serve_with_permits(
+        listener,
+        policy,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+    )
+    .await;
+}
+
+async fn serve_with_permits(listener: TcpListener, policy: NetworkPolicy, permits: Arc<Semaphore>) {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -64,8 +79,14 @@ async fn serve(listener: TcpListener, policy: NetworkPolicy) {
                 let Ok((stream, peer)) = accepted else {
                     break;
                 };
+                let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                    tracing::debug!(%peer, "local egress broker connection cap reached");
+                    drop(stream);
+                    continue;
+                };
                 let policy = policy.clone();
                 connections.spawn(async move {
+                    let _permit = permit;
                     if let Err(error) = handle_connection(stream, &policy).await {
                         tracing::debug!(%peer, %error, "local egress broker connection ended");
                     }
@@ -77,7 +98,8 @@ async fn serve(listener: TcpListener, policy: NetworkPolicy) {
 }
 
 async fn handle_connection(mut client: TcpStream, policy: &NetworkPolicy) -> Result<(), io::Error> {
-    let request = match read_connect_request(&mut client).await {
+    let request = match read_connect_request_with_timeout(&mut client, CONNECT_HEADER_TIMEOUT).await
+    {
         Ok(request) => request,
         Err(reason) => {
             audit(None, None, false, reason);
@@ -125,15 +147,31 @@ async fn handle_connection(mut client: TcpStream, policy: &NetworkPolicy) -> Res
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
     let mut upstream = upstream;
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
-    Ok(())
+    relay_bidirectional(&mut client, &mut upstream, TUNNEL_IDLE_TIMEOUT).await
 }
 
+#[derive(Debug)]
 struct ConnectRequest {
     authority: String,
 }
 
-async fn read_connect_request(stream: &mut TcpStream) -> Result<ConnectRequest, &'static str> {
+async fn read_connect_request_with_timeout<S>(
+    stream: &mut S,
+    timeout: Duration,
+) -> Result<ConnectRequest, &'static str>
+where
+    S: AsyncRead + Unpin,
+{
+    match tokio::time::timeout(timeout, read_connect_request(stream)).await {
+        Ok(result) => result,
+        Err(_) => Err("CONNECT headers timed out"),
+    }
+}
+
+async fn read_connect_request<S>(stream: &mut S) -> Result<ConnectRequest, &'static str>
+where
+    S: AsyncRead + Unpin,
+{
     let mut bytes = Vec::with_capacity(1024);
     let mut buffer = [0_u8; 1024];
     loop {
@@ -148,6 +186,9 @@ async fn read_connect_request(stream: &mut TcpStream) -> Result<ConnectRequest, 
             return Err("CONNECT request ended before its headers");
         }
         bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > MAX_CONNECT_HEADERS {
+            return Err("CONNECT headers exceed the size limit");
+        }
         if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
@@ -168,6 +209,107 @@ async fn read_connect_request(stream: &mut TcpStream) -> Result<ConnectRequest, 
     Ok(ConnectRequest {
         authority: authority.to_owned(),
     })
+}
+
+async fn relay_bidirectional<C, U>(
+    client: &mut C,
+    upstream: &mut U,
+    idle_timeout: Duration,
+) -> io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    let (client_reader, client_writer) = tokio::io::split(client);
+    let (upstream_reader, upstream_writer) = tokio::io::split(upstream);
+    let (activity, mut latest_activity) = tokio::sync::watch::channel(Instant::now());
+    let client_to_upstream = relay_direction(
+        client_reader,
+        upstream_writer,
+        idle_timeout,
+        activity.clone(),
+    );
+    let upstream_to_client =
+        relay_direction(upstream_reader, client_writer, idle_timeout, activity);
+    tokio::pin!(client_to_upstream, upstream_to_client);
+
+    let mut activity_open = true;
+    let mut client_to_upstream_open = true;
+    let mut upstream_to_client_open = true;
+    let idle = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle);
+
+    while client_to_upstream_open || upstream_to_client_open {
+        tokio::select! {
+            () = &mut idle => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "egress tunnel was idle for too long",
+                ));
+            }
+            changed = latest_activity.changed(), if activity_open => {
+                match changed {
+                    Ok(()) => {
+                        idle.as_mut().reset(*latest_activity.borrow_and_update() + idle_timeout);
+                    }
+                    Err(_) => activity_open = false,
+                }
+            }
+            result = &mut client_to_upstream, if client_to_upstream_open => {
+                result?;
+                client_to_upstream_open = false;
+            }
+            result = &mut upstream_to_client, if upstream_to_client_open => {
+                result?;
+                upstream_to_client_open = false;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn relay_direction<R, W>(
+    mut reader: R,
+    mut writer: W,
+    timeout: Duration,
+    activity: tokio::sync::watch::Sender<Instant>,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return shutdown_with_timeout(&mut writer, timeout).await;
+        }
+        activity.send_replace(Instant::now());
+        write_all_with_timeout(&mut writer, &buffer[..read], timeout).await?;
+        activity.send_replace(Instant::now());
+    }
+}
+
+async fn write_all_with_timeout<W>(
+    writer: &mut W,
+    bytes: &[u8],
+    timeout: Duration,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    tokio::time::timeout(timeout, writer.write_all(bytes))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "egress tunnel write timed out"))?
+}
+
+async fn shutdown_with_timeout<W>(writer: &mut W, timeout: Duration) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    tokio::time::timeout(timeout, writer.shutdown())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "egress tunnel shutdown timed out"))?
 }
 
 fn parse_authority(authority: &str) -> Option<(String, u16)> {
@@ -367,5 +509,153 @@ mod tests {
         assert!(String::from_utf8(response)
             .unwrap()
             .starts_with("HTTP/1.1 403"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_connect_headers_time_out() {
+        let (mut client, mut broker_side) = tokio::io::duplex(256);
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\n")
+            .await
+            .unwrap();
+
+        let reason = read_connect_request_with_timeout(&mut broker_side, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert_eq!(reason, "CONNECT headers timed out");
+    }
+
+    #[tokio::test]
+    async fn oversized_connect_headers_are_rejected() {
+        let (mut client, mut broker_side) = tokio::io::duplex(MAX_CONNECT_HEADERS + 1024);
+        client
+            .write_all(&vec![b'a'; MAX_CONNECT_HEADERS + 1])
+            .await
+            .unwrap();
+
+        let reason = read_connect_request(&mut broker_side).await.unwrap_err();
+
+        assert_eq!(reason, "CONNECT headers exceed the size limit");
+    }
+
+    #[tokio::test]
+    async fn broker_closes_connections_above_its_concurrency_cap() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let permits = Arc::new(Semaphore::new(1));
+        let task = tokio::spawn(serve_with_permits(
+            listener,
+            NetworkPolicy::Open,
+            Arc::clone(&permits),
+        ));
+
+        let mut occupying = TcpStream::connect(address).await.unwrap();
+        occupying
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while permits.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let mut excess = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(read, 0);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_idle_tunnel_is_closed() {
+        let (mut client_side, _client_peer) = tokio::io::duplex(256);
+        let (mut upstream_side, _upstream_peer) = tokio::io::duplex(256);
+
+        let error = relay_bidirectional(
+            &mut client_side,
+            &mut upstream_side,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "egress tunnel was idle for too long");
+    }
+
+    #[tokio::test]
+    async fn half_close_allows_the_reverse_direction_to_finish() {
+        let (mut client, mut broker_client) = tokio::io::duplex(256);
+        let (mut broker_upstream, mut upstream) = tokio::io::duplex(256);
+        let relay = tokio::spawn(async move {
+            relay_bidirectional(
+                &mut broker_client,
+                &mut broker_upstream,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        client.write_all(b"ping").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut request = Vec::new();
+        upstream.read_to_end(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+
+        upstream.write_all(b"pong").await.unwrap();
+        upstream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(&response, b"pong");
+
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn backpressured_write_does_not_block_reverse_traffic() {
+        let (mut client, mut broker_client) = tokio::io::duplex(1);
+        let (mut broker_upstream, mut upstream) = tokio::io::duplex(1);
+        let relay = tokio::spawn(async move {
+            relay_bidirectional(
+                &mut broker_client,
+                &mut broker_upstream,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        client.write_all(b"ab").await.unwrap();
+        upstream.write_all(b"R").await.unwrap();
+
+        let mut reverse = [0_u8; 1];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut reverse))
+            .await
+            .expect("reverse traffic stalled behind the backpressured write")
+            .unwrap();
+        assert_eq!(&reverse, b"R");
+
+        let mut forward = [0_u8; 2];
+        upstream.read_exact(&mut forward).await.unwrap();
+        assert_eq!(&forward, b"ab");
+
+        client.shutdown().await.unwrap();
+        upstream.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
