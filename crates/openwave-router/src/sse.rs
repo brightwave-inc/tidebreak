@@ -126,20 +126,15 @@ pub fn safe_http_error_redacting(
     sensitive_values: &[&str],
 ) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
-    let error = parsed
-        .as_ref()
-        .map(|value| value.get("error").unwrap_or(value));
-    let raw_code = error
-        .and_then(|error| error.get("type").or_else(|| error.get("code")))
-        .and_then(serde_json::Value::as_str);
+    let raw_code = parsed.as_ref().and_then(provider_error_code);
     let code = raw_code
         .filter(|code| safe_error_code(code) && !contains_sensitive_value(code, sensitive_values));
     let message = raw_code
         .is_none_or(safe_error_code)
         .then(|| {
-            error
-                .and_then(|error| error.get("message"))
-                .and_then(serde_json::Value::as_str)
+            parsed
+                .as_ref()
+                .and_then(provider_error_message)
                 .and_then(|message| safe_error_message(message, sensitive_values))
         })
         .flatten();
@@ -153,6 +148,69 @@ pub fn safe_http_error_redacting(
         result.push_str(&message);
     }
     result
+}
+
+/// Extract the stable enum-like identifier from provider JSON.
+///
+/// OpenAI's public API normally nests this under `error`, while its adjacent
+/// gateways also use top-level and `detail` envelopes. Check every candidate
+/// independently: a present-but-null `code` must not hide a useful `type`.
+fn provider_error_code(value: &serde_json::Value) -> Option<&str> {
+    let error = value.get("error").filter(|error| error.is_object());
+    let detail = value.get("detail").filter(|detail| detail.is_object());
+    [error, detail, Some(value)]
+        .into_iter()
+        .flatten()
+        .flat_map(|container| [container.get("type"), container.get("code")])
+        .flatten()
+        .find_map(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .filter(|code| safe_error_code(code))
+        })
+}
+
+/// Prefer the provider's specific `code` for behavioral classification, then
+/// fall back to its broader `type`.
+fn provider_error_classification_code(value: &serde_json::Value) -> Option<&str> {
+    let error = value.get("error").filter(|error| error.is_object());
+    let detail = value.get("detail").filter(|detail| detail.is_object());
+    [error, detail, Some(value)]
+        .into_iter()
+        .flatten()
+        .flat_map(|container| [container.get("code"), container.get("type")])
+        .flatten()
+        .find_map(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .filter(|code| safe_error_code(code))
+        })
+}
+
+/// Extract a human diagnostic from the bounded provider body.
+///
+/// In addition to the canonical `{ "error": { "message": ... } }` shape,
+/// OpenAI-facing services return top-level `message`, string `error`, string
+/// `detail`, and OAuth-style `error_description` fields. Only this selected
+/// scalar is considered; arrays and arbitrary JSON are never rendered.
+fn provider_error_message(value: &serde_json::Value) -> Option<&str> {
+    let error = value.get("error");
+    let detail = value.get("detail");
+    [
+        error.and_then(|error| error.get("message")),
+        value.get("message"),
+        detail.and_then(|detail| detail.get("message")),
+        detail.filter(|detail| detail.is_string()),
+        value.get("error_description"),
+        error.filter(|error| error.is_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(serde_json::Value::as_str)
 }
 
 /// Classify an error delivered *inside* a 200 stream — the in-band counterpart
@@ -373,16 +431,13 @@ pub fn classify_provider_error_redacting(
     use openwave_core::error::{AgentError, ProviderFailure};
 
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
-    let error = parsed
+    let code = parsed
         .as_ref()
-        .map(|value| value.get("error").unwrap_or(value));
-    let code = error
-        .and_then(|error| error.get("code").or_else(|| error.get("type")))
-        .and_then(serde_json::Value::as_str)
+        .and_then(provider_error_classification_code)
         .unwrap_or("");
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(serde_json::Value::as_str)
+    let message = parsed
+        .as_ref()
+        .and_then(provider_error_message)
         .unwrap_or("");
     let safe = || safe_http_error_redacting(provider, status, body, sensitive_values);
 
@@ -597,6 +652,54 @@ mod tests {
         assert_eq!(
             safe_http_error("gemini", 400, secret),
             "gemini returned 400"
+        );
+    }
+
+    #[test]
+    fn safe_http_error_handles_openai_adjacent_error_envelopes() {
+        assert_eq!(
+            safe_http_error(
+                "openai",
+                400,
+                r#"{"error":{"message":"Unsupported parameter: temperature","type":"invalid_request_error","param":"temperature","code":null}}"#,
+            ),
+            "openai returned 400 (invalid_request_error): Unsupported parameter: temperature"
+        );
+        assert_eq!(
+            safe_http_error(
+                "openai",
+                400,
+                r#"{"detail":"Model gpt-example is not available for this account"}"#,
+            ),
+            "openai returned 400: Model gpt-example is not available for this account"
+        );
+        assert_eq!(
+            safe_http_error(
+                "openai",
+                400,
+                r#"{"error":"invalid_request","error_description":"The requested model is unavailable"}"#,
+            ),
+            "openai returned 400 (invalid_request): The requested model is unavailable"
+        );
+    }
+
+    #[test]
+    fn safe_http_error_redacts_fallback_openai_messages() {
+        assert_eq!(
+            safe_http_error(
+                "openai",
+                400,
+                r#"{"detail":"Request rejected for bearer sk-secret"}"#,
+            ),
+            "openai returned 400"
+        );
+        assert_eq!(
+            safe_http_error(
+                "openai",
+                400,
+                r#"{"detail":[{"msg":"echoed request must not be rendered"}]}"#,
+            ),
+            "openai returned 400"
         );
     }
 
