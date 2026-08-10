@@ -162,22 +162,20 @@ Coverage percentage is not a goal and is not tracked. Confidence is.
 
 ## Let CI do the heavy verification
 
-During active greenfield development, pull requests use a deliberately fast
-default gate. Full validation remains automatic after merge and on scheduled or
-manual runs. Add `full-ci` when a change warrants the heavyweight
-platform-neutral lanes before merge. Re-running the full workspace suite before
-every push buys little and costs minutes on each iteration. Run a cheap relevant
-subset locally, push early, and let the configured lanes work while you keep
-going.
+Every platform-neutral lane a change can reach runs on its pull request: a
+green PR means the same commits stay green on `main`. There is no opt-in
+label for heavier validation — the former `full-ci` label is gone and does
+nothing. Re-running the full workspace suite locally before every push buys
+little and costs minutes on each iteration. Run a cheap relevant subset
+locally, push early, and let the lanes work while you keep going.
 
 The change-scope gate in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 is the whole rule, and it is coarse on purpose:
 
 - Any changed file outside `*.md`, `docs/`, `assets/`, `.githooks/`, `LICENSE`,
   `NOTICE`, and `crates/openwave-desktop/ui/` marks the change **Rust** —
-  including `Cargo.toml` and `Cargo.lock`. That always runs rustfmt. With
-  `full-ci`, and automatically outside pull requests, it also runs clippy
-  (`--all-targets -D warnings`) and the desktop tests. Every Cargo invocation
+  including `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy
+  (`--all-targets -D warnings`), and the desktop tests. Every Cargo invocation
   passes `--locked`, so a lockfile drift fails there too.
 - A Rust change also marks the **workspace** scope, which adds the headless
   workspace tests plus the PostgreSQL turn-state lane, unless every changed file
@@ -186,12 +184,11 @@ is the whole rule, and it is coarse on purpose:
   cannot see such a change. `ui/src/generated/` is not covered by the carve-out
   because its staleness check lives in `openwave-server`.
 - Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
-  `pnpm test` and `pnpm build` together during full CI.
-- Branch protection requires the pull-request jobs directly. Heavy jobs report
-  a successful skip on ordinary pull requests and become active when the
-  `full-ci` label is added. The always-running change detector rejects
-  impossible narrower-scope combinations before conditional jobs consume them.
-  There is no serial aggregate wrapper after the slowest job.
+  `pnpm test` and `pnpm build`.
+- Branch protection requires the pull-request jobs directly. A lane outside a
+  change's scope reports a successful skip. The always-running change detector
+  rejects impossible narrower-scope combinations before conditional jobs
+  consume them. There is no serial aggregate wrapper after the slowest job.
 - The native Windows lane is **parked**, along with the release workflow's
   Windows build — see [`docs/deferred.md`](docs/deferred.md). `windows-check`
   and `prepare_windows`/`build_windows` are each gated behind a literal `false`
@@ -200,17 +197,10 @@ is the whole rule, and it is coarse on purpose:
   has been declared unsupported, so a change that touches Windows-gated code
   still deserves the same care — it just gets no CI signal right now.
 
-An ordinary pull request's heavy-job skips are the intended fast path, backed by
-full validation on `main`. For risky or boundary-crossing changes, add
-`full-ci` and wait for the applicable platform-neutral lanes. Run a cheap subset
-for fast local feedback on what you actually touched — `cargo check -p <crate>`,
-the one test module you changed, `tsc` — and push.
-
-**The real trap is confusing the fast gate with full validation.** When a PR has
-`full-ci`, judge by whether every applicable platform-neutral job is present and
-passed, not by the absence of red. A conflicting PR runs nothing but trivial policy
-checks; rebase it before believing its status. `gh pr checks <n>` shows the
-truth.
+**The remaining trap is a PR that ran nothing.** A conflicting PR runs nothing
+but trivial policy checks; rebase it before believing its status. Judge a PR by
+whether every applicable lane is present and passed, not by the absence of red.
+`gh pr checks <n>` shows the truth.
 
 Enable auto-merge (`gh pr merge <n> --squash --auto --delete-branch`) so a PR
 lands the moment its lanes go green instead of waiting for you to come back.

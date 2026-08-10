@@ -156,11 +156,11 @@ jobs:
             exit 0
           fi
 
-          # `rust` gates rustfmt plus the full-CI lanes that cover every crate:
-          # clippy and the openwave-desktop tests. `workspace` gates the full-CI
-          # lanes that cover everything *except* openwave-desktop, so it can
-          # stay false when a change cannot reach them. `workspace` implies
-          # `rust`; the gate below asserts that.
+          # `rust` gates rustfmt plus the lanes that cover every crate: clippy
+          # and the openwave-desktop tests. `workspace` gates the lanes that
+          # cover everything *except* openwave-desktop, so it can stay false
+          # when a change cannot reach them. `workspace` implies `rust`; the
+          # gate below asserts that.
           rust=false
           ui=false
           workspace=false
@@ -223,9 +223,9 @@ jobs:
     name: supply-chain advisories (cargo-deny)
     needs: changes
     # cargo-deny resolves the crate graph and reads the RustSec database; it
-    # compiles nothing, so this runs on every Rust-scoped pull request instead
-    # of hiding behind `full-ci`. The weekly scheduled run re-checks an
-    # unchanged lockfile against newly published advisories.
+    # compiles nothing, so it runs on every Rust-scoped pull request. The
+    # weekly scheduled run re-checks an unchanged lockfile against newly
+    # published advisories.
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -274,9 +274,9 @@ jobs:
   lint:
     name: clippy
     needs: changes
-    # Keep the default greenfield PR gate fast. Add `full-ci` for pre-merge
-    # validation; pushes to main and scheduled/manual runs always pay this cost.
-    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    # Every scope-relevant lane runs on every pull request: green PR checks
+    # must mean the same commits stay green on main.
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -332,7 +332,7 @@ jobs:
   desktop:
     name: desktop test
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -375,10 +375,10 @@ jobs:
     name: Windows cargo check
     needs: changes
     # A native runner keeps the Windows SDK and MSVC available for native
-    # dependencies such as ring and SQLite. Native Windows validation is an
-    # independent pre-merge choice: `full-ci` does not opt a pull request into
-    # this long-running lane. Add `windows-ci` when the change reaches a Windows
-    # boundary; main and scheduled/manual runs retain the automatic backstop.
+    # dependencies such as ring and SQLite. Native Windows validation stays an
+    # explicit pre-merge choice even though every other lane runs by default:
+    # add `windows-ci` when the change reaches a Windows boundary; main and
+    # scheduled/manual runs retain the automatic backstop.
     #
     # The leading `false` parks the whole lane while Windows packaging is paused
     # (see docs/deferred.md). The rest of the condition is the live gating
@@ -468,7 +468,7 @@ jobs:
   test:
     name: test
     needs: changes
-    if: ${{ needs.changes.outputs.workspace == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    if: ${{ needs.changes.outputs.workspace == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -511,7 +511,7 @@ jobs:
   postgres:
     name: postgres state machine
     needs: changes
-    if: ${{ needs.changes.outputs.workspace == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    if: ${{ needs.changes.outputs.workspace == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -561,7 +561,7 @@ jobs:
   ui:
     name: desktop UI
     needs: changes
-    if: ${{ needs.changes.outputs.ui == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    if: ${{ needs.changes.outputs.ui == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

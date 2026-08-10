@@ -432,23 +432,21 @@ request title** and **Pull request body**.
 Branch protection on `main` requires the individual CI jobs, not an aggregate
 wrapper — there is none. The required contexts are `change scope`, `semantic PR
 title`, `release policy`, `secret scan (gitleaks)`, `rustfmt`, `clippy`,
-`desktop test`, `test`, `postgres state machine`, and `desktop UI`. Only the
-first five run on an ordinary pull request; the compile-heavy lanes (`clippy`,
-`desktop test`, `test`, `postgres state machine`, `desktop UI`) are opt-in
-behind the `full-ci` label and otherwise report a successful skip, which is what
-lets a required check pass without running. That is the deliberate fast gate
-described in [`CLAUDE.md`](../CLAUDE.md), backed by full validation on every
-Rust-scoped push to `main` and on the weekly scheduled run — not a claim that
-PostgreSQL state-machine coverage gates every merge. Keep both sets required so
+`desktop test`, `test`, `postgres state machine`, and `desktop UI`. Every lane
+a change's scope can reach runs on the pull request itself; a lane outside the
+scope reports a successful skip, which is what lets a required check pass
+without running. Green PR checks are full platform-neutral validation — see
+[`CLAUDE.md`](../CLAUDE.md) — re-backed by the same lanes on every Rust-scoped
+push to `main` and on the weekly scheduled run. Keep the whole set required so
 the skip-reporting stays wired up, and add any new always-running lane to the
 list.
 
-`Windows cargo check` is intentionally separate from the required contexts and
-from `full-ci`. It runs automatically for Rust-scoped pushes to `main`, weekly
-schedules, and manual dispatches, while pull requests opt in with `windows-ci`
-when they touch a native Windows boundary. Keep it non-required so ordinary and
-`full-ci` pull requests do not wait for long-running native platform coverage;
-the post-merge and scheduled runs remain the backstop.
+`Windows cargo check` is intentionally separate from the required contexts. It
+runs automatically for Rust-scoped pushes to `main`, weekly schedules, and
+manual dispatches, while pull requests opt in with `windows-ci` when they touch
+a native Windows boundary. Keep it non-required so pull requests do not wait
+for long-running native platform coverage; the post-merge and scheduled runs
+remain the backstop.
 
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.
