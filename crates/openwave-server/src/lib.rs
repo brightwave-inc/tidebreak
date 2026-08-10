@@ -17,6 +17,7 @@
 //! `OPENWAVE_LISTEN_ADDR`. The desktop profile refuses one — see
 //! [`Config::bind_addr`].
 
+mod agent_control_tools;
 mod agent_run_scratch_reaper;
 mod approval_judge;
 mod approvals;
@@ -1346,6 +1347,12 @@ fn agent_deps(
             source_store.clone(),
         )))
         .with(Box::new(create_app))
+        .with(Box::new(agent_control_tools::ResumeAgentTool::new(
+            source_store.clone(),
+        )))
+        .with(Box::new(agent_control_tools::CancelAgentTool::new(
+            source_store.clone(),
+        )))
         .with(Box::new(task_plan_tool::UpdateTaskPlanTool::new(
             source_store.clone(),
         )))

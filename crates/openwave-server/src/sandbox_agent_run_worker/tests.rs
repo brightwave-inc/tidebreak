@@ -3131,3 +3131,82 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
         "the resumed request should carry the guidance in its task text"
     );
 }
+
+/// The parent model can act on a check-in itself: resume with guidance, or
+/// cancel outright — the same transitions the run panel drives, as tools.
+#[tokio::test]
+async fn parent_tools_resume_and_cancel_a_checked_in_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = sandbox_chat();
+    store.create_chat(&chat).await.unwrap();
+    let provider = Arc::new(WebSearchThenFinalProvider::default());
+    let worker = SandboxAgentRunWorker::new(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        AgentConfig {
+            model: "sandbox-model".into(),
+            max_steps: 8,
+            ..AgentConfig::default()
+        },
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let spawn = CallId::new();
+    let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
+    admit_sandbox(&store, chat.id, spawn, "Produce a document.").await;
+    spend_the_cadence(&store, id, chat.id, 7).await;
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::CheckedIn(id)
+    );
+
+    let ctx = openwave_core::ToolCtx::new_legacy_workspace(chat.id, None, dir.path().join("ws"));
+    let resume = crate::agent_control_tools::ResumeAgentTool::new(store.clone());
+    let output = openwave_core::Tool::execute(
+        &resume,
+        &ctx,
+        serde_json::json!({"agent_id": id, "guidance": "Wrap it up."}),
+    )
+    .await
+    .unwrap();
+    assert!(!output.is_error, "resume should succeed: {output:?}");
+    let resumed = store.get_agent_run(id).await.unwrap().unwrap();
+    assert_eq!(resumed.status, AgentRunStatus::RetryWait);
+    assert_eq!(resumed.checkin_grants, 1);
+
+    // Resuming a run that is not paused is a readable refusal, not an error.
+    let again = openwave_core::Tool::execute(&resume, &ctx, serde_json::json!({"agent_id": id}))
+        .await
+        .unwrap();
+    assert!(again.is_error);
+
+    // Drive the run to its next pause, then cancel it from the parent's side.
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::Completed(id)
+    );
+    let cancel = crate::agent_control_tools::CancelAgentTool::new(store.clone());
+    let output = openwave_core::Tool::execute(
+        &cancel,
+        &ctx,
+        serde_json::json!({"agent_id": id, "reason": "no longer needed"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !output.is_error,
+        "cancelling a finished run reads as already finished: {output:?}"
+    );
+}
