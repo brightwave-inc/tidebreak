@@ -46,6 +46,111 @@ function workflowJob(source, name) {
   return source.slice(start, end);
 }
 
+function stripRustCommentsAndStrings(source) {
+  const masked = [...source];
+  const erase = (start, end) => {
+    for (let index = start; index < end; index += 1) {
+      if (masked[index] !== "\n") masked[index] = " ";
+    }
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    if (source.startsWith("//", index)) {
+      const end = source.indexOf("\n", index);
+      erase(index, end === -1 ? source.length : end);
+      index = end === -1 ? source.length : end;
+    } else if (source.startsWith("/*", index)) {
+      const end = source.indexOf("*/", index + 2);
+      erase(index, end === -1 ? source.length : end + 2);
+      index = end === -1 ? source.length : end + 1;
+    } else if (source[index] === '"' || source[index] === "'") {
+      const quote = source[index];
+      let end = index + 1;
+      while (end < source.length) {
+        if (source[end] === "\\") end += 2;
+        else if (source[end++] === quote) break;
+      }
+      erase(index, end);
+      index = end - 1;
+    }
+  }
+  return masked.join("");
+}
+
+function rustDelimitedBody(source, marker) {
+  const stripped = stripRustCommentsAndStrings(source);
+  const match = stripped.match(marker);
+  assert.ok(match, `missing Rust body for ${marker}`);
+  const start = match.index + match[0].length;
+  const open = stripped.indexOf("{", start);
+  assert.notEqual(open, -1, `missing opening brace for ${marker}`);
+  let depth = 1;
+  for (let index = open + 1; index < stripped.length; index += 1) {
+    if (stripped[index] === "{") depth += 1;
+    if (stripped[index] === "}" && --depth === 0) {
+      return stripped.slice(open + 1, index);
+    }
+  }
+  throw new Error(`unbalanced Rust body for ${marker}`);
+}
+
+function rustFunctionBody(source, name) {
+  return rustDelimitedBody(source, new RegExp(`\\b(?:async\\s+)?fn\\s+${name}\\b`));
+}
+
+function hasOrderedUniqueTokens(body, tokens) {
+  let previous = -1;
+  return tokens.every((token) => {
+    const position = body.indexOf(token);
+    if (position === -1 || position <= previous || body.indexOf(token, position + token.length) !== -1) {
+      return false;
+    }
+    previous = position;
+    return true;
+  });
+}
+
+function updaterTransitionIsSafe(updater, broker) {
+  const restart = rustFunctionBody(updater, "take_staged_and_restart");
+  const install = "staged.update.install(&staged.bytes)";
+  const legacySafe = hasOrderedUniqueTokens(restart, [
+    "app.state::<HostAccess>().shutdown().await",
+    install,
+  ]);
+  const reversibleMarker = /\b(?:async\s+)?fn\s+install_behind_broker_barrier\b/;
+  const reversibleSafe = reversibleMarker.test(stripRustCommentsAndStrings(updater)) && (() => {
+    const barrier = rustFunctionBody(updater, "install_behind_broker_barrier");
+    const quiesce = "host_access.quiesce_for_update().await?";
+    const resume = "host_access.resume_after_failed_update().await";
+    const shutdown = "host_access.shutdown().await";
+    const barrierOrdered =
+      hasOrderedUniqueTokens(barrier, [quiesce, install, shutdown]) &&
+      hasOrderedUniqueTokens(barrier, [quiesce, install, resume]);
+    const admit = rustFunctionBody(broker, "admit");
+    const quiesceArm = rustDelimitedBody(broker, /BrokerCommand::Quiesce\s*\{\s*reply\s*\}\s*=>/);
+    const resumeArm = rustDelimitedBody(
+      broker,
+      /BrokerCommand::ResumeAfterFailedUpdate\s*\{\s*reply\s*\}\s*=>/,
+    );
+    const session = rustFunctionBody(broker, "ensure_session");
+    const safe = (
+      barrierOrdered &&
+      !admit.includes("drop(admission)") &&
+      hasOrderedUniqueTokens(admit, [
+        "BrokerAdmission::Running",
+        "self.commands.try_send(command)",
+      ]) &&
+      hasOrderedUniqueTokens(quiesceArm, ["self.ensure_session().await", "reply.send("]) &&
+      hasOrderedUniqueTokens(resumeArm, ["self.allow_session_start = false", "reply.send("]) &&
+      hasOrderedUniqueTokens(session, [
+        "if !self.allow_session_start",
+        "return Err(BrokerClientError::UpdateRecovery)",
+      ])
+    );
+    return safe;
+  })();
+  return legacySafe || reversibleSafe;
+}
+
 test("third-party workflow actions use immutable commit SHAs", () => {
   for (const [name, source] of Object.entries(workflows)) {
     for (const match of source.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)) {
@@ -812,6 +917,107 @@ test("the packaged updater trusts the production signing key and endpoint", () =
   ]);
 });
 
+test("updater transition policy rejects unsafe ordering mutations", () => {
+  const legacy = `
+    async fn take_staged_and_restart() {
+      app.state::<HostAccess>().shutdown().await;
+      staged.update.install(&staged.bytes);
+    }
+  `;
+  const reversibleUpdater = `
+    async fn take_staged_and_restart() { install_behind_broker_barrier().await; }
+    async fn install_behind_broker_barrier() {
+      host_access.quiesce_for_update().await?;
+      match staged.update.install(&staged.bytes) {
+        Ok(()) => { host_access.shutdown().await; }
+        Err(_) => { host_access.resume_after_failed_update().await; }
+      }
+    }
+  `;
+  const reversibleBroker = `
+    async fn admit(&self, command: BrokerCommand) {
+      let admission = self.admission.lock().await;
+      if *admission != BrokerAdmission::Running { return Err(()); }
+      self.commands.try_send(command)?;
+    }
+    async fn run(&mut self) {
+      match command {
+        BrokerCommand::Quiesce { reply } => {
+          self.ensure_session().await?;
+          reply.send(());
+        }
+        BrokerCommand::ResumeAfterFailedUpdate { reply } => {
+          self.allow_session_start = false;
+          reply.send(());
+        }
+      }
+    }
+    async fn ensure_session(&mut self) {
+      if !self.allow_session_start {
+        return Err(BrokerClientError::UpdateRecovery);
+      }
+    }
+  `;
+  assert.ok(updaterTransitionIsSafe(legacy, ""));
+  assert.ok(updaterTransitionIsSafe(reversibleUpdater, reversibleBroker));
+
+  const unsafeCases = [
+    [
+      "legacy install before shutdown",
+      `async fn take_staged_and_restart() { staged.update.install(&staged.bytes); app.state::<HostAccess>().shutdown().await; }`,
+      "",
+    ],
+    [
+      "legacy comment decoy",
+      `async fn take_staged_and_restart() { staged.update.install(&staged.bytes); // app.state::<HostAccess>().shutdown().await\n }`,
+      "",
+    ],
+    [
+      "install before the broker barrier",
+      reversibleUpdater.replace(
+        "host_access.quiesce_for_update().await?;",
+        "staged.update.install(&staged.bytes); host_access.quiesce_for_update().await?;",
+      ),
+      reversibleBroker,
+    ],
+    [
+      "admission unlock before enqueue",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "self.commands.try_send(command)?;",
+        "drop(admission); self.commands.try_send(command)?;",
+      ),
+    ],
+    [
+      "quiesce acknowledgement before session pinning",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "self.ensure_session().await?;\n          reply.send(());",
+        "reply.send(());\n          self.ensure_session().await?;",
+      ),
+    ],
+    [
+      "resume acknowledgement before recovery gate",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "self.allow_session_start = false;\n          reply.send(());",
+        "reply.send(());\n          self.allow_session_start = false;",
+      ),
+    ],
+    [
+      "missing recovery gate",
+      reversibleUpdater,
+      reversibleBroker.replace(
+        "if !self.allow_session_start {\n        return Err(BrokerClientError::UpdateRecovery);\n      }",
+        "",
+      ),
+    ],
+  ];
+  for (const [name, updater, broker] of unsafeCases) {
+    assert.equal(updaterTransitionIsSafe(updater, broker), false, name);
+  }
+});
+
 test("the packaged desktop activates the signed updater feed", () => {
   assert.match(desktopCargo, /tauri-plugin-updater = "=[^"]+"/);
   assert.match(
@@ -826,37 +1032,10 @@ test("the packaged desktop activates the signed updater feed", () => {
   assert.match(desktopUpdater, /updater\.check\(\)\.await/);
   assert.match(desktopUpdater, /update\.download\(/);
   assert.doesNotMatch(desktopUpdater, /download_and_install/);
-  const legacyShutdownBeforeInstall =
-    /state::<HostAccess>\(\)\.shutdown\(\)\.await[\s\S]*staged\.update\.install\(&staged\.bytes\)/.test(
-      desktopUpdater,
-    );
-  const reversibleBarrier = /install_behind_broker_barrier\(/.test(desktopUpdater);
   assert.ok(
-    legacyShutdownBeforeInstall || reversibleBarrier,
+    updaterTransitionIsSafe(desktopUpdater, desktopBroker),
     "updates must use the legacy shutdown-before-install boundary or the reversible broker barrier",
   );
-  if (reversibleBarrier) {
-    assert.match(
-      desktopUpdater,
-      /quiesce\(\)\.await\?;[\s\S]*match install\(\)[\s\S]*Ok\(\(\)\) => \{[\s\S]*shutdown\(\)\.await[\s\S]*Err\(install_error\) => \{[\s\S]*resume\(\)\.await/,
-    );
-    assert.match(
-      desktopUpdater,
-      /\|\| host_access\.quiesce_for_update\(\)[\s\S]*\|\| staged\.update\.install\(&staged\.bytes\)[\s\S]*\|\| host_access\.resume_after_failed_update\(\)[\s\S]*\|\| host_access\.shutdown\(\)/,
-    );
-    assert.match(
-      desktopBroker,
-      /if \*admission != BrokerAdmission::Running[\s\S]*self\.commands\.try_send\(command\)/,
-    );
-    assert.match(
-      desktopBroker,
-      /BrokerCommand::Quiesce \{ reply \} => \{[\s\S]*self\.ensure_session\(\)\.await/,
-    );
-    assert.match(
-      desktopBroker,
-      /BrokerCommand::ResumeAfterFailedUpdate \{ reply \} => \{[\s\S]*self\.allow_session_start = false/,
-    );
-  }
   assert.match(desktopUpdater, /app\.restart\(\)/);
   assert.match(
     desktopUpdater,
