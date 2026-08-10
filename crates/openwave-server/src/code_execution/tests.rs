@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use openwave_code_execution::{
     CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionUnavailableReason,
-    DaytonaCredential, DaytonaExecutionProvider, E2BCredential, E2BExecutionProvider,
-    ExecFolderAccess, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
-    OutputArtifactStatus, RemoteSessionPool, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
-    PACKAGE_MANAGER_DOMAINS,
+    DaytonaCredential, DaytonaExecutionProvider, DockerExecutionProvider, E2BCredential,
+    E2BExecutionProvider, ExecFolderAccess, ExecutionId, ExecutionWorkspaceId,
+    LocalExecutionProvider, OutputArtifactStatus, RemoteSessionPool, DOCUMENT_SCRIPTS_DIR,
+    DOCUMENT_SCRIPT_FILES, PACKAGE_MANAGER_DOMAINS,
 };
 use openwave_core::{
     exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, NetworkPolicy, Result,
@@ -952,7 +952,9 @@ fn chat_network_policy_compiles_package_class_and_deny_all_for_managed_providers
 
 #[test]
 fn egress_enforcement_never_oversells_a_provider_past_its_model() {
-    let status = egress_enforcement_status();
+    // The vendors' rows do not depend on the policy; the container's does,
+    // and the default open policy is the one that must not read as enforced.
+    let status = egress_enforcement_status(&EgressConfig::Open);
     let row = |provider| {
         status
             .iter()
@@ -1006,15 +1008,95 @@ fn egress_enforcement_never_oversells_a_provider_past_its_model() {
         "the tier caveat must keep Daytona off the unconditional boundary status"
     );
 
-    // The container backend sends no policy anywhere, so it must not borrow a
-    // status that implies one was sent and merely went unconfirmed. This is
-    // the assertion that catches the tempting future edit — passing the
-    // configured egress into the container adapter and calling the row
-    // enforced — without the container actually enforcing anything.
+    // The container backend enforces exactly one policy class and must not
+    // borrow a status for the rest. Under an allowlist it compiles nothing
+    // into container networking, so the row stays at the absence of a
+    // boundary rather than the `unconfirmed` of a policy that was sent.
     let docker = row(CodeExecutionProviderKind::Docker);
     assert_eq!(docker.status, EgressEnforcementStatus::NotEnforced);
     assert_eq!(docker.gaps, [DOCKER_OPEN_EGRESS_GAP]);
     assert!(docker.requirement.is_none());
+}
+
+/// The container backend's disclosure splits by policy class, and each half is
+/// derived from what the adapter actually compiles into container creation.
+/// The half that matters most is the negative one: an allowlist the container
+/// does not enforce must never read as enforced because the strict class next
+/// to it does.
+#[test]
+fn container_egress_disclosure_splits_by_policy_class() {
+    let row = |policy: &EgressConfig| {
+        egress_enforcement_status(policy)
+            .into_iter()
+            .find(|row| row.provider == CodeExecutionProviderKind::Docker)
+            .expect("the container backend's enforcement is disclosed")
+    };
+
+    // "No network" is a real boundary here: the container is created with no
+    // network interface, enforced by the runtime, with nothing left reachable
+    // for a gap to describe.
+    let off = row(&network_egress_config(&NetworkPolicy::Off));
+    assert_eq!(off.status, EgressEnforcementStatus::Boundary);
+    assert!(off.gaps.is_empty());
+    assert!(off.requirement.is_none());
+
+    // Every other class is enforced by nothing, including the one that looks
+    // restrictive.
+    for policy in [
+        network_egress_config(&NetworkPolicy::PackageManagers),
+        network_egress_config(&NetworkPolicy::AllowedHosts {
+            allowed_hosts: vec!["example.com".to_owned()],
+            package_managers: false,
+        }),
+        network_egress_config(&NetworkPolicy::Open),
+    ] {
+        let row = row(&policy);
+        assert_eq!(
+            row.status,
+            EgressEnforcementStatus::NotEnforced,
+            "{policy:?} is not enforced by container networking"
+        );
+        assert_eq!(row.gaps, [DOCKER_OPEN_EGRESS_GAP]);
+    }
+
+    // A stored allowlist that no longer parses cannot create a sandbox at all,
+    // so it must not be disclosed as enforcement either.
+    let malformed = EgressConfig::Allowlist {
+        domains: vec!["not a host".to_owned()],
+        cidrs: vec![],
+    };
+    assert_eq!(
+        row(&malformed).status,
+        EgressEnforcementStatus::NotEnforced,
+        "a policy that fails to compile claims nothing"
+    );
+}
+
+/// The container adapter must receive the chat's policy and turn the strict
+/// class into the creation flag — the plumbing and the enforcement are the
+/// same change, so neither can land alone.
+#[test]
+fn container_adapter_receives_the_chat_policy_and_blocks_the_network_for_off() {
+    let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+    let off = configured_docker(
+        timeout,
+        RemoteSessionPool::default(),
+        &network_egress_config(&NetworkPolicy::Off),
+    )
+    .unwrap();
+    assert!(DockerExecutionProvider::egress_enforcement(off.egress_policy()).is_some());
+
+    let packages = configured_docker(
+        timeout,
+        RemoteSessionPool::default(),
+        &network_egress_config(&NetworkPolicy::PackageManagers),
+    )
+    .unwrap();
+    assert!(packages.egress_policy().is_some());
+    assert!(
+        DockerExecutionProvider::egress_enforcement(packages.egress_policy()).is_none(),
+        "an allowlist reaches the adapter but is not enforced by it"
+    );
 }
 
 #[test]

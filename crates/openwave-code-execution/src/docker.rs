@@ -59,12 +59,19 @@
 //!
 //! # Egress
 //!
-//! Not enforced. The container runs on the runtime's default network with
-//! ordinary outbound access, exactly like an unrestricted managed sandbox.
-//! The per-chat network policy is *not* compiled into anything here, and this
-//! backend deliberately declares no egress enforcement rather than implying
-//! one — network policy for this backend is a later slice, and until it lands
-//! the honest answer is that a command can reach the internet.
+//! Only the strictest policy class is enforced. A policy that permits nothing
+//! — the chat's "no network" setting — creates the container with
+//! `--network none`, so it has no interface but loopback: no route, no DNS,
+//! nothing to negotiate with. That is an external boundary, enforced by the
+//! runtime rather than by anything inside the container.
+//!
+//! Every other class is **not** enforced. An allowlist would need a
+//! per-container internal network and the egress proxy the sandbox-agent
+//! container tier already runs; until that lands, a container created under an
+//! allowlist policy runs on the runtime's default network with ordinary
+//! outbound access, and this backend declares no enforcement for it rather
+//! than implying one. [`DockerExecutionProvider::egress_enforcement`] states
+//! the split, and the settings surface derives its disclosure from it.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -74,6 +81,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use openwave_egress::{EgressEnforcement, EgressPolicy};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -115,11 +123,12 @@ const CONTAINER_PREFIX: &str = "openwave-exec-";
 /// this backend creates, so an operator (or a later host-driven sweep) can
 /// enumerate them with `docker ps --filter label=openwave.exec-workspace`.
 const WORKSPACE_LABEL: &str = "openwave.exec-workspace";
-/// Label carrying the runtime/image/container contract a workspace was created
+/// Label carrying the runtime/image/network contract a workspace was created
 /// for. A deterministic workspace name alone is not enough to prove a
-/// container belongs to this provider configuration: changing the image (or a
-/// future confinement contract) must replace the old container rather than
-/// silently adopting it.
+/// container belongs to this provider configuration: changing the image, or
+/// the network shape the chat's policy compiles to, must replace the old
+/// container rather than silently adopting it. See
+/// [`DockerExecutionProvider::configuration_identity`].
 const CONFIGURATION_LABEL: &str = "openwave.exec-configuration";
 /// Bump when the `docker run` confinement or keepalive contract changes in a
 /// way that makes an already-running container unsafe or incompatible to
@@ -169,6 +178,44 @@ pub struct DockerExecutionProvider {
     image: String,
     timeout: Duration,
     pool: RemoteSessionPool,
+    egress: Option<EgressPolicy>,
+}
+
+/// How a configured egress policy compiles into container networking.
+///
+/// Only two shapes exist today, and the gap between them is the whole of this
+/// backend's egress story: a policy that permits nothing becomes a container
+/// with no network, and everything else becomes the runtime's default network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerNetwork {
+    /// `--network none`: loopback only. Nothing in the container can reach a
+    /// destination, resolve a name, or route to the host.
+    None,
+    /// The runtime's default network — ordinary outbound access. No part of
+    /// the configured policy is applied.
+    Default,
+}
+
+/// Compile the host policy into the container's network shape.
+///
+/// A policy that permits nothing at all is the only class this backend can
+/// enforce with a creation-time flag, and it is exactly the class the chat's
+/// "no network" setting produces (an allowlist with no grants on either axis).
+/// Any policy with a grant in it needs a proxy topology that does not exist
+/// here yet, so it compiles to the default network and is disclosed as
+/// unenforced rather than partially applied.
+fn container_network(policy: Option<&EgressPolicy>) -> ContainerNetwork {
+    match policy {
+        None => ContainerNetwork::Default,
+        Some(EgressPolicy::BlockAll) => ContainerNetwork::None,
+        Some(EgressPolicy::Allowlist(allowlist)) => {
+            if allowlist.is_empty() {
+                ContainerNetwork::None
+            } else {
+                ContainerNetwork::Default
+            }
+        }
+    }
 }
 
 impl DockerExecutionProvider {
@@ -190,6 +237,7 @@ impl DockerExecutionProvider {
             image: DOCUMENTS_IMAGE.to_owned(),
             timeout,
             pool,
+            egress: None,
         })
     }
 
@@ -198,6 +246,41 @@ impl DockerExecutionProvider {
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
         self.binary = binary.into();
         self
+    }
+
+    /// Apply an egress policy to every container this provider creates.
+    ///
+    /// Only a policy that permits nothing is compiled into anything: it
+    /// becomes `--network none`. A policy with grants in it is accepted and
+    /// deliberately *not* applied — this backend has no way to enforce a
+    /// partial allowlist yet, and [`Self::egress_enforcement`] says so, so a
+    /// caller passing one is not told it was enforced.
+    #[must_use]
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Self {
+        self.egress = Some(policy);
+        self
+    }
+
+    /// The egress policy applied to this provider's containers, if any.
+    #[must_use]
+    pub fn egress_policy(&self) -> Option<&EgressPolicy> {
+        self.egress.as_ref()
+    }
+
+    /// Host knowledge about what container networking enforces for `policy`.
+    ///
+    /// `None` is the honest answer for every policy this backend does not
+    /// compile into container creation: nothing is applied, so there is no
+    /// enforcement to declare and the surface must not borrow one. A policy
+    /// that permits nothing becomes `--network none`, which is enforced by the
+    /// runtime outside the container and leaves no exception open — no name
+    /// resolution, no host route, nothing a curated carve-out could hide in.
+    #[must_use]
+    pub fn egress_enforcement(policy: Option<&EgressPolicy>) -> Option<EgressEnforcement> {
+        match container_network(policy) {
+            ContainerNetwork::None => Some(EgressEnforcement::external(Vec::new())),
+            ContainerNetwork::Default => None,
+        }
     }
 
     /// Run a different image than the pinned documents one.
@@ -379,7 +462,7 @@ impl DockerExecutionProvider {
     /// runtime, because a container missing it starts and serves exactly like
     /// a confined one.
     fn run_args(&self, workspace_id: &str) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "run".to_owned(),
             "--detach".to_owned(),
             // The container removes itself — and its anonymous workspace
@@ -417,6 +500,15 @@ impl DockerExecutionProvider {
             WORKSPACE_ROOT.to_owned(),
             "--workdir".to_owned(),
             WORKSPACE_ROOT.to_owned(),
+        ];
+        // The one part of the egress policy this backend can enforce.
+        // Deliberately absent — rather than spelled as the runtime's default
+        // network by name — when nothing is enforced, so a host that runs its
+        // containers on a custom default network keeps it.
+        if self.container_network() == ContainerNetwork::None {
+            args.extend(["--network".to_owned(), "none".to_owned()]);
+        }
+        args.extend([
             // The image's entrypoint is the sandbox agent, which is a
             // different tier's protocol entirely. This backend wants only a
             // container to exec into, so the entrypoint is replaced by a
@@ -425,7 +517,13 @@ impl DockerExecutionProvider {
             "sleep".to_owned(),
             self.image.clone(),
             CONTAINER_LIFETIME.as_secs().to_string(),
-        ]
+        ]);
+        args
+    }
+
+    /// The network shape the configured policy compiles into.
+    fn container_network(&self) -> ContainerNetwork {
+        container_network(self.egress.as_ref())
     }
 
     fn configuration_fingerprint(&self) -> [u8; 32] {
@@ -439,9 +537,25 @@ impl DockerExecutionProvider {
         hasher.finalize().into()
     }
 
+    /// The identity a created container is labelled with, and the one an
+    /// existing container must match to be adopted.
+    ///
+    /// It carries the network shape as well as the runtime and image, because
+    /// the pooled session's egress check only covers containers this process
+    /// remembers creating. A host that restarted — or a second OpenWave
+    /// window — finds the container by its deterministic name with no pooled
+    /// handle at all, and adopting one created with ordinary network access
+    /// into a chat whose network is off would silently undo the enforcement.
     fn configuration_identity(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.configuration_fingerprint());
+        hasher.update(match self.container_network() {
+            ContainerNetwork::None => b"\nnetwork:none".as_slice(),
+            ContainerNetwork::Default => b"\nnetwork:default".as_slice(),
+        });
+        let identity: [u8; 32] = hasher.finalize().into();
         let mut encoded = String::with_capacity(64);
-        for byte in self.configuration_fingerprint() {
+        for byte in identity {
             write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
         }
         encoded
@@ -550,10 +664,16 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
         self.configuration_fingerprint()
     }
 
-    /// No egress policy is compiled into a container, so every container this
-    /// backend creates has the same (unrestricted) network shape.
+    /// The pooled container is bound to the policy it was created under, so a
+    /// policy change replaces it instead of reusing a container whose
+    /// networking no longer matches. The fingerprint is over the policy
+    /// itself, not over the network shape it compiles to: a container created
+    /// under an unenforced allowlist and one created under open egress are
+    /// networked identically today, but conflating them would mean a chat that
+    /// moved between those settings kept a container the *next* slice's
+    /// enforcement would have replaced.
     fn egress_fingerprint(&self) -> [u8; 32] {
-        egress_policy_fingerprint(None)
+        egress_policy_fingerprint(self.egress.as_ref())
     }
 
     async fn create_session(
@@ -1150,6 +1270,7 @@ fn is_missing_container(status: Option<i32>, stderr: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::ExecutionId;
+    use openwave_egress::{DomainPattern, EgressAllowlist};
 
     fn provider() -> DockerExecutionProvider {
         DockerExecutionProvider::new(Duration::from_secs(30)).unwrap()
@@ -1217,6 +1338,94 @@ mod tests {
         assert!(!provider()
             .with_image("ghcr.io/example/image:latest")
             .verifies_image_integrity());
+    }
+
+    /// The security boundary this backend does enforce. A policy that permits
+    /// nothing must reach the runtime as `--network none`; a policy with
+    /// grants in it must not silently borrow that enforcement, and must not
+    /// name a network either — the container keeps the runtime's default.
+    #[test]
+    fn a_deny_all_policy_creates_the_container_with_no_network() {
+        let network = |args: &[String]| {
+            args.iter()
+                .position(|arg| arg == "--network")
+                .map(|at| args[at + 1].clone())
+        };
+
+        for policy in [
+            EgressPolicy::BlockAll,
+            EgressPolicy::Allowlist(EgressAllowlist::new(Vec::new(), Vec::new())),
+        ] {
+            let blocked = provider().with_egress_policy(policy);
+            assert_eq!(
+                network(&blocked.run_args("chat-123")).as_deref(),
+                Some("none"),
+            );
+            // `--network none` is a runtime-enforced boundary with nothing
+            // left reachable, and the declaration is what the settings
+            // surface derives its disclosure from.
+            let enforcement = DockerExecutionProvider::egress_enforcement(blocked.egress_policy())
+                .expect("a deny-all policy is enforced");
+            assert!(enforcement.is_credential_boundary());
+            assert!(enforcement.exceptions().is_empty());
+        }
+
+        // No policy, and a policy this backend cannot enforce, both leave the
+        // container on the runtime's default network — and declare nothing.
+        let allowlist = EgressPolicy::Allowlist(EgressAllowlist::new(
+            vec![DomainPattern::parse("pypi.org").unwrap()],
+            Vec::new(),
+        ));
+        for open in [None, Some(allowlist)] {
+            let provider = match open {
+                Some(policy) => provider().with_egress_policy(policy),
+                None => provider(),
+            };
+            assert_eq!(network(&provider.run_args("chat-123")), None);
+            assert!(
+                DockerExecutionProvider::egress_enforcement(provider.egress_policy()).is_none()
+            );
+        }
+    }
+
+    /// Two mechanisms keep a container from outliving the policy it was
+    /// created under: the pooled session's egress fingerprint, which replaces
+    /// a container this process created, and the configuration label, which
+    /// stops a container found by name — after a restart, or from another
+    /// window — being adopted into a chat with different networking.
+    #[test]
+    fn a_policy_change_replaces_the_container_rather_than_reusing_it() {
+        let open = provider();
+        let blocked = provider().with_egress_policy(EgressPolicy::BlockAll);
+        let allowlist = provider().with_egress_policy(EgressPolicy::Allowlist(
+            EgressAllowlist::new(vec![DomainPattern::parse("pypi.org").unwrap()], Vec::new()),
+        ));
+
+        assert_ne!(open.egress_fingerprint(), blocked.egress_fingerprint());
+        // An allowlist is not enforced yet, but it is still a distinct policy:
+        // conflating it with open egress would leave a stale container behind
+        // the moment it becomes enforceable.
+        assert_ne!(open.egress_fingerprint(), allowlist.egress_fingerprint());
+        assert_ne!(blocked.egress_fingerprint(), allowlist.egress_fingerprint());
+
+        // The pooled session key is deliberately not policy-derived — the
+        // fingerprint above is what replaces the container, so a chat keeps
+        // one session slot across policy edits.
+        assert_eq!(
+            open.credential_fingerprint(),
+            blocked.credential_fingerprint()
+        );
+
+        // Adoption is keyed on the network shape, so a no-network container
+        // and an ordinary one can never be adopted for each other.
+        assert_ne!(
+            open.configuration_identity(),
+            blocked.configuration_identity()
+        );
+        assert_eq!(
+            open.configuration_identity(),
+            allowlist.configuration_identity()
+        );
     }
 
     /// The model's argv must reach the container as argv. If it were ever

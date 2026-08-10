@@ -145,7 +145,8 @@ stdin, writes confined to private chat scratch, bounded time and output,
 process-group cleanup, and private running/terminal receipts. Other platforms
 fail closed rather than running unconfined. `openwave-server` owns the runtime
 provider/timeout setting and resolves the same per-chat network policy into the
-local broker, E2B, or Daytona behind the common contract.
+local broker, E2B, Daytona, or — for its strictest class only — a container
+created with no network at all.
 
 See [Code execution](code-execution.md).
 

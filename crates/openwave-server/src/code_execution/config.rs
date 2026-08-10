@@ -372,15 +372,24 @@ pub(super) fn configured_daytona(
     }
 }
 
-/// Build the container adapter. It holds no credential and compiles no
-/// egress policy — the configured policy is deliberately not passed here,
-/// because nothing in this backend would enforce it and accepting it would
-/// imply otherwise. See [`egress_enforcement_status`].
+/// Build the container adapter with the configured egress policy applied.
+///
+/// The policy is passed in, but only its strictest class reaches container
+/// creation: a policy that permits nothing becomes `--network none`, and
+/// anything else is left on the runtime's default network. That asymmetry is
+/// not hidden here — [`egress_enforcement_status`] derives the disclosure from
+/// the same declaration the adapter compiles from, so a class the container
+/// does not enforce cannot read as enforced.
 pub(super) fn configured_docker(
     timeout: Duration,
     pool: RemoteSessionPool,
+    egress: &EgressConfig,
 ) -> std::result::Result<DockerExecutionProvider, CodeExecutionError> {
-    DockerExecutionProvider::with_session_pool(timeout, pool)
+    let provider = DockerExecutionProvider::with_session_pool(timeout, pool)?;
+    Ok(match resolve_egress_policy(egress)? {
+        Some(policy) => provider.with_egress_policy(policy),
+        None => provider,
+    })
 }
 
 /// Renderer-safe configuration and readiness.
@@ -570,7 +579,14 @@ pub(super) const DAYTONA_TIER_REQUIREMENT: &str = "Daytona org tier 3+";
 /// establish statically is the account tier the per-sandbox override needs, so
 /// Daytona is disclosed as a *conditional* boundary with that requirement
 /// inline, never an unconditional green one.
-pub(super) fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement> {
+///
+/// The container backend is the one provider whose status depends on the
+/// policy rather than only on the backend, so the policy the row describes is
+/// an argument: a policy that permits nothing is a real boundary there
+/// (`--network none`), and every other class is enforced by nothing at all.
+pub(super) fn egress_enforcement_status(
+    policy: &EgressConfig,
+) -> Vec<CodeExecutionEgressEnforcement> {
     vec![
         enforcement_row(
             CodeExecutionProviderKind::E2b,
@@ -584,24 +600,44 @@ pub(super) fn egress_enforcement_status() -> Vec<CodeExecutionEgressEnforcement>
             true,
             Some(DAYTONA_TIER_REQUIREMENT),
         ),
-        // The container backend applies no network policy at all. It is not
-        // derived from an enforcement model because there is no enforcement
-        // to model: saying so plainly is the only honest row, and it is what
-        // stops a conversation set to "no network" from reading as enforced
-        // when it is running on this backend.
-        CodeExecutionEgressEnforcement {
+        docker_enforcement_row(policy),
+    ]
+}
+
+/// The container backend's row for one policy.
+///
+/// Derived, never asserted: the adapter's own declaration decides. It declares
+/// enforcement only for the class it actually compiles into container
+/// creation — a policy permitting nothing, which becomes a container with no
+/// network interface — and declares nothing for the rest, which is what keeps
+/// a chat set to "package managers only" from reading as restricted here when
+/// its container has ordinary internet access.
+///
+/// A policy that does not parse is treated as unenforced. It cannot create a
+/// sandbox at all ([`resolve_egress_policy`] fails closed), so the honest
+/// disclosure is the one that claims nothing.
+fn docker_enforcement_row(policy: &EgressConfig) -> CodeExecutionEgressEnforcement {
+    let compiled = policy.to_policy().ok().flatten();
+    match DockerExecutionProvider::egress_enforcement(compiled.as_ref()) {
+        Some(enforcement) => {
+            enforcement_row(CodeExecutionProviderKind::Docker, &enforcement, true, None)
+        }
+        None => CodeExecutionEgressEnforcement {
             provider: CodeExecutionProviderKind::Docker,
             status: EgressEnforcementStatus::NotEnforced,
             gaps: vec![DOCKER_OPEN_EGRESS_GAP.to_owned()],
             requirement: None,
         },
-    ]
+    }
 }
 
-/// What the container backend leaves reachable: everything. Stated as a gap
-/// so the settings surface lists it inline beside the vendors' caveats.
+/// What the container backend leaves reachable under every policy it cannot
+/// enforce: everything. Stated as a gap so the settings surface lists it
+/// inline beside the vendors' caveats, and it names the one setting that *is*
+/// enforced so the split is visible where the claim is made.
 pub(super) const DOCKER_OPEN_EGRESS_GAP: &str =
-    "every destination — the container runs with ordinary internet access";
+    "every destination — an allowlist is not compiled into container networking; only the \
+     no-network setting is enforced, by creating the container with no network at all";
 
 /// Project one provider's enforcement declaration into the renderer-safe row.
 ///
@@ -646,8 +682,8 @@ pub(super) fn enforcement_row(
 impl CodeExecutionEgressInfo {
     fn from_config(policy: EgressConfig) -> Self {
         Self {
+            enforcement: egress_enforcement_status(&policy),
             policy,
-            enforcement: egress_enforcement_status(),
         }
     }
 }

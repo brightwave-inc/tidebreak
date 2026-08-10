@@ -119,13 +119,26 @@ destination reachable, the surface cannot present it as a full boundary.
   therefore reports it as a *conditional* boundary with that requirement inline,
   never an unconditional green one.
 
-- **Docker — `not_enforced`.** The container backend applies no network
-  restriction at all: the container runs on the runtime's default network with
-  ordinary outbound access, and a conversation's network setting does not reach
-  it. This is not a weaker boundary but the absence of one, and it is disclosed
-  as its own status rather than borrowed from `unconfirmed`, which describes a
-  policy that *was* sent. Compiling the per-chat policy into container
-  networking is a later slice.
+- **Docker — `boundary` for "no network", `not_enforced` otherwise.** The
+  container backend enforces exactly one policy class. A policy that permits
+  nothing — what a conversation set to "no network" compiles to — creates the
+  container with `--network none`, so it has no interface but loopback: no
+  route, no name resolution, nothing to negotiate with. That is externally
+  enforced by the runtime with no exception left open, so the row is derived
+  from an `EgressEnforcement` declaration like the vendors', not asserted.
+  Every other class is enforced by nothing: an allowlist is not compiled into
+  container networking at all, and the container runs on the runtime's default
+  network with ordinary outbound access. That half stays `not_enforced` — the
+  absence of a boundary rather than a weaker one, and distinct from
+  `unconfirmed`, which describes a policy that *was* sent. Restricting the
+  remaining classes needs the per-container internal network plus egress proxy
+  the sandbox-agent container tier already runs; that is a later slice.
+
+Because the container row depends on the policy and not only on the backend,
+the settings surface renders it for the host-level `egress` value it displays.
+Chat execution compiles the per-chat policy, so a chat set to "no network"
+gets a no-network container even while the host-level row reads
+`not_enforced` for an open default.
 
 The local adapter is an unconditional external boundary: direct networking
 stays denied and the only pinhole reaches the policy broker. Managed fidelity
@@ -219,8 +232,17 @@ writable, unlike the sandbox-agent container tier: foreground exec installs
 packages and writes scratch, and the surface a read-only root would protect is
 the container's own ephemeral layer.
 
-Network policy is **not** enforced here yet — see the `not_enforced`
-disclosure above.
+The chat's network policy reaches container creation, but only its strictest
+class is enforced there: "no network" creates the container with `--network
+none`, and every other class runs on the runtime's default network — see the
+enforcement disclosure above. The container a chat is using is bound to the
+policy it was created under, on two axes. The pooled session records the
+policy's fingerprint, so editing the policy destroys the container and creates
+a replacement instead of reusing one with stale networking. The configuration
+label a container carries records its network shape, so a container found by
+its deterministic name — after a host restart, or from a second window, where
+no pooled handle exists — is replaced rather than adopted when its networking
+does not match.
 
 ## Connected folders in local exec
 
