@@ -341,7 +341,10 @@ fn spawn_deprovision(app: tauri::AppHandle) {
                 log_pairing(&app, "ignored a disconnect link: nothing to disconnect");
             }
             Ok(DeprovisionTarget::Misconfigured { .. }) => {
-                log_pairing(&app, "disconnect refused: the managed policy is misconfigured");
+                log_pairing(
+                    &app,
+                    "disconnect refused: the managed policy is misconfigured",
+                );
                 show_disconnect_failure(
                     &app,
                     &PairingError::Other(openwave_core::AgentError::config(
@@ -652,7 +655,10 @@ mod tests {
     /// cases honest: a link must fail the whole contract, not merely the
     /// provision half of it.
     fn parsed_provision(link: &str) -> Option<super::ProvisionLink> {
-        match tauri::Url::parse(link).ok().map(|url| parse_deep_link(&url)) {
+        match tauri::Url::parse(link)
+            .ok()
+            .map(|url| parse_deep_link(&url))
+        {
             Some(Ok(DeepLink::Provision(link))) => Some(link),
             _ => None,
         }
@@ -769,7 +775,9 @@ mod tests {
             ("https://deprovision", false),
         ];
         for (link, accepted) in cases {
-            let parsed = tauri::Url::parse(link).ok().map(|url| parse_deep_link(&url));
+            let parsed = tauri::Url::parse(link)
+                .ok()
+                .map(|url| parse_deep_link(&url));
             assert_eq!(
                 matches!(parsed, Some(Ok(DeepLink::Deprovision))),
                 *accepted,

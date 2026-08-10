@@ -1124,7 +1124,9 @@ mod tests {
         let (base, revoked) = serve_revocable_gateway().await;
         let gateway_url = format!("{base}/");
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, &gateway_url).await.unwrap();
+        managed_policy::provision(&*store, &gateway_url)
+            .await
+            .unwrap();
         let secrets = test_secrets();
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
