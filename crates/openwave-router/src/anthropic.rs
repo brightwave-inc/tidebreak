@@ -1095,12 +1095,6 @@ impl RawAssistantBlocks {
         }
     }
 
-    fn set(&mut self, index: u32, key: &str, value: &str) {
-        if let Some(block) = self.open.get_mut(&index) {
-            block[key] = json!(value);
-        }
-    }
-
     fn append_json(&mut self, index: u32, fragment: &str) {
         self.partial_json
             .entry(index)
@@ -1307,7 +1301,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         raw.append_text(index, "thinking", &str_at(delta, "thinking"));
                     }
                     Some("signature_delta") => {
-                        raw.set(index, "signature", &str_at(delta, "signature"));
+                        raw.append_text(index, "signature", &str_at(delta, "signature"));
                     }
                     Some("input_json_delta") => {
                         raw.append_json(index, &str_at(delta, "partial_json"));
@@ -1331,7 +1325,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 // it the thinking text is display-only.
                 Some("signature_delta") => {
                     if let Some(block) = state.pending_reasoning.get_mut(&index) {
-                        block["signature"] = json!(str_at(delta, "signature"));
+                        append_str_field(block, "signature", &str_at(delta, "signature"));
                     }
                     Vec::new()
                 }
@@ -2139,6 +2133,87 @@ mod tests {
     }
 
     #[test]
+    fn split_reasoning_signature_survives_agent_persistence_and_parallel_tool_replay() {
+        let events = run(&[
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "check both sources"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "signed-"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "tail"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "redacted_thinking", "data": "opaque"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+        ]);
+        let captured: Vec<Value> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ReasoningBlock { data } => Some(data),
+                _ => None,
+            })
+            .collect();
+        let expected = vec![
+            json!({
+                "type": "thinking",
+                "thinking": "check both sources",
+                "signature": "signed-tail",
+            }),
+            json!({"type": "redacted_thinking", "data": "opaque"}),
+        ];
+        assert_eq!(captured, expected);
+
+        // The agent persists MessageReasoning separately from ChatMessage and
+        // reconstructs it before the next provider step. Exercise that same
+        // serde boundary before replaying a parallel tool batch.
+        let origin = ReasoningOrigin {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-5".into(),
+        };
+        let stored = serde_json::to_value(MessageReasoning::captured(origin, captured)).unwrap();
+        let restored: MessageReasoning = serde_json::from_value(stored).unwrap();
+        let mut req = reasoning_request("claude-opus-5", None);
+        req.messages = vec![
+            ChatMessage::text(Role::User, "compare these"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "web_extract".into(),
+                        input: json!({"url": "https://example.com/one"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_2".into(),
+                        name: "web_extract".into(),
+                        input: json!({"url": "https://example.com/two"}),
+                    },
+                ],
+                reasoning: restored,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        content: "first".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "toolu_2".into(),
+                        content: "second".into(),
+                        is_error: false,
+                    },
+                ],
+                reasoning: MessageReasoning::default(),
+            },
+        ];
+
+        let body = build_request_json(&req).unwrap();
+        let replayed = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(replayed[..expected.len()], expected);
+        assert_eq!(replayed[2]["id"], "toolu_1");
+        assert_eq!(replayed[3]["id"], "toolu_2");
+    }
+
+    #[test]
     fn captured_reasoning_is_replayed_verbatim_ahead_of_its_content() {
         let reasoning = vec![
             json!({"type": "thinking", "thinking": "plan: read first", "signature": "sig-1"}),
@@ -2908,6 +2983,42 @@ mod tests {
                 "title": "A",
                 "encrypted_content": "opaque",
             }]));
+            if leg == 1 {
+                // Thinking must stay first in the assistant content, so make
+                // room ahead of the search blocks before streaming a split
+                // signature through the raw pause-turn capture path.
+                for frame in &mut frames {
+                    if let Some(index) = frame.get_mut("index") {
+                        *index = json!(index.as_u64().unwrap() + 1);
+                    }
+                }
+                frames.splice(
+                    0..0,
+                    [
+                        json!({
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        }),
+                        json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "thinking_delta", "thinking": "check the source"},
+                        }),
+                        json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "signature_delta", "signature": "signed-"},
+                        }),
+                        json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "signature_delta", "signature": "tail"},
+                        }),
+                        json!({"type": "content_block_stop", "index": 0}),
+                    ],
+                );
+            }
             // The first response pauses mid-turn; the second finishes it.
             frames.push(json!({
                 "type": "message_delta",
@@ -2970,9 +3081,18 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "assistant");
         let blocks = messages[1]["content"].as_array().unwrap();
-        assert_eq!(blocks[0], json!({"type": "text", "text": "Let me check."}));
         assert_eq!(
-            blocks[1],
+            blocks[0],
+            json!({
+                "type": "thinking",
+                "thinking": "check the source",
+                "signature": "signed-tail",
+            }),
+            "the raw continuation preserves the complete split signature"
+        );
+        assert_eq!(blocks[1], json!({"type": "text", "text": "Let me check."}));
+        assert_eq!(
+            blocks[2],
             json!({
                 "type": "server_tool_use",
                 "id": "srvtoolu_1",
@@ -2980,9 +3100,9 @@ mod tests {
                 "input": {"query": "rust 2027"},
             })
         );
-        assert_eq!(blocks[2]["type"], "web_search_tool_result");
+        assert_eq!(blocks[3]["type"], "web_search_tool_result");
         assert_eq!(
-            blocks[2]["content"][0]["encrypted_content"], "opaque",
+            blocks[3]["content"][0]["encrypted_content"], "opaque",
             "the provider validates the resumed turn against what it sent"
         );
     }

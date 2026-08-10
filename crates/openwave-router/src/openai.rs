@@ -1605,6 +1605,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_provider_surfaces_bounded_openai_detail_error() {
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::Router;
+
+        async fn reject() -> (StatusCode, &'static str) {
+            (
+                StatusCode::BAD_REQUEST,
+                include_str!("../tests/fixtures/openai/detail_error.response.json"),
+            )
+        }
+
+        let app = Router::new().route("/v1/responses", post(reject));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiProvider::new("key").with_base_url(format!("http://{address}/v1"));
+        let result = provider
+            .stream(ChatRequest {
+                model: "gpt-5.6-sol".into(),
+                messages: vec![ChatMessage::text(Role::User, "hey hows it going")],
+                ..Default::default()
+            })
+            .await;
+        let Err(error) = result else {
+            panic!("expected the provider request to fail");
+        };
+
+        assert!(matches!(error, AgentError::InvalidRequest(_)));
+        assert_eq!(
+            error.to_string(),
+            "invalid provider request: openai returned 400: The requested model is not available for this account."
+        );
+    }
+
+    #[tokio::test]
     async fn chatgpt_oauth_sends_bearer_account_and_originator_headers() {
         use std::sync::Arc;
 
