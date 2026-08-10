@@ -220,14 +220,26 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut client_open = true;
-    let mut upstream_open = true;
-    let mut client_buffer = [0_u8; 16 * 1024];
-    let mut upstream_buffer = [0_u8; 16 * 1024];
+    let (client_reader, client_writer) = tokio::io::split(client);
+    let (upstream_reader, upstream_writer) = tokio::io::split(upstream);
+    let (activity, mut latest_activity) = tokio::sync::watch::channel(Instant::now());
+    let client_to_upstream = relay_direction(
+        client_reader,
+        upstream_writer,
+        idle_timeout,
+        activity.clone(),
+    );
+    let upstream_to_client =
+        relay_direction(upstream_reader, client_writer, idle_timeout, activity);
+    tokio::pin!(client_to_upstream, upstream_to_client);
+
+    let mut activity_open = true;
+    let mut client_to_upstream_open = true;
+    let mut upstream_to_client_open = true;
     let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
 
-    while client_open || upstream_open {
+    while client_to_upstream_open || upstream_to_client_open {
         tokio::select! {
             () = &mut idle => {
                 return Err(io::Error::new(
@@ -235,31 +247,47 @@ where
                     "egress tunnel was idle for too long",
                 ));
             }
-            read = client.read(&mut client_buffer), if client_open => {
-                let read = read?;
-                if read == 0 {
-                    client_open = false;
-                    shutdown_with_timeout(upstream, idle_timeout).await?;
-                    continue;
+            changed = latest_activity.changed(), if activity_open => {
+                match changed {
+                    Ok(()) => {
+                        idle.as_mut().reset(*latest_activity.borrow_and_update() + idle_timeout);
+                    }
+                    Err(_) => activity_open = false,
                 }
-                idle.as_mut().reset(Instant::now() + idle_timeout);
-                write_all_with_timeout(upstream, &client_buffer[..read], idle_timeout).await?;
-                idle.as_mut().reset(Instant::now() + idle_timeout);
             }
-            read = upstream.read(&mut upstream_buffer), if upstream_open => {
-                let read = read?;
-                if read == 0 {
-                    upstream_open = false;
-                    shutdown_with_timeout(client, idle_timeout).await?;
-                    continue;
-                }
-                idle.as_mut().reset(Instant::now() + idle_timeout);
-                write_all_with_timeout(client, &upstream_buffer[..read], idle_timeout).await?;
-                idle.as_mut().reset(Instant::now() + idle_timeout);
+            result = &mut client_to_upstream, if client_to_upstream_open => {
+                result?;
+                client_to_upstream_open = false;
+            }
+            result = &mut upstream_to_client, if upstream_to_client_open => {
+                result?;
+                upstream_to_client_open = false;
             }
         }
     }
     Ok(())
+}
+
+async fn relay_direction<R, W>(
+    mut reader: R,
+    mut writer: W,
+    timeout: Duration,
+    activity: tokio::sync::watch::Sender<Instant>,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return shutdown_with_timeout(&mut writer, timeout).await;
+        }
+        activity.send_replace(Instant::now());
+        write_all_with_timeout(&mut writer, &buffer[..read], timeout).await?;
+        activity.send_replace(Instant::now());
+    }
 }
 
 async fn write_all_with_timeout<W>(
@@ -561,5 +589,73 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(error.to_string(), "egress tunnel was idle for too long");
+    }
+
+    #[tokio::test]
+    async fn half_close_allows_the_reverse_direction_to_finish() {
+        let (mut client, mut broker_client) = tokio::io::duplex(256);
+        let (mut broker_upstream, mut upstream) = tokio::io::duplex(256);
+        let relay = tokio::spawn(async move {
+            relay_bidirectional(
+                &mut broker_client,
+                &mut broker_upstream,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        client.write_all(b"ping").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut request = Vec::new();
+        upstream.read_to_end(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+
+        upstream.write_all(b"pong").await.unwrap();
+        upstream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(&response, b"pong");
+
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn backpressured_write_does_not_block_reverse_traffic() {
+        let (mut client, mut broker_client) = tokio::io::duplex(1);
+        let (mut broker_upstream, mut upstream) = tokio::io::duplex(1);
+        let relay = tokio::spawn(async move {
+            relay_bidirectional(
+                &mut broker_client,
+                &mut broker_upstream,
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        client.write_all(b"ab").await.unwrap();
+        upstream.write_all(b"R").await.unwrap();
+
+        let mut reverse = [0_u8; 1];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut reverse))
+            .await
+            .expect("reverse traffic stalled behind the backpressured write")
+            .unwrap();
+        assert_eq!(&reverse, b"R");
+
+        let mut forward = [0_u8; 2];
+        upstream.read_exact(&mut forward).await.unwrap();
+        assert_eq!(&forward, b"ab");
+
+        client.shutdown().await.unwrap();
+        upstream.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
