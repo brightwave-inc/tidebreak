@@ -13,7 +13,8 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
     AgentActivityItem, AgentRunSnapshot, ChatSummary, GrantRung, InboxItem, ModelCatalog,
-    PendingApprovalSnapshot, PendingPlan, PendingQuestions, Transcript,
+    PendingApprovalSnapshot, PendingPlan, PendingQuestions, ProviderInfo, ProvidersList,
+    Transcript,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -212,6 +213,159 @@ impl Client {
     /// The selectable model catalog.
     pub async fn list_models(&self) -> Result<ModelCatalog> {
         self.get_json(format!("{}/models", self.base)).await
+    }
+
+    /// Pin a model role to a catalog key, or clear it back to automatic with
+    /// `None`.
+    pub async fn set_model_role(
+        &self,
+        role: &str,
+        selection: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/models/roles/{role}", self.base),
+            &serde_json::json!({ "selection": selection }),
+        )
+        .await
+    }
+
+    /// Every provider kind and its current configuration.
+    pub async fn list_providers(&self) -> Result<Vec<ProviderInfo>> {
+        let list: ProvidersList = self.get_json(format!("{}/providers", self.base)).await?;
+        Ok(list.providers)
+    }
+
+    /// Store an API key for one provider and enable it for routing.
+    ///
+    /// The credential goes straight to the server's secret store (the OS
+    /// keychain on a desktop profile); the response never carries it back.
+    pub async fn set_provider_api_key(&self, kind: &str, key: &str) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/providers/{kind}", self.base),
+            &serde_json::json!({
+                "enabled": true,
+                "credential": { "type": "api_key", "key": key },
+            }),
+        )
+        .await
+    }
+
+    /// Remove a provider's stored credential. The provider's other settings
+    /// are untouched.
+    pub async fn delete_provider_credential(&self, kind: &str) -> Result<()> {
+        self.delete_ok(format!("{}/providers/{kind}/credential", self.base))
+            .await
+    }
+
+    /// Runtime settings (`GET /settings`), verbatim.
+    pub async fn get_settings(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/settings", self.base)).await
+    }
+
+    /// Host web-search selection and readiness.
+    pub async fn get_web_search_config(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/web-search", self.base)).await
+    }
+
+    /// Select the host web-search provider; `None` turns host search off.
+    pub async fn set_web_search_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/web-search", self.base),
+            &serde_json::json!({ "provider": provider }),
+        )
+        .await
+    }
+
+    /// Which web-search provider slots hold a key.
+    pub async fn get_web_search_credentials(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/web-search/credentials", self.base))
+            .await
+    }
+
+    /// Store one web-search provider's key. Selection is unchanged.
+    pub async fn set_web_search_credential(
+        &self,
+        provider: &str,
+        key: &str,
+    ) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/web-search/credentials/{provider}", self.base),
+            &serde_json::json!({ "api_key": key }),
+        )
+        .await
+    }
+
+    /// Remove one web-search provider's key. Selection is unchanged.
+    pub async fn delete_web_search_credential(&self, provider: &str) -> Result<serde_json::Value> {
+        self.delete_json(format!("{}/web-search/credentials/{provider}", self.base))
+            .await
+    }
+
+    /// Code-execution backend selection, readiness, and per-provider detail.
+    pub async fn get_code_execution_config(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/code-execution", self.base)).await
+    }
+
+    /// Select the code-execution backend; `None` disables execution.
+    pub async fn set_code_execution_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/code-execution", self.base),
+            &serde_json::json!({ "provider": provider }),
+        )
+        .await
+    }
+
+    /// Which code-execution provider slots hold a key.
+    pub async fn get_code_execution_credentials(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/code-execution/credentials", self.base))
+            .await
+    }
+
+    /// Store one code-execution provider's key. Selection is unchanged.
+    pub async fn set_code_execution_credential(
+        &self,
+        provider: &str,
+        key: &str,
+    ) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/code-execution/credentials/{provider}", self.base),
+            &serde_json::json!({ "api_key": key }),
+        )
+        .await
+    }
+
+    /// Remove one code-execution provider's key. Selection is unchanged.
+    pub async fn delete_code_execution_credential(
+        &self,
+        provider: &str,
+    ) -> Result<serde_json::Value> {
+        self.delete_json(format!(
+            "{}/code-execution/credentials/{provider}",
+            self.base
+        ))
+        .await
+    }
+
+    /// Every mounted MCP server, configured and plugin-sourced alike.
+    pub async fn get_mcp_servers(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/mcp/servers", self.base)).await
+    }
+
+    /// Replace the user-configured MCP server set wholesale — the only shape
+    /// the route accepts. Plugin-sourced servers are rebuilt by the server and
+    /// must not appear in `servers`.
+    pub async fn put_mcp_servers(&self, servers: serde_json::Value) -> Result<serde_json::Value> {
+        self.put_json(
+            format!("{}/mcp/servers", self.base),
+            &serde_json::json!({ "servers": servers }),
+        )
+        .await
     }
 
     /// Background agent runs for a chat.
@@ -454,6 +608,43 @@ impl Client {
             .json::<T>()
             .await
             .map_err(request_error)
+    }
+
+    /// PUT a JSON body and decode the route's answer.
+    async fn put_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let response = self
+            .http
+            .put(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response)
+            .await?
+            .json::<T>()
+            .await
+            .map_err(request_error)
+    }
+
+    /// DELETE, decoding the route's answer.
+    async fn delete_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
+        let response = self.http.delete(url).send().await.map_err(request_error)?;
+        Self::expect_success(response)
+            .await?
+            .json::<T>()
+            .await
+            .map_err(request_error)
+    }
+
+    /// DELETE a route that answers `204`.
+    async fn delete_ok(&self, url: String) -> Result<()> {
+        let response = self.http.delete(url).send().await.map_err(request_error)?;
+        Self::expect_success(response).await?;
+        Ok(())
     }
 }
 

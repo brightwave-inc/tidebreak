@@ -521,6 +521,79 @@ pub struct ModelInfo {
 pub struct ModelCatalog {
     #[serde(default)]
     pub models: Vec<ModelInfo>,
+    /// Every named model role, its selection, and what it resolves to now.
+    #[serde(default)]
+    pub roles: Vec<ModelRoleInfo>,
+}
+
+/// One named model role, from `GET /models`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelRoleInfo {
+    pub role: String,
+    /// The catalog key pinned to this role, or `None` for automatic.
+    #[serde(default)]
+    pub selection: Option<String>,
+    /// What the role resolves to right now, selection or not.
+    #[serde(default)]
+    pub resolved_key: Option<String>,
+}
+
+/// One provider row from `GET /providers`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderInfo {
+    /// Wire form of the provider kind (`anthropic`, `openai_compatible`, …),
+    /// which is also the path segment the write routes take.
+    pub kind: String,
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether a credential is stored — never the credential itself.
+    #[serde(default)]
+    pub has_credential: bool,
+    /// How the provider is authenticated (`api_key`, `chatgpt`, …), when it is.
+    #[serde(default)]
+    pub auth_mode: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+/// The `GET /providers` envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProvidersList {
+    #[serde(default)]
+    pub providers: Vec<ProviderInfo>,
+}
+
+/// One mounted MCP server, from `GET /mcp/servers`. The response flattens each
+/// server's definition into its live projection, so both are read here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerInfo {
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    /// `initializing` / `healthy` / `degraded` / `reconnecting` / `disabled`.
+    #[serde(default)]
+    pub health: String,
+    #[serde(default)]
+    pub tool_count: usize,
+    /// The plugin this server came from, when it is plugin-sourced. Those are
+    /// derived by the server and cannot be edited over the config route.
+    #[serde(default)]
+    pub plugin: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub gateway_endpoint: Option<String>,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
+}
+
+/// The `GET /mcp/servers` envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServersInfo {
+    #[serde(default)]
+    pub servers: Vec<McpServerInfo>,
 }
 
 #[cfg(test)]
