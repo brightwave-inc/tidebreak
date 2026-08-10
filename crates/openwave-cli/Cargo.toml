@@ -48,7 +48,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sig
 tokio-tungstenite = { workspace = true }
 ratatui-textarea = "=0.9.2"
 # Display-width clipping for lines rendered into fixed scrollback/panel buffers.
-unicode-width = "=0.2.0"
+unicode-width = "=0.2.2"
 uuid = { workspace = true }
 
 [dev-dependencies]
