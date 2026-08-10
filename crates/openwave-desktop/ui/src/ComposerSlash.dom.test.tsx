@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { Composer, type ComposerSlash } from "./Composer";
+import { SLASH_COMMANDS } from "./ComposerCommands";
 import type { SlashOption } from "./ComposerSlash";
 
 afterEach(cleanup);
@@ -37,6 +38,7 @@ function slash(overrides: Partial<ComposerSlash> = {}): ComposerSlash {
     onInvoke: vi.fn(),
     onRemove: vi.fn(),
     loadPromptBody: vi.fn(async () => "Write this week's update covering:"),
+    onCommand: vi.fn(),
     ...overrides,
   };
 }
@@ -48,10 +50,12 @@ function slash(overrides: Partial<ComposerSlash> = {}): ComposerSlash {
 function ComposerHarness({
   slash: menu,
   onDraftChange,
+  onSend = vi.fn(async () => {}),
   activeTurnId = null,
 }: {
   slash: ComposerSlash;
   onDraftChange?: (draft: string) => void;
+  onSend?: () => Promise<void>;
   activeTurnId?: string | null;
 }) {
   const [draft, setDraft] = useState("");
@@ -68,7 +72,7 @@ function ComposerHarness({
         setDraft(next);
         onDraftChange?.(next);
       }}
-      onSend={vi.fn(async () => {})}
+      onSend={onSend}
       onSteer={vi.fn(async () => {})}
       onStop={vi.fn(async () => {})}
       resetKey="chat-1"
@@ -85,7 +89,9 @@ it("opens on a leading slash, narrows to what is typed, and closes on escape", a
 
   await user.click(screen.getByRole("textbox", { name: "Message" }));
   await user.keyboard("/");
-  expect(screen.getAllByRole("option")).toHaveLength(3);
+  expect(screen.getAllByRole("option")).toHaveLength(
+    OPTIONS.length + SLASH_COMMANDS.length,
+  );
 
   await user.keyboard("ppt");
   const narrowed = screen.getAllByRole("option");
@@ -151,6 +157,34 @@ it("invokes a picked skill and shows it as a chip the reader can drop", async ()
   render(<ComposerHarness slash={slash({ invoked: ["pptx"], onRemove })} />);
   await user.click(screen.getByRole("button", { name: "Remove Pptx" }));
   expect(onRemove).toHaveBeenCalledWith("pptx");
+});
+
+it("runs a built-in command instead of sending it as a message", async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const onSend = vi.fn(async () => {});
+  render(<ComposerHarness slash={slash({ onCommand })} onSend={onSend} />);
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("/usage{Enter}");
+
+  expect(onCommand).toHaveBeenCalledWith("usage", "");
+  expect(onSend).not.toHaveBeenCalled();
+});
+
+it("runs a command typed out with the list dismissed", async () => {
+  // The path a command with an argument takes: the token's list closes at the
+  // first space, so Enter has to recognise the line rather than the highlight.
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const onSend = vi.fn(async () => {});
+  render(<ComposerHarness slash={slash({ onCommand })} onSend={onSend} />);
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("/usage{Escape}{Enter}");
+
+  expect(onCommand).toHaveBeenCalledWith("usage", "");
+  expect(onSend).not.toHaveBeenCalled();
 });
 
 it("shows a bundle a running turn cannot reach, and refuses the pick", async () => {

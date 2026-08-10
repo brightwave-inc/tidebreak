@@ -26,7 +26,9 @@ import {
   type ComposerImages,
   type ComposerVoice,
 } from "./Composer";
+import type { SlashCommandName } from "./ComposerCommands";
 import { ComposerPrompt } from "./ComposerPrompt";
+import { ChatUsageDialog } from "./ChatUsageDialog";
 import type { ComposerNetwork, ComposerReasoning } from "./ComposerToolsMenu";
 import { MessageList, type RetryableTurn } from "./MessageList";
 import { revealPendingCall } from "./TranscriptFocus";
@@ -196,6 +198,17 @@ export function ChatView({
       ).reverse(),
     [messages],
   );
+
+  // Built-in `/` commands run here rather than being sent, so each one owns
+  // whatever local state it needs — a dialog, in `/usage`'s case.
+  const [usageOpen, setUsageOpen] = useState(false);
+  const runSlashCommand = useCallback((name: SlashCommandName) => {
+    switch (name) {
+      case "usage":
+        setUsageOpen(true);
+        return;
+    }
+  }, []);
 
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as {
@@ -504,6 +517,17 @@ export function ChatView({
 
   return (
     <section className="chat-pane">
+      {/* Mounted only while it is up: the dialog reads the model catalog and
+          the chat's finished turns, and neither is worth holding open behind a
+          conversation nobody has asked about. */}
+      {usageOpen && (
+        <ChatUsageDialog
+          client={client}
+          chat={chat}
+          open={usageOpen}
+          onOpenChange={setUsageOpen}
+        />
+      )}
       <div className={cn("message-view", fadeClass)}>
         <MessageList
           messages={messages}
@@ -623,6 +647,7 @@ export function ChatView({
                   invokedSkills.filter((skill) => skill !== name),
                 ),
               loadPromptBody: composerPlugins.loadPromptBody,
+              onCommand: runSlashCommand,
             }}
             images={composerImages}
             files={composerFiles}

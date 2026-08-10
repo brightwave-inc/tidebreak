@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { Search, Sparkles, Wand2 } from "lucide-react";
+import { Search, Sparkles, TerminalSquare, Wand2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import {
@@ -159,6 +159,7 @@ const PLUGINS_PANEL_LIST_ID = "composer-plugins-list";
  * as having come from a particular library.
  */
 export function optionIcon(option: SlashOption): LucideIcon {
+  if (option.kind === "command") return TerminalSquare;
   if (option.kind === "prompt") return Sparkles;
   if (option.category) return categoryIcon(option.category);
   return Wand2;
@@ -169,5 +170,7 @@ function optionKindLabel(option: SlashOption): string {
     ? "Plugin"
     : option.kind === "skill"
       ? "Skill"
-      : "Prompt";
+      : option.kind === "command"
+        ? "Command"
+        : "Prompt";
 }
