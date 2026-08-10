@@ -382,8 +382,13 @@ fn redact_private_key_blocks(input: &str) -> String {
         let label_start = begin + BEGIN.len();
         let line_end = find_line_end(input, label_start);
         let Some(relative_label_end) = input[label_start..line_end].find(MARKER_END) else {
-            // Preserve the malformed candidate, but resume searching after its
-            // prefix so it cannot consume a later valid BEGIN marker.
+            // A damaged private-key BEGIN marker must redact its body through
+            // EOF. A non-private marker still yields to a later valid key.
+            if input[label_start..line_end].contains("PRIVATE KEY") {
+                out.push_str(&input[cursor..begin]);
+                out.push_str(REDACTED);
+                return out;
+            }
             out.push_str(&input[cursor..label_start]);
             cursor = label_start;
             continue;
@@ -435,9 +440,7 @@ fn redact_credential_urls(input: &str) -> String {
             continue;
         }
 
-        let url_end = input[separator + 3..]
-            .find(is_url_boundary)
-            .map_or(input.len(), |offset| separator + 3 + offset);
+        let url_end = find_url_end(input, separator + 3);
         let candidate = &input[scheme_start..url_end];
         let has_credentials = url::Url::parse(candidate)
             .ok()
@@ -453,6 +456,21 @@ fn redact_credential_urls(input: &str) -> String {
 
     out.push_str(&input[cursor..]);
     out
+}
+
+/// Find a URL boundary without mistaking brackets around an IPv6 authority
+/// host for surrounding prose delimiters.
+fn find_url_end(input: &str, authority_start: usize) -> usize {
+    let mut in_ipv6_host = false;
+    for (offset, character) in input[authority_start..].char_indices() {
+        match character {
+            '[' => in_ipv6_host = true,
+            ']' if in_ipv6_host => in_ipv6_host = false,
+            _ if !in_ipv6_host && is_url_boundary(character) => return authority_start + offset,
+            _ => {}
+        }
+    }
+    input.len()
 }
 
 const fn is_url_scheme_char(character: char) -> bool {
@@ -1073,6 +1091,8 @@ fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
             }
             directory.open_with(&temporary, &options)?
         };
+        #[cfg(target_os = "macos")]
+        clear_macos_extended_acl(&file)?;
         file.write_all(content)?;
         file.sync_all()?;
         drop(file);
@@ -1085,6 +1105,72 @@ fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
         let _ = directory.remove_file(&temporary);
     }
     result.map_err(|_| "Could not write the debug bundle".to_owned())
+}
+
+/// macOS inherits extended ACL entries even when the new file has mode 0600.
+/// Clear and verify them before sensitive content reaches the file.
+#[cfg(target_os = "macos")]
+fn clear_macos_extended_acl(file: &cap_std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let acl = unsafe { acl_init(1) };
+    if acl.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let status = unsafe { acl_set_fd_np(file.as_raw_fd(), acl, ACL_TYPE_EXTENDED) };
+    unsafe { acl_free(acl) };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if macos_file_has_extended_acl(file)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the selected filesystem did not clear inherited export ACLs",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_file_has_extended_acl(file: &cap_std::fs::File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENOENT) {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    let mut entry = std::ptr::null_mut();
+    let status = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    unsafe { acl_free(acl) };
+    match status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+#[cfg(target_os = "macos")]
+const ACL_FIRST_ENTRY: libc::c_int = 0;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+    fn acl_set_fd_np(fd: libc::c_int, acl: *mut libc::c_void, acl_type: libc::c_int)
+        -> libc::c_int;
+    fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> *mut libc::c_void;
+    fn acl_get_entry(
+        acl: *mut libc::c_void,
+        entry_id: libc::c_int,
+        entry: *mut *mut libc::c_void,
+    ) -> libc::c_int;
 }
 
 /// Create the temporary export with a protected DACL before any sensitive byte
@@ -1540,9 +1626,18 @@ mod tests {
             "-----BEGIN CERTIFICATE\ntruncated\n[redacted]"
         );
 
+        let damaged_private = "-----BEGIN PRIVATE KEY\nLIVEPRIVATEKEYBODY";
+        assert_eq!(scrub_credentials(damaged_private), "[redacted]");
+
         let password = "correct-horse-battery-staple";
         let connection = format!("database=postgres://alice:{password}@db.example.test/openwave");
         assert_eq!(scrub_credentials(&connection), "database=[redacted]");
+
+        let ipv4_connection = format!("database=postgres://alice:{password}@127.0.0.1/openwave");
+        assert_eq!(scrub_credentials(&ipv4_connection), "database=[redacted]");
+
+        let ipv6_connection = format!("database=postgres://alice:{password}@[::1]/openwave");
+        assert_eq!(scrub_credentials(&ipv6_connection), "database=[redacted]");
 
         let token_url = "remote=https://ghp_abcdefghijklmnopqrstuvwxyz@github.com/openwave.git";
         assert_eq!(scrub_credentials(token_url), "remote=[redacted]");
@@ -1551,6 +1646,29 @@ mod tests {
             scrub_credentials("docs=https://example.test/reference"),
             "docs=https://example.test/reference"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn debug_bundle_export_clears_inherited_macos_acl() {
+        use std::process::Command;
+
+        let directory = tempfile::tempdir().unwrap();
+        let acl =
+            "everyone allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit";
+        assert!(Command::new("chmod")
+            .args(["+a", acl, directory.path().to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+
+        let destination = directory.path().join("bundle.md");
+        write_bundle(&destination, b"private").unwrap();
+        let file = Dir::open_ambient_dir(directory.path(), ambient_authority())
+            .unwrap()
+            .open("bundle.md")
+            .unwrap();
+        assert!(!macos_file_has_extended_acl(&file).unwrap());
     }
 
     #[test]
