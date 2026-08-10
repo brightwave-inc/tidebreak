@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { ReactElement } from "react";
 import {
   cleanup,
   fireEvent,
@@ -9,7 +10,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ProviderInfo } from "../api";
+import type { ApiClient, ModelInfo, ProviderInfo } from "../api";
 import { ProvidersPanel } from "./ProvidersPanel";
 
 const compatible: ProviderInfo = {
@@ -20,14 +21,29 @@ const compatible: ProviderInfo = {
   models: [],
 };
 
-afterEach(cleanup);
+/**
+ * Cards open collapsed, so every assertion about a card's contents starts by
+ * opening it — which is what a reader does too.
+ */
+function renderPanel(ui: ReactElement) {
+  const result = render(ui);
+  for (const header of screen.queryAllByRole("button", { name: /^Expand / })) {
+    fireEvent.click(header);
+  }
+  return result;
+}
+
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 describe("ProvidersPanel", () => {
   it("registers custom compatible models with explicit runtime limits", async () => {
     const putProvider = vi.fn().mockResolvedValue(compatible);
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[compatible]}
         client={client}
@@ -75,7 +91,7 @@ describe("ProvidersPanel", () => {
     const putProvider = vi.fn().mockResolvedValue(compatible);
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[compatible]}
         client={client}
@@ -121,7 +137,7 @@ describe("ProvidersPanel", () => {
     const putProvider = vi.fn().mockResolvedValue(xai);
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel providers={[xai]} client={client} onChanged={vi.fn()} />,
     );
 
@@ -165,7 +181,7 @@ describe("ProvidersPanel", () => {
   });
 
   it("does not expose custom model registration for curated providers", () => {
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[
           {
@@ -202,7 +218,7 @@ describe("ProvidersPanel", () => {
       models: [],
     };
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[fireworks, together]}
         client={{} as ApiClient}
@@ -243,7 +259,7 @@ describe("ProvidersPanel", () => {
     vi.stubGlobal("open", open);
     const user = userEvent.setup();
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[openai]}
         client={client}
@@ -274,7 +290,7 @@ describe("ProvidersPanel", () => {
       .mockResolvedValue({ signed_in: true });
     const onChanged = vi.fn();
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[
           { kind: "openai", enabled: false, has_credential: false, models: [] },
@@ -292,7 +308,7 @@ describe("ProvidersPanel", () => {
   });
 
   it("shows ChatGPT sign-out when OpenAI is signed in via subscription", () => {
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[
           {
@@ -328,7 +344,7 @@ describe("ProvidersPanel", () => {
     const putProvider = vi.fn().mockResolvedValue(vertex);
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[vertex]}
         client={client}
@@ -380,7 +396,7 @@ describe("ProvidersPanel", () => {
     const putProvider = vi.fn().mockResolvedValue(gemini);
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[gemini]}
         client={client}
@@ -416,7 +432,7 @@ describe("ProvidersPanel", () => {
     const putProvider = vi.fn().mockResolvedValue(bedrock);
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[bedrock]}
         client={client}
@@ -489,7 +505,7 @@ describe("ProvidersPanel", () => {
     });
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[bedrock]}
         client={client}
@@ -512,7 +528,7 @@ describe("ProvidersPanel", () => {
     const putProvider = vi.fn();
     const client = { putProvider } as unknown as ApiClient;
 
-    render(
+    renderPanel(
       <ProvidersPanel
         providers={[compatible]}
         client={client}
@@ -529,5 +545,167 @@ describe("ProvidersPanel", () => {
       screen.queryByRole("button", { name: "Save configuration" }),
     ).not.toBeInTheDocument();
     expect(putProvider).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProvidersPanel model visibility", () => {
+  const anthropic: ProviderInfo = {
+    kind: "anthropic",
+    enabled: true,
+    has_credential: true,
+    models: [],
+  };
+  const openai: ProviderInfo = {
+    kind: "openai",
+    enabled: true,
+    has_credential: true,
+    models: [],
+  };
+  const model = (
+    key: string,
+    provider: ModelInfo["provider"],
+    display_name: string,
+    recommended: boolean,
+  ): ModelInfo =>
+    ({
+      key,
+      id: key.split("::")[1],
+      display_name,
+      provider,
+      vendor: null,
+      verification: "verified",
+      recommended,
+      available: true,
+      context_window: 200_000,
+      max_output_tokens: 64_000,
+      input_modalities: ["text"],
+      supports_reasoning: false,
+      reasoning_efforts: [],
+      supports_tools: true,
+      supports_structured_output: true,
+      multimodal: false,
+    }) as unknown as ModelInfo;
+
+  const models: ModelInfo[] = [
+    model("anthropic::opus-5", "anthropic", "Claude Opus 5", true),
+    model("anthropic::opus-4-8", "anthropic", "Claude Opus 4.8", false),
+    model("openai::gpt-5-mini", "openai", "GPT-5 mini", false),
+  ];
+
+  function clientWith(overrides: Record<string, "show" | "hide">) {
+    const putSettings = vi
+      .fn()
+      .mockImplementation((body: Record<string, unknown>) =>
+        Promise.resolve({
+          model_visibility_overrides: body.model_visibility_overrides,
+        }),
+      );
+    const getSettings = vi
+      .fn()
+      .mockResolvedValue({ model_visibility_overrides: overrides });
+    return {
+      putSettings,
+      getSettings,
+      client: {
+        getSettings,
+        putSettings,
+        // The OpenAI card resumes any sign-in the server is still holding.
+        getOpenaiChatgptStatus: vi.fn().mockResolvedValue({ signed_in: false }),
+      } as unknown as ApiClient,
+    };
+  }
+
+  it("writes the complete deviation map, never a redundant entry", async () => {
+    // A deviation for another provider is already stored: the write replaces
+    // the whole map, so losing it would silently unhide that model.
+    const { client, putSettings } = clientWith({
+      "openai::gpt-5-mini": "show",
+      "anthropic::opus-4-8": "show",
+    });
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[anthropic]}
+        models={models}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    // Unchecking a model that is only visible because of an override returns
+    // it to its catalog default, which is the absence of a key.
+    const legacy = await screen.findByRole("checkbox", {
+      name: "Show Claude Opus 4.8",
+    });
+    await waitFor(() => expect(legacy).toBeChecked());
+    fireEvent.click(legacy);
+    await waitFor(() =>
+      expect(putSettings).toHaveBeenCalledWith({
+        model_visibility_overrides: { "openai::gpt-5-mini": "show" },
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Show Claude Opus 5" }),
+    );
+    await waitFor(() =>
+      expect(putSettings).toHaveBeenLastCalledWith({
+        model_visibility_overrides: {
+          "openai::gpt-5-mini": "show",
+          "anthropic::opus-5": "hide",
+        },
+      }),
+    );
+  });
+
+  it("resets only the card's own provider keys", async () => {
+    const { client, putSettings } = clientWith({
+      "anthropic::opus-5": "hide",
+      "anthropic::opus-4-8": "show",
+      "openai::gpt-5-mini": "show",
+    });
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[anthropic, openai]}
+        models={models}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    const [reset] = await screen.findAllByRole("button", {
+      name: "Reset to defaults",
+    });
+    fireEvent.click(reset);
+
+    await waitFor(() =>
+      expect(putSettings).toHaveBeenCalledWith({
+        model_visibility_overrides: { "openai::gpt-5-mini": "show" },
+      }),
+    );
+  });
+
+  it("expands the card a deep link names", async () => {
+    const { client } = clientWith({});
+
+    render(
+      <ProvidersPanel
+        providers={[anthropic, openai]}
+        models={models}
+        client={client}
+        onChanged={vi.fn()}
+        expandProvider="openai"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Collapse OpenAI" }),
+      ).toHaveAttribute("aria-expanded", "true"),
+    );
+    expect(
+      screen.getByRole("button", { name: "Expand Anthropic" }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 });

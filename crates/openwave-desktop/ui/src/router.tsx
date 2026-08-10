@@ -259,6 +259,11 @@ const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
     getParentRoute: () => settingsRoute,
     path: section.path,
     component: section.Component,
+    // Only the sections that address with search params declare one; the rest
+    // have nothing to validate.
+    ...(section.validateSearch
+      ? { validateSearch: section.validateSearch }
+      : {}),
   }),
 );
 

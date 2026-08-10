@@ -48,6 +48,7 @@ import {
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
   type ModelRole as WireModelRole,
+  type ModelVisibility as WireModelVisibility,
   type ModelRoleInfo as WireModelRoleInfo,
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
@@ -167,6 +168,9 @@ export type ServerInfo = {
 export type ProviderKind = WireProviderKind;
 /** Stable provider-scoped key used for new settings and chat overrides. */
 export type ModelSelectionKey = `${ProviderKind}::${string}`;
+
+/** A reader's deviation from a model's curated `recommended` default. */
+export type ModelVisibility = WireModelVisibility;
 
 /** How hard a reasoning-capable model should think before answering. */
 export type ReasoningEffort = WireReasoningEffort;

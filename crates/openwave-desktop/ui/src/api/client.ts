@@ -33,6 +33,7 @@ import {
   type ModelRole,
   type ModelRoleInfo,
   type ModelSelectionKey,
+  type ModelVisibility,
   type NetworkPolicy,
   type PendingFolderAccessRequest,
   type PendingOutputWritebackRequest,
@@ -308,10 +309,15 @@ export class ApiClient {
    * Update runtime settings. A field absent leaves it unchanged, `null` resets
    * it to the server default, and a value sets it (matching the double-option
    * body the server expects).
+   *
+   * `model_visibility_overrides` is the exception to "absent leaves it
+   * unchanged, present merges": the server replaces the map wholesale, so a
+   * writer sends the complete set of deviations it wants persisted.
    */
   putSettings(body: {
     model?: ModelSelectionKey | null;
     max_active_background_agents?: number;
+    model_visibility_overrides?: Record<string, ModelVisibility>;
     compaction?: {
       threshold_fraction?: number;
       target_fraction?: number;
