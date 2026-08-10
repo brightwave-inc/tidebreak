@@ -518,7 +518,7 @@ impl ToolRegistry {
                 registered,
                 validate_arguments: Some(validate),
                 ..
-            }) => registered.mismatch(arguments).is_none() && validate(arguments),
+            }) => registered.is_advertisable() && validate(arguments),
             Some(RegisteredTool::Client {
                 registered,
                 validate_arguments: None,
@@ -528,7 +528,7 @@ impl ToolRegistry {
                 registered,
                 validate_arguments,
                 ..
-            }) => registered.mismatch(arguments).is_none() && validate_arguments(arguments),
+            }) => registered.is_advertisable() && validate_arguments(arguments),
             Some(RegisteredTool::Server { .. })
             | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => false,
