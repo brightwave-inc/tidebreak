@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
@@ -99,7 +99,7 @@ jobs:
           version: v0.16.0
 
       - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
