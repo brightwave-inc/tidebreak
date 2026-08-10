@@ -1741,9 +1741,11 @@ pub trait Store: Send + Sync {
     /// Accept a steer with renderer-hidden, message-scoped context needed for
     /// its eventual durable model projection.
     ///
-    /// `voice_input_used` is kept separate from caller-visible content so the
-    /// store derives the canonical model note. Implementations that do not yet
-    /// persist this metadata can continue serving the ordinary false case.
+    /// `voice_input_used` and `invoked_skills` are kept separate from
+    /// caller-visible content so the store derives the canonical model note.
+    /// The skills are the steer's own: a steer neither inherits the turn's
+    /// opening list nor spends its budget. Implementations that do not yet
+    /// persist this metadata can continue serving the ordinary empty case.
     #[allow(clippy::too_many_arguments)]
     async fn accept_turn_steer_with_message_context(
         &self,
@@ -1751,10 +1753,11 @@ pub trait Store: Send + Sync {
         turn_id: TurnId,
         chat_id: ChatId,
         content: &str,
+        invoked_skills: &[String],
         interrupt: bool,
         voice_input_used: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
-        if voice_input_used {
+        if voice_input_used || !invoked_skills.is_empty() {
             return turn_storage_unavailable();
         }
         self.accept_turn_steer(id, turn_id, chat_id, content, interrupt)

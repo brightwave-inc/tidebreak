@@ -12,6 +12,7 @@ fn pending_turn_steer(
         turn_id: Set(turn.id.0),
         chat_id: Set(turn.chat_id.0),
         content: Set(content.into()),
+        invoked_skills: Set(serde_json::json!([])),
         voice_input_used: Set(false),
         interrupt: Set(false),
         status: Set(TurnSteerStatus::Pending.as_str().into()),
@@ -191,6 +192,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
                 turn.id,
                 chat.id,
                 "change course",
+                &["presentations".to_owned()],
                 false,
                 true,
             )
@@ -199,6 +201,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     );
     assert_eq!(pending.status, TurnSteerStatus::Pending);
     assert!(pending.voice_input_used);
+    assert_eq!(pending.invoked_skills, vec!["presentations".to_owned()]);
     assert_eq!(pending.message_id, None);
 
     let claim_at = Utc::now();
@@ -320,6 +323,12 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         .llm_content
         .as_deref()
         .is_some_and(|content| content.contains("The user dictated this message")));
+    // The steer's own skills reach the model as a directive on the message the
+    // steer became — the whole point of carrying them, and the thing a wrong
+    // argument position in either projection site would silently drop.
+    assert!(messages[2].llm_content.as_deref().is_some_and(|content| {
+        content.contains("explicitly invoked these skills") && content.contains("presentations")
+    }));
 
     let second_id = crate::id::TurnSteerId::new();
     accepted_steer(
@@ -595,7 +604,27 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
     ));
     assert!(matches!(
         store
-            .accept_turn_steer_with_message_context(id, turn.id, chat.id, "exact", false, true,)
+            .accept_turn_steer_with_message_context(
+                id, turn.id, chat.id, "exact", &[], false, true,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnSteerOutcome::IdentityConflict
+    ));
+    // The skills a steer names are part of what was accepted: a retry that
+    // changes them must not be answered with the steer already stored, which
+    // would drop the skills it asked for without saying so.
+    assert!(matches!(
+        store
+            .accept_turn_steer_with_message_context(
+                id,
+                turn.id,
+                chat.id,
+                "exact",
+                &["docx".to_owned()],
+                false,
+                false,
+            )
             .await
             .unwrap(),
         AcceptTurnSteerOutcome::IdentityConflict

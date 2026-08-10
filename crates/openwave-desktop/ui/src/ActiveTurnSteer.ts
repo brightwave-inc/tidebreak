@@ -23,6 +23,8 @@ export type ActiveTurnSteerRequest = ActiveTurnTarget & {
   draftSnapshot: string;
   steerId: string;
   voiceInputUsed: boolean;
+  /** Skills named for this guidance alone, under the steer's own budget. */
+  invokedSkills: readonly string[];
 };
 
 export function canBeginActiveTurnSteer(input: {
@@ -36,6 +38,16 @@ export function canBeginActiveTurnSteer(input: {
     input.turnId !== null &&
     input.cancelRequestTurnId === null &&
     !input.deletionInFlight
+  );
+}
+
+function sameSkills(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((skill, index) => skill === right[index])
   );
 }
 
@@ -55,6 +67,7 @@ export class ActiveTurnSteerFence {
     draft: string,
     createId: () => string,
     voiceInputUsed = false,
+    invokedSkills: readonly string[] = [],
   ): ActiveTurnSteerRequest | null {
     const content = draft.trim();
     if (
@@ -70,7 +83,8 @@ export class ActiveTurnSteerFence {
       this.retryable &&
       sameTarget(this.retryable, target) &&
       this.retryable.content === content &&
-      this.retryable.voiceInputUsed === voiceInputUsed
+      this.retryable.voiceInputUsed === voiceInputUsed &&
+      sameSkills(this.retryable.invokedSkills, invokedSkills)
         ? { ...this.retryable, draftSnapshot: draft }
         : {
             ...target,
@@ -78,6 +92,7 @@ export class ActiveTurnSteerFence {
             draftSnapshot: draft,
             steerId: createId(),
             voiceInputUsed,
+            invokedSkills: [...invokedSkills],
           };
     this.retryable = null;
     this.pending = request;

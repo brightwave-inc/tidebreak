@@ -678,6 +678,15 @@ pub(super) fn turn_steer_table() -> TableCreateStatement {
         .col(ColumnDef::new(TurnSteer::TurnId).uuid().not_null())
         .col(ColumnDef::new(TurnSteer::ChatId).uuid().not_null())
         .col(ColumnDef::new(TurnSteer::Content).text().not_null())
+        // The skills the user named for this steer, as a JSON array of slugs.
+        // Scoped to the one instruction the same way the turn's own list is
+        // scoped to its opening message: invocation is a per-message directive,
+        // so a steer neither inherits nor extends the turn's list.
+        .col(
+            ColumnDef::new(TurnSteer::InvokedSkills)
+                .json_binary()
+                .not_null(),
+        )
         .col(
             ColumnDef::new(TurnSteer::VoiceInputUsed)
                 .boolean()

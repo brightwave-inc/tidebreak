@@ -414,6 +414,11 @@ pub struct TurnSteer {
     pub chat_id: ChatId,
     /// Byte-exact user instruction.
     pub content: String,
+    /// Skills the user explicitly named for this instruction.
+    ///
+    /// Scoped to the steer alone: invocation is a per-message directive, so a
+    /// steer neither inherits the turn's opening list nor spends its budget.
+    pub invoked_skills: Vec<String>,
     /// Whether the instruction was dictated and transcribed from speech.
     pub voice_input_used: bool,
     /// Whether delivery should preempt the current model stream.

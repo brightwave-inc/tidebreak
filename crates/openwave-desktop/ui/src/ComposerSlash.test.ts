@@ -99,10 +99,13 @@ describe("skillsToInvoke", () => {
 describe("availableSlashOptions", () => {
   const options = slashOptionsFromCatalog(CATALOG);
 
-  it("keeps prompts and drops invocations while a turn is running", () => {
+  it("keeps invocations reachable while a turn runs, minus disabled bundles", () => {
+    // A steer carries its own invocation, so skills stay pickable. The
+    // `charts` bundle is off, and picking it mid-turn would flip it on
+    // install-wide and name a manifest this turn never staged.
     expect(
       availableSlashOptions(options, [], { steering: true }).map((o) => o.name),
-    ).toEqual(["weekly-update"]);
+    ).toEqual(["documents", "docx", "notes", "weekly-update"]);
   });
 
   it("drops a bundle only once every member it could add is on the message", () => {

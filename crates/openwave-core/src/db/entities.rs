@@ -1062,6 +1062,7 @@ pub mod turn_steer {
         pub turn_id: Uuid,
         pub chat_id: Uuid,
         pub content: String,
+        pub invoked_skills: Json,
         pub voice_input_used: bool,
         pub interrupt: bool,
         pub status: String,

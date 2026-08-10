@@ -377,7 +377,7 @@ export function Composer({
     : [];
   // Skills vanish from the list at the cap, which would otherwise read as a
   // catalog that has lost them. The note says which bound was reached.
-  const capNote = !active && atSkillCap;
+  const capNote = atSkillCap;
   const slashCapNote = slashToken !== null && capNote;
   // An open list with nothing in it is a panel over the draft saying nothing.
   const slashOpen =
@@ -802,9 +802,6 @@ export function Composer({
               key={name}
               option={skillOption(slash.options, name)}
               name={name}
-              // Steering carries no invocation, so a chip is set aside for as
-              // long as a turn is running rather than silently applying later.
-              inactive={active}
               onRemove={() => slash.onRemove(name)}
             />
           ))}
@@ -1127,22 +1124,17 @@ function skillOption(
 function InvokedSkillChip({
   option,
   name,
-  inactive,
   onRemove,
 }: {
   option: SlashOption | undefined;
   name: string;
-  inactive: boolean;
   onRemove: () => void;
 }) {
   const label = option?.label ?? name;
   const Icon = option ? optionIcon(option) : Wand2;
   return (
     <li
-      className={cn(
-        "relative flex min-w-0 max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 py-1 pl-2 pr-7 text-muted-foreground",
-        inactive && "opacity-60",
-      )}
+      className="relative flex min-w-0 max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 py-1 pl-2 pr-7 text-muted-foreground"
     >
       <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-background">
         <Icon size={14} aria-hidden="true" />
@@ -1153,9 +1145,7 @@ function InvokedSkillChip({
       >
         {label}
       </span>
-      <small className="text-[0.68rem]">
-        {inactive ? "Next message" : "Skill"}
-      </small>
+      <small className="text-[0.68rem]">Skill</small>
       <button
         type="button"
         className="absolute right-1 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"

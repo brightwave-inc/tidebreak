@@ -35,8 +35,10 @@ export type TurnControls = {
  * @param draftRef the live composer draft, read at the moment guidance is sent
  *   rather than at render, so a keystroke that has not painted yet still counts.
  * @param onDraftAccepted called when accepted guidance was the draft still in
- *   the composer, so the composer can clear it.
+ *   the composer, so the composer can clear it and its pills together.
  * @param voiceInputUsed whether voice transcription contributed to this draft.
+ * @param invokedSkills the pills on the draft, which the steer carries under
+ *   its own budget rather than the turn's.
  */
 export function useTurnControls(
   client: ApiClient | null,
@@ -44,6 +46,7 @@ export function useTurnControls(
   draftRef: RefObject<string>,
   onDraftAccepted: () => void,
   voiceInputUsed = false,
+  invokedSkills: readonly string[] = [],
 ): TurnControls {
   const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
     null,
@@ -191,6 +194,7 @@ export function useTurnControls(
       draftRef.current,
       () => crypto.randomUUID(),
       voiceInputUsed,
+      invokedSkills,
     );
     if (!request) return;
 
@@ -206,6 +210,7 @@ export function useTurnControls(
         request.content,
         true,
         request.voiceInputUsed,
+        request.invokedSkills,
       );
       if (!canApplySteerResponse(request)) return;
 

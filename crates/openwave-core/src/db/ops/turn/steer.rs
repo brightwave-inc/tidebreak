@@ -21,16 +21,18 @@ use super::super::{
 };
 use super::{canonical_db_timestamp, turn_run_status_from_db};
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn accept_turn_steer(
     store: &DbStore,
     id: TurnSteerId,
     turn_id: TurnId,
     chat_id: ChatId,
     content: &str,
+    invoked_skills: &[String],
     interrupt: bool,
     voice_input_used: bool,
 ) -> Result<AcceptTurnSteerOutcome> {
-    validate_steer_input(id, turn_id, chat_id, content)?;
+    validate_steer_input(id, turn_id, chat_id, content, invoked_skills)?;
     if let Some(existing) = entities::turn_steer::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
@@ -41,6 +43,7 @@ pub(in crate::db) async fn accept_turn_steer(
             turn_id,
             chat_id,
             content,
+            invoked_skills,
             interrupt,
             voice_input_used,
         );
@@ -74,6 +77,7 @@ pub(in crate::db) async fn accept_turn_steer(
             turn_id,
             chat_id,
             content,
+            invoked_skills,
             interrupt,
             voice_input_used,
         )?;
@@ -136,6 +140,7 @@ pub(in crate::db) async fn accept_turn_steer(
                 turn_id,
                 chat_id,
                 content,
+                invoked_skills,
                 interrupt,
                 voice_input_used,
             );
@@ -148,6 +153,7 @@ pub(in crate::db) async fn accept_turn_steer(
         turn_id: Set(turn_id.0),
         chat_id: Set(chat_id.0),
         content: Set(content.to_owned()),
+        invoked_skills: Set(serde_json::json!(invoked_skills)),
         voice_input_used: Set(voice_input_used),
         interrupt: Set(interrupt),
         status: Set(TurnSteerStatus::Pending.as_str().into()),
@@ -173,6 +179,7 @@ pub(in crate::db) async fn accept_turn_steer(
                     turn_id,
                     chat_id,
                     content,
+                    invoked_skills,
                     interrupt,
                     voice_input_used,
                 );
@@ -497,7 +504,7 @@ pub(in crate::db) async fn apply_turn_steer(
             &steer.content,
             &[],
             &[],
-            &[],
+            &invoked_skills_from_steer(&steer)?,
             steer.voice_input_used,
         )),
         reasoning: Set(None),
@@ -636,6 +643,7 @@ fn validate_steer_input(
     turn_id: TurnId,
     chat_id: ChatId,
     content: &str,
+    invoked_skills: &[String],
 ) -> Result<()> {
     let content_len = content.chars().count();
     if id.0.is_nil() || turn_id.0.is_nil() || chat_id.0.is_nil() {
@@ -652,7 +660,7 @@ fn validate_steer_input(
             TurnSteer::MAX_CONTENT_LEN
         )));
     }
-    Ok(())
+    super::validate_invoked_skills(invoked_skills)
 }
 
 fn exact_accepted_steer(
@@ -660,12 +668,17 @@ fn exact_accepted_steer(
     turn_id: TurnId,
     chat_id: ChatId,
     content: &str,
+    invoked_skills: &[String],
     interrupt: bool,
     voice_input_used: bool,
 ) -> Result<AcceptTurnSteerOutcome> {
+    // The skill list is part of the caller's identity: a retry that names
+    // different skills is a different instruction, and reporting it as the
+    // one already accepted would silently drop the skills it asked for.
     if existing.turn_id != turn_id.0
         || existing.chat_id != chat_id.0
         || existing.content != content
+        || invoked_skills_from_steer(&existing)? != invoked_skills
         || existing.interrupt != interrupt
         || existing.voice_input_used != voice_input_used
     {
@@ -687,7 +700,7 @@ where
         &steer.content,
         &[],
         &[],
-        &[],
+        &invoked_skills_from_steer(steer)?,
         steer.voice_input_used,
     );
     let exact = entities::message::Entity::find_by_id(steer.id)
@@ -838,6 +851,7 @@ fn turn_steer_from_model(model: entities::turn_steer::Model) -> Result<TurnSteer
         id: TurnSteerId(model.id),
         turn_id: TurnId(model.turn_id),
         chat_id: ChatId(model.chat_id),
+        invoked_skills: invoked_skills_from_steer(&model)?,
         content: model.content,
         voice_input_used: model.voice_input_used,
         interrupt: model.interrupt,
@@ -846,6 +860,20 @@ fn turn_steer_from_model(model: entities::turn_steer::Model) -> Result<TurnSteer
         message_id: model.message_id.map(MessageId),
         created_at: model.created_at,
         resolved_at: model.resolved_at,
+    })
+}
+
+/// Read back the skills the user named on an accepted steer.
+///
+/// A row whose value is not an array of strings is corrupt rather than merely
+/// unusual: the accepted instruction can no longer be described honestly, so
+/// this fails instead of degrading to "no skills were invoked".
+fn invoked_skills_from_steer(model: &entities::turn_steer::Model) -> Result<Vec<String>> {
+    serde_json::from_value(model.invoked_skills.clone()).map_err(|error| {
+        AgentError::Store(format!(
+            "turn steer {} has unreadable invoked skills: {error}",
+            TurnSteerId(model.id)
+        ))
     })
 }
 

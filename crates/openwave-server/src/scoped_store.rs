@@ -257,12 +257,14 @@ impl ScopedStore {
     }
 
     /// [`Store::accept_turn_steer_with_message_context`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn accept_turn_steer_with_message_context(
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
         chat_id: ChatId,
         content: &str,
+        invoked_skills: &[String],
         interrupt: bool,
         voice_input_used: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
@@ -272,6 +274,7 @@ impl ScopedStore {
                 turn_id,
                 chat_id,
                 content,
+                invoked_skills,
                 interrupt,
                 voice_input_used,
             )

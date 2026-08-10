@@ -471,6 +471,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
                 turn_id,
                 chat.id,
                 "change course",
+                &[],
                 true,
                 true,
             )
