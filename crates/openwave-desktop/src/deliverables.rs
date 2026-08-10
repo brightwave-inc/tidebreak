@@ -148,6 +148,40 @@ pub(crate) struct OutputRevisionsCatalog {
     revisions: Vec<OutputRevisionInfo>,
 }
 
+/// Publish a user's edit of a text output as a new user-authored revision.
+///
+/// `expected_revision_id` is the revision the editor was opened on. It is a
+/// precondition, not a hint: if anything published a newer revision in the
+/// meantime the save is refused and the renderer is told which revision is
+/// current, so the person reloads and reconciles instead of silently discarding
+/// work they never saw.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SaveOutputRevisionRequest {
+    chat_id: Uuid,
+    output_id: OutputId,
+    expected_revision_id: OutputRevisionId,
+    content: String,
+}
+
+/// The outcome of one save. A conflict is an expected product state with its own
+/// reconcile path, not a failure, so it travels as a value rather than an error.
+#[derive(Debug, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "status"
+)]
+pub(crate) enum SaveOutputRevisionResult {
+    /// The edit published a new revision; the payload previews it.
+    Saved(DeliverablePreview),
+    /// Another revision became current after the editor opened.
+    Conflict {
+        /// The revision that is current now — what the renderer should reload.
+        current_revision_id: OutputRevisionId,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OutputExportResult {
@@ -369,6 +403,55 @@ pub(crate) async fn restore_output_revision(
     let (output, revision) =
         require_live_output(host_access.store(), chat_id, request.output_id).await?;
     summary_from_record(&output, &revision)
+}
+
+/// Save an edited text output as a new user-authored revision.
+///
+/// Append-only, exactly like a restore: the previous revision keeps its id and
+/// its bytes, and this publishes a new head marked as produced by the user. The
+/// edit is conditional on the revision it started from still being current.
+#[tauri::command]
+pub(crate) async fn save_output_revision(
+    app: AppHandle,
+    host_access: State<'_, HostAccess>,
+    request: SaveOutputRevisionRequest,
+) -> Result<SaveOutputRevisionResult, String> {
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?
+        .clone();
+    let scratch_root = crate::data_dir(&app)?.join("scratch");
+    let scratch =
+        tauri::async_runtime::spawn_blocking(move || open_chat_scratch(&scratch_root, chat_id))
+            .await
+            .map_err(|_| "Could not save your changes".to_owned())??;
+    match openwave_core::save_user_output_revision(
+        &*store,
+        &scratch,
+        chat_id,
+        request.output_id,
+        request.expected_revision_id,
+        &request.content,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(_) => {
+            let (output, revision) =
+                require_live_output(host_access.store(), chat_id, request.output_id).await?;
+            Ok(SaveOutputRevisionResult::Saved(
+                revision_preview(&app, chat_id, &output, &revision).await?,
+            ))
+        }
+        Err(openwave_core::AgentError::OutputRevisionConflict {
+            current_revision, ..
+        }) => Ok(SaveOutputRevisionResult::Conflict {
+            current_revision_id: current_revision,
+        }),
+        Err(openwave_core::AgentError::Store(message)) => Err(message),
+        Err(_) => Err("Could not save your changes".to_owned()),
+    }
 }
 
 /// Soft-delete an output. The explicit inverse is `restore_output`, which the
@@ -989,6 +1072,29 @@ mod tests {
                 created_at,
             },
         )
+    }
+
+    /// The renderer branches on `status` and reads the saved preview from the
+    /// same object, so the two variants have to project exactly that shape. A
+    /// conflict is a value with the revision to reconcile against, never an
+    /// error string the renderer would have to parse.
+    #[test]
+    fn a_save_projects_its_outcome_as_a_status_tagged_object() {
+        let (output, revision) = output_record(ChatId::new(), "brief.md", b"# Brief");
+        let saved = serde_json::to_value(SaveOutputRevisionResult::Saved(
+            preview_from_bytes(&output, &revision, b"# Brief".to_vec()).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(saved["status"], "saved");
+        assert_eq!(saved["revisionId"], revision.id.to_string());
+        assert_eq!(saved["content"], "# Brief");
+
+        let conflict = serde_json::to_value(SaveOutputRevisionResult::Conflict {
+            current_revision_id: revision.id,
+        })
+        .unwrap();
+        assert_eq!(conflict["status"], "conflict");
+        assert_eq!(conflict["currentRevisionId"], revision.id.to_string());
     }
 
     fn revision_path(root: &Path, output: &OutputRecord, revision: &OutputRevision) -> PathBuf {

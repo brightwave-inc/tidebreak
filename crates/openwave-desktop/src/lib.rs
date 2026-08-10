@@ -313,6 +313,7 @@ pub fn run() {
             deliverables::list_output_revisions,
             deliverables::read_output_revision,
             deliverables::restore_output_revision,
+            deliverables::save_output_revision,
             deliverables::delete_output,
             chat_debug::copy_chat_debug_bundle,
             chat_debug::save_chat_debug_bundle,
