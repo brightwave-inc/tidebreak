@@ -627,11 +627,12 @@ async fn callback(
     };
     (
         axum::http::StatusCode::OK,
-        Html(super::callback_page::callback_page(outcome, heading, message)),
+        Html(super::callback_page::callback_page(
+            outcome, heading, message,
+        )),
     )
         .into_response()
 }
-
 
 #[derive(Clone)]
 struct CallbackState {
