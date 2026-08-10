@@ -29,6 +29,11 @@ import {
   type SlashOption,
 } from "./ComposerSlash";
 import {
+  parseSlashCommand,
+  withSlashCommands,
+  type SlashCommandName,
+} from "./ComposerCommands";
+import {
   activeMentionQuery,
   attachableFiles,
   attachableFolders,
@@ -229,6 +234,15 @@ export type ComposerSlash = {
   onRemove: (name: string) => void;
   /** One prompt's insertable text. A rejection leaves the draft as it was. */
   loadPromptBody: (name: string) => Promise<string>;
+  /**
+   * Run a built-in command. The argument is whatever followed the name on the
+   * line, empty when the command was picked from the list.
+   *
+   * Absent on a surface with no conversation behind it — the home composer
+   * starts a chat, and a command that reports on one has nothing to read there.
+   * Commands are offered only where they can be run.
+   */
+  onCommand?: (name: SlashCommandName, argument: string) => void;
 };
 
 /** Whether attached images stop this turn from being sent, and why. */
@@ -369,9 +383,15 @@ export function Composer({
   const invokedSkills = slash?.invoked ?? [];
   const atSkillCap = invokedSkills.length >= MAX_INVOKED_SKILLS;
   /** What a pick can still reach, given what this message already carries. */
-  const slashOptions = availableSlashOptions(slash?.options ?? [], invokedSkills, {
+  const libraryOptions = availableSlashOptions(slash?.options ?? [], invokedSkills, {
     steering: active,
   });
+  // The `/` list carries the built-in commands as well as the library; the
+  // panel behind the tools menu is the library alone, because that is what its
+  // label promises and a command is not something installed.
+  const slashOptions = slash?.onCommand
+    ? withSlashCommands(libraryOptions)
+    : libraryOptions;
   const slashMatches = slashToken
     ? filterSlashOptions(slashOptions, slashToken.query)
     : [];
@@ -490,6 +510,11 @@ export function Composer({
    *
    * A row the list marked unavailable does nothing: it is shown so the reader
    * can see it is still installed, and its hint already says what is in the way.
+   *
+   * A command runs instead of writing anything: the token comes out of the
+   * draft and the app does the thing. Picked from the list it carries no
+   * argument — the reader who wants to give one types the whole line and sends
+   * it, which `submit` reads.
    */
   function pickOption(
     option: SlashOption,
@@ -513,6 +538,10 @@ export function Composer({
       return;
     }
     if (token) applySlashReplacement(draft, token.start, caret, "");
+    if (option.kind === "command") {
+      slash.onCommand?.(option.name as SlashCommandName, "");
+      return;
+    }
     if (option.kind === "plugin") {
       const plugin = plugins?.items.find((item) => item.name === option.name);
       if (plugin) plugins?.onSelect(plugin);
@@ -590,6 +619,15 @@ export function Composer({
 
   async function submit(): Promise<void> {
     if (!canSubmit) return;
+    // A line that names a command is not a message: it runs here, and the draft
+    // it came from goes away like a sent one would. Checked before the send so
+    // a command is never posted to the model as prose.
+    const command = slash?.onCommand ? parseSlashCommand(draft) : null;
+    if (command) {
+      onDraftChange("");
+      slash?.onCommand?.(command.command.name, command.argument);
+      return;
+    }
     const submissionKey = resetKey;
     await (active ? onSteer() : onSend());
     historyIndexRef.current = null;
@@ -814,7 +852,7 @@ export function Composer({
       )}
       {panelQuery !== null && slash && (
         <PluginsPanel
-          options={slashOptions}
+          options={libraryOptions}
           query={panelQuery}
           capNote={capNote}
           onQueryChange={setPanelQuery}

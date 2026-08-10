@@ -6,15 +6,17 @@ export const MAX_INVOKED_SKILLS = 8;
 
 /**
  * One thing the plugins panel can reach: a skill to invoke, a bundle of them,
- * or a prompt to insert.
+ * or a prompt to insert — plus the app's own built-in commands, which the same
+ * list carries so `/` opens one popover rather than two.
  *
- * All three live in one flat list because the reader is looking for a name, not
- * deciding which library it came from. `kind` is what the composer acts on:
+ * All of them live in one flat list because the reader is looking for a name,
+ * not deciding which library it came from. `kind` is what the composer acts on:
  * picking a skill leaves a pill behind, picking a bundle leaves one per member
- * skill, and picking a prompt writes text.
+ * skill, picking a prompt writes text, and picking a command runs it here in
+ * the app without a turn.
  */
 export type SlashOption = {
-  kind: "skill" | "prompt" | "plugin";
+  kind: "skill" | "prompt" | "plugin" | "command";
   /** The catalog slug — what the wire and the pill are keyed by. */
   name: string;
   label: string;
@@ -228,8 +230,8 @@ export function skillsToInvoke(
  * bundle cannot be picked there: doing so turns the bundle on install-wide and
  * names a manifest the running turn's workspace never staged. Its row is kept
  * and marked rather than dropped, because a row that quietly disappears when a
- * turn starts reads as a catalog that has lost it. Prompts are text and stay
- * available throughout.
+ * turn starts reads as a catalog that has lost it. Prompts are text and
+ * commands are the app's own, so both stay available throughout.
  */
 export function availableSlashOptions(
   options: readonly SlashOption[],
@@ -238,7 +240,7 @@ export function availableSlashOptions(
 ): SlashOption[] {
   const available: SlashOption[] = [];
   for (const option of options) {
-    if (option.kind === "prompt") {
+    if (option.kind === "prompt" || option.kind === "command") {
       available.push(option);
       continue;
     }
