@@ -403,6 +403,41 @@ impl TurnClientWaitStatus {
     }
 }
 
+/// One message accepted while its chat had a live turn, waiting its turn.
+///
+/// The id is the client-generated turn id promotion will accept under, so an
+/// ambiguous promotion retry resolves to `Existing` rather than a duplicate
+/// turn. Rows are FIFO by `position` within a chat and fully durable: a queue
+/// survives restarts and is visible to every client on the chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct QueuedTurn {
+    /// The turn id this row becomes when promoted.
+    pub id: TurnId,
+    /// Owning chat.
+    pub chat_id: ChatId,
+    /// Byte-exact user message.
+    pub content: String,
+    /// Image-attachment ids, in display order.
+    pub attachments: Vec<uuid::Uuid>,
+    /// Chat-owned document ids.
+    pub file_attachments: Vec<crate::id::DocumentId>,
+    /// Skills the user explicitly invoked.
+    pub invoked_skills: Vec<String>,
+    /// Whether the message was dictated.
+    pub voice_input_used: bool,
+    /// FIFO order within the chat.
+    pub position: i32,
+    /// When the message was queued.
+    pub created_at: DateTime<Utc>,
+    /// When it was last edited or reordered.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl QueuedTurn {
+    /// Maximum queued messages one chat may hold.
+    pub const MAX_PER_CHAT: usize = 32;
+}
+
 /// One durably accepted steering instruction for an active turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSteer {

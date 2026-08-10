@@ -555,6 +555,39 @@ pub mod agent_run {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod queued_turn {
+    use sea_orm::entity::prelude::*;
+
+    /// One message accepted while its chat had a live turn, waiting to become
+    /// a real turn when the chat is free. The row id is the client-generated
+    /// turn id the promotion will accept under, so an ambiguous promotion
+    /// retry lands on `AcceptTurnOutcome::Existing` instead of a duplicate.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "queued_turn")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub chat_id: Uuid,
+        pub content: String,
+        /// Image-attachment ids, JSON array of UUID strings.
+        pub attachments_json: String,
+        /// Chat-owned document ids, JSON array of UUID strings.
+        pub file_attachments_json: String,
+        /// Invoked skill names, JSON array of strings.
+        pub invoked_skills_json: String,
+        pub voice_input_used: bool,
+        /// FIFO order within the chat; reorder rewrites positions.
+        pub position: i32,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod sandbox_spawn_checkpoint {
     use sea_orm::entity::prelude::*;
 

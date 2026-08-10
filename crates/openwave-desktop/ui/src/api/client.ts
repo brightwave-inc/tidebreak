@@ -37,6 +37,7 @@ import {
   type ModelVisibility,
   type NetworkPolicy,
   type PendingFolderAccessRequest,
+  type QueuedTurn,
   type PendingOutputWritebackRequest,
   type PendingPlanApproval,
   type PendingToolApproval,
@@ -1235,6 +1236,7 @@ export class ApiClient {
     fileAttachments: readonly string[] = [],
     invokedSkills: readonly string[] = [],
     voiceInputUsed = false,
+    queue = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
@@ -1246,8 +1248,53 @@ export class ApiClient {
         file_attachments: fileAttachments,
         invoked_skills: invokedSkills,
         voice_input_used: voiceInputUsed,
+        queue,
       }),
     });
+  }
+
+  /** The chat's queued messages, FIFO, plus whether promotion is paused. */
+  listQueuedTurns(
+    chatId: string,
+  ): Promise<{ queued: QueuedTurn[]; paused: boolean }> {
+    return this.json(`/chats/${encodeURIComponent(chatId)}/queued`, {
+      headers: this.headers(),
+    });
+  }
+
+  patchQueuedTurn(
+    chatId: string,
+    turnId: string,
+    update: { content?: string; position?: number },
+  ): Promise<QueuedTurn> {
+    return this.json(
+      `/chats/${encodeURIComponent(chatId)}/queued/${encodeURIComponent(turnId)}`,
+      {
+        method: "PATCH",
+        headers: this.headers(true),
+        body: JSON.stringify(update),
+      },
+    );
+  }
+
+  async deleteQueuedTurn(chatId: string, turnId: string): Promise<void> {
+    await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/queued/${encodeURIComponent(turnId)}`,
+      { method: "DELETE", headers: this.headers() },
+      204,
+    );
+  }
+
+  async putQueuePaused(chatId: string, paused: boolean): Promise<void> {
+    await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/queue-paused`,
+      {
+        method: "PUT",
+        headers: this.headers(true),
+        body: JSON.stringify({ paused }),
+      },
+      204,
+    );
   }
 
   steer(

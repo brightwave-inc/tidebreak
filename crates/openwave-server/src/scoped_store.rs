@@ -315,6 +315,14 @@ impl ScopedStore {
         self.store.get_agent_run_result(id).await
     }
 
+    /// [`Store::enqueue_queued_turn`].
+    pub async fn enqueue_queued_turn(
+        &self,
+        queued: &openwave_core::QueuedTurn,
+    ) -> Result<openwave_core::QueuedTurn> {
+        self.store.enqueue_queued_turn(queued).await
+    }
+
     /// [`Store::resume_agent_run_from_checkin`].
     pub async fn resume_agent_run_from_checkin(
         &self,

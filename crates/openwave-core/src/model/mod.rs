@@ -47,9 +47,9 @@ pub use runs::{
 };
 pub use turns::{
     AgentRunWaitCondition, AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest,
-    ClientToolCallRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress,
-    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
-    TurnRunStatus, TurnSteer, TurnSteerStatus,
+    ClientToolCallRequest, QueuedTurn, TurnAgentRunWaitSet, TurnAgentRunWaitStatus,
+    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
 };
 
 pub(crate) use messages::user_message_llm_content;

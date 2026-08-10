@@ -18,9 +18,9 @@ use crate::model::{
     Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileRejection,
     ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
-    TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
+    ToolCallResolution, TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -1773,6 +1773,38 @@ pub trait Store: Send + Sync {
     /// Queued, running, resuming, and retry-wait turns accept instructions;
     /// cancelling or terminal turns return
     /// [`AcceptTurnSteerOutcome::TurnUnavailable`].
+    /// Durably queue a message to run as its own turn once the chat is free.
+    /// An exact ambiguous retry returns the original row.
+    async fn enqueue_queued_turn(&self, _queued: &QueuedTurn) -> Result<QueuedTurn> {
+        turn_storage_unavailable()
+    }
+
+    /// The chat's queued messages, FIFO.
+    async fn list_queued_turns(&self, _chat_id: ChatId) -> Result<Vec<QueuedTurn>> {
+        turn_storage_unavailable()
+    }
+
+    /// Chats currently holding queued messages, for the promoter's scan.
+    async fn chats_with_queued_turns(&self) -> Result<Vec<ChatId>> {
+        turn_storage_unavailable()
+    }
+
+    /// Retract one queued message. `false` when no such row exists.
+    async fn delete_queued_turn(&self, _chat_id: ChatId, _id: TurnId) -> Result<bool> {
+        turn_storage_unavailable()
+    }
+
+    /// Edit a queued message and/or move it, keeping positions dense.
+    async fn update_queued_turn(
+        &self,
+        _chat_id: ChatId,
+        _id: TurnId,
+        _content: Option<&str>,
+        _position: Option<i32>,
+    ) -> Result<Option<QueuedTurn>> {
+        turn_storage_unavailable()
+    }
+
     async fn accept_turn_steer(
         &self,
         _id: TurnSteerId,

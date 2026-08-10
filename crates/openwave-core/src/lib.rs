@@ -185,7 +185,7 @@ pub use model::{
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileRejection,
     ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord,
     ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId,
-    PermissionMode, Project, ReasoningEffort, Role, RootAttachmentChange,
+    PermissionMode, Project, QueuedTurn, ReasoningEffort, Role, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
     RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
     SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
