@@ -29,6 +29,7 @@ const MODELS: ModelInfo[] = [
     reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
     multimodal: true,
     available: true,
+    recommended: true,
   },
   {
     key: "openai::gpt-4o",
@@ -47,6 +48,7 @@ const MODELS: ModelInfo[] = [
     reasoning_efforts: [],
     multimodal: true,
     available: true,
+    recommended: false,
   },
 ];
 

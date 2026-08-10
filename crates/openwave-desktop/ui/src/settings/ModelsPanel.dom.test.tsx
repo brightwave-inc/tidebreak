@@ -24,6 +24,7 @@ const models: ModelInfo[] = [
     supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
+    recommended: true,
   },
   {
     key: "openai::gpt-4o",
@@ -42,6 +43,7 @@ const models: ModelInfo[] = [
     supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
+    recommended: true,
   },
   {
     key: "openai::gpt-4o-mini",
@@ -60,6 +62,7 @@ const models: ModelInfo[] = [
     supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
+    recommended: true,
   },
   {
     key: "openai::gpt-no-schema",
@@ -78,6 +81,7 @@ const models: ModelInfo[] = [
     supports_structured_output: false,
     reasoning_efforts: [],
     multimodal: false,
+    recommended: false,
   },
   {
     key: "together::moonshotai/Kimi-K3",
@@ -96,6 +100,7 @@ const models: ModelInfo[] = [
     supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: true,
+    recommended: false,
   },
 ];
 
@@ -228,6 +233,7 @@ function gatewayModel(
     supports_structured_output: true,
     reasoning_efforts: [],
     multimodal: false,
+    recommended: false,
   };
 }
 
