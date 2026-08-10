@@ -1,5 +1,5 @@
 import type { ComponentType, FunctionComponent } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Blocks,
   Bot,
@@ -35,15 +35,44 @@ import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
  * threaded props down through a parent, so the route tree can point straight at
  * one and the rail can list them without a component in between.
  */
+/**
+ * Where a link into Providers is pointing: the card to open, and whether the
+ * cursor belongs in its credential field. Anything else in the URL is dropped
+ * — a stale or hand-edited link still lands on a legible page.
+ */
+export type ProvidersSearch = {
+  provider?: string;
+  focus?: "credential";
+};
+
+export function providersSearch(
+  search: Record<string, unknown>,
+): ProvidersSearch {
+  return {
+    provider:
+      typeof search.provider === "string" ? search.provider : undefined,
+    focus: search.focus === "credential" ? "credential" : undefined,
+  };
+}
+
 function ProvidersSection() {
-  const { client, providers, refreshCatalog } = useApp();
+  const { client, models, providers, refreshCatalog } = useApp();
   const { managed } = useManagedPolicy();
+  const search = providersSearch(
+    useRouterState({ select: (state) => state.location.search }) as Record<
+      string,
+      unknown
+    >,
+  );
   return (
     <ProvidersPanel
       providers={providers}
+      models={models}
       client={client}
       managed={managed}
       onChanged={() => void refreshCatalog()}
+      expandProvider={search.provider}
+      focusCredential={search.focus === "credential"}
     />
   );
 }
@@ -147,6 +176,9 @@ export type SettingsSectionDef = {
   label: string;
   icon: ComponentType<{ size?: number }>;
   Component: FunctionComponent;
+  /** Search params this section addresses with, validated at the route so an
+   * unknown value never reaches the panel. */
+  validateSearch?: (search: Record<string, unknown>) => Record<string, unknown>;
   /** Kept out of the rail on a managed profile. The route still resolves — a
    * deep link or a stale history entry must land on something legible — and
    * the panel itself renders its locked state. */
@@ -166,6 +198,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     label: "Providers",
     icon: KeyRound,
     Component: ProvidersSection,
+    validateSearch: providersSearch,
     managedHidden: true,
   },
   {
