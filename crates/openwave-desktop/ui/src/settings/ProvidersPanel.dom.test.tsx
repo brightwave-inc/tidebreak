@@ -675,7 +675,7 @@ describe("ProvidersPanel model visibility", () => {
     );
 
     const [reset] = await screen.findAllByRole("button", {
-      name: "Reset to recommended",
+      name: "Reset to defaults",
     });
     fireEvent.click(reset);
 

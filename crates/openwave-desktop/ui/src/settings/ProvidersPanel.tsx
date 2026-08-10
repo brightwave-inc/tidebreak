@@ -971,7 +971,7 @@ function ProviderRow({
                   disabled={visibilitySaving}
                   onClick={() => void resetToRecommended()}
                 >
-                  Reset to recommended
+                  Reset to defaults
                 </Button>
               </div>
               {catalogModels.map((model) => {
@@ -992,11 +992,6 @@ function ProviderRow({
                     <span className={cn(!visible && "text-muted-foreground")}>
                       {model.display_name}
                     </span>
-                    {model.recommended && (
-                      <Badge variant="outline" size="sm">
-                        Recommended
-                      </Badge>
-                    )}
                   </label>
                 );
               })}
