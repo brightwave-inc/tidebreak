@@ -2,6 +2,7 @@
 
 use super::*;
 
+use std::net::Ipv4Addr;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

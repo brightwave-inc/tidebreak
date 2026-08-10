@@ -585,3 +585,66 @@ async fn the_role_gate_rejects_a_route_no_auth_middleware_covers() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// A desktop server must never open a routable socket. The refusal runs on the
+/// real boot path, before the instance lock or the store, so a misconfigured
+/// launch fails immediately and leaves nothing behind — and it is a refusal
+/// rather than a silent fallback, because an operator who set the variable
+/// would otherwise believe they had published a port.
+#[tokio::test]
+async fn desktop_boot_refuses_a_configured_listen_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.listen_addr = Some("0.0.0.0:8080".parse().unwrap());
+
+    let refusal = match crate::bind(config).await {
+        Err(refusal) => refusal.to_string(),
+        Ok(_) => panic!("the desktop profile must not bind a routable address"),
+    };
+    assert!(
+        refusal.contains("loopback-only") && refusal.contains("self_host"),
+        "the refusal must name the remedy: {refusal}"
+    );
+    assert!(
+        !dir.path().join("openwave.lock").exists(),
+        "the refusal must come before the boot takes the instance lock"
+    );
+}
+
+/// The container-entrypoint contract: a self-host deployment binds the address
+/// it was given, and the liveness probe the entrypoint waits on answers there
+/// without a credential — it sits outside both auth layers, so a packaging
+/// healthcheck never needs a token it has no way to hold.
+///
+/// The address is taken from a configured `Config` rather than the process
+/// environment, which a parallel test binary cannot mutate safely, and bound
+/// on port 0 so the test cannot collide with anything. What it pins is that a
+/// self-host config's `bind_addr` is what the socket ends up on; that
+/// `bind_inner` is the caller of `bind_addr` is pinned by the desktop refusal
+/// above, which travels the real boot path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_host_deployment_serves_liveness_on_its_configured_address() {
+    let (router, state, _store, _dir) = self_host_app().await;
+    let mut config = (*state.config).clone();
+    assert_eq!(config.profile, Profile::SelfHost);
+    config.listen_addr = Some("127.0.0.1:0".parse().unwrap());
+
+    let listener = TcpListener::bind(config.bind_addr().unwrap())
+        .await
+        .unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    assert_eq!(
+        addr.ip(),
+        "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+        "the configured interface is the one bound"
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let response = reqwest::get(format!("http://{addr}/healthz"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), "ok");
+}

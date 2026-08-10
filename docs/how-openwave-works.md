@@ -817,6 +817,16 @@ team deployment, and MCP servers are host processes. The profile targets one
 operator's small team, not adversarial tenants; multi-tenant isolation is
 explicitly not claimed.
 
+**Where it listens.** The server binds loopback on an ephemeral port by
+default; a self-host deployment that must be reachable from outside its machine
+— a container publishing a port, say — sets `OPENWAVE_LISTEN_ADDR` to a full
+address and port (`0.0.0.0:8080`), and `openwave serve` announces the bound
+address on stdout as before. The desktop profile refuses to boot if that
+variable is set rather than honouring or ignoring it: that server's per-launch
+token is the only thing separating the agent from other local processes, and
+its `Origin`/`Host` checks assume a loopback bind. On self-host the per-launch
+token is no longer printed at startup, because it authenticates nobody there.
+
 ## Where the code lives
 
 | Area | Start here | What it owns |
