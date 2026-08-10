@@ -2,13 +2,14 @@
   "name": "openwave-docs",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@10.18.3",
   "scripts": {
     "predev": "node scripts/generate-search-index.mjs",
     "dev": "next dev",
     "prebuild": "node scripts/generate-search-index.mjs",
     "build": "next build",
     "start": "serve out",
-    "types:check": "tsc --noEmit",
+    "types:check": "next typegen && tsc --noEmit",
     "lint": "eslint"
   },
   "dependencies": {

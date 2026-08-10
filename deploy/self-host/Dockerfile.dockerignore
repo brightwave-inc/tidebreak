@@ -1,8 +1,52 @@
-# Build-context exclusions for deploy/self-host/Dockerfile (BuildKit reads the
-# file named after the Dockerfile). Build artifacts and installed JavaScript
-# dependencies are large and never part of a `cargo build --locked`.
-.git
-target
+# Deny by default. This Dockerfile is built from the workspace root, and Git's
+# ignore rules do not stop Docker from uploading untracked files to a daemon or
+# remote BuildKit cache.
+**
+
+# Workspace manifests and lock state.
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+
+# Cargo must be able to discover every workspace member. The final rules below
+# still reject credential-shaped files even if one is accidentally created
+# inside a crate directory.
+!crates/
+!crates/**
+
+# Source-time files referenced by the server dependency closure.
+!skills/
+!skills/**
+!plugins/
+!plugins/**
+
+# Never admit local credentials or application state, even below an allowed
+# source directory. Keep these after the allow rules so they win.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.keystore
+**/secrets.toml
+**/credentials.json
+**/.aws
+**/.aws/**
+**/.ssh
+**/.ssh/**
+**/.openwave
+**/.openwave/**
+
+# Generated and dependency trees are never source inputs.
+**/target
+**/target/**
 **/node_modules
-crates/openwave-desktop/ui/dist
-docs-site/.next
+**/node_modules/**
+**/dist
+**/dist/**
+**/.next
+**/.next/**
+**/.git
+**/.git/**

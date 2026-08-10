@@ -1,9 +1,6 @@
-# Supply-chain advisory policy for `cargo deny check advisories`.
-#
-# Scope is deliberately narrow: this is the RustSec advisory gate, not a
-# license or dependency-ban policy. Only the `advisories` check is wired into
-# CI (`.github/workflows/ci.yml`), so the other sections cargo-deny supports
-# are intentionally absent.
+# Rust dependency policy enforced by `cargo deny` in CI. Keep exceptions
+# explicit and reviewable: the lockfile is immutable during checks, but a pin
+# alone does not establish that its license and source are acceptable.
 
 [advisories]
 # Security advisories and unsound APIs always fail. These are the findings we
@@ -26,3 +23,37 @@ yanked = "warn"
 # Keep this list short and dated; an entry that outlives its justification is
 # worse than no gate at all.
 ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+
+# SPDX licenses present in the current resolved workspace graph and accepted
+# for distribution. Compound expressions still have to be satisfiable using
+# this set; adding a dependency with another license fails CI until it receives
+# an explicit review here.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# Symphonia is temporarily patched to a specific upstream commit for the WebM
+# MediaRecorder fix documented beside `[patch.crates-io]` in Cargo.toml.
+allow-git = ["https://github.com/pdeljanov/Symphonia"]

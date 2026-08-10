@@ -42,6 +42,36 @@ updates:
           - minor
           - patch
 
+  # Public documentation is a deployed Next.js application with its own
+  # production dependency graph and lockfile, not prose-only content.
+  - package-ecosystem: npm
+    directory: "/docs-site"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    versioning-strategy: increase
+    commit-message:
+      prefix: deps
+      include: scope
+    groups:
+      docs-site-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Release-only JavaScript tooling is isolated from the product dependency
+  # graphs, but its exact CLI pin and lockfile still need an automated update
+  # path.
+  - package-ecosystem: npm
+    directory: "/.github/e2b-cli"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    versioning-strategy: increase
+    commit-message:
+      prefix: ci
+      include: scope
+
   # GitHub Actions used by our workflows.
   - package-ecosystem: github-actions
     directory: "/"

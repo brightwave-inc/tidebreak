@@ -104,6 +104,7 @@ jobs:
     name: change scope
     runs-on: ubuntu-latest
     outputs:
+      docs_site: ${{ steps.scope.outputs.docs_site }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
       workspace: ${{ steps.scope.outputs.workspace }}
@@ -122,6 +123,7 @@ jobs:
         run: |
           full_validation() {
             {
+              echo "docs_site=true"
               echo "rust=true"
               echo "ui=true"
               echo "workspace=true"
@@ -161,6 +163,7 @@ jobs:
           # cover everything *except* openwave-desktop, so it can stay false
           # when a change cannot reach them. `workspace` implies `rust`; the
           # gate below asserts that.
+          docs_site=false
           rust=false
           ui=false
           workspace=false
@@ -168,8 +171,10 @@ jobs:
             > "$RUNNER_TEMP/changed-files"
           while IFS= read -r -d '' file; do
             case "$file" in
-              *.md|docs/*|assets/*|.githooks/*|docs-site/*|LICENSE|NOTICE) ;;
+              docs-site/*) docs_site=true ;;
+              *.md|docs/*|assets/*|.githooks/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
+                docs_site=true
                 rust=true
                 ui=true
                 workspace=true
@@ -199,6 +204,7 @@ jobs:
           fi
 
           {
+            echo "docs_site=$docs_site"
             echo "rust=$rust"
             echo "ui=$ui"
             echo "workspace=$workspace"
@@ -237,8 +243,8 @@ jobs:
           tool: cargo-deny@0.20.2
       # Posture and exceptions live in deny.toml. `--all-features` covers
       # optional dependencies that a default-feature graph would miss.
-      - name: Check RustSec advisories
-        run: cargo deny --all-features check advisories
+      - name: Check advisories, licenses, and dependency sources
+        run: cargo deny --all-features check advisories licenses sources
 
 
   unused-deps:
@@ -581,5 +587,33 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Test
         run: pnpm test
+      - name: Build
+        run: pnpm build
+
+  docs-site:
+    name: documentation site
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_site == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: docs-site/pnpm-lock.yaml
+      - name: Install documentation dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type-check
+        run: pnpm types:check
+      - name: Lint
+        run: pnpm lint
       - name: Build
         run: pnpm build

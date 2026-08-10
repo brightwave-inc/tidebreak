@@ -79,12 +79,6 @@ env:
   # (`E2B_API_BASE` in crates/openwave-code-execution/src/e2b.rs).
   E2B_API_BASE: https://api.e2b.app
   TEMPLATE_DIR: crates/openwave-sandbox-agent/e2b
-  # Pinned exactly, like every other direct dependency in this repository.
-  # 2.16.1 (published 2026-07-31) is the current release of the v2 CLI, the
-  # line that carries Build System 2.0 — `template create`, which builds on
-  # E2B's infrastructure instead of shelling out to a local Docker daemon the
-  # way the v1 `template build` did.
-  E2B_CLI_VERSION: 2.16.1
 
 jobs:
   # Reads the template definition and decides whether anything needs building.
@@ -107,6 +101,60 @@ jobs:
       template_id: ${{ steps.state.outputs.template_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate the publication source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+
+          case "$EVENT_NAME" in
+            push)
+              [[ "$SOURCE_REF" == refs/heads/main && "$SOURCE_REF_NAME" == main ]] || {
+                echo "Automatic E2B publication must run from main, got $SOURCE_REF ($SOURCE_REF_NAME)" >&2
+                exit 1
+              }
+              ;;
+            workflow_dispatch)
+              if [[ "$SOURCE_REF" == refs/heads/main && "$SOURCE_REF_NAME" == main ]]; then
+                :
+              elif [[ "$SOURCE_REF" == "refs/tags/$SOURCE_REF_NAME" ]]; then
+                node scripts/check-release-tag.mjs "$SOURCE_REF_NAME"
+                release_json="$(gh api \
+                  -H 'Accept: application/vnd.github+json' \
+                  "repos/$GITHUB_REPOSITORY/releases/tags/$SOURCE_REF_NAME")"
+                [[ "$(jq -r .tag_name <<<"$release_json")" == "$SOURCE_REF_NAME" &&
+                  "$(jq -r .draft <<<"$release_json")" == false &&
+                  "$(jq -r .prerelease <<<"$release_json")" == false ]] || {
+                  echo "Manual E2B publication requires a published, non-prerelease GitHub Release." >&2
+                  exit 1
+                }
+                tag_sha="$(git rev-parse "refs/tags/$SOURCE_REF_NAME^{commit}")"
+                [[ "$tag_sha" == "$SOURCE_SHA" ]] || {
+                  echo "Selected release tag $SOURCE_REF_NAME resolves to $tag_sha, not $SOURCE_SHA" >&2
+                  exit 1
+                }
+              else
+                echo "Manual E2B publication must select main or a vX.Y.Z release tag, got $SOURCE_REF" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported publication event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "Refusing to publish E2B content not contained in main: $SOURCE_SHA" >&2
+            exit 1
+          }
 
       - name: Require the E2B credential
         env:
@@ -249,22 +297,26 @@ jobs:
       template_id: ${{ steps.verify.outputs.template_id }}
     env:
       ALIAS: ${{ needs.resolve.outputs.alias }}
-      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-      # Optional; deprecated in E2B's API in favour of the API key, but still
-      # accepted by team-scoped endpoints. Passed through when the secret is
-      # set and simply absent when it is not.
-      E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10.18.3
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
+          cache: pnpm
+          cache-dependency-path: .github/e2b-cli/pnpm-lock.yaml
 
-      - name: Install the E2B CLI
+      # The checked lockfile pins the CLI's entire transitive graph and
+      # lifecycle scripts stay disabled. No E2B credential is in this step's
+      # environment.
+      - name: Install the locked E2B CLI
         run: |
-          npm install --global "@e2b/cli@$E2B_CLI_VERSION"
-          e2b --version
+          pnpm --dir .github/e2b-cli install --frozen-lockfile --ignore-scripts
+          .github/e2b-cli/node_modules/.bin/e2b --version
 
       # `e2b template create` takes no config file: it reads the Dockerfile and
       # takes sizing as flags, so e2b.toml's numbers are passed explicitly
@@ -273,9 +325,11 @@ jobs:
         working-directory: ${{ env.TEMPLATE_DIR }}
         env:
           CPU_COUNT: ${{ needs.resolve.outputs.cpu_count }}
+          E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
           MEMORY_MB: ${{ needs.resolve.outputs.memory_mb }}
         run: |
-          e2b template create "$ALIAS" \
+          "$GITHUB_WORKSPACE/.github/e2b-cli/node_modules/.bin/e2b" template create "$ALIAS" \
             --dockerfile e2b.Dockerfile \
             --cpu-count "$CPU_COUNT" \
             --memory-mb "$MEMORY_MB"
@@ -286,7 +340,11 @@ jobs:
       # pasted nothing but their own API key gets the documents image.
       - name: Publish the template
         working-directory: ${{ env.TEMPLATE_DIR }}
-        run: e2b template publish "$ALIAS" --yes
+        env:
+          E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          "$GITHUB_WORKSPACE/.github/e2b-cli/node_modules/.bin/e2b" template publish "$ALIAS" --yes
 
       # Confirms the publish took from the account that performed it. It cannot
       # prove the other half of the claim — that a *different* E2B account can
@@ -295,6 +353,8 @@ jobs:
       # keeps that as a manual one-liner.
       - name: Verify the alias resolves and is public
         id: verify
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: |
           body="$RUNNER_TEMP/alias.json"
           status="$(curl --silent --show-error --location \
