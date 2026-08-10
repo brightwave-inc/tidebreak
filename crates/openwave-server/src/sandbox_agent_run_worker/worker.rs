@@ -11,8 +11,6 @@ use openwave_core::{
     FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, RequestFolderAccessArgs,
     Result, ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest,
     SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution,
-    MAX_SANDBOX_TASK_PLAN_CALLS, MAX_SANDBOX_TOOL_CALLS, MAX_SANDBOX_TOOL_CALLS_PER_STEP,
-    SANDBOX_TOOL_CALL_REFUSAL_RESERVE as REFUSAL_RESERVE,
 };
 use tokio::sync::Notify;
 
@@ -326,6 +324,15 @@ impl SandboxAgentRunWorker {
             }
         };
         let mut agent_config = self.agent_config.clone();
+        // The check-in cadence is a live setting read on every claim, so
+        // raising it rescues an in-flight run at its next claim instead of
+        // waiting for a restart. Absent a stored choice the boot
+        // configuration's step budget stands.
+        if let Some(steps) =
+            crate::routes::read_sandbox_agent_checkin_steps_override(&*self.store).await?
+        {
+            agent_config.max_steps = steps as usize;
+        }
         let supports_vendor_web_search = if self.resolver.enforces_model_registry() {
             let Some(policy) =
                 crate::providers::resolve_model_policy(&*self.store, &model, true).await?
@@ -435,7 +442,6 @@ impl SandboxAgentRunWorker {
         // Progress keys are per model step, not per parked row: one step can now
         // park several calls, and a replayed claim must land on the same key.
         let depth = sandbox_call_steps(&previous_calls).len();
-        let previous_budget = sandbox_row_budget(&previous_calls);
         let outcome = match completion {
             SandboxCompletion::Final(text) => self.submit_result(&run, lease_token, text).await,
             SandboxCompletion::ToolCalls(intents) => {
@@ -443,7 +449,8 @@ impl SandboxAgentRunWorker {
                     run,
                     lease_token,
                     intents,
-                    &previous_budget,
+                    depth,
+                    agent_config.max_steps,
                     &narration,
                 )
                 .await
@@ -454,13 +461,7 @@ impl SandboxAgentRunWorker {
                 outputs,
                 summary,
             } => match self
-                .done_plan_reminder(
-                    &run,
-                    &previous_calls,
-                    &previous_budget,
-                    depth,
-                    agent_config.max_steps,
-                )
+                .done_plan_reminder(&run, &previous_calls, depth, agent_config.max_steps)
                 .await?
             {
                 Some(message) => {
@@ -477,7 +478,8 @@ impl SandboxAgentRunWorker {
                         run,
                         lease_token,
                         vec![intent],
-                        &previous_budget,
+                        depth,
+                        agent_config.max_steps,
                         "",
                     )
                     .await
@@ -742,11 +744,9 @@ impl SandboxAgentRunWorker {
     ///   malformed arguments are answered too — and a model that calls tools in
     ///   parallel is exactly the population this reminder is for. Only a prior
     ///   receipt carrying [`TASK_PLAN_INCOMPLETE`] spends it;
-    /// - it is withheld unless the run can afford the row it parks into and the
-    ///   model step that consumes it, so the reminder never converts a run that
-    ///   was about to finish into a budget failure. The row it parks is a
-    ///   rejected `done`, which belongs to the work budget like any other
-    ///   non-plan row.
+    /// - it is withheld unless the run can afford the model step that parks the
+    ///   reminder and the one that consumes it, so the reminder never converts
+    ///   a run that was about to finish into a cadence failure.
     ///
     /// A run with no plan, or one whose steps are all `completed`, is never
     /// interrupted. Neither is a run that ends by simply producing final text
@@ -757,11 +757,10 @@ impl SandboxAgentRunWorker {
         &self,
         run: &AgentRun,
         previous_calls: &[openwave_core::SandboxToolCall],
-        previous_budget: &SandboxRowBudget,
         depth: usize,
         max_steps: usize,
     ) -> Result<Option<String>> {
-        if previous_budget.work >= MAX_SANDBOX_TOOL_CALLS || depth.saturating_add(2) > max_steps {
+        if depth.saturating_add(2) > max_steps {
             return Ok(None);
         }
         for call in previous_calls
@@ -824,44 +823,20 @@ impl SandboxAgentRunWorker {
     /// refused parks alongside them with its answer already attached, so the
     /// next step of the run reads it as an ordinary error result.
     ///
-    /// The step is trimmed to what the run's remaining tool budget can hold
-    /// before anything is written: rows are the durable cost, and a batch the
-    /// store would refuse is worse than one honest refusal the model can read.
-    /// A step that can hold nothing at all is answered out of the budget's
-    /// refusal reserve rather than failing the run — see
-    /// [`SANDBOX_TOOL_CALL_REFUSAL_RESERVE`](openwave_core::SANDBOX_TOOL_CALL_REFUSAL_RESERVE).
+    /// A step made after the cadence withdrew the parking tools is answered
+    /// rather than run: the refusal parks as a rejected row so the model can
+    /// read why, spending one of the grace steps kept for exactly this — see
+    /// [`SANDBOX_STEP_REFUSAL_GRACE`].
     pub(super) async fn park_sandbox_tool_calls(
         &self,
         run: AgentRun,
         lease_token: uuid::Uuid,
         intents: Vec<SandboxToolCallIntent>,
-        previous_budget: &SandboxRowBudget,
+        depth: usize,
+        max_steps: usize,
         narration: &str,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
-        let emitted = intents.len();
-        // Each budget is spent by the rows that belong to it, so a batch is
-        // admitted call by call rather than by one count: a step that mixes a
-        // plan update with real work can exhaust one allowance while the other
-        // still has room. The prefix that fits is what parks.
-        let mut work_left = MAX_SANDBOX_TOOL_CALLS.saturating_sub(previous_budget.work);
-        let mut plan_left = MAX_SANDBOX_TASK_PLAN_CALLS.saturating_sub(previous_budget.plan);
-        let mut admitted = 0;
-        for intent in &intents {
-            if admitted == MAX_SANDBOX_TOOL_CALLS_PER_STEP {
-                break;
-            }
-            let left = if intent.name == openwave_core::UPDATE_TASK_PLAN_TOOL {
-                &mut plan_left
-            } else {
-                &mut work_left
-            };
-            if *left == 0 {
-                break;
-            }
-            *left -= 1;
-            admitted += 1;
-        }
-        if emitted == 0 {
+        if intents.is_empty() {
             // A completion that parked nothing is not a checkpoint at all;
             // there is no call to answer and nothing durable to write.
             return self
@@ -872,22 +847,17 @@ impl SandboxAgentRunWorker {
                 )
                 .await;
         }
-        // A step whose first call has nothing left to spend called a tool the
-        // request no longer offered. That is a thing models do at the end of a
-        // long transcript, and the run has usually already produced the work it
-        // was asked for, so it is answered rather than killed: the budget keeps
-        // one row back for exactly this, and the answer tells the model to
-        // finish with `done`. Only when that reserve is spent too — the model
-        // ignoring the refusal it can now read — is there nowhere left to go.
-        let refusal_only = admitted == 0;
+        // A step past the point the cadence withdrew parking tools called a
+        // tool the request no longer offered. That is a thing models do at the
+        // end of a long transcript, and the run has usually already produced
+        // the work it was asked for, so it is answered rather than killed: the
+        // grace steps exist for exactly this, and the answer tells the model to
+        // finish with `done`. Only when the grace is spent too — the model
+        // ignoring refusals it can now read — is there nowhere left to go.
+        let refusal_only = depth.saturating_add(2) > max_steps;
+        let mut intents = intents;
         if refusal_only {
-            let spent_reserve = match intents[0].name.as_str() {
-                openwave_core::UPDATE_TASK_PLAN_TOOL => {
-                    previous_budget.plan >= MAX_SANDBOX_TASK_PLAN_CALLS + REFUSAL_RESERVE
-                }
-                _ => previous_budget.work >= MAX_SANDBOX_TOOL_CALLS + REFUSAL_RESERVE,
-            };
-            if spent_reserve {
+            if depth.saturating_add(1) > max_steps + SANDBOX_STEP_REFUSAL_GRACE {
                 return self
                     .record_failure(
                         &run,
@@ -896,49 +866,20 @@ impl SandboxAgentRunWorker {
                     )
                     .await;
             }
-            admitted = 1;
-        }
-        let mut intents = intents;
-        let dropped = emitted - admitted;
-        if dropped > 0 || refusal_only {
-            // The last call the step can afford is answered rather than run, so
-            // the model learns why the rest are missing. Everything past it is
-            // dropped outright: the transcript is rebuilt from rows, so a call
-            // with no row simply never happened and leaves no dangling tool use.
-            intents.truncate(admitted);
+            // One refusal answers the whole step: the transcript is rebuilt
+            // from rows, so the calls that never park simply never happened
+            // and leave no dangling tool use.
+            intents.truncate(1);
             let last = intents
                 .last_mut()
-                .expect("at least one call is admitted when a step parks");
-            let (error_code, message) = if admitted == MAX_SANDBOX_TOOL_CALLS_PER_STEP {
-                (
-                    "too_many_calls_in_step",
-                    format!(
-                        "A step may make at most {MAX_SANDBOX_TOOL_CALLS_PER_STEP} tool calls: \
-                         this call and {dropped} other call(s) in this step were not run. Re-send \
-                         them in a later step."
-                    ),
-                )
-            } else if dropped > 0 {
-                (
-                    "tool_budget_exhausted",
-                    format!(
-                        "This task's tool budget is exhausted: this call and {dropped} other \
-                         call(s) in this step were not run. Finish with done."
-                    ),
-                )
-            } else {
-                (
-                    "tool_budget_exhausted",
-                    "This task's tool budget is exhausted and this tool is no longer available: \
-                     the call was not run, and no further call to it will be. Finish now by \
-                     calling done with the filenames you wrote under output/ and a summary of \
-                     what you produced."
-                        .to_owned(),
-                )
-            };
+                .expect("a non-empty step keeps its first call when refused");
             last.disposition = SandboxToolCallDisposition::Rejected {
-                error_code,
-                message,
+                error_code: "tool_budget_exhausted",
+                message: "This task's step budget is exhausted and this tool is no longer \
+                          available: the call was not run, and no further call to it will be. \
+                          Finish now by calling done with the filenames you wrote under output/ \
+                          and a summary of what you produced."
+                    .to_owned(),
             };
         }
         let entries: Vec<SandboxToolCallParkEntry> = intents
@@ -1017,17 +958,6 @@ impl SandboxAgentRunWorker {
                 // Keyed by the batch's first call so a replayed commit
                 // republishes nothing, exactly as a single checkpoint did.
                 self.publish_progress(run.id, head, narration).await;
-                if dropped > 0 {
-                    self.publish_note(
-                        run.id,
-                        &format!("call:{head}:dropped"),
-                        &format!(
-                            "Dropped {dropped} tool call(s) from this step: no room left in this \
-                             task's tool budget."
-                        ),
-                    )
-                    .await;
-                }
                 // This shared wake is only a latency hint; the dedicated
                 // executor's durable candidate scan remains the recovery path.
                 // A call the host already answered has no executor and simply

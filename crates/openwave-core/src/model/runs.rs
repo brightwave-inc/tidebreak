@@ -198,7 +198,14 @@ impl AgentRun {
     /// room to stretch waits toward the run's wall-clock envelope; at three
     /// the budget was gone before either could bind.
     pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
-    /// Default wall-clock budget for one sandbox run.
+    /// No-progress window for one sandbox run.
+    ///
+    /// This is a stall detector, not a total wall clock: every committed
+    /// checkpoint and every settled executor batch restarts it, so a run
+    /// doing real work can live far past one window and only a run that
+    /// makes no durable progress for a whole window is failed by the
+    /// deadline scan. It still stamps the initial `deadline_at` at
+    /// admission, before the first progress event exists to extend it.
     pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
     /// Largest accepted scheduler concurrency bound.
     pub const MAX_CONCURRENCY_LIMIT: u32 = 1_024;

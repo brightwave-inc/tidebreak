@@ -46,49 +46,26 @@ pub const SANDBOX_DONE_TOOL: &str = "done";
 pub const MAX_SANDBOX_AGENT_TASK_CHARS: usize = 16_000;
 /// Maximum number of depth-one children in one foreground wait request.
 pub const MAX_WAIT_FOR_AGENTS_CHILDREN: usize = TurnAgentRunWaitSet::MAX_CHILDREN;
-/// Maximum host-executed *work* checkpoints one sandbox run may accumulate.
+/// Default model steps a sandbox run may take before it must wrap up.
 ///
-/// A sandbox run's checkpoints form a chain the worker replays in full on every
-/// claim, so the count is bounded rather than open-ended: the whole chain rides
-/// each model request. Real delegated work needs a sequence — search, read,
-/// then several commands to produce a file — so the bound is a working budget,
-/// not the one-call fence it replaced.
+/// This is the run's one policy bound — a check-in cadence, not a row budget.
+/// Each step is one model completion over the replayed checkpoint chain, so
+/// the cadence bounds context growth and model spend at once; durable rows
+/// need no bound of their own because they cannot accumulate without steps
+/// accumulating. Reaching the cadence is not a failure: the run's tools are
+/// withdrawn two steps early, the request says so in words, and the run ends
+/// by submitting what it has. The value is user-configurable in settings;
+/// this constant is the default when no setting is stored.
+pub const DEFAULT_SANDBOX_AGENT_CHECKIN_STEPS: usize = 100;
+/// Default consecutive tool-call errors after which a sandbox run checks in.
 ///
-/// `update_task_plan` rows are counted against
-/// [`MAX_SANDBOX_TASK_PLAN_CALLS`] instead, so the run's bookkeeping cannot
-/// spend the allowance its actual work needs.
-pub const MAX_SANDBOX_TOOL_CALLS: usize = 16;
-/// Maximum `update_task_plan` checkpoints one sandbox run may accumulate.
-///
-/// Plan rows are budgeted separately from the work budget above, and the reason
-/// is the prompt: a run is told to keep its plan current as steps finish, which
-/// is a call after most real steps. Charged to the same 16 rows, bookkeeping
-/// would starve the exec and search calls the task is actually for — the run
-/// would run out of budget describing work it never got to do. Their own cap
-/// keeps that from happening while still bounding a model that does nothing but
-/// rewrite its checklist. It is smaller than the work budget because a plan is
-/// replaced whole: eight revisions is a generous account of one delegated task.
-pub const MAX_SANDBOX_TASK_PLAN_CALLS: usize = 8;
-/// Durable rows each budget keeps back so an over-budget call can be answered.
-///
-/// A tool is withdrawn from the request once its budget is spent, but
-/// withdrawal is not a guarantee: a model that has called `exec` on every step
-/// of a long transcript will sometimes call it once more after it disappears.
-/// That call still has to be answered, and the answer is a row like any other
-/// — so if the budget were spent to the last row there would be nowhere to put
-/// it, and the run would die holding work it had already finished.
-///
-/// The reserve is the row that refusal lands in. It is never advertised and
-/// never executes: the only thing that may be written into it is a rejection
-/// telling the model its budget is gone and to finish with `done`. One row is
-/// enough because it only has to survive the model ignoring the withdrawal
-/// once, and by the time it is spent the transcript says plainly what happened.
-pub const SANDBOX_TOOL_CALL_REFUSAL_RESERVE: usize = 1;
-/// Maximum tool calls one model step may park as a single batch.
-///
-/// A step's calls are parked together and replayed together, so this bounds how
-/// much a single completion can commit against the run's total budget above.
-pub const MAX_SANDBOX_TOOL_CALLS_PER_STEP: usize = 8;
+/// A run whose worker keeps crashing is caught by `max_attempts`, but a run
+/// whose tool calls keep *failing* looks healthy to the scheduler — every
+/// step completes, every row resolves, just always as an error. Left alone it
+/// thrashes until the step cadence ends it. This is the earlier trigger: N
+/// trailing error receipts in a row, reset by any success. Derived from
+/// durable receipts, so a replayed claim computes the same answer.
+pub const DEFAULT_SANDBOX_AGENT_ERROR_CHECKIN: usize = 5;
 
 /// Whether a sandbox tool call may run alongside its batch siblings.
 ///

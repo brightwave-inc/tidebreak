@@ -7,7 +7,7 @@ schema: E2B and Daytona are the managed cloud adapters, and Docker runs the same
 image in a container on the host's own runtime.
 
 This capability is separate from a sandbox *agent*. A sandbox agent is a
-depth-one model run with a constrained tool budget. A code-execution sandbox is
+depth-one model run supervised by a step-based check-in cadence. A code-execution sandbox is
 one bounded process invocation owned by the foreground coordinator.
 
 ## Configuration

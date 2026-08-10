@@ -318,6 +318,8 @@ export class ApiClient {
   putSettings(body: {
     model?: ModelSelectionKey | null;
     max_active_background_agents?: number;
+    sandbox_agent_checkin_steps?: number;
+    sandbox_agent_error_checkin?: number;
     model_visibility_overrides?: Record<string, ModelVisibility>;
     compaction?: {
       threshold_fraction?: number;

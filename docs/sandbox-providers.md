@@ -36,7 +36,7 @@ automation stays fully maintained — the execution providers depend on it.
 
 | Tier | Today | What isolates the work |
 | --- | --- | --- |
-| Background agent run | `openwave-server` sandbox agent-run worker | Capability restriction: no history, fixed tool budget, bounded I/O. |
+| Background agent run | `openwave-server` sandbox agent-run worker | Capability restriction: no history, supervised step cadence, bounded I/O. |
 | Execution provider | `openwave-code-execution` | OS, container, or VM enforcement: Seatbelt on supported hosts, a container on the host's own runtime, a vendor sandbox remotely. |
 
 Both tiers can end up running a container, which is exactly why the rule below
