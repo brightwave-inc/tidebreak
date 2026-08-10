@@ -343,6 +343,82 @@ async fn explicit_null_model_clears_a_configured_one() {
     assert!(settings["model"].is_null());
 }
 
+#[tokio::test]
+async fn model_visibility_overrides_replace_rather_than_merge() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let stored = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "model_visibility_overrides": {
+                "anthropic::claude-opus-4-6": "show",
+                "openai::gpt-5.6-sol": "hide",
+            }
+        }),
+    )
+    .await;
+    assert_eq!(stored.status(), StatusCode::OK);
+    let settings: serde_json::Value = json_body(stored).await;
+    assert_eq!(
+        settings["model_visibility_overrides"],
+        serde_json::json!({
+            "anthropic::claude-opus-4-6": "show",
+            "openai::gpt-5.6-sol": "hide",
+        })
+    );
+
+    // Absent leaves the map alone; present replaces it wholesale, so a single
+    // remaining key drops the other override rather than merging over it.
+    let untouched = put_settings(&router, &bearer, serde_json::json!({})).await;
+    let settings: serde_json::Value = json_body(untouched).await;
+    assert_eq!(
+        settings["model_visibility_overrides"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let replaced = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "model_visibility_overrides": {"openai::gpt-5.6-sol": "hide"}
+        }),
+    )
+    .await;
+    let settings: serde_json::Value = json_body(replaced).await;
+    assert_eq!(
+        settings["model_visibility_overrides"],
+        serde_json::json!({"openai::gpt-5.6-sol": "hide"})
+    );
+
+    // An empty map is how a client resets everything to the curated defaults.
+    let reset = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model_visibility_overrides": {}}),
+    )
+    .await;
+    let settings: serde_json::Value = json_body(reset).await;
+    assert_eq!(
+        settings["model_visibility_overrides"],
+        serde_json::json!({})
+    );
+
+    // A key that is not provider-qualified is rejected: it could never match a
+    // catalog row, so storing it would silently do nothing forever.
+    let malformed = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model_visibility_overrides": {"claude-opus-5": "hide"}}),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+}
+
 /// `has_api_key` from `GET /settings`.
 async fn api_key_configured(router: &Router, bearer: &str) -> bool {
     let response = router

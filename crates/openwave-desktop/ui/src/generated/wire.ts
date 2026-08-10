@@ -1480,6 +1480,17 @@ vendor: ProviderKind | null,
  */
 verification: VerificationTier, 
 /**
+ * Whether a picker shows this model without being asked for the full
+ * catalog — the curated default-visible set.
+ *
+ * Presentation only: a model that is not recommended is exactly as
+ * selectable and supported as one that is. Effective visibility is this
+ * flag flipped by any matching entry in the reader's
+ * `model_visibility_overrides` setting; the server never filters the
+ * catalog by it.
+ */
+recommended: boolean, 
+/**
  * Whether the provider is enabled, configured, credentialed, and able to
  * serve this model at its configured endpoint/location.
  */
@@ -1555,6 +1566,16 @@ selection: string | null,
  * the work that depends on it is skipped.
  */
 resolved_key: string | null, };
+
+/**
+ * A reader's explicit deviation from a model's curated `recommended` flag.
+ *
+ * Only deviations are stored. Effective visibility is the catalog's
+ * `recommended` flag flipped by a matching override, so a catalog refresh
+ * gives new models their curated default without a reconciliation step, and
+ * "we changed the default" stays distinguishable from "you chose" forever.
+ */
+export type ModelVisibility = "show" | "hide";
 
 /**
  * Network access granted to commands in one conversation workspace.
@@ -2219,7 +2240,22 @@ max_active_background_agents: number,
 /**
  * When and how hard semantic compaction may run.
  */
-compaction: CompactionSettings, };
+compaction: CompactionSettings, 
+/**
+ * Per-model deviations from the catalog's `recommended` flag, keyed by the
+ * same provider-qualified selection key `ModelInfo.key` and a chat's model
+ * carry (`"<provider>::<id>"`).
+ *
+ * Deviations only: a model with no entry uses its catalog default, and
+ * resetting one to the default means sending the map without that key.
+ * `PUT /settings` **replaces this map wholesale** rather than merging, so
+ * a writer sends the complete set of deviations it wants to persist.
+ *
+ * Visibility is a picker concern: the server stores and serves this map
+ * and never filters `GET /models` by it. A hidden model remains fully
+ * valid for existing chats, replay, and explicit selection.
+ */
+model_visibility_overrides: { [key in string]: ModelVisibility }, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
