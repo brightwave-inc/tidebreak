@@ -2267,6 +2267,10 @@ impl Store for DbStore {
         ops::conversation::append_event(self, chat_id, event).await
     }
 
+    async fn append_chat_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+        ops::conversation::append_chat_event(self, chat_id, event).await
+    }
+
     async fn append_turn_event(
         &self,
         chat_id: ChatId,

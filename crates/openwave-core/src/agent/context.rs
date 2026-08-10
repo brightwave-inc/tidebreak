@@ -34,9 +34,65 @@ pub(crate) struct CreateContextCheckpoint<'a> {
     pub current: Option<&'a ContextCheckpoint>,
     pub attempted_boundary: &'a mut Option<usize>,
     pub events: &'a super::events::EventSink<'a>,
+    /// Compact whatever the boundary rules allow, without waiting for the
+    /// transcript to cross the policy threshold. Set by a compaction the user
+    /// asked for: they can see the meter, and asking is the trigger.
+    pub ignore_threshold: bool,
+    /// What the person asking wants the summary to hold on to, if they said.
+    /// Everything else about the checkpoint — its schema, its boundary, its
+    /// budget — is unchanged; this only steers what the summary spends its
+    /// room on.
+    pub focus: Option<&'a str>,
 }
 
 impl Agent {
+    /// Compact this chat now, because someone asked for it.
+    ///
+    /// The threshold is what makes automatic compaction infrequent; a person
+    /// who has looked at the meter and asked for it has supplied their own
+    /// trigger, so this runs the same pass without it. Everything else is
+    /// unchanged, including the reasons it may decline: too little history to
+    /// give up, a protected tail that already fills the target, no utility
+    /// model configured. All of those return `Ok(None)` — nothing was
+    /// compacted, and nothing is wrong.
+    ///
+    /// `focus` is what the caller asked the summary to keep. It steers the
+    /// summarizer and nothing else: the checkpoint's schema, boundary, and
+    /// budget do not depend on it.
+    ///
+    /// Events go to `events` exactly as they do inside a turn, so a caller that
+    /// journals them gets the same `CompactionStarted`/`CompactionFinished`
+    /// pair the renderer already understands.
+    pub async fn compact_now(
+        &self,
+        chat_id: ChatId,
+        focus: Option<&str>,
+        events: &futures::channel::mpsc::UnboundedSender<crate::event::AgentEvent>,
+    ) -> Result<Option<ContextCheckpoint>> {
+        let current = self.load_projectable_checkpoint(chat_id).await;
+        let loaded = self
+            .load_transcript(
+                chat_id,
+                current
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.source_message_id),
+            )
+            .await?;
+        let sink = super::events::EventSink::Legacy(events);
+        self.maybe_create_context_checkpoint(CreateContextCheckpoint {
+            chat_id,
+            transcript: &loaded.messages,
+            source_boundaries: &loaded.source_boundaries,
+            user_texts: &loaded.user_texts,
+            current: current.as_ref(),
+            attempted_boundary: &mut None,
+            events: &sink,
+            ignore_threshold: true,
+            focus,
+        })
+        .await
+    }
+
     /// Load one checkpoint only when it is supported and owned by this chat.
     ///
     /// Checkpoints are an optimization over the raw transcript. Store failures
@@ -154,6 +210,8 @@ impl Agent {
             current,
             attempted_boundary,
             events,
+            ignore_threshold,
+            focus,
         } = args;
         let utility = match self.config.utility_model.clone() {
             Some(utility) => utility,
@@ -178,8 +236,9 @@ impl Agent {
                 .find(|source| source.message_id == checkpoint.source_message_id)
                 .map(|source| source.provider_boundary)
         });
-        if self.model_view_tokens(transcript, current, current_provider_boundary)
-            <= bounds.threshold
+        if !ignore_threshold
+            && self.model_view_tokens(transcript, current, current_provider_boundary)
+                <= bounds.threshold
         {
             return Ok(None);
         }
@@ -204,12 +263,9 @@ impl Agent {
         // maintenance call on the same raw prefix this turn.
         *attempted_boundary = Some(candidate_boundary);
 
-        let summary_budget = context::compute_message_budget(
-            utility.context_window,
-            0,
-            Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT),
-            &[],
-        );
+        let system = checkpoint_system_prompt(focus);
+        let summary_budget =
+            context::compute_message_budget(utility.context_window, 0, Some(system.as_ref()), &[]);
         if summary_budget == 0 {
             return Ok(None);
         }
@@ -250,7 +306,7 @@ impl Agent {
             provider: utility.provider.clone(),
             model: utility.model.clone(),
             reasoning_model: utility.reasoning_model,
-            system: Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT.into()),
+            system: Some(system.into_owned()),
             messages: summary_messages,
             tools: Vec::new(),
             max_tokens: Some(CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS),
@@ -516,6 +572,24 @@ impl Agent {
             }
         }
         Ok(attachments)
+    }
+}
+
+/// The summarizer's instructions, plus what the caller asked it to keep.
+///
+/// The focus is appended rather than woven in, and it is labelled as the
+/// user's request, so the standing instructions — the schema, the fields, the
+/// prohibition on markdown — are the ones that survive a focus line that tries
+/// to argue with them. Without a focus the prompt is byte-identical to the one
+/// automatic compaction has always sent.
+fn checkpoint_system_prompt(focus: Option<&str>) -> std::borrow::Cow<'static, str> {
+    match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
+        None => std::borrow::Cow::Borrowed(CONTEXT_CHECKPOINT_SYSTEM_PROMPT),
+        Some(focus) => std::borrow::Cow::Owned(format!(
+            "{CONTEXT_CHECKPOINT_SYSTEM_PROMPT}\n\nThe user asked for this checkpoint and said to \
+             keep, above everything else: {focus}\nSpend the room you have on that, within the \
+             same schema.",
+        )),
     }
 }
 

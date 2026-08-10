@@ -2604,6 +2604,20 @@ pub trait Store: Send + Sync {
     /// fenced and ambiguous retries recover the original sequence.
     async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64>;
 
+    /// Append a nonterminal event that belongs to the chat rather than to a
+    /// turn.
+    ///
+    /// Maintenance the user asks for between turns — compaction run on demand —
+    /// produces events with no turn to hang them on, and the journal is still
+    /// where the renderer reads them from. Unlike
+    /// [`append_event`](Self::append_event) this is allowed on a chat with
+    /// durable turn history, because the event describes the chat and claims no
+    /// turn's ordinal space. Terminal events are never chat-scoped: they resolve
+    /// a turn, and only turn resolution may write one.
+    async fn append_chat_event(&self, _chat_id: ChatId, _event: &AgentEvent) -> Result<i64> {
+        turn_storage_unavailable()
+    }
+
     /// Append a nonterminal event owned by an exact live turn attempt.
     ///
     /// `(lease_token, attempt_event_ordinal)` is the idempotency identity. An

@@ -505,6 +505,11 @@ pub fn app(state: AppState) -> Router {
         .route("/chats/{id}/cancel", post(routes::post_cancel))
         .route("/chats/{id}/steer", post(routes::post_steer))
         .route(
+            "/chats/{id}/compact",
+            post(routes::post_compact)
+                .layer(DefaultBodyLimit::max(routes::MAX_COMPACT_CHAT_BODY_BYTES)),
+        )
+        .route(
             "/chats/{chat_id}/turns/{turn_id}/file-changes/undo",
             post(routes::post_undo_turn_file_changes),
         )

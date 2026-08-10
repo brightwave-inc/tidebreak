@@ -1391,6 +1391,31 @@ pub(in crate::db) async fn append_event(
     Ok(seq)
 }
 
+/// Append an event that belongs to the chat rather than to a turn.
+///
+/// Sequence allocation takes the same chat write lock turn acceptance takes, so
+/// a maintenance event and the next turn's admission cannot race for a number.
+/// A terminal event is refused outright: those resolve a turn, and a turn-less
+/// row could not name the one it resolved.
+pub(in crate::db) async fn append_chat_event(
+    store: &DbStore,
+    chat_id: ChatId,
+    event: &AgentEvent,
+) -> Result<i64> {
+    if is_terminal_event(event) {
+        return Err(AgentError::Store(format!(
+            "chat {chat_id} cannot journal a terminal event outside a turn"
+        )));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
+    }
+    let seq = append_event_on(&transaction, chat_id, None, None, None, None, event).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(seq)
+}
+
 pub(in crate::db) async fn append_turn_event(
     store: &DbStore,
     chat_id: ChatId,

@@ -3386,7 +3386,7 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
     assert!(store.get_turn_run(turn_id).await.unwrap().is_none());
 }
 
-async fn put_json(
+pub(super) async fn put_json(
     router: &Router,
     bearer: &str,
     uri: &str,
