@@ -135,7 +135,10 @@ in `authorize()` — was considered and rejected for now: it would duplicate
 the app grant into the broker's ledger (two records of one consent, able
 to disagree) and touch the persisted state format for no enforcement the
 server-side gate does not already provide. Recorded as revisitable if the
-broker ever becomes the sole consent store.
+broker ever becomes the sole consent store. The broker's audit trail still
+sees every folder operation, attributed to a dedicated **app actor**
+carrying the app id — not a borrowed grant subject — with writes recording
+a durable intent before any bytes change, exactly like agent writes.
 
 App writes are the first live user of the broker's bounded write
 operation (chat writebacks resolve paths advisorily and journal through

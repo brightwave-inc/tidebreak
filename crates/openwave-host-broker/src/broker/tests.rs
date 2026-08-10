@@ -3591,12 +3591,16 @@ fn pending_write_recovery_never_replays_an_ambiguous_native_result() {
 /// trusted-host surface with the broker's host-level half intact: only a
 /// live registration answers, transfers keep the byte bounds, and writes are
 /// digest-bound and mode-checked — while no conversation context applies at
-/// all, because consent lives in the caller's app grant.
+/// all, because consent lives in the caller's app grant. Every operation
+/// lands in the audit trail under the app actor, with writes recording a
+/// durable intent first.
 #[test]
 fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
-    let (_temp, broker, root) = setup();
+    let (_temp, broker, root, audit) = audited_setup();
+    std::fs::create_dir(root.join("reports")).unwrap();
     let controller = broker.controller();
     let conversation = Uuid::new_v4();
+    let app_id = crate::AppId::new();
     let registered = register(
         &controller,
         GrantSubject::conversation(conversation).unwrap(),
@@ -3616,6 +3620,7 @@ fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
     // Listing the root and reading a file need no conversation context.
     let ControlResult::ListAppFolder { entries } =
         control(ControlRequest::ListAppFolder(AppFolderPathRequest {
+            app_id,
             root_id,
             path: RelativePath::root(),
         }))
@@ -3632,6 +3637,7 @@ fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
 
     let ControlResult::ReadAppFolderFile(read) =
         control(ControlRequest::ReadAppFolderFile(AppFolderPathRequest {
+            app_id,
             root_id,
             path: RelativePath::parse("note.txt").unwrap(),
         }))
@@ -3649,6 +3655,7 @@ fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
     // replace replaces.
     let write = |mode: WriteFileMode, bytes: &[u8]| {
         control(ControlRequest::WriteAppFolderFile(AppFolderWriteRequest {
+            app_id,
             root_id,
             path: RelativePath::parse("app-state.json").unwrap(),
             mode,
@@ -3685,6 +3692,7 @@ fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
     // A mismatched digest refuses before any I/O.
     assert_eq!(
         control(ControlRequest::WriteAppFolderFile(AppFolderWriteRequest {
+            app_id,
             root_id,
             path: RelativePath::parse("tampered.json").unwrap(),
             mode: WriteFileMode::Create,
@@ -3707,12 +3715,52 @@ fn app_folder_trio_serves_live_registrations_and_dies_with_the_registration() {
     );
     assert_eq!(
         control(ControlRequest::ReadAppFolderFile(AppFolderPathRequest {
+            app_id,
             root_id,
             path: RelativePath::parse("note.txt").unwrap(),
         }))
         .unwrap_err()
         .code,
         ErrorCode::Denied
+    );
+
+    // Every folder operation above is in the trail, attributed to the app
+    // actor — reads as completions, each write as a durable intent paired
+    // with its completion, and the post-revocation read as a denial.
+    let events = audit.events.lock().unwrap();
+    let app_events = events
+        .iter()
+        .filter(|event| event.actor == AuditActor::App { app_id })
+        .map(|event| (event.operation, event.outcome))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        app_events,
+        [
+            (AuditOperation::ListAppFolder, AuditOutcome::Allowed),
+            (AuditOperation::ReadAppFolderFile, AuditOutcome::Allowed),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Attempted),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Allowed),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Attempted),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Allowed),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Attempted),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Failed),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Attempted),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Allowed),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Attempted),
+            (AuditOperation::WriteAppFolderFile, AuditOutcome::Failed),
+            (AuditOperation::ReadAppFolderFile, AuditOutcome::Denied),
+        ]
+    );
+    let write_target = events
+        .iter()
+        .find(|event| event.operation == AuditOperation::WriteAppFolderFile)
+        .map(|event| event.target.clone());
+    assert_eq!(
+        write_target,
+        Some(AuditTarget::Path {
+            root_id,
+            relative: RelativePath::parse("app-state.json").unwrap(),
+        })
     );
 }
 

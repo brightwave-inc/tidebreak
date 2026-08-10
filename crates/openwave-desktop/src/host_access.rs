@@ -307,6 +307,13 @@ fn folder_relative_path(
     RelativePath::parse(path).map_err(|_| openwave_server::host_folders::FolderOpError::InvalidPath)
 }
 
+fn folder_app_id(
+    app: openwave_core::id::AppId,
+) -> Result<openwave_host_broker::AppId, openwave_server::host_folders::FolderOpError> {
+    openwave_host_broker::AppId::from_uuid(*app.as_uuid())
+        .map_err(|_| openwave_server::host_folders::FolderOpError::Failed)
+}
+
 #[async_trait::async_trait]
 impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
     async fn approved_roots(
@@ -337,6 +344,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
 
     async fn list_folder(
         &self,
+        app: openwave_core::id::AppId,
         root: openwave_core::HostRootId,
         path: &str,
     ) -> Result<
@@ -345,6 +353,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
     > {
         use openwave_server::host_folders::FolderOpError;
 
+        let app_id = folder_app_id(app)?;
         let root_id =
             RootId::from_uuid(*root.as_uuid()).map_err(|_| FolderOpError::NotConnected)?;
         let path = folder_relative_path(path)?;
@@ -352,6 +361,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
             .broker()
             .broker
             .control(ControlRequest::ListAppFolder(AppFolderPathRequest {
+                app_id,
                 root_id,
                 path,
             }))
@@ -371,6 +381,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
 
     async fn read_file(
         &self,
+        app: openwave_core::id::AppId,
         root: openwave_core::HostRootId,
         path: &str,
     ) -> Result<Vec<u8>, openwave_server::host_folders::FolderOpError> {
@@ -378,6 +389,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
 
         use openwave_server::host_folders::FolderOpError;
 
+        let app_id = folder_app_id(app)?;
         let root_id =
             RootId::from_uuid(*root.as_uuid()).map_err(|_| FolderOpError::NotConnected)?;
         let path = folder_relative_path(path)?;
@@ -385,6 +397,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
             .broker()
             .broker
             .control(ControlRequest::ReadAppFolderFile(AppFolderPathRequest {
+                app_id,
                 root_id,
                 path,
             }))
@@ -400,6 +413,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
 
     async fn write_file(
         &self,
+        app: openwave_core::id::AppId,
         root: openwave_core::HostRootId,
         path: &str,
         content: &[u8],
@@ -413,6 +427,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
 
         use openwave_server::host_folders::FolderOpError;
 
+        let app_id = folder_app_id(app)?;
         let root_id =
             RootId::from_uuid(*root.as_uuid()).map_err(|_| FolderOpError::NotConnected)?;
         let path = folder_relative_path(path)?;
@@ -420,6 +435,7 @@ impl openwave_server::host_folders::HostFolders for DesktopHostFolders {
             .broker()
             .broker
             .control(ControlRequest::WriteAppFolderFile(AppFolderWriteRequest {
+                app_id,
                 root_id,
                 path,
                 mode: if replace {

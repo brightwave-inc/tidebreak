@@ -312,7 +312,7 @@ pub async fn post_app_invoke(
                 },
             )
             .await?;
-            dispatch_folder_op(&state, folder, &path, op)
+            dispatch_folder_op(&state, app_id, folder, &path, op)
                 .await
                 .map(|result| Json(result).into_response())
         }
@@ -664,6 +664,7 @@ impl AppFolderInvokeResult {
 /// failures.
 async fn dispatch_folder_op(
     state: &AppState,
+    app_id: AppId,
     folder: openwave_core::id::HostRootId,
     path: &str,
     op: FolderOp,
@@ -675,7 +676,7 @@ async fn dispatch_folder_op(
         ));
     };
     Ok(match op {
-        FolderOp::List => match host.list_folder(folder, path).await {
+        FolderOp::List => match host.list_folder(app_id, folder, path).await {
             Ok(entries) => AppFolderInvokeResult {
                 entries: Some(
                     entries
@@ -690,7 +691,7 @@ async fn dispatch_folder_op(
             },
             Err(error) => AppFolderInvokeResult::failure(error),
         },
-        FolderOp::Read => match host.read_file(folder, path).await {
+        FolderOp::Read => match host.read_file(app_id, folder, path).await {
             Ok(bytes) => AppFolderInvokeResult {
                 content_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
                 ..AppFolderInvokeResult::success()
@@ -707,7 +708,10 @@ async fn dispatch_folder_op(
                     crate::host_folders::FolderOpError::Failed,
                 ));
             };
-            match host.write_file(folder, path, &content, replace).await {
+            match host
+                .write_file(app_id, folder, path, &content, replace)
+                .await
+            {
                 Ok(receipt) => AppFolderInvokeResult {
                     replaced: Some(receipt.replaced),
                     ..AppFolderInvokeResult::success()

@@ -10,12 +10,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Capability, ConsentMethod, ExecutionContext, GrantId, GrantSubject, OperationId, RelativePath,
-    RequestId, RootId, Scope,
+    AppId, Capability, ConsentMethod, ExecutionContext, GrantId, GrantSubject, OperationId,
+    RelativePath, RequestId, RootId, Scope,
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -173,6 +173,10 @@ pub struct RegisterRootRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppFolderPathRequest {
+    /// The app whose grant admitted this dispatch, for the audit trail. The
+    /// broker does not verify app grants — the server already did — so this
+    /// names the accountable actor rather than proving consent.
+    pub app_id: AppId,
     pub root_id: RootId,
     pub path: RelativePath,
 }
@@ -183,6 +187,9 @@ pub struct AppFolderPathRequest {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppFolderWriteRequest {
+    /// The app whose grant admitted this dispatch, for the audit trail. See
+    /// [`AppFolderPathRequest::app_id`].
+    pub app_id: AppId,
     pub root_id: RootId,
     pub path: RelativePath,
     pub mode: WriteFileMode,
@@ -195,6 +202,7 @@ impl std::fmt::Debug for AppFolderWriteRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AppFolderWriteRequest")
+            .field("app_id", &self.app_id)
             .field("root_id", &self.root_id)
             .field("path", &self.path)
             .field("mode", &self.mode)

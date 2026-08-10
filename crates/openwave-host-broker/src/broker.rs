@@ -335,16 +335,47 @@ impl ControlAudit {
             | ControlRequest::ListApprovedRoots
             | ControlRequest::ListGrantStatements
             | ControlRequest::ListUnavailableRoots => None,
-            // The app-folder trio is consented and recorded server-side: the
-            // app grant names the folder and access level, and dispatch is
-            // admitted there before the broker is reached. The broker-side
-            // audit vocabulary is subject-keyed and local apps have no grant
-            // subject; auditing these under a borrowed subject would
-            // misattribute them. An app-actor audit kind is the recorded
-            // follow-up (docs/folder-bindings.md).
-            ControlRequest::ListAppFolder(_)
-            | ControlRequest::ReadAppFolderFile(_)
-            | ControlRequest::WriteAppFolderFile(_) => None,
+            // The app-folder trio is consented server-side — the app grant
+            // names the folder and access level, and dispatch is admitted
+            // there before the broker is reached — but the broker's own
+            // ledger still sees the I/O, attributed to the app actor the
+            // request names. No capability or grant id applies: the broker
+            // holds no grant row for an app, so implying one would overstate
+            // what this record proves.
+            ControlRequest::ListAppFolder(request) => Some(Self {
+                actor: AuditActor::App {
+                    app_id: request.app_id,
+                },
+                mutates: false,
+                operation: AuditOperation::ListAppFolder,
+                grant_id: None,
+                operation_id: None,
+                target: AuditTarget::path(request.root_id, &request.path),
+            }),
+            ControlRequest::ReadAppFolderFile(request) => Some(Self {
+                actor: AuditActor::App {
+                    app_id: request.app_id,
+                },
+                mutates: false,
+                operation: AuditOperation::ReadAppFolderFile,
+                grant_id: None,
+                operation_id: None,
+                target: AuditTarget::path(request.root_id, &request.path),
+            }),
+            // A host mutation: like the agent write operation, the intent
+            // record must be durable before any bytes change. No operation
+            // id — the digest-bound write reconciles a same-content retry by
+            // itself, so there is no separate mutation identity to correlate.
+            ControlRequest::WriteAppFolderFile(request) => Some(Self {
+                actor: AuditActor::App {
+                    app_id: request.app_id,
+                },
+                mutates: true,
+                operation: AuditOperation::WriteAppFolderFile,
+                grant_id: None,
+                operation_id: None,
+                target: AuditTarget::path(request.root_id, &request.path),
+            }),
             ControlRequest::ResolveExecRoots(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: match request.context.project_id() {

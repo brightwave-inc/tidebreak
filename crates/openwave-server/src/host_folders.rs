@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 
-use openwave_core::id::HostRootId;
+use openwave_core::id::{AppId, HostRootId};
 use openwave_core::local_app::FolderAccess;
 
 /// One host-approved connected folder, projected renderer-safe: the stable
@@ -87,21 +87,29 @@ pub trait HostFolders: Send + Sync {
     async fn approved_roots(&self) -> openwave_core::Result<Vec<ApprovedFolder>>;
 
     /// List one directory under an approved folder, within the host's
-    /// listing bounds.
+    /// listing bounds. `app` names the invoking app in the host's audit
+    /// trail; the caller has already enforced its grant.
     async fn list_folder(
         &self,
+        app: AppId,
         root: HostRootId,
         path: &str,
     ) -> Result<Vec<FolderEntry>, FolderOpError>;
 
     /// Read one file under an approved folder as bounded opaque bytes.
-    async fn read_file(&self, root: HostRootId, path: &str) -> Result<Vec<u8>, FolderOpError>;
+    async fn read_file(
+        &self,
+        app: AppId,
+        root: HostRootId,
+        path: &str,
+    ) -> Result<Vec<u8>, FolderOpError>;
 
     /// Write one file under an approved folder, atomically, within the
     /// host's write bound. `replace` selects the create-vs-replace mode; the
     /// caller has already enforced the grant's access level.
     async fn write_file(
         &self,
+        app: AppId,
         root: HostRootId,
         path: &str,
         content: &[u8],

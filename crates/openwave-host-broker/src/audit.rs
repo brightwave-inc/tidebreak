@@ -32,8 +32,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    Capability, ErrorCode, ExecutionContext, GrantId, GrantSubject, OperationId, RelativePath,
-    RequestId, RootId,
+    AppId, Capability, ErrorCode, ExecutionContext, GrantId, GrantSubject, OperationId,
+    RelativePath, RequestId, RootId,
 };
 
 const AUDIT_FILE_NAME: &str = "host-broker-audit.jsonl";
@@ -81,6 +81,9 @@ pub enum AuditOperation {
     ReadFile,
     ReadFileBinary,
     WriteFile,
+    ListAppFolder,
+    ReadAppFolderFile,
+    WriteAppFolderFile,
     ProtocolVersionMismatch,
 }
 
@@ -109,6 +112,12 @@ pub enum AuditActor {
     },
     Operation {
         context: ExecutionContext,
+    },
+    /// A local app acting on its folder grant through the app-folder control
+    /// surface. Consent lives in the server-side app grant, so no grant
+    /// subject applies; the app id is the accountable identity.
+    App {
+        app_id: AppId,
     },
 }
 

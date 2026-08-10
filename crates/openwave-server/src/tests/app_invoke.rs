@@ -558,6 +558,9 @@ use crate::host_folders::{
 struct FakeFolderHost {
     roots: StdMutex<Vec<ApprovedFolder>>,
     files: StdMutex<StdBTreeMap<String, Vec<u8>>>,
+    /// The app identity each dispatched operation carried, in order — the
+    /// value the host's audit trail will attribute the I/O to.
+    seen_apps: StdMutex<Vec<openwave_core::id::AppId>>,
 }
 
 impl FakeFolderHost {
@@ -578,9 +581,11 @@ impl HostFolders for FakeFolderHost {
 
     async fn list_folder(
         &self,
+        app: openwave_core::id::AppId,
         root: HostRootId,
         _path: &str,
     ) -> Result<Vec<FolderEntry>, FolderOpError> {
+        self.seen_apps.lock().unwrap().push(app);
         if !self.live(root) {
             return Err(FolderOpError::NotConnected);
         }
@@ -596,7 +601,13 @@ impl HostFolders for FakeFolderHost {
             .collect())
     }
 
-    async fn read_file(&self, root: HostRootId, path: &str) -> Result<Vec<u8>, FolderOpError> {
+    async fn read_file(
+        &self,
+        app: openwave_core::id::AppId,
+        root: HostRootId,
+        path: &str,
+    ) -> Result<Vec<u8>, FolderOpError> {
+        self.seen_apps.lock().unwrap().push(app);
         if !self.live(root) {
             return Err(FolderOpError::NotConnected);
         }
@@ -610,11 +621,13 @@ impl HostFolders for FakeFolderHost {
 
     async fn write_file(
         &self,
+        app: openwave_core::id::AppId,
         root: HostRootId,
         path: &str,
         content: &[u8],
         replace: bool,
     ) -> Result<FolderWriteReceipt, FolderOpError> {
+        self.seen_apps.lock().unwrap().push(app);
         if !self.live(root) {
             return Err(FolderOpError::NotConnected);
         }
@@ -696,6 +709,7 @@ async fn folder_invokes_walk_the_ladder_and_round_trip_through_the_seam() {
             "note.txt".to_owned(),
             b"hello".to_vec(),
         )])),
+        seen_apps: StdMutex::new(Vec::new()),
     });
     state.host_folders = Some(host.clone());
     let bearer = format!("Bearer {}", state.token);
@@ -801,4 +815,12 @@ async fn folder_invokes_walk_the_ladder_and_round_trip_through_the_seam() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let info: AgentErrorInfo = json_body(response).await;
     assert_eq!(info.kind, "consent_required");
+
+    // Every dispatched operation carried the invoking app's identity — what
+    // the host's audit trail attributes the I/O to. Refused invokes (pin,
+    // consent, malformed, disconnected) never reached the seam at all.
+    assert_eq!(
+        host.seen_apps.lock().unwrap().as_slice(),
+        [reader, reader, writer, writer]
+    );
 }

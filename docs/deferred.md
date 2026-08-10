@@ -29,8 +29,7 @@ pick them up now:
   [decision record 1](decisions/0001-project-files-and-attachment-vocabulary.md)
   but not yet built.
 - Make deletion of a terminal chat erase its background-run workspaces without
-  waiting for the periodic reaper, and add an app actor to the host-folder audit
-  vocabulary.
+  waiting for the periodic reaper.
 
 These are important finishing work, but they do not change the product's basic
 shape. They should be delivered as normal, reviewable slices rather than held
