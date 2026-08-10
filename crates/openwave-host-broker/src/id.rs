@@ -87,6 +87,10 @@ macro_rules! uuid_id {
 
 uuid_id!(RootId, "Host-local identity for one registered root.");
 uuid_id!(
+    AppId,
+    "Trusted product identity for one local app acting on its folder grant."
+);
+uuid_id!(
     GrantId,
     "Stable identity for one consented capability grant."
 );

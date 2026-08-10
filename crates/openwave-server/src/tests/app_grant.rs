@@ -310,6 +310,7 @@ async fn folder_bindings_grant_and_fail_closed_when_the_folder_disconnects() {
         // if it ever does keeps this test about the grant object.
         async fn list_folder(
             &self,
+            _app: openwave_core::id::AppId,
             _root: openwave_core::id::HostRootId,
             _path: &str,
         ) -> Result<Vec<crate::host_folders::FolderEntry>, crate::host_folders::FolderOpError>
@@ -319,6 +320,7 @@ async fn folder_bindings_grant_and_fail_closed_when_the_folder_disconnects() {
 
         async fn read_file(
             &self,
+            _app: openwave_core::id::AppId,
             _root: openwave_core::id::HostRootId,
             _path: &str,
         ) -> Result<Vec<u8>, crate::host_folders::FolderOpError> {
@@ -327,6 +329,7 @@ async fn folder_bindings_grant_and_fail_closed_when_the_folder_disconnects() {
 
         async fn write_file(
             &self,
+            _app: openwave_core::id::AppId,
             _root: openwave_core::id::HostRootId,
             _path: &str,
             _content: &[u8],

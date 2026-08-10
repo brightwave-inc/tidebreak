@@ -25,8 +25,8 @@ pub use capability::{
     Capability, ConsentMethod, ConsentRecord, Grant, GrantError, RootAttachment, Scope,
 };
 pub use id::{
-    ExecutionContext, GrantId, GrantSubject, IdError, OperationId, ParseIdError, RequestId, RootId,
-    SubjectKind,
+    AppId, ExecutionContext, GrantId, GrantSubject, IdError, OperationId, ParseIdError, RequestId,
+    RootId, SubjectKind,
 };
 pub use path_policy::{RootPolicy, RootPolicyError, ValidatedRoot};
 pub use protocol::{
