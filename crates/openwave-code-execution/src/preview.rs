@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
-use std::fs;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::io::{Cursor, Read as _};
+use std::path::Path;
 
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat};
 use openwave_core::{DocumentBlob, ImageData, ImageMediaType, ImageRef, MAX_IMAGE_BYTES};
@@ -24,7 +26,13 @@ pub struct PreviewScan {
 #[derive(Debug)]
 struct Candidate {
     name: String,
-    path: PathBuf,
+}
+
+#[derive(Debug)]
+enum PreviewDirectoryError {
+    Missing,
+    NotPrivate,
+    Unavailable,
 }
 
 /// Read, prioritize, resize, and bound images directly under `preview/`.
@@ -33,28 +41,28 @@ struct Candidate {
 /// are named in a compact note so the model can repair the preview and rerun.
 pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
     let mut scan = PreviewScan::default();
-    // Skipping symlinked *entries* below is not enough on its own: the
-    // directory itself is opened by path, and local exec is confined to the
-    // scratch tree but can plant `<scratch>/preview -> ~/Pictures` there. The
-    // traversal has already happened by the time entries are filtered, so
-    // images from an arbitrary host directory would be attached to the chat.
-    match fs::symlink_metadata(preview_dir) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
+    // Pin the containing scratch directory, then open preview/ relative to it
+    // without following the final component. Every candidate is subsequently
+    // opened relative to this descriptor with the same no-follow rule. A
+    // sandbox process can rename or replace either pathname after this point,
+    // but it cannot redirect the descriptor or the file handle we actually
+    // inspect and decode.
+    let directory = match open_preview_directory(preview_dir) {
+        Ok(directory) => directory,
+        Err(PreviewDirectoryError::Missing) => return scan,
+        Err(PreviewDirectoryError::NotPrivate) => {
             scan.notes
                 .push("preview images unavailable: preview/ is not a private workspace directory. Remove it and rerun.".into());
             return scan;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return scan,
-        Err(_) => {
+        Err(PreviewDirectoryError::Unavailable) => {
             scan.notes
                 .push("preview images unavailable: preview/ could not be read".into());
             return scan;
         }
-    }
-    let entries = match fs::read_dir(preview_dir) {
+    };
+    let entries = match directory.entries() {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return scan,
         Err(_) => {
             scan.notes
                 .push("preview images unavailable: preview/ could not be read".into());
@@ -63,22 +71,22 @@ pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
     };
     let mut candidates = Vec::new();
     for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // Classify relative to the pinned directory and without following a
+        // symlink. The later no-follow open remains the enforcing operation;
+        // this check only avoids treating known non-files as candidates.
+        let Ok(metadata) = directory.symlink_metadata(&name) else {
             continue;
         };
         if !metadata.is_file() || metadata.len() == 0 {
             continue;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
         if preview_media_type_from_extension(&name).is_none() {
             continue;
         }
-        candidates.push(Candidate {
-            name,
-            path: entry.path(),
-        });
+        candidates.push(Candidate { name });
     }
     candidates.sort_by(|left, right| {
         preview_priority(&left.name)
@@ -93,7 +101,7 @@ pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
             omitted.push(candidate.name);
             continue;
         }
-        match prepare_preview(&candidate) {
+        match prepare_preview(&directory, &candidate) {
             Ok(image) => scan.images.push(image),
             Err(()) => rejected.push(candidate.name),
         }
@@ -113,12 +121,50 @@ pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
     scan
 }
 
-fn prepare_preview(candidate: &Candidate) -> Result<(ImageRef, ImageData), ()> {
-    let metadata = fs::metadata(&candidate.path).map_err(|_| ())?;
-    if metadata.len() > MAX_WORKSPACE_FILE_BYTES as u64 || metadata.len() > MAX_IMAGE_BYTES {
+fn open_preview_directory(preview_dir: &Path) -> Result<Dir, PreviewDirectoryError> {
+    let parent_path = preview_dir
+        .parent()
+        .ok_or(PreviewDirectoryError::Unavailable)?;
+    let name = preview_dir
+        .file_name()
+        .ok_or(PreviewDirectoryError::Unavailable)?;
+    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())
+        .map_err(|_| PreviewDirectoryError::Unavailable)?;
+    match parent.open_dir_nofollow(name) {
+        Ok(directory) => Ok(directory),
+        Err(_) => match parent.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(PreviewDirectoryError::Missing)
+            }
+            Ok(metadata) if metadata.is_symlink() || !metadata.is_dir() => {
+                Err(PreviewDirectoryError::NotPrivate)
+            }
+            Ok(_) | Err(_) => Err(PreviewDirectoryError::Unavailable),
+        },
+    }
+}
+
+fn prepare_preview(directory: &Dir, candidate: &Candidate) -> Result<(ImageRef, ImageData), ()> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory
+        .open_with(&candidate.name, &options)
+        .map_err(|_| ())?;
+    let metadata = file.metadata().map_err(|_| ())?;
+    let max_bytes = (MAX_WORKSPACE_FILE_BYTES as u64).min(MAX_IMAGE_BYTES);
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
         return Err(());
     }
-    let bytes = fs::read(&candidate.path).map_err(|_| ())?;
+    // Bound the read itself rather than trusting the earlier length. A writer
+    // may extend the already-open file after metadata() returns; reading one
+    // byte past the ceiling detects that race without allocating unboundedly.
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| ())?);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.is_empty() || bytes.len() as u64 > max_bytes {
+        return Err(());
+    }
     let fallback = preview_media_type_from_extension(&candidate.name).ok_or(())?;
     let media_type = ImageMediaType::sniff(&bytes).unwrap_or(fallback);
     let format = match media_type {
@@ -235,6 +281,56 @@ mod tests {
         assert!(scan.images.is_empty());
         assert_eq!(scan.notes.len(), 1);
         assert!(scan.notes[0].contains("not a private workspace directory"));
+    }
+
+    /// A model-controlled symlink inside a legitimate preview directory must
+    /// not make the unsandboxed host read an otherwise inaccessible image.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_preview_file_cannot_disclose_an_outside_image() {
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_png(elsewhere.path(), "private.png", 19, 17);
+        let private_bytes = std::fs::read(elsewhere.path().join("private.png")).unwrap();
+
+        let preview = tempfile::tempdir().unwrap();
+        write_png(preview.path(), "safe.png", 8, 6);
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("private.png"),
+            preview.path().join("leak.png"),
+        )
+        .unwrap();
+
+        let scan = scan_preview_directory(preview.path());
+
+        assert_eq!(scan.images.len(), 1);
+        assert_eq!(scan.images[0].0.width, 8);
+        assert_eq!(scan.images[0].0.height, 6);
+        assert_ne!(scan.images[0].1.bytes(), private_bytes);
+    }
+
+    /// The no-follow open, rather than the earlier directory listing, is the
+    /// enforcement point for a file replaced after it was selected.
+    #[cfg(unix)]
+    #[test]
+    fn a_preview_replaced_by_a_symlink_before_open_is_refused() {
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_png(elsewhere.path(), "private.png", 19, 17);
+
+        let preview = tempfile::tempdir().unwrap();
+        write_png(preview.path(), "candidate.png", 8, 6);
+        let directory = open_preview_directory(preview.path()).unwrap();
+        let candidate = Candidate {
+            name: "candidate.png".into(),
+        };
+
+        std::fs::remove_file(preview.path().join("candidate.png")).unwrap();
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("private.png"),
+            preview.path().join("candidate.png"),
+        )
+        .unwrap();
+
+        assert!(prepare_preview(&directory, &candidate).is_err());
     }
 
     #[test]
