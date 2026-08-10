@@ -119,12 +119,14 @@ function updaterTransitionIsSafe(updater, broker) {
   const reversibleMarker = /\b(?:async\s+)?fn\s+install_behind_broker_barrier\b/;
   const reversibleSafe = reversibleMarker.test(stripRustCommentsAndStrings(updater)) && (() => {
     const barrier = rustFunctionBody(updater, "install_behind_broker_barrier");
-    const quiesce = "host_access.quiesce_for_update().await?";
-    const resume = "host_access.resume_after_failed_update().await";
-    const shutdown = "host_access.shutdown().await";
+    const quiesce = "quiesce().await?";
+    const installCall = "match install()";
+    const resume = "resume().await";
+    const shutdown = "shutdown().await";
     const barrierOrdered =
-      hasOrderedUniqueTokens(barrier, [quiesce, install, shutdown]) &&
-      hasOrderedUniqueTokens(barrier, [quiesce, install, resume]);
+      hasOrderedUniqueTokens(barrier, [quiesce, installCall, shutdown, resume]) &&
+      (barrier.match(/\binstall\(\)/g) ?? []).length === 1;
+    const bindings = /install_behind_broker_barrier\(\s*\|\| host_access\.quiesce_for_update\(\),\s*\|\| staged\.update\.install\(&staged\.bytes\),\s*\|\| host_access\.resume_after_failed_update\(\),\s*\|\| host_access\.shutdown\(\),\s*\)/s;
     const admit = rustFunctionBody(broker, "admit");
     const quiesceArm = rustDelimitedBody(broker, /BrokerCommand::Quiesce\s*\{\s*reply\s*\}\s*=>/);
     const resumeArm = rustDelimitedBody(
@@ -134,6 +136,7 @@ function updaterTransitionIsSafe(updater, broker) {
     const session = rustFunctionBody(broker, "ensure_session");
     const safe = (
       barrierOrdered &&
+      bindings.test(restart) &&
       !admit.includes("drop(admission)") &&
       hasOrderedUniqueTokens(admit, [
         "BrokerAdmission::Running",
@@ -924,13 +927,22 @@ test("updater transition policy rejects unsafe ordering mutations", () => {
       staged.update.install(&staged.bytes);
     }
   `;
+  // This mirrors #1907: the generic helper owns the transition order, while
+  // the Tauri call site supplies the concrete host and staged-update actions.
   const reversibleUpdater = `
-    async fn take_staged_and_restart() { install_behind_broker_barrier().await; }
-    async fn install_behind_broker_barrier() {
-      host_access.quiesce_for_update().await?;
-      match staged.update.install(&staged.bytes) {
-        Ok(()) => { host_access.shutdown().await; }
-        Err(_) => { host_access.resume_after_failed_update().await; }
+    async fn take_staged_and_restart() {
+      install_behind_broker_barrier(
+        || host_access.quiesce_for_update(),
+        || staged.update.install(&staged.bytes),
+        || host_access.resume_after_failed_update(),
+        || host_access.shutdown(),
+      ).await;
+    }
+    async fn install_behind_broker_barrier(quiesce: Q, install: I, resume: R, shutdown: S) {
+      quiesce().await?;
+      match install() {
+        Ok(()) => { shutdown().await; }
+        Err(_) => { resume().await; }
       }
     }
   `;
@@ -975,8 +987,8 @@ test("updater transition policy rejects unsafe ordering mutations", () => {
     [
       "install before the broker barrier",
       reversibleUpdater.replace(
-        "host_access.quiesce_for_update().await?;",
-        "staged.update.install(&staged.bytes); host_access.quiesce_for_update().await?;",
+        "quiesce().await?;",
+        "install(); quiesce().await?;",
       ),
       reversibleBroker,
     ],
