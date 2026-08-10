@@ -1,6 +1,7 @@
 //! `openwave://` deep-link handling: gateway pairing.
 //!
-//! One link shape is recognized: `openwave://provision?gateway=<url>`. macOS
+//! Two link shapes are recognized: `openwave://provision?gateway=<url>` and
+//! the payload-free `openwave://deprovision`. macOS
 //! delivers opened URLs through the runtime's opened-URL events, which the
 //! deep-link plugin re-emits; on Windows and Linux the OS launches a second
 //! app instance with the link as its only argument, and the single-instance
@@ -33,13 +34,26 @@
 //! direction only: after a registration parks a pairing, the shell emits a
 //! best-effort [`PAIRING_CHANGED_EVENT`] nudge so the gate refetches policy
 //! immediately instead of waiting out its poll tick.
+//!
+//! `openwave://deprovision` is the reverse ceremony, with the native
+//! confirmation as its consent: the dialog names the provisioned gateway,
+//! and only an explicit confirmation runs the compare-and-swap'd delete
+//! ([`openwave_server::deprovision_provisioned_gateway`]) — anchored to the
+//! URL the dialog named, so a row that moved in between refuses. An OS (MDM)
+//! asserted gateway refuses outright (that tier is never locally removable),
+//! and on an unmanaged profile the link is a logged no-op, so a drive-by
+//! link buys at most one dialog that defaults to changing nothing. The link
+//! deliberately carries no payload: the dialog names whatever policy
+//! resolves, rather than trusting a URL the link asserted. The same
+//! [`PAIRING_CHANGED_EVENT`] nudge makes the gate re-read policy and unlock
+//! without a restart.
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::{oneshot, watch};
 
-use openwave_server::{PairingError, PairingHandle, PendingRegistration};
+use openwave_server::{DeprovisionTarget, PairingError, PairingHandle, PendingRegistration};
 
 /// Where the pairing handler waits for the embedded server's pairing handle:
 /// filled once boot has bound the server. A provision link commonly
@@ -98,15 +112,19 @@ pub(crate) fn install(app: &tauri::AppHandle) {
     }
 }
 
-/// Handle every URL in one delivery. Only a link that parses as a provision
-/// link surfaces the window and registers the pending pairing; a malformed
-/// link is logged bounded — never echoing the link — and changes nothing.
+/// Handle every URL in one delivery. Only a link that parses as one of the
+/// recognized shapes surfaces the window and acts; a malformed link is
+/// logged bounded — never echoing the link — and changes nothing.
 fn handle_deep_link_urls(app: &tauri::AppHandle, urls: &[tauri::Url]) {
     for url in urls {
-        match provision_link(url) {
-            Ok(link) => {
+        match parse_deep_link(url) {
+            Ok(DeepLink::Provision(link)) => {
                 focus_main_window(app);
                 spawn_pairing(app.clone(), link);
+            }
+            Ok(DeepLink::Deprovision) => {
+                focus_main_window(app);
+                spawn_deprovision(app.clone());
             }
             Err(reason) => log_pairing(app, &format!("ignored a deep link: {reason}")),
         }
@@ -123,19 +141,30 @@ pub(crate) fn focus_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Parse and validate a provision link.
+/// A recognized deep link, parsed and validated whole.
+#[derive(Debug, PartialEq, Eq)]
+enum DeepLink {
+    /// `openwave://provision?gateway=<url>`: park a pairing for sign-in.
+    Provision(ProvisionLink),
+    /// `openwave://deprovision`, payload-free: ask to disconnect from the
+    /// provisioned gateway. Carrying anything at all — a query, userinfo, a
+    /// port, extra path — refuses the link whole.
+    Deprovision,
+}
+
+/// Parse and validate a deep link.
 ///
 /// The contract is strict — scheme `openwave` (dev builds also answer
-/// `openwave-dev`), action `provision` with no userinfo, port, or extra
-/// path, exactly one query parameter named `gateway`, and a gateway value
-/// that is an https URL (http only on loopback) with no userinfo, query, or
-/// fragment — so a
-/// malformed or hostile link is refused whole rather than partially honored.
-/// Near-miss gateway values matter: the conflict check on the write path
-/// compares normalized URL strings, so accepting a decorated variant would
-/// mint a distinct, permanently conflicting policy value. The gateway URL is
-/// additionally held to the connectors contract server-side.
-fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
+/// `openwave-dev`) with no userinfo or port, and an action of `provision`
+/// (with exactly one query parameter named `gateway`, whose value is an
+/// https URL — http only on loopback — with no userinfo, query, or fragment)
+/// or `deprovision` (with no query at all) — so a malformed or hostile link
+/// is refused whole rather than partially honored. Near-miss gateway values
+/// matter: the conflict check on the write path compares normalized URL
+/// strings, so accepting a decorated variant would mint a distinct,
+/// permanently conflicting policy value. The gateway URL is additionally
+/// held to the connectors contract server-side.
+fn parse_deep_link(url: &tauri::Url) -> Result<DeepLink, String> {
     if url.scheme() != "openwave" && !(cfg!(debug_assertions) && url.scheme() == DEV_SCHEME) {
         return Err("not an openwave:// link".into());
     }
@@ -154,9 +183,22 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
         (None, path) => path.to_string(),
         (Some(host), path) => format!("{host}/{path}"),
     };
-    if action != "provision" {
-        return Err("not a provision link".into());
+    match action.as_str() {
+        "provision" => provision_link(url).map(DeepLink::Provision),
+        "deprovision" => {
+            if url.query().is_some() {
+                return Err("the deprovision link must carry no parameters".into());
+            }
+            Ok(DeepLink::Deprovision)
+        }
+        _ => Err("not a recognized openwave link".into()),
     }
+}
+
+/// The provision half of the contract: exactly one query parameter named
+/// `gateway`, holding a credible gateway URL. Scheme, userinfo, port, and
+/// action shape were already checked by [`parse_deep_link`].
+fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     let mut pairs = url.query_pairs();
     let Some((key, value)) = pairs.next() else {
         return Err("the provision link carries no gateway parameter".into());
@@ -266,6 +308,94 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
     });
 }
 
+/// The deprovision flow: probe what the link would act on, and only a
+/// user-consented provisioned row gets the confirmation dialog — which is
+/// the consent the CAS'd delete then anchors to. Every other state is a
+/// refusal dialog or a logged no-op; nothing here loops or retries.
+fn spawn_deprovision(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let handle = match wait_pairing_handle(&app).await {
+            Ok(handle) => handle,
+            Err(reason) => {
+                log_pairing(&app, &format!("disconnect failed: {reason}"));
+                return;
+            }
+        };
+        match openwave_server::deprovision_target(&handle).await {
+            Ok(DeprovisionTarget::Provisioned { gateway_url }) => {
+                confirm_and_disconnect(&app, &handle, &gateway_url).await;
+            }
+            Ok(DeprovisionTarget::OsManaged { gateway_url }) => {
+                log_pairing(&app, "disconnect refused: an OS policy asserts the gateway");
+                show_disconnect_failure(
+                    &app,
+                    &PairingError::Conflict {
+                        provisioned_url: gateway_url.unwrap_or_default(),
+                        replaceable: false,
+                    },
+                );
+            }
+            Ok(DeprovisionTarget::Unprovisioned) => {
+                // A drive-by link on an unmanaged install must stay quiet,
+                // symmetric with the provision path's no-dialog happy path.
+                log_pairing(&app, "ignored a disconnect link: nothing to disconnect");
+            }
+            Ok(DeprovisionTarget::Misconfigured { .. }) => {
+                log_pairing(
+                    &app,
+                    "disconnect refused: the managed policy is misconfigured",
+                );
+                show_disconnect_failure(
+                    &app,
+                    &PairingError::Other(openwave_core::AgentError::config(
+                        "the managed policy is misconfigured",
+                    )),
+                );
+            }
+            Err(error) => {
+                log_pairing(&app, &format!("disconnect failed: {error}"));
+                show_disconnect_failure(&app, &PairingError::Other(error));
+            }
+        }
+    });
+}
+
+/// Escalate to the user's explicit choice: a native dialog naming the
+/// provisioned origin, defaulting to changing nothing. Confirmation runs the
+/// delete anchored to exactly the URL the dialog named; a row that moved in
+/// between surfaces as one failure dialog, never a retry loop.
+async fn confirm_and_disconnect(app: &tauri::AppHandle, handle: &PairingHandle, gateway_url: &str) {
+    let origin = origin_of(gateway_url);
+    if PAIRING_DIALOG_SHOWING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log_pairing(app, "a pairing dialog is already up; logged only");
+        return;
+    }
+    let approved = ask_confirmation(
+        app,
+        "Disconnect this device?",
+        &disconnect_prompt(&origin),
+        "Disconnect",
+    )
+    .await;
+    PAIRING_DIALOG_SHOWING.store(false, std::sync::atomic::Ordering::SeqCst);
+    if !approved {
+        log_pairing(app, &format!("disconnecting from {origin} declined"));
+        return;
+    }
+    match openwave_server::deprovision_provisioned_gateway(handle, gateway_url).await {
+        Ok(()) => {
+            log_pairing(app, &format!("disconnected from {origin}"));
+            // The live unlock: the gate refetches `/policy`, resolves
+            // unmanaged, and renders the open experience without a restart.
+            notify_pairing_changed(app);
+        }
+        Err(failure) => {
+            log_pairing(app, &format!("disconnect refused for {origin}: {failure}"));
+            show_disconnect_failure(app, &failure);
+        }
+    }
+}
+
 /// Escalate a replaceable conflict to the user's explicit choice: a native
 /// dialog naming both origins, defaulting to changing nothing. Confirmation
 /// parks the replacing pairing — still nothing durable; the sign-in the gate
@@ -319,15 +449,20 @@ async fn confirm_and_replace(
 /// the dialog's answer arrives on a callback, and a channel that drops
 /// unanswered reads as a decline — the failure direction of every path here
 /// is "change nothing".
-async fn ask_to_repair(app: &tauri::AppHandle, message: &str) -> bool {
+async fn ask_confirmation(
+    app: &tauri::AppHandle,
+    title: &str,
+    message: &str,
+    confirm_label: &str,
+) -> bool {
     let (tx, rx) = oneshot::channel();
     let mut dialog = app
         .dialog()
         .message(message)
-        .title("Re-pair this device?")
+        .title(title)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Re-pair".to_owned(),
+            confirm_label.to_owned(),
             "Cancel".to_owned(),
         ));
     if let Some(window) = app.get_webview_window("main") {
@@ -337,6 +472,10 @@ async fn ask_to_repair(app: &tauri::AppHandle, message: &str) -> bool {
         let _ = tx.send(approved);
     });
     rx.await.unwrap_or(false)
+}
+
+async fn ask_to_repair(app: &tauri::AppHandle, message: &str) -> bool {
+    ask_confirmation(app, "Re-pair this device?", message, "Re-pair").await
 }
 
 /// Reduce a stored gateway base URL to its origin — the only form
@@ -359,6 +498,58 @@ fn repair_prompt(new_origin: &str, old_origin: &str) -> String {
          which models and settings are available. You'll complete a sign-in to \
          {new_origin} to finish — until then, nothing changes."
     )
+}
+
+/// The disconnect question, pure like [`repair_prompt`]: what the
+/// confirmation claims — the origin being left, that the session is signed
+/// out, and that re-pairing stays possible — must be testable without a GUI.
+fn disconnect_prompt(origin: &str) -> String {
+    format!(
+        "Disconnect this device from {origin}?\n\n\
+         OpenWave will sign out of {origin} and stop being managed by it. \
+         You can pair again later from your gateway's page."
+    )
+}
+
+/// The one user-facing line per disconnect refusal class, pure like
+/// [`refusal_message`]. An OS (MDM) asserted gateway names itself and points
+/// at the administrator — that tier is never locally removable. A replaceable
+/// conflict only reaches this dialog when the confirmation raced a change to
+/// the provisioned row, so it says the state moved and leaves the retry to
+/// the user. Any other refusal stays generic — the raw reason is in
+/// `pairing.log` — and says nothing changed.
+fn disconnect_refusal_message(failure: &PairingError) -> String {
+    match failure {
+        PairingError::Conflict {
+            provisioned_url,
+            replaceable: false,
+        } => format!(
+            "This device is managed by {} through your organization's \
+             device policy. Contact your administrator to disconnect.",
+            origin_of(provisioned_url)
+        ),
+        PairingError::Conflict { .. } => "The gateway managing this device changed while \
+             disconnecting. Nothing was changed; try again from the new state."
+            .to_string(),
+        _ => "OpenWave could not disconnect this device. Nothing was changed; \
+             details are in pairing.log."
+            .to_string(),
+    }
+}
+
+/// One bounded error dialog per refused disconnect, same posture as
+/// [`show_pairing_failure`]: no retry affordance, no loop.
+fn show_disconnect_failure(app: &tauri::AppHandle, failure: &PairingError) {
+    if PAIRING_DIALOG_SHOWING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log_pairing(app, "a pairing dialog is already up; logged only");
+        return;
+    }
+    app.dialog()
+        .message(disconnect_refusal_message(failure))
+        .title("Disconnect refused")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+    PAIRING_DIALOG_SHOWING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The one user-facing line per refusal class, pure so the choice of what a
@@ -455,7 +646,23 @@ fn log_pairing(app: &tauri::AppHandle, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_of, provision_link, refusal_message, repair_prompt, PairingError};
+    use super::{
+        disconnect_prompt, disconnect_refusal_message, origin_of, parse_deep_link, refusal_message,
+        repair_prompt, DeepLink, PairingError,
+    };
+
+    /// Parse through the one entry the handler uses, keeping the hostile
+    /// cases honest: a link must fail the whole contract, not merely the
+    /// provision half of it.
+    fn parsed_provision(link: &str) -> Option<super::ProvisionLink> {
+        match tauri::Url::parse(link)
+            .ok()
+            .map(|url| parse_deep_link(&url))
+        {
+            Some(Ok(DeepLink::Provision(link))) => Some(link),
+            _ => None,
+        }
+    }
 
     #[test]
     fn provision_links_are_held_to_the_contract() {
@@ -539,12 +746,41 @@ mod tests {
             ),
         ];
         for (link, expected) in cases {
-            let parsed = tauri::Url::parse(link)
-                .ok()
-                .and_then(|url| provision_link(&url).ok());
+            let parsed = parsed_provision(link);
             assert_eq!(
                 parsed.as_ref().map(|link| link.gateway_url.as_str()),
                 *expected,
+                "{link}"
+            );
+        }
+    }
+
+    /// The deprovision link's whole contract: the bare action in either URL
+    /// spelling, and nothing else — any query at all, userinfo, a port, a
+    /// trailing path segment, a percent-encoded action, or a foreign scheme
+    /// refuses the link whole.
+    #[test]
+    fn deprovision_links_are_held_to_the_contract() {
+        let cases: &[(&str, bool)] = &[
+            ("openwave://deprovision", true),
+            ("openwave://deprovision/", true),
+            ("openwave:deprovision", true),
+            ("openwave://deprovision?gateway=https://gw.example", false),
+            ("openwave://deprovision?", false),
+            ("openwave://deprovision?x=1", false),
+            ("openwave://user:pw@deprovision", false),
+            ("openwave://deprovision:9999", false),
+            ("openwave://deprovision/extra", false),
+            ("openwave://depro%76ision", false),
+            ("https://deprovision", false),
+        ];
+        for (link, accepted) in cases {
+            let parsed = tauri::Url::parse(link)
+                .ok()
+                .map(|url| parse_deep_link(&url));
+            assert_eq!(
+                matches!(parsed, Some(Ok(DeepLink::Deprovision))),
+                *accepted,
                 "{link}"
             );
         }
@@ -555,8 +791,17 @@ mod tests {
     /// build profile, which is exactly the contract.
     #[test]
     fn the_dev_scheme_is_a_debug_only_alias() {
-        let url = tauri::Url::parse("openwave-dev://provision?gateway=https://gw.example").unwrap();
-        assert_eq!(provision_link(&url).is_ok(), cfg!(debug_assertions));
+        for link in [
+            "openwave-dev://provision?gateway=https://gw.example",
+            "openwave-dev://deprovision",
+        ] {
+            let url = tauri::Url::parse(link).unwrap();
+            assert_eq!(
+                parse_deep_link(&url).is_ok(),
+                cfg!(debug_assertions),
+                "{link}"
+            );
+        }
     }
 
     /// The refusal dialog's one line per failure class: an MDM-asserted
@@ -622,5 +867,49 @@ mod tests {
             origin_of("https://gw.example:8443/base/path/"),
             "https://gw.example:8443"
         );
+    }
+
+    /// The disconnect confirmation's load-bearing claims: the origin being
+    /// left by name, that the session is signed out, and that pairing again
+    /// stays possible — disconnecting is not a one-way door.
+    #[test]
+    fn the_disconnect_prompt_names_the_origin_and_the_way_back() {
+        let prompt = disconnect_prompt("https://gw.example");
+        assert!(prompt.contains("Disconnect this device from https://gw.example?"));
+        assert!(prompt.contains("sign out of https://gw.example"));
+        assert!(prompt.contains("pair again"));
+    }
+
+    /// The disconnect refusal's one line per failure class: an OS-asserted
+    /// gateway names itself — reduced to its origin — and points at the
+    /// administrator; a raced replaceable conflict says the state moved; a
+    /// generic failure keeps the raw reason in pairing.log. Every class says
+    /// or implies nothing changed.
+    #[test]
+    fn the_disconnect_refusal_names_the_right_authority() {
+        let os = disconnect_refusal_message(&PairingError::Conflict {
+            provisioned_url: "https://mdm.example/base/".to_string(),
+            replaceable: false,
+        });
+        assert!(os.contains("managed by https://mdm.example"));
+        assert!(os.contains("administrator"));
+        assert!(!os.contains("/base"));
+
+        let raced = disconnect_refusal_message(&PairingError::Conflict {
+            provisioned_url: "https://third.example/".to_string(),
+            replaceable: true,
+        });
+        assert!(raced.contains("changed while"));
+        assert!(raced.contains("Nothing was changed"));
+        assert!(
+            !raced.contains("administrator"),
+            "a user-replaceable row must not be blamed on an administrator"
+        );
+
+        let other = disconnect_refusal_message(&PairingError::Other(
+            openwave_core::AgentError::config("reader failed: token=shh"),
+        ));
+        assert!(other.contains("pairing.log"));
+        assert!(!other.contains("token=shh"));
     }
 }
