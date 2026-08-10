@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -289,7 +289,12 @@ describe("ChatView", () => {
     }));
     await renderChatView();
 
-    await userEvent.click(screen.getAllByRole("option")[0]!);
+    const choices = within(
+      screen.getByRole("group", { name: "Approval choices" }),
+    ).getAllByRole("button");
+    await userEvent.click(choices[0]!);
+    expect(client.decideApproval).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
 
     await waitFor(() =>
       expect(client.decideApproval).toHaveBeenCalledWith(

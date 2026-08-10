@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NetworkPolicyDialog } from "./NetworkPolicyDialog";
@@ -8,7 +9,8 @@ import { NetworkPolicyDialog } from "./NetworkPolicyDialog";
 afterEach(cleanup);
 
 describe("NetworkPolicyDialog", () => {
-  it("offers the package-registry class as one per-chat choice", () => {
+  it("selects a package-registry policy without applying it until submit", async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     render(
       <NetworkPolicyDialog
@@ -19,10 +21,12 @@ describe("NetworkPolicyDialog", () => {
       />,
     );
 
-    fireEvent.click(
-      screen
-        .getByText(/Only curated package registries are reachable/i)
-        .closest("button")!,
+    await user.click(
+      screen.getByRole("radio", { name: /Package installs/i }),
+    );
+    expect(onChange).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: "Apply network policy" }),
     );
 
     expect(onChange).toHaveBeenCalledWith({ mode: "package_managers" });
@@ -43,7 +47,10 @@ describe("NetworkPolicyDialog", () => {
       target: { value: "api.example.com, api.example.com\nfiles.example.com" },
     });
     fireEvent.click(screen.getByText("Also allow package registries"));
-    fireEvent.click(screen.getByRole("button", { name: "Use custom policy" }));
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Apply network policy" }),
+    );
 
     expect(onChange).toHaveBeenCalledWith({
       mode: "allowed_hosts",
@@ -68,13 +75,16 @@ describe("NetworkPolicyDialog", () => {
       />,
     );
 
-    const internetAccess = screen
-      .getByText(/Reach public internet destinations/i)
-      .closest("button")!;
+    const internetAccess = screen.getByRole("radio", {
+      name: /Internet access/i,
+    });
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
 
     fireEvent.click(internetAccess);
-    fireEvent.click(internetAccess);
+    expect(onChange).not.toHaveBeenCalled();
+    const apply = screen.getByRole("button", { name: "Apply network policy" });
+    fireEvent.click(apply);
+    fireEvent.click(apply);
 
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(internetAccess).toBeDisabled();

@@ -26,6 +26,7 @@ export function AppsPage({ appId }: { appId?: string }) {
       <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
         {appId ? (
           <AppDetailView
+            key={appId}
             appId={appId}
             apis={apis}
             onBack={() => void navigate({ to: "/apps" })}

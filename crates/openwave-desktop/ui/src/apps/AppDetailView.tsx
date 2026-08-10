@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { AppDetail, AppGrantState } from "@/api";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
 import { AppConsentSheet } from "./AppConsentSheet";
@@ -53,13 +54,31 @@ export function AppDetailView({
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const generationRef = useRef(0);
+  const actionGenerationRef = useRef(0);
+  const appIdRef = useRef(appId);
+  appIdRef.current = appId;
+  const { confirm, dialog } = useConfirm();
+
+  function actionIsCurrent(
+    targetAppId: string,
+    scopeGeneration: number,
+    actionGeneration: number,
+  ) {
+    return (
+      appIdRef.current === targetAppId &&
+      generationRef.current === scopeGeneration &&
+      actionGenerationRef.current === actionGeneration
+    );
+  }
 
   useEffect(() => {
     const generation = ++generationRef.current;
+    actionGenerationRef.current += 1;
     setDetail(null);
     setGrant(null);
     setLoadError(null);
     setActionError(null);
+    setBusy(false);
     void (async () => {
       try {
         const [loadedDetail, loadedGrant] = await Promise.all([
@@ -80,26 +99,46 @@ export function AppDetailView({
   }, [apis, appId]);
 
   async function onConsent() {
+    const targetAppId = appId;
+    const scopeGeneration = generationRef.current;
+    const actionGeneration = ++actionGenerationRef.current;
     setBusy(true);
     setActionError(null);
     try {
-      setGrant(await apis.consent(appId));
+      const nextGrant = await apis.consent(targetAppId);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setGrant(nextGrant);
+      }
     } catch (caught) {
-      setActionError(friendlyAppsError(caught, "Could not record consent."));
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setActionError(friendlyAppsError(caught, "Could not record consent."));
+      }
     } finally {
-      setBusy(false);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setBusy(false);
+      }
     }
   }
 
   async function onRevoke() {
+    const targetAppId = appId;
+    const scopeGeneration = generationRef.current;
+    const actionGeneration = ++actionGenerationRef.current;
     setBusy(true);
     try {
-      await apis.revoke(appId);
-      setGrant(await apis.grantState(appId));
+      await apis.revoke(targetAppId);
+      const nextGrant = await apis.grantState(targetAppId);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setGrant(nextGrant);
+      }
     } catch (caught) {
-      toast.error(friendlyAppsError(caught, "Could not revoke access."));
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        toast.error(friendlyAppsError(caught, "Could not revoke access."));
+      }
     } finally {
-      setBusy(false);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setBusy(false);
+      }
     }
   }
 
@@ -107,23 +146,55 @@ export function AppDetailView({
   // server reconfigured underneath the grant) drops the frame back behind
   // the sheet with the server's fresh projection.
   async function onConsentRequired() {
+    const targetAppId = appId;
+    const scopeGeneration = generationRef.current;
+    const actionGeneration = ++actionGenerationRef.current;
     try {
-      setGrant(await apis.grantState(appId));
+      const nextGrant = await apis.grantState(targetAppId);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setGrant(nextGrant);
+      }
     } catch {
-      setGrant((current) =>
-        current ? { ...current, granted: false } : current,
-      );
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setGrant((current) =>
+          current ? { ...current, granted: false } : current,
+        );
+      }
     }
   }
 
   async function onDelete() {
+    const targetAppId = appId;
+    const scopeGeneration = generationRef.current;
+    const confirmed = await confirm({
+      title: `Delete ${detail?.name ?? "this app"}?`,
+      description:
+        "The app will be removed from the library and can no longer be opened.",
+      confirmLabel: "Delete app",
+      destructive: true,
+    });
+    if (
+      !confirmed ||
+      appIdRef.current !== targetAppId ||
+      generationRef.current !== scopeGeneration
+    ) {
+      return;
+    }
+    const actionGeneration = ++actionGenerationRef.current;
     setBusy(true);
     try {
-      await apis.deleteApp(appId);
-      onBack();
+      await apis.deleteApp(targetAppId);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        onBack();
+      }
     } catch (caught) {
-      toast.error(friendlyAppsError(caught, "Could not delete this app."));
-      setBusy(false);
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        toast.error(friendlyAppsError(caught, "Could not delete this app."));
+      }
+    } finally {
+      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+        setBusy(false);
+      }
     }
   }
 
@@ -246,6 +317,7 @@ export function AppDetailView({
           </>
         )}
       </div>
+      {dialog}
     </div>
   );
 }

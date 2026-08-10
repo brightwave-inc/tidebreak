@@ -2,7 +2,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import type { ManagedPolicy } from "./api";
+import type { ManagedPolicy, PermissionMode } from "./api";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 
@@ -17,7 +17,9 @@ afterEach(() => {
  */
 it("applies the chosen mode and closes", async () => {
   const onChange = vi.fn();
-  render(<PermissionModeMenu value={null} onChange={onChange} />);
+  render(
+    <PermissionModeMenu scopeKey="chat-1" value={null} onChange={onChange} />,
+  );
 
   await userEvent.click(screen.getByRole("button", { name: "Permissions: Ask" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: /Allow all/ }));
@@ -44,7 +46,11 @@ it("locks modes above a managed ceiling", async () => {
   const onChange = vi.fn();
   render(
     <ManagedPolicyContext.Provider value={capped}>
-      <PermissionModeMenu value="allow" onChange={onChange} />
+      <PermissionModeMenu
+        scopeKey="chat-1"
+        value="allow"
+        onChange={onChange}
+      />
     </ManagedPolicyContext.Provider>,
   );
 
@@ -59,4 +65,54 @@ it("locks modes above a managed ceiling", async () => {
 
   await userEvent.click(locked);
   expect(onChange).not.toHaveBeenCalled();
+});
+
+it("lets a new chat save while an old chat write is still settling", async () => {
+  let resolveOld!: () => void;
+  const oldWrite = new Promise<void>((resolve) => {
+    resolveOld = resolve;
+  });
+  const onChange = vi
+    .fn<(mode: PermissionMode) => Promise<void>>()
+    .mockImplementationOnce(() => oldWrite)
+    .mockResolvedValueOnce(undefined);
+  const { rerender } = render(
+    <PermissionModeMenu
+      scopeKey="chat-1"
+      value="ask"
+      onChange={onChange}
+    />,
+  );
+
+  await userEvent.click(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: /Allow all/ }),
+  );
+  expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeDisabled();
+
+  rerender(
+    <PermissionModeMenu
+      scopeKey="chat-2"
+      value="ask"
+      onChange={onChange}
+    />,
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Permissions: Ask" }),
+    ).not.toBeDisabled(),
+  );
+
+  await userEvent.click(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: /Plan/ }),
+  );
+  expect(onChange).toHaveBeenLastCalledWith("plan");
+
+  resolveOld();
+  await waitFor(() => expect(onChange).toHaveBeenCalledTimes(2));
 });

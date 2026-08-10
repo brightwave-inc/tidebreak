@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppInvokeRefusalError, type AppDetail, type AppGrantState } from "@/api";
@@ -80,6 +80,14 @@ function apisWith(grant: AppGrantState): AppsApis {
       is_error: false,
     }),
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 afterEach(() => {
@@ -310,5 +318,37 @@ describe("AppDetailView", () => {
         "This app can read 'Tax documents' and send data to 'issues'.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("ignores an earlier app load that resolves after navigation", async () => {
+    const oldDetail = deferred<AppDetail>();
+    const oldGrant = deferred<AppGrantState>();
+    const currentDetail: AppDetail = {
+      ...DETAIL,
+      id: "app-2",
+      name: "Current app",
+    };
+    const apis = apisWith(GRANTED);
+    apis.get = vi
+      .fn()
+      .mockReturnValueOnce(oldDetail.promise)
+      .mockResolvedValueOnce(currentDetail);
+    apis.grantState = vi
+      .fn()
+      .mockReturnValueOnce(oldGrant.promise)
+      .mockResolvedValueOnce(GRANTED);
+    const { rerender } = render(
+      <AppDetailView appId="app-1" apis={apis} onBack={() => {}} />,
+    );
+
+    rerender(<AppDetailView appId="app-2" apis={apis} onBack={() => {}} />);
+    expect(await screen.findByTitle("App: Current app")).toBeInTheDocument();
+
+    await act(async () => {
+      oldDetail.resolve(DETAIL);
+      oldGrant.resolve(GRANTED);
+    });
+    expect(screen.getByTitle("App: Current app")).toBeInTheDocument();
+    expect(screen.queryByTitle("App: Fixture app")).not.toBeInTheDocument();
   });
 });

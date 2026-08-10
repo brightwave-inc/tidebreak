@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   ApiClient,
@@ -306,6 +306,7 @@ export function PermissionsPanel({
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
+  const reloadGenerationRef = useRef(0);
   const known =
     knownChatIds || knownProjectIds
       ? { chatIds: knownChatIds, projectIds: knownProjectIds }
@@ -313,13 +314,20 @@ export function PermissionsPanel({
 
   const chatId = chat?.id ?? null;
   const chatProjectId = chat?.project_id ?? null;
+  const scopeKey = chatId
+    ? `chat:${chatId}:project:${chatProjectId ?? "none"}`
+    : "global";
+  const scopeKeyRef = useRef(scopeKey);
+  scopeKeyRef.current = scopeKey;
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGenerationRef.current;
     try {
       const [tool, capability] = await Promise.all([
         client.listConsentStatements(),
         listCapabilityConsents(),
       ]);
+      if (generation !== reloadGenerationRef.current) return;
       const all = [...tool, ...capability];
       setStatements(
         chatId
@@ -328,15 +336,23 @@ export function PermissionsPanel({
       );
       setError(null);
     } catch {
+      if (generation !== reloadGenerationRef.current) return;
       setError("Saved approvals could not be loaded.");
     }
   }, [client, chatId, chatProjectId]);
 
   useEffect(() => {
+    setStatements(null);
+    setError(null);
+    setBusyId(null);
     void reload();
-  }, [reload]);
+    return () => {
+      reloadGenerationRef.current += 1;
+    };
+  }, [reload, scopeKey]);
 
   async function revoke(statement: ConsentStatementSnapshot) {
+    const startingScope = scopeKey;
     const confirmed = await confirm({
       title: "Revoke this approval?",
       description:
@@ -356,7 +372,7 @@ export function PermissionsPanel({
       confirmLabel: "Revoke",
       destructive: true,
     });
-    if (!confirmed) return;
+    if (!confirmed || scopeKeyRef.current !== startingScope) return;
     setBusyId(handleKey(statement));
     try {
       if (statement.handle.kind === "tool_grant") {
@@ -364,14 +380,17 @@ export function PermissionsPanel({
       } else {
         await revokeCapabilityConsent(statement);
       }
+      if (scopeKeyRef.current !== startingScope) return;
       // Reload rather than filter locally: revoking a folder's read access
       // also withdraws its dependent command access, and the list should show
       // exactly what the broker now holds.
       await reload();
     } catch {
-      setError("The approval could not be revoked. Try again.");
+      if (scopeKeyRef.current === startingScope) {
+        setError("The approval could not be revoked. Try again.");
+      }
     } finally {
-      setBusyId(null);
+      if (scopeKeyRef.current === startingScope) setBusyId(null);
     }
   }
 

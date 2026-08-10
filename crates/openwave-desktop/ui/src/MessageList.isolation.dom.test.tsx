@@ -94,7 +94,7 @@ describe("a tool result that cannot render", () => {
     // phase-wide boundary took this card down with its sibling, which leaves
     // the reader unable to answer and unable to see why.
     expect(
-      screen.getByRole("option", { name: /Yes, run it once/ }),
+      screen.getByRole("button", { name: /Yes, run it once/ }),
     ).toBeTruthy();
   });
 });
@@ -139,7 +139,7 @@ describe("a continuation card that cannot render", () => {
       1,
     );
     expect(
-      screen.getByRole("option", { name: /Yes, run it once/ }),
+      screen.getByRole("button", { name: /Yes, run it once/ }),
     ).toBeTruthy();
   });
 });

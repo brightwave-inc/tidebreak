@@ -7,6 +7,8 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import type { PermissionMode } from "./api";
 import { useManagedPolicy } from "./managedPolicy";
 import { Button } from "@/components/ui/button";
@@ -103,14 +105,55 @@ export function permissionModeOption(mode: PermissionMode | null) {
  * under.
  */
 export function PermissionModeMenu({
+  scopeKey,
   value,
   disabled,
   onChange,
 }: {
+  /** Identity of the chat or draft whose setting is being changed. */
+  scopeKey: string;
   value: PermissionMode | null;
   disabled?: boolean;
   onChange: (mode: PermissionMode) => void | Promise<void>;
 }) {
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const operationGenerationRef = useRef(0);
+  const scopeKeyRef = useRef(scopeKey);
+  scopeKeyRef.current = scopeKey;
+
+  useEffect(() => {
+    operationGenerationRef.current += 1;
+    savingRef.current = false;
+    setSaving(false);
+  }, [scopeKey]);
+
+  async function selectMode(mode: PermissionMode) {
+    if (savingRef.current) return;
+    const startingScope = scopeKey;
+    const generation = ++operationGenerationRef.current;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onChange(mode);
+    } catch {
+      if (
+        scopeKeyRef.current === startingScope &&
+        operationGenerationRef.current === generation
+      ) {
+        toast.error("Could not update permissions. Try again.");
+      }
+    } finally {
+      if (
+        scopeKeyRef.current === startingScope &&
+        operationGenerationRef.current === generation
+      ) {
+        savingRef.current = false;
+        setSaving(false);
+      }
+    }
+  }
+
   const ceiling = useManagedPolicy().permission_mode_ceiling ?? null;
   const ceilingRank = ceiling === null ? null : autonomyRank(ceiling);
   const overCeiling = (mode: PermissionMode) =>
@@ -120,14 +163,16 @@ export function PermissionModeMenu({
     : value;
   const current = permissionModeOption(effective);
   const CurrentIcon = current.icon;
+  const controlsDisabled = disabled || saving;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           className={cn("h-8 gap-1.5", current.elevated && "text-warning-foreground")}
-          disabled={disabled}
+          disabled={controlsDisabled}
           aria-label={`Permissions: ${current.label}`}
+          aria-busy={saving}
         >
           <CurrentIcon
             className={cn(
@@ -147,10 +192,10 @@ export function PermissionModeMenu({
           return (
             <DropdownMenuItem
               key={option.value}
-              disabled={disabled || locked}
+              disabled={controlsDisabled || locked}
               onSelect={() => {
                 if (selected) return;
-                void onChange(option.value);
+                void selectMode(option.value);
               }}
               className="flex flex-col items-start gap-0.5 py-3"
             >

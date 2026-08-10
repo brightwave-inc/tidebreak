@@ -48,10 +48,9 @@ type ApprovalCardProps = {
  * being decided; the longer sentence about what the action can reach explains
  * rather than asks, so it sits underneath. Below that, the exact action.
  *
- * The options are a keyboard-navigable list rather than a row of buttons,
- * ordered narrowest grant first with the decline last. Scope is easy to widen
- * by accident and hard to notice afterwards, so the cheapest keystroke has to
- * be the one that grants the least.
+ * The choices are selectable buttons followed by an explicit Submit action,
+ * ordered narrowest grant first with the decline last. Exploring or selecting
+ * a choice never executes the tool or persists a grant by itself.
  */
 export function ApprovalCard({
   callId,
@@ -76,7 +75,7 @@ export function ApprovalCard({
     grantRungs,
   );
   const [highlight, setHighlight] = useState(0);
-  const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const hasAutoFocused = useRef(false);
   const safeHighlight = Math.min(highlight, options.length - 1);
   const ask = approvalAsk(preview, summary);
@@ -94,14 +93,14 @@ export function ApprovalCard({
       (active.isContentEditable ||
         active.tagName === "INPUT" ||
         active.tagName === "TEXTAREA" ||
-        active.closest('[role="listbox"]') !== null);
+        active.closest('[aria-label="Approval choices"]') !== null);
     if (focusedElsewhere) return;
     // preventScroll: the point is to arm the keys, not to drag the transcript
     // to a card that may have mounted off-screen.
     rowRefs.current[0]?.focus({ preventScroll: true });
   }, [deciding]);
 
-  const commit = (index: number) => {
+  const activate = (index: number) => {
     const option = options[index];
     if (!option || deciding) return;
     if (option.kind === "more") {
@@ -113,23 +112,25 @@ export function ApprovalCard({
       rowRefs.current[0]?.focus();
       return;
     }
+    setHighlight(index);
+  };
+
+  const submitSelected = () => {
+    const option = options[safeHighlight];
+    if (!option || option.kind !== "decide" || deciding) return;
     onDecide(callId, option.decision, option.grant);
   };
 
   const focusRow = (to: number) => {
     const wrapped = ((to % options.length) + options.length) % options.length;
+    if (options[wrapped]?.kind === "decide") setHighlight(wrapped);
     rowRefs.current[wrapped]?.focus();
   };
 
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>, index: number) => {
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       focusRow(index + (event.key === "ArrowDown" ? 1 : -1));
-      return;
-    }
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      commit(index);
       return;
     }
     if (/^[1-9]$/.test(event.key)) {
@@ -164,27 +165,31 @@ export function ApprovalCard({
         </ScrollableContainer>
       )}
       <div
-        role="listbox"
-        aria-label="What should happen"
+        role="group"
+        aria-label="Approval choices"
         className="flex flex-col gap-0.5"
       >
         {options.map((option, index) => (
-          <div
+          <button
+            type="button"
             key={option.key}
             ref={(node) => {
               rowRefs.current[index] = node;
             }}
-            role="option"
-            aria-selected={index === safeHighlight}
-            tabIndex={deciding ? -1 : 0}
-            onClick={() => commit(index)}
-            onFocus={() => setHighlight(index)}
+            aria-pressed={
+              option.kind === "decide" ? index === safeHighlight : undefined
+            }
+            disabled={deciding}
+            onClick={() => activate(index)}
+            onFocus={() => {
+              if (option.kind === "decide") setHighlight(index);
+            }}
             onMouseEnter={(event) => event.currentTarget.focus()}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
               "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2.5 text-sm outline-hidden focus-visible:ring-2",
               index === safeHighlight ? "bg-muted" : "hover:bg-muted/60",
-              deciding && "pointer-events-none opacity-60",
+              deciding && "opacity-60",
             )}
           >
             <span className="text-muted-foreground w-4 shrink-0 text-xs tabular-nums">
@@ -201,7 +206,7 @@ export function ApprovalCard({
             >
               {option.label}
             </span>
-          </div>
+          </button>
         ))}
       </div>
       {canRemember && grantScope === "project" && (
@@ -212,12 +217,12 @@ export function ApprovalCard({
       )}
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
-          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · ↵ submit
+          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · Submit confirms
         </span>
         <Button
           size="sm"
           disabled={deciding}
-          onClick={() => commit(safeHighlight)}
+          onClick={submitSelected}
         >
           Submit
         </Button>

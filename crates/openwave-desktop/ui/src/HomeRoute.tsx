@@ -373,6 +373,7 @@ export function HomeRoute() {
             }
             permissionMenu={
               <PermissionModeMenu
+                scopeKey="new-chat"
                 value={effective.permissionMode}
                 disabled={creatingChat}
                 onChange={newChat.setPermissionMode}

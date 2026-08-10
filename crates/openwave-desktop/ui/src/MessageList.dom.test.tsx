@@ -45,6 +45,12 @@ function card(overrides: Partial<Parameters<typeof ApprovalCard>[0]> = {}) {
   );
 }
 
+function approvalChoices() {
+  return within(
+    screen.getByRole("group", { name: "Approval choices" }),
+  ).getAllByRole("button");
+}
+
 const ONCE = "1.Yes, allow it once";
 const REMEMBER = "2.Yes, and don't ask again in this chat";
 
@@ -62,12 +68,12 @@ afterEach(() => {
 });
 
 describe("approval card interactions", () => {
-  it("propagates each decision with the grant it names", async () => {
+  it("submits only the selected decision with the grant it names", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
 
-    const options = screen.getAllByRole("option");
+    const options = approvalChoices();
     expect(options.map((option) => option.textContent)).toEqual([
       ONCE,
       REMEMBER,
@@ -75,27 +81,33 @@ describe("approval card interactions", () => {
     ]);
 
     await user.click(options[0]!);
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", null);
 
     await user.click(options[1]!);
+    expect(onDecide).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
 
     await user.click(options[2]!);
+    expect(onDecide).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
   it("starts on the narrowest grant so a stray Enter cannot widen scope", () => {
     render(card());
 
-    const options = screen.getAllByRole("option");
-    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    const options = approvalChoices();
+    expect(options[0]).toHaveAttribute("aria-pressed", "true");
     expect(options[0]?.textContent).toBe(ONCE);
   });
 
   it("arms its keyboard shortcuts without needing a click first", () => {
     render(card());
 
-    expect(document.activeElement).toBe(screen.getAllByRole("option")[0]);
+    expect(document.activeElement).toBe(approvalChoices()[0]);
   });
 
   it("leaves focus alone when the user is typing elsewhere", () => {
@@ -109,15 +121,20 @@ describe("approval card interactions", () => {
     composer.remove();
   });
 
-  it("submits the highlighted option from the keyboard", async () => {
+  it("selects from the keyboard and waits for explicit submit", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
 
     await user.keyboard("{ArrowDown}{Enter}");
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
 
+    approvalChoices()[1]?.focus();
     await user.keyboard("3{Enter}");
+    expect(onDecide).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
@@ -127,6 +144,8 @@ describe("approval card interactions", () => {
     render(card({ onDecide }));
 
     await user.keyboard("{ArrowUp}{Enter}");
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
@@ -135,7 +154,7 @@ describe("approval card interactions", () => {
     const onDecide = vi.fn();
     render(card({ onDecide, deciding: true }));
 
-    for (const option of screen.getAllByRole("option")) {
+    for (const option of approvalChoices()) {
       await user.click(option);
     }
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
@@ -152,7 +171,8 @@ describe("approval card interactions", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Could not send your decision",
     );
-    await user.click(screen.getAllByRole("option")[0]!);
+    await user.click(approvalChoices()[0]!);
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
   });
 
@@ -160,7 +180,7 @@ describe("approval card interactions", () => {
     render(card({ canApprove: false }));
 
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual(["1.No, don't allow this"]);
   });
 
@@ -168,7 +188,7 @@ describe("approval card interactions", () => {
     render(card({ canRemember: false }));
 
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual([ONCE, "2.No, don't allow this"]);
   });
 
@@ -188,7 +208,7 @@ describe("approval card interactions", () => {
     );
 
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual(["1.Yes, run it once", "2.No, don't allow this"]);
   });
 
@@ -217,7 +237,7 @@ describe("approval card interactions", () => {
     // Every option on screen is one keystroke away, so the narrowest grants are
     // inline and the widest ones are not.
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
@@ -228,7 +248,7 @@ describe("approval card interactions", () => {
 
     await user.click(screen.getByText(MORE));
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
@@ -264,7 +284,7 @@ describe("approval card interactions", () => {
     );
 
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
@@ -279,7 +299,7 @@ describe("approval card interactions", () => {
     render(card({ grantScope: "project" }));
 
     expect(
-      screen.getAllByRole("option").map((row) => row.textContent),
+      approvalChoices().map((row) => row.textContent),
     ).toEqual([ONCE, REMEMBER_IN_PROJECT, "3.No, don't allow this"]);
     // And says once, in full, what the rows cannot say without becoming
     // three long lines.
@@ -305,11 +325,13 @@ describe("approval card interactions", () => {
     // "More options" sat at row 4; expanding puts a broader grant there. A
     // stray Enter must not commit whatever moved under the cursor.
     await user.keyboard("4{Enter}");
-    expect(screen.getAllByRole("option")[0]).toHaveAttribute(
-      "aria-selected",
+    expect(approvalChoices()[0]).toHaveAttribute(
+      "aria-pressed",
       "true",
     );
     await user.keyboard("{Enter}");
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
   });
 
@@ -334,7 +356,7 @@ describe("approval card interactions", () => {
     // The ladder used to be exec-shaped, so this card's only standing option
     // was the widest rung there is.
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual([
       ONCE,
       "2.Yes, and always allow exactly “quarterly filings”",
@@ -345,7 +367,9 @@ describe("approval card interactions", () => {
     // them alongside the query it leads with.
     expect(screen.getByText(/# limited to sec.gov/)).toBeInTheDocument();
 
-    await user.click(screen.getAllByRole("option")[1]!);
+    await user.click(approvalChoices()[1]!);
+    expect(onDecide).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith(
       "call-1",
       "approve",
@@ -369,7 +393,7 @@ describe("approval card interactions", () => {
 
     // A natural-language query runs to hundreds of characters; the unabridged
     // one is in the block above, which is where it is meant to be read.
-    expect(screen.getAllByRole("option")[1]?.textContent).toBe(
+    expect(approvalChoices()[1]?.textContent).toBe(
       "2.Yes, and always allow exactly “what did the company say about revenue recogniti…”",
     );
   });
@@ -380,9 +404,9 @@ describe("approval card interactions", () => {
 
     expect(screen.queryByText(MORE)).not.toBeInTheDocument();
     expect(
-      screen.getAllByRole("option").map((option) => option.textContent),
+      approvalChoices().map((option) => option.textContent),
     ).toEqual([ONCE, REMEMBER, "3.No, don't allow this"]);
-    await user.click(screen.getAllByRole("option")[1]!);
+    await user.click(approvalChoices()[1]!);
   });
 
   it("asks about the command rather than about commands in general", () => {
@@ -411,7 +435,7 @@ describe("approval card interactions", () => {
     ).toBeInTheDocument();
     // The class-of-egress sentence becomes the subheading, not the ask.
     expect(screen.getByText(/may reach the network/)).toBeInTheDocument();
-    expect(screen.getAllByRole("option")[0]).toHaveTextContent(
+    expect(approvalChoices()[0]).toHaveTextContent(
       "Yes, run it once",
     );
   });
