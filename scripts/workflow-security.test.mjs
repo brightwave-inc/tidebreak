@@ -98,8 +98,12 @@ test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
   const fmt = workflowJob(ci, "fmt");
   const postgres = workflowJob(ci, "postgres");
   const testJob = workflowJob(ci, "test");
-  const fullCiGate =
-    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'full-ci'\)/;
+  // Transitional: each lane is gated by its change scope, either alone or
+  // still combined with the legacy `full-ci` opt-in label while that label is
+  // being retired. Once the label-free gating lands on main, this collapses
+  // to scope-only and `full-ci` becomes forbidden outright.
+  const laneGate =
+    /if: \$\{\{ needs\.changes\.outputs\.(?:rust|workspace|ui) == 'true'(?: && \(github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'full-ci'\)\))? \}\}/;
 
   assert.match(
     ci,
@@ -128,7 +132,7 @@ test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
     postgres,
     workflowJob(ci, "ui"),
   ]) {
-    assert.match(job, fullCiGate);
+    assert.match(job, laneGate);
   }
 
   for (const job of [
