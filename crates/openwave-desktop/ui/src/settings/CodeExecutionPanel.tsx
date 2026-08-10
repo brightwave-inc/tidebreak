@@ -359,13 +359,14 @@ const EGRESS_STATUS_PRESENTATION: Record<
     label: "Unconfirmed",
     lead: "A policy is sent at creation, but enforcement is not yet confirmed against the live API. These stay reachable regardless of policy:",
   },
-  // Not a weaker boundary — no boundary. The conversation's network choice
-  // reaches nothing on this backend, which is worth the strongest tone the
-  // list has rather than the same amber as a partially enforced one.
+  // Not a weaker boundary — no boundary. For this policy the conversation's
+  // network choice reaches nothing on the backend, which is worth the
+  // strongest tone the list has rather than the same amber as a partially
+  // enforced one. The gap text says which setting is the exception.
   not_enforced: {
     badge: "critical",
     label: "Not enforced",
-    lead: "This backend applies no network restriction, so a conversation's network setting does not reach it:",
+    lead: "This backend applies no network restriction for this policy, so a conversation's network setting does not reach it:",
   },
 };
 

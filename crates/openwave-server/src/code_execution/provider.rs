@@ -1250,13 +1250,18 @@ impl ConfiguredCodeExecutionProvider {
                 )?)
             }
             CodeExecutionProviderKind::Docker => {
-                // No credential and no egress policy: the container runs on
-                // the host's own runtime with ordinary network access, which
-                // the settings surface discloses rather than implying the
-                // conversation's policy reaches it.
+                // The chat's policy reaches container creation, but only its
+                // strictest class is enforced there: "no network" creates the
+                // container with no network at all, and an allowlist runs on
+                // the runtime's default network, which the settings surface
+                // discloses rather than implying the policy reaches it.
+                let egress = network_policy
+                    .map(network_egress_config)
+                    .unwrap_or_else(|| config.egress.clone());
                 Box::new(configured_docker(
                     Duration::from_millis(config.timeout_ms),
                     self.remote_sessions.clone(),
+                    &egress,
                 )?)
             }
             _ => {
