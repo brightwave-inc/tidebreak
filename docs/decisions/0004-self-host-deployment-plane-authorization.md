@@ -128,6 +128,18 @@ servers are host processes, which makes per-user servers a sandboxing
 problem, not an authorization problem). Nothing here forecloses it later; it
 would slot in as member-plane routes writing owner-scoped config rows.
 
+**Trusted-header authentication from a fronting proxy** — let the operator's
+reverse proxy or load balancer authenticate (say, against their identity
+provider) and pass the resolved identity in a request header the server
+trusts. Rejected as the default: the scheme is only as strong as the
+guarantee that every request actually traversed the proxy, and the
+characteristic misdeployment — the server port reachable directly — fails
+open, where a bearer token fails closed. It remains a legitimate *future*
+authenticator behind the same credential-to-principal seam, carrying user
+and role the way the token file does today; adopting it would be a
+configuration option for operators who already run such a proxy, not a
+redesign.
+
 **Do nothing.** Rejected — that is the current state, and it is the finding
 in #1460.
 
