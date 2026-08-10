@@ -358,6 +358,28 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   /**
+   * Durably queue the draft to run as its own turn once the active one
+   * finishes. Same validated body as an ordinary send, parked server-side —
+   * the tray above the composer shows and manages the rows.
+   */
+  async function onQueue() {
+    const content = draftRef.current.trim();
+    if (!chat || !content) return;
+    await client.postMessage(
+      chatId,
+      crypto.randomUUID(),
+      content,
+      readyImageAttachmentIds(images.attachments),
+      files.map((file) => file.documentId),
+      invokedSkills(),
+      voice.inputUsed,
+      true,
+    );
+    setComposerDraft("");
+    voice.resetInputUsed();
+  }
+
+  /**
    * The one path a message takes. Home writes the first message of a new chat
    * but does not post it, so this has to be reachable with text that was never
    * in this route's draft.
@@ -740,6 +762,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             voice.resetInputUsed();
           }}
           onSend={onSend}
+          onQueue={onQueue}
           onRetryTurn={retryTurn}
           onOpenAgentPanel={(runId) => openPanel({ type: "agent", runId })}
           onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}

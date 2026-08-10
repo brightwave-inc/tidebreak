@@ -691,6 +691,7 @@ describe("sending a message", () => {
       file_attachments: ["doc-1"],
       invoked_skills: ["pptx"],
       voice_input_used: true,
+      queue: false,
     });
   });
 });
