@@ -68,6 +68,8 @@ import {
   type SkillInstructions as WireSkillInstructions,
   type NetworkPolicy as WireNetworkPolicy,
   type ReasoningEffort as WireReasoningEffort,
+  type CompactionRun,
+  type CompactionSettings,
   type Settings,
   type StickyChatDefaults as WireStickyChatDefaults,
   type WebSearchConfigInfo as WireWebSearchConfigInfo,
@@ -247,8 +249,13 @@ export type ModelCatalog = {
 };
 
 /** Global runtime settings (`GET/PUT /settings`). */
-/** Global runtime settings (`GET/PUT /settings`). */
 export type RuntimeSettings = Settings;
+
+/** Host-global compaction cadence, as `GET/PUT /settings` carries it. */
+export type { CompactionSettings };
+
+/** What one on-demand compaction did (`POST /chats/{id}/compact`). */
+export type { CompactionRun };
 
 export type Project = WireProject;
 

@@ -4,6 +4,7 @@ import {
   Blocks,
   Bot,
   Cpu,
+  Gauge,
   Globe,
   KeyRound,
   Palette,
@@ -21,6 +22,7 @@ import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
 import { AgentsPanel } from "./AgentsPanel";
 import { CodeExecutionPanel } from "./CodeExecutionPanel";
+import { CompactionPanel } from "./CompactionPanel";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
 import { PermissionsPanel } from "./PermissionsPanel";
@@ -123,6 +125,11 @@ function CodeExecutionSection() {
   return <CodeExecutionPanel client={client} />;
 }
 
+function CompactionSection() {
+  const { client } = useApp();
+  return <CompactionPanel client={client} />;
+}
+
 function AgentsSection() {
   const { client } = useApp();
   return <AgentsPanel client={client} />;
@@ -209,6 +216,10 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     unmanagedHidden: true,
   },
   { path: "models", label: "Models", icon: Cpu, Component: ModelsSection },
+  // Next to Models rather than in a section of its own: every number here is a
+  // fraction of the selected model's context window, so a reader who has just
+  // changed models is in the right place to reconsider them.
+  { path: "context", label: "Context", icon: Gauge, Component: CompactionSection },
   { path: "agents", label: "Agents", icon: Bot, Component: AgentsSection },
   {
     path: "voice-transcription",

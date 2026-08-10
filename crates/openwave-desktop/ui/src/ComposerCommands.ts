@@ -20,7 +20,7 @@ export type SlashCommand = {
   takesArgument: boolean;
 };
 
-export type SlashCommandName = "usage";
+export type SlashCommandName = "usage" | "compact";
 
 /**
  * Every built-in command, in the order the list offers them.
@@ -33,6 +33,12 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: "usage",
     description: "Show this chat's context and token usage.",
     takesArgument: false,
+  },
+  {
+    name: "compact",
+    description:
+      "Summarize the earlier part of this chat now. Add what to keep: /compact the API design",
+    takesArgument: true,
   },
 ];
 

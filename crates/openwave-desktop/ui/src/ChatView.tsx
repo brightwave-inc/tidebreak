@@ -50,7 +50,8 @@ import {
 } from "./useAgentRuns";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDown } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import {
   TranscriptNavigation,
   transcriptNavigationEntries,
@@ -202,13 +203,53 @@ export function ChatView({
   // Built-in `/` commands run here rather than being sent, so each one owns
   // whatever local state it needs — a dialog, in `/usage`'s case.
   const [usageOpen, setUsageOpen] = useState(false);
-  const runSlashCommand = useCallback((name: SlashCommandName) => {
-    switch (name) {
-      case "usage":
-        setUsageOpen(true);
+  const [compactRequested, setCompactRequested] = useState(false);
+  /**
+   * Summarize what is behind this conversation, on request.
+   *
+   * The success path is already told: the server journals the same compaction
+   * events a turn's own pass emits, and the transcript grows its divider. What
+   * needs saying here is the two outcomes the journal is silent about — a chat
+   * with nothing worth summarizing yet, and a request that failed.
+   */
+  const runCompaction = useCallback(
+    async (focus: string) => {
+      if (busy) {
+        toast.error("Wait for the current response to finish before compacting.");
         return;
-    }
-  }, []);
+      }
+      if (compactRequested) return;
+      setCompactRequested(true);
+      try {
+        const run = await client.compactChat(chat.id, focus || undefined);
+        if (run.compacted) {
+          toast.success("Summarized the earlier part of this conversation");
+        } else {
+          toast.message("Nothing to compact yet — this conversation still fits.");
+        }
+      } catch (caught) {
+        toast.error(
+          friendlyErrorMessage(caught, "Could not compact this conversation."),
+        );
+      } finally {
+        setCompactRequested(false);
+      }
+    },
+    [busy, chat.id, client, compactRequested],
+  );
+  const runSlashCommand = useCallback(
+    (name: SlashCommandName, argument: string) => {
+      switch (name) {
+        case "usage":
+          setUsageOpen(true);
+          return;
+        case "compact":
+          void runCompaction(argument);
+          return;
+      }
+    },
+    [runCompaction],
+  );
 
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as {
