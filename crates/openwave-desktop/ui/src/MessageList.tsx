@@ -6,6 +6,7 @@ import type {
   ApiClient,
   AgentRun,
   AgentActivityHistoryEntry,
+  AgentRunProgress,
   AgentRunTaskPlan,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
@@ -223,6 +224,10 @@ type MessageListProps = {
   onLoadBackgroundAgentTaskPlan?: (
     runId: string,
   ) => Promise<AgentRunTaskPlan | null>;
+  onLoadBackgroundAgentProgress?: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
   onOpenBackgroundAgent?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
   /** The connected client, so a background agent row can fetch debug info. */
@@ -293,6 +298,10 @@ export function MessageList({
   onCancelBackgroundAgentRun = async () => undefined,
   onLoadBackgroundAgentActivity = async () => [],
   onLoadBackgroundAgentTaskPlan = async () => null,
+  onLoadBackgroundAgentProgress = async (_runId, afterSequence) => ({
+    entries: [],
+    nextSequence: afterSequence,
+  }),
   onOpenBackgroundAgent,
   onOpenOutput,
   busy,
@@ -345,6 +354,7 @@ export function MessageList({
       cancel: onCancelBackgroundAgentRun,
       loadActivity: onLoadBackgroundAgentActivity,
       loadTaskPlan: onLoadBackgroundAgentTaskPlan,
+      loadProgress: onLoadBackgroundAgentProgress,
       open: onOpenBackgroundAgent,
       openOutput: onOpenOutput,
       client: backgroundAgentClient,
@@ -555,6 +565,10 @@ export function groupMessageItems(
     cancel: (runId: string) => Promise<void>;
     loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
     loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+    loadProgress: (
+      runId: string,
+      afterSequence: number,
+    ) => Promise<AgentRunProgress>;
     open?: (runId: string) => void;
     openOutput?: (outputId: string) => void;
     /** The connected client, so a row's "Copy debug info" can fetch its run. */
@@ -567,6 +581,10 @@ export function groupMessageItems(
     cancel: async () => undefined,
     loadActivity: async () => [],
     loadTaskPlan: async () => null,
+    loadProgress: async (_runId: string, afterSequence: number) => ({
+      entries: [],
+      nextSequence: afterSequence,
+    }),
   },
   retry?: { failureId: string; onRetry: () => void },
 ) {
@@ -736,6 +754,7 @@ export function groupMessageItems(
             onCancel={backgroundAgents.cancel}
             onLoadActivity={backgroundAgents.loadActivity}
             onLoadTaskPlan={backgroundAgents.loadTaskPlan}
+            onLoadProgress={backgroundAgents.loadProgress}
             onOpen={backgroundAgents.open}
             onOpenOutput={backgroundAgents.openOutput}
             {...(backgroundAgents.client && chatId
