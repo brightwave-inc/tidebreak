@@ -139,28 +139,227 @@ const SECRET_KEY_SUFFIXES: &[&str] = &[
 pub(crate) fn scrub_credentials(input: &str) -> String {
     let input = redact_private_key_blocks(input);
     let input = redact_credential_urls(&input);
+    let input = redact_keyed_values(&input);
+    redact_intrinsic_tokens(&input)
+}
+
+/// Redact the complete scalar introduced by a credential key. Treating a
+/// keyed value as one token is unsafe: authorization schemes and quoted shell,
+/// JSON, or TOML values can all contain spaces and punctuation.
+fn redact_keyed_values(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    // The token that could name the value about to be read, if the separators
-    // since have all been "still the same key/value pair" characters.
-    let mut key: Option<String> = None;
-    let mut rest = input.as_str();
+    let mut copied_through = 0;
+    let mut cursor = 0;
+
+    while cursor < input.len() {
+        let next = input[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a character boundary");
+        if !is_token_char(next) {
+            cursor += next.len_utf8();
+            continue;
+        }
+        let token_end = input[cursor..]
+            .find(|character| !is_token_char(character))
+            .map_or(input.len(), |offset| cursor + offset);
+        let key = input[cursor..token_end].to_ascii_lowercase();
+        if is_secret_key_name(&key) {
+            if let Some(value) = keyed_value(input, token_end, &key) {
+                if let Some(redacted) = redact_scalar(&key, &input[value.start..value.end]) {
+                    out.push_str(&input[copied_through..value.start]);
+                    out.push_str(&redacted);
+                    copied_through = value.end;
+                    cursor = value.end;
+                    continue;
+                }
+            }
+        }
+        cursor = token_end;
+    }
+
+    out.push_str(&input[copied_through..]);
+    out
+}
+
+#[derive(Clone, Copy)]
+struct ScalarRange {
+    start: usize,
+    end: usize,
+}
+
+fn keyed_value(input: &str, key_end: usize, key: &str) -> Option<ScalarRange> {
+    let mut cursor = key_end;
+    cursor = skip_horizontal_space(input, cursor);
+    cursor = skip_quote_delimiter(input, cursor);
+    cursor = skip_horizontal_space(input, cursor);
+    let delimiter = input[cursor..].chars().next()?;
+    if !matches!(delimiter, ':' | '=') {
+        return None;
+    }
+    cursor += delimiter.len_utf8();
+    cursor = skip_horizontal_space(input, cursor);
+
+    if input[cursor..].starts_with("\\\"") || input[cursor..].starts_with("\\'") {
+        let quote = input[cursor + 1..]
+            .chars()
+            .next()
+            .expect("escaped quote exists");
+        let start = cursor + 2;
+        let end = find_rendered_quote(input, start, quote).unwrap_or(input.len());
+        return Some(ScalarRange { start, end });
+    }
+    if matches!(input[cursor..].chars().next(), Some('"' | '\'')) {
+        let quote = input[cursor..].chars().next().expect("quote exists");
+        let start = cursor + quote.len_utf8();
+        let end = find_unescaped_quote(input, start, quote).unwrap_or(input.len());
+        return Some(ScalarRange { start, end });
+    }
+
+    let end = if delimiter == ':' || is_authorization_key(key) {
+        find_line_end(input, cursor)
+    } else {
+        input[cursor..]
+            .find(is_unquoted_value_boundary)
+            .map_or(input.len(), |offset| cursor + offset)
+    };
+    Some(ScalarRange { start: cursor, end })
+}
+
+fn skip_horizontal_space(input: &str, mut cursor: usize) -> usize {
+    while matches!(input[cursor..].chars().next(), Some(' ' | '\t')) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn skip_quote_delimiter(input: &str, cursor: usize) -> usize {
+    if input[cursor..].starts_with("\\\"") || input[cursor..].starts_with("\\'") {
+        cursor + 2
+    } else if matches!(input[cursor..].chars().next(), Some('"' | '\'')) {
+        cursor + 1
+    } else {
+        cursor
+    }
+}
+
+fn find_unescaped_quote(input: &str, start: usize, quote: char) -> Option<usize> {
+    let mut backslashes = 0;
+    for (offset, character) in input[start..].char_indices() {
+        if character == quote && backslashes % 2 == 0 {
+            return Some(start + offset);
+        }
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    None
+}
+
+/// Find the closing quote in text that has itself been escaped for rendering,
+/// such as `\"password\": \"value\"`. A quote preceded by three or more
+/// backslashes is content escaped inside that scalar, not its terminator.
+fn find_rendered_quote(input: &str, start: usize, quote: char) -> Option<usize> {
+    let mut backslashes = 0;
+    for (offset, character) in input[start..].char_indices() {
+        if character == quote && backslashes == 1 {
+            return Some(start + offset - 1);
+        }
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    None
+}
+
+fn find_line_end(input: &str, start: usize) -> usize {
+    let mut cursor = start;
+    while cursor < input.len() {
+        if input[cursor..].starts_with("\\n") || input[cursor..].starts_with("\\r") {
+            return cursor;
+        }
+        let character = input[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a character boundary");
+        if matches!(character, '\n' | '\r') {
+            return cursor;
+        }
+        cursor += character.len_utf8();
+    }
+    input.len()
+}
+
+const fn is_unquoted_value_boundary(character: char) -> bool {
+    // Unquoted `=` assignments end at shell whitespace or common collection
+    // punctuation. Values containing those characters need quotes; header and
+    // YAML-style `:` values are instead consumed through the line ending.
+    character.is_ascii_whitespace() || matches!(character, ',' | ';' | ')' | ']' | '}' | '"' | '\'')
+}
+
+fn redact_scalar(key: &str, value: &str) -> Option<String> {
+    if is_authorization_key(key) {
+        let trailing_start = value.trim_end_matches([' ', '\t']).len();
+        let (credential, trailing) = value.split_at(trailing_start);
+        let scheme_end = credential.find(char::is_whitespace);
+        if let Some(scheme_end) = scheme_end {
+            let scheme = &credential[..scheme_end];
+            let separator_end = credential[scheme_end..]
+                .find(|character: char| !character.is_whitespace())
+                .map_or(credential.len(), |offset| scheme_end + offset);
+            if is_preserved_authorization_scheme(scheme) && separator_end < credential.len() {
+                return Some(format!(
+                    "{}{}{}{}",
+                    scheme,
+                    &credential[scheme_end..separator_end],
+                    REDACTED,
+                    trailing
+                ));
+            }
+        }
+        return (!credential.is_empty()).then(|| format!("{REDACTED}{trailing}"));
+    }
+
+    (value.trim().len() >= MIN_KEYED_SECRET_LEN).then(|| REDACTED.to_owned())
+}
+
+fn is_secret_key_name(key: &str) -> bool {
+    SECRET_KEYS.contains(&key)
+        || SECRET_KEY_SUFFIXES
+            .iter()
+            .any(|suffix| key.ends_with(suffix))
+}
+
+fn is_authorization_key(key: &str) -> bool {
+    matches!(key, "authorization" | "proxy-authorization")
+}
+
+fn is_preserved_authorization_scheme(scheme: &str) -> bool {
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "bearer" | "basic" | "digest" | "negotiate" | "token"
+    )
+}
+
+fn redact_intrinsic_tokens(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
     while let Some(next) = rest.chars().next() {
         if is_token_char(next) {
             let end = rest.find(|c| !is_token_char(c)).unwrap_or(rest.len());
             let (token, tail) = rest.split_at(end);
-            if is_secret(token, key.as_deref()) {
+            if is_intrinsic_secret(token) {
                 out.push_str(REDACTED);
-                key = None;
             } else {
                 out.push_str(token);
-                key = Some(token.to_ascii_lowercase());
             }
             rest = tail;
         } else {
             out.push(next);
-            if !matches!(next, '"' | '\'' | ':' | '=' | ' ' | '\t' | '\\') {
-                key = None;
-            }
             rest = &rest[next.len_utf8()..];
         }
     }
@@ -181,8 +380,13 @@ fn redact_private_key_blocks(input: &str) -> String {
     while let Some(relative_begin) = input[cursor..].find(BEGIN) {
         let begin = cursor + relative_begin;
         let label_start = begin + BEGIN.len();
-        let Some(relative_label_end) = input[label_start..].find(MARKER_END) else {
-            break;
+        let line_end = find_line_end(input, label_start);
+        let Some(relative_label_end) = input[label_start..line_end].find(MARKER_END) else {
+            // Preserve the malformed candidate, but resume searching after its
+            // prefix so it cannot consume a later valid BEGIN marker.
+            out.push_str(&input[cursor..label_start]);
+            cursor = label_start;
+            continue;
         };
         let label_end = label_start + relative_label_end;
         let label = &input[label_start..label_end];
@@ -271,33 +475,7 @@ const fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/' | '~')
 }
 
-fn is_secret(token: &str, key: Option<&str>) -> bool {
-    // An HTTP auth scheme word names the credential that follows it; redacting
-    // the word itself would consume the naming and leave the actual token in
-    // the clear. `Token` is a scheme in its own right (`Authorization: Token
-    // …`), and is also a key name below.
-    if matches!(
-        token.to_ascii_lowercase().as_str(),
-        "bearer" | "basic" | "digest" | "negotiate" | "token"
-    ) {
-        return false;
-    }
-    if token.len() >= MIN_KEYED_SECRET_LEN {
-        if let Some(key) = key {
-            // `Bearer <token>` / `Basic <token>`: the scheme word names the
-            // value the same way a JSON key does.
-            if key == "bearer"
-                || key == "basic"
-                || key == "digest"
-                || SECRET_KEYS.contains(&key)
-                || SECRET_KEY_SUFFIXES
-                    .iter()
-                    .any(|suffix| key.ends_with(suffix))
-            {
-                return true;
-            }
-        }
-    }
+fn is_intrinsic_secret(token: &str) -> bool {
     if SECRET_PREFIXES.iter().any(|prefix| {
         token.starts_with(prefix) && token.len() >= prefix.len() + MIN_PREFIXED_SECRET_TAIL
     }) {
@@ -879,17 +1057,22 @@ fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
 
     let temporary = format!(".openwave-debug-export-{}.tmp", Uuid::new_v4());
     let result = (|| -> std::io::Result<()> {
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        {
-            use cap_std::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = directory.open_with(&temporary, &options)?;
+        #[cfg(windows)]
+        let mut file = create_private_windows_file(parent, &temporary)?;
+        #[cfg(not(windows))]
+        let mut file = {
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            directory.open_with(&temporary, &options)?
+        };
         file.write_all(content)?;
         file.sync_all()?;
         drop(file);
@@ -902,6 +1085,157 @@ fn write_bundle(destination: &Path, content: &[u8]) -> Result<(), String> {
         let _ = directory.remove_file(&temporary);
     }
     result.map_err(|_| "Could not write the debug bundle".to_owned())
+}
+
+/// Create the temporary export with a protected DACL before any sensitive byte
+/// is written. `OW` is the Windows Owner Rights SID; the creator owns this new
+/// file, while LocalSystem and administrators retain recovery access.
+#[cfg(windows)]
+fn create_private_windows_file(parent: &Path, temporary: &str) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{FromRawHandle as _, RawHandle};
+
+    use windows_sys::Win32::Foundation::{
+        LocalFree, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_NONE,
+    };
+
+    let path: Vec<u16> = parent
+        .join(temporary)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: Windows owns the descriptor allocated by the conversion call;
+    // it remains live through CreateFileW and is released exactly once below.
+    unsafe {
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let handle = CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        );
+        let result = if handle == INVALID_HANDLE_VALUE {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(std::fs::File::from_raw_handle(handle as RawHandle))
+        };
+        LocalFree(descriptor);
+        let file = result?;
+        if !windows_file_has_private_dacl(&file)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the selected filesystem did not preserve the private export ACL",
+            ));
+        }
+        Ok(file)
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_has_private_dacl(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetAce, GetSecurityDescriptorControl, IsWellKnownSid, WinBuiltinAdministratorsSid,
+        WinCreatorOwnerRightsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: GetSecurityInfo owns the descriptor allocation. Every pointer
+    // read below is part of that descriptor and remains live until LocalFree.
+    unsafe {
+        let status = GetSecurityInfo(
+            file.as_raw_handle().cast(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+        let result = (|| -> std::io::Result<bool> {
+            let mut control = 0;
+            let mut revision = 0;
+            if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if control & SE_DACL_PROTECTED == 0 || dacl.is_null() || (*dacl).AceCount != 3 {
+                return Ok(false);
+            }
+
+            let mut allowed = [false; 3];
+            for index in 0..u32::from((*dacl).AceCount) {
+                let mut raw_ace = std::ptr::null_mut();
+                if GetAce(dacl, index, &mut raw_ace) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let ace = &*raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+                if u32::from(ace.Header.AceType) != ACCESS_ALLOWED_ACE_TYPE
+                    || ace.Header.AceFlags != 0
+                    || ace.Mask != FILE_ALL_ACCESS
+                {
+                    return Ok(false);
+                }
+                let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                let slot = if IsWellKnownSid(sid, WinLocalSystemSid) != 0 {
+                    0
+                } else if IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0 {
+                    1
+                } else if IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0 {
+                    2
+                } else {
+                    return Ok(false);
+                };
+                if allowed[slot] {
+                    return Ok(false);
+                }
+                allowed[slot] = true;
+            }
+            Ok(allowed.into_iter().all(|present| present))
+        })();
+        LocalFree(descriptor);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -1128,6 +1462,27 @@ mod tests {
                 "Authorization: Token abcdef123456",
                 "Authorization: Token [redacted]",
             ),
+            (
+                "Authorization: Negotiate YIIGeAYGKwYBBQUCoIIGbDCCBmg=",
+                "Authorization: Negotiate [redacted]",
+            ),
+            (
+                "Authorization: ApiKey supersecretvalue",
+                "Authorization: [redacted]",
+            ),
+            (
+                "password=\"correct horse battery staple\"",
+                "password=\"[redacted]\"",
+            ),
+            ("secret=p@$$w0rd:with/slashes", "secret=[redacted]"),
+            (
+                r#"{\"proxy-authorization\": \"Negotiate opaque credential value\"}"#,
+                r#"{\"proxy-authorization\": \"Negotiate [redacted]\"}"#,
+            ),
+            (
+                r#"{\"password\": \"correct \\\"horse\\\" battery staple\"}"#,
+                r#"{\"password\": \"[redacted]\"}"#,
+            ),
             // Ordinary conversation and file paths are left alone: the chat
             // is the diagnostic.
             (
@@ -1179,6 +1534,12 @@ mod tests {
         let escaped = r#"{"output":"-----BEGIN PRIVATE KEY-----\nopaque-key-material\n-----END PRIVATE KEY-----"}"#;
         assert_eq!(scrub_credentials(escaped), r#"{"output":"[redacted]"}"#);
 
+        let malformed_then_private = "-----BEGIN CERTIFICATE\ntruncated\n-----BEGIN PRIVATE KEY-----\nLIVEPRIVATEKEYBODY\n-----END PRIVATE KEY-----";
+        assert_eq!(
+            scrub_credentials(malformed_then_private),
+            "-----BEGIN CERTIFICATE\ntruncated\n[redacted]"
+        );
+
         let password = "correct-horse-battery-staple";
         let connection = format!("database=postgres://alice:{password}@db.example.test/openwave");
         assert_eq!(scrub_credentials(&connection), "database=[redacted]");
@@ -1218,6 +1579,12 @@ mod tests {
                     & 0o777,
                 0o600
             );
+        }
+
+        #[cfg(windows)]
+        {
+            let file = std::fs::File::open(&destination).unwrap();
+            assert!(windows_file_has_private_dacl(&file).unwrap());
         }
     }
 

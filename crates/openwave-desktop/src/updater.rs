@@ -17,6 +17,7 @@
 //! so an unfocused window is not sufficient consent to replace and restart the
 //! application.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -407,26 +408,51 @@ struct InstallResolutionError {
     message: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InstallDisposition {
-    Restart,
-    PreserveForRetry,
-}
-
-fn install_disposition<T, E>(result: &Result<T, E>) -> InstallDisposition {
-    if result.is_ok() {
-        InstallDisposition::Restart
-    } else {
-        InstallDisposition::PreserveForRetry
-    }
-}
-
 fn retryable_update_state(version: String, message: &'static str) -> DesktopUpdateState {
     DesktopUpdateState {
         status: DesktopUpdateStatus::Ready,
         version: Some(version),
         error: Some(message.to_owned()),
         enabled: updates_enabled(),
+    }
+}
+
+struct FailedInstall<E> {
+    install_error: E,
+    resume_error: Option<String>,
+}
+
+/// Run the synchronous bundle replacement only after the broker's admission
+/// barrier has drained. The closures keep the ordering contract directly
+/// testable without constructing a packaged Tauri updater in unit tests.
+async fn install_behind_broker_barrier<E, Q, QF, I, R, RF, S, SF>(
+    quiesce: Q,
+    install: I,
+    resume: R,
+    shutdown: S,
+) -> Result<Result<(), FailedInstall<E>>, String>
+where
+    Q: FnOnce() -> QF,
+    QF: Future<Output = Result<(), String>>,
+    I: FnOnce() -> Result<(), E>,
+    R: FnOnce() -> RF,
+    RF: Future<Output = Result<(), String>>,
+    S: FnOnce() -> SF,
+    SF: Future<Output = ()>,
+{
+    quiesce().await?;
+    match install() {
+        Ok(()) => {
+            shutdown().await;
+            Ok(Ok(()))
+        }
+        Err(install_error) => {
+            let resume_error = resume().await.err();
+            Ok(Err(FailedInstall {
+                install_error,
+                resume_error,
+            }))
+        }
     }
 }
 
@@ -481,24 +507,46 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
     };
 
     let version = staged.update.version.clone();
-    let install_result = staged.update.install(&staged.bytes);
-    if let Err(error) = &install_result {
-        eprintln!("openwave-desktop: update installation failed: {error}");
-    }
-    if install_disposition(&install_result) == InstallDisposition::PreserveForRetry {
-        store_staged(&app, Some(staged));
-        set_update_state(&app, retryable_update_state(version, UPDATE_INSTALL_ERROR));
-        app.state::<UpdateManager>()
-            .busy
-            .store(false, Ordering::Release);
-        return Err(UPDATE_INSTALL_ERROR.to_owned());
-    }
+    let host_access = app.state::<HostAccess>();
+    let install_result = install_behind_broker_barrier(
+        || host_access.quiesce_for_update(),
+        || staged.update.install(&staged.bytes),
+        || host_access.resume_after_failed_update(),
+        || host_access.shutdown(),
+    )
+    .await;
 
-    // The bundle has been replaced successfully. Close the old broker only
-    // now, immediately before relaunch, so a failed installation leaves the
-    // current process fully usable and the staged bytes available for retry.
-    app.state::<HostAccess>().shutdown().await;
-    app.restart();
+    match install_result {
+        Err(error) => {
+            eprintln!("openwave-desktop: could not quiesce host broker for update: {error}");
+            store_staged(&app, Some(staged));
+            set_update_state(&app, retryable_update_state(version, UPDATE_PREPARE_ERROR));
+            app.state::<UpdateManager>()
+                .busy
+                .store(false, Ordering::Release);
+            Err(UPDATE_PREPARE_ERROR.to_owned())
+        }
+        Ok(Err(failure)) => {
+            eprintln!(
+                "openwave-desktop: update installation failed: {}",
+                failure.install_error
+            );
+            if let Some(error) = failure.resume_error {
+                eprintln!(
+                    "openwave-desktop: old host broker could not resume after update failure: {error}"
+                );
+            }
+            store_staged(&app, Some(staged));
+            set_update_state(&app, retryable_update_state(version, UPDATE_INSTALL_ERROR));
+            app.state::<UpdateManager>()
+                .busy
+                .store(false, Ordering::Release);
+            Err(UPDATE_INSTALL_ERROR.to_owned())
+        }
+        Ok(Ok(())) => {
+            app.restart();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -592,21 +640,91 @@ mod tests {
     }
 
     #[test]
-    fn install_result_controls_restart_and_retry_state() {
+    fn failed_install_state_remains_retryable() {
         let mut state = retryable_update_state("1.2.3".to_owned(), UPDATE_INSTALL_ERROR);
 
-        assert_eq!(
-            install_disposition(&Ok::<(), ()>(())),
-            InstallDisposition::Restart
-        );
-        assert_eq!(
-            install_disposition(&Err::<(), ()>(())),
-            InstallDisposition::PreserveForRetry
-        );
         assert_eq!(state.enabled, updates_enabled());
         state.enabled = true;
         assert!(can_restart(&state, true));
         assert_eq!(state.version.as_deref(), Some("1.2.3"));
         assert_eq!(state.error.as_deref(), Some(UPDATE_INSTALL_ERROR));
+    }
+
+    #[tokio::test]
+    async fn broker_barrier_drains_before_install_and_resumes_only_on_failure() {
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let quiesce_events = events.clone();
+        let install_events = events.clone();
+        let resume_events = events.clone();
+        let shutdown_events = events.clone();
+
+        let result = install_behind_broker_barrier(
+            move || async move {
+                let mut events = quiesce_events.lock().unwrap();
+                events.push("in-flight finished");
+                events.push("queued finished");
+                events.push("admission closed");
+                Ok(())
+            },
+            move || {
+                install_events.lock().unwrap().push("install");
+                Err("injected install failure")
+            },
+            move || async move {
+                resume_events.lock().unwrap().push("resume pinned broker");
+                Ok(())
+            },
+            move || async move {
+                shutdown_events.lock().unwrap().push("shutdown");
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(result.install_error, "injected install failure");
+        assert!(result.resume_error.is_none());
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "in-flight finished",
+                "queued finished",
+                "admission closed",
+                "install",
+                "resume pinned broker",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_install_permanently_shuts_down_before_restart() {
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let quiesce_events = events.clone();
+        let install_events = events.clone();
+        let resume_events = events.clone();
+        let shutdown_events = events.clone();
+
+        let result = install_behind_broker_barrier(
+            move || async move {
+                quiesce_events.lock().unwrap().push("quiesce");
+                Ok(())
+            },
+            move || {
+                install_events.lock().unwrap().push("install");
+                Ok::<(), &'static str>(())
+            },
+            move || async move {
+                resume_events.lock().unwrap().push("resume");
+                Ok(())
+            },
+            move || async move {
+                shutdown_events.lock().unwrap().push("shutdown");
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(*events.lock().unwrap(), ["quiesce", "install", "shutdown"]);
     }
 }

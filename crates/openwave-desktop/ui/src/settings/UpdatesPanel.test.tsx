@@ -40,6 +40,10 @@ describe("UpdatesPanel", () => {
 
     expect(updateStateSummary(state)).toContain("Version 1.2.3");
     expect(markup).toContain("Restart to update");
+    expect(markup).toContain(
+      "installs only after you choose Restart to update",
+    );
+    expect(markup).not.toContain("installs on its own");
     expect(markup).not.toContain("Check for updates");
   });
 

@@ -61,7 +61,7 @@ export function UpdatesPanel({
   return (
     <SettingsPanel
       title="Updates"
-      description="OpenWave checks shortly after launch and every five minutes, and downloads updates in the background. A downloaded update installs on its own once nothing is running and the app is in the background; while agent work is in flight or the app is in use, it waits for you to restart."
+      description="OpenWave checks shortly after launch and every five minutes, and downloads updates in the background. A downloaded update installs only after you choose Restart to update."
       busy={busy}
     >
       <SettingsSection title="Automatic updates">
