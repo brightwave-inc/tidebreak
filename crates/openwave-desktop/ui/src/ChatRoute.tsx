@@ -56,7 +56,7 @@ import {
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
-import { ModelMenu } from "./ModelMenu";
+import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
   PICKER_BUSY_MESSAGE,
@@ -108,7 +108,9 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, setStatus } = useApp();
+  const { client, models, defaultModelKey, providers, modelVisibilityOverrides, setStatus } =
+    useApp();
+  const modelSettingsNav = useModelSettingsNav();
   const { layout, openPanel } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
@@ -704,6 +706,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               value={chat!.model}
               defaultKey={defaultModelKey}
               disabled={deletingChatId !== null}
+              visibilityOverrides={modelVisibilityOverrides}
+              providers={providers}
+              onManageModels={modelSettingsNav.onManageModels}
+              onSetUpProvider={modelSettingsNav.onSetUpProvider}
               onChange={onModelChange}
             />
           }

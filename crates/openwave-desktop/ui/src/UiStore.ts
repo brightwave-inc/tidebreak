@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 const SIDEBAR_COLLAPSED_KEY = "openwave.sidebar-collapsed";
+const MODEL_MENU_NOT_CONNECTED_KEY = "openwave.model-menu-not-connected-collapsed";
 
 function readStoredSidebarCollapsed(): boolean {
   try {
@@ -18,6 +19,22 @@ function storeSidebarCollapsed(collapsed: boolean): void {
   }
 }
 
+function readStoredNotConnectedCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(MODEL_MENU_NOT_CONNECTED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function storeNotConnectedCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(MODEL_MENU_NOT_CONNECTED_KEY, String(collapsed));
+  } catch {
+    // Preference persistence is best-effort.
+  }
+}
+
 /**
  * Chrome state that belongs to no conversation and does not deserve a URL:
  * whether the sidebar is showing.
@@ -28,6 +45,13 @@ function storeSidebarCollapsed(collapsed: boolean): void {
 export type UiStore = {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
+  /**
+   * Whether the model picker's "Not connected" section is folded away. Open by
+   * default — the section exists to be noticed once — and remembered after
+   * that, because a reader who has read it does not need it again.
+   */
+  modelMenuNotConnectedCollapsed: boolean;
+  toggleModelMenuNotConnected: () => void;
 };
 
 export function createUiStore() {
@@ -38,6 +62,13 @@ export function createUiStore() {
         const sidebarCollapsed = !state.sidebarCollapsed;
         storeSidebarCollapsed(sidebarCollapsed);
         return { sidebarCollapsed };
+      }),
+    modelMenuNotConnectedCollapsed: readStoredNotConnectedCollapsed(),
+    toggleModelMenuNotConnected: () =>
+      set((state) => {
+        const collapsed = !state.modelMenuNotConnectedCollapsed;
+        storeNotConnectedCollapsed(collapsed);
+        return { modelMenuNotConnectedCollapsed: collapsed };
       }),
   }));
 }
