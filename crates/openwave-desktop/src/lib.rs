@@ -18,6 +18,8 @@ mod attachments;
 mod broker;
 mod chat_debug;
 mod client_execution;
+#[cfg(test)]
+mod command_parity;
 mod deep_link;
 mod deliverables;
 mod documents;
