@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -312,4 +313,116 @@ fn print_mode_fails_with_clean_stdout_when_no_model_provider_is_configured() {
         stderr.contains("provider") && stderr.contains("credential"),
         "stderr: {stderr}"
     );
+}
+
+/// Start `openwave serve` on `dir` and read back where it is and how to
+/// authenticate. Both lines are printed only after the listener is bound, so
+/// this also synchronizes with a server ready to accept.
+fn spawn_serve(dir: &Path) -> (Reaper, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("serve")
+        .env("OPENWAVE_DATA_DIR", dir)
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave serve");
+    let stdout = child.stdout.take().unwrap();
+    let reaper = Reaper(child);
+    let mut lines = BufReader::new(stdout).lines();
+    let addr_line = lines.next().unwrap().unwrap();
+    let token_line = lines.next().unwrap().unwrap();
+    let url = format!(
+        "http://{}",
+        addr_line.rsplit("http://").next().unwrap().trim()
+    );
+    let token = token_line
+        .strip_prefix("openwave: token ")
+        .expect("token line")
+        .trim()
+        .to_owned();
+    (reaper, url, token)
+}
+
+/// Attach mode's whole point: a second process reaches a data directory the
+/// first one owns by being its client, and the call is the real thing — a
+/// route answering over HTTP against the running server's state. The attaching
+/// process is pointed at the *same* data directory on purpose: a client that
+/// quietly embedded a server of its own would hit the ownership guard and fail
+/// here rather than pass by accident.
+#[test]
+fn a_setup_command_attaches_to_a_running_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, url, token) = spawn_serve(dir.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["provider", "list", "--output-format", "json", "--server"])
+        .arg(&url)
+        .env("OPENWAVE_SERVER_TOKEN", &token)
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run an attached provider list");
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "stderr: {stderr}");
+    let listed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the route's answer on one line");
+    assert!(
+        listed["providers"]
+            .as_array()
+            .is_some_and(|providers| providers
+                .iter()
+                .any(|provider| provider["kind"] == "anthropic")),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The other half of the same rule: a second process that tries to *embed* a
+/// server over an owned data directory is refused before it touches the
+/// database, and told what to do instead.
+#[test]
+fn a_second_process_embedding_the_same_data_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, _url, _token) = spawn_serve(dir.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["provider", "list"])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run a second embedding command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("already running") && stderr.contains("--server"),
+        "the refusal must name attach mode: {stderr}"
+    );
+}
+
+/// The claim must be honest across a crash. A killed server runs no shutdown
+/// path at all, so if ownership were recorded as something the next process
+/// reads back, the directory would stay locked forever; the OS lock it actually
+/// uses dies with the process that held it.
+#[test]
+fn a_killed_server_leaves_its_data_directory_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut server, _url, _token) = spawn_serve(dir.path());
+    // SIGKILL: no unwinding, no destructors, no clean shutdown.
+    server.0.kill().unwrap();
+    server.0.wait().unwrap();
+    assert!(
+        dir.path().join("openwave.lock").exists(),
+        "the marker file outlives the process that made it"
+    );
+
+    let (_reclaimed, url, _token) = spawn_serve(dir.path());
+    assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
 }

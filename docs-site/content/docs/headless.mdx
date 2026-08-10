@@ -45,6 +45,9 @@ openwave mcp-server remove <name>
 
 A bare `openwave` with no arguments runs `serve`.
 
+`tui`, `-p`, and the setup commands additionally take `--server <url>` and
+`--server-token-env <var>` — see [Attaching to a running server](#attaching-to-a-running-server).
+
 ### `serve`
 
 Starts the local API on an ephemeral loopback port and prints the address and a
@@ -287,11 +290,73 @@ under the running binary's signature.
 cargo run -p openwave-cli -- rehome-secrets
 ```
 
+## Attaching to a running server
+
+**One data directory, one server.** A server claims its data directory when it
+starts and holds the claim for as long as the process lives. A second process
+that tries to start its own server over the same directory is refused outright,
+because two engines writing one database race each other in ways nothing else
+would catch:
+
+```text
+openwave: configuration error: another OpenWave process is already running on
+the data directory /Users/me/.openwave. Connect to it instead …
+```
+
+The claim is an OS advisory lock on `openwave.lock` inside the directory, so it
+is honest across a crash: a killed process releases it the moment it dies, and
+the leftover file never has to be cleaned up by hand.
+
+The way in is to *attach* — to be a client of the server that is already there
+rather than a second one:
+
+```sh
+export OPENWAVE_SERVER_TOKEN=<the token that server printed>
+cargo run -p openwave-cli -- --server http://127.0.0.1:53421 provider list
+cargo run -p openwave-cli -- -p "what changed today?" --server http://127.0.0.1:53421
+cargo run -p openwave-cli -- tui --server http://127.0.0.1:53421
+```
+
+`--server` works on `tui`, `-p`, and every setup command. `OPENWAVE_SERVER_URL`
+sets the same thing for a whole shell, and the flag wins over it. An attached
+command reads no local data directory, writes no log file, and touches no
+keychain — it is only an HTTP+WebSocket client, so `OPENWAVE_DATA_DIR` and the
+rest of the profile environment are ignored.
+
+`serve`, `mcp`, and `rehome-secrets` reject `--server`: the first two *are*
+servers, and the third rewrites local keychain items. (They ignore
+`OPENWAVE_SERVER_URL`, so a shell that exports it can still start a daemon.)
+
+### Getting a token
+
+The bearer token is per-launch and is full authority over the profile, so it is
+never a command-line argument — every process on the machine can read those, and
+they land in shell history. It comes from `OPENWAVE_SERVER_TOKEN`, or from the
+variable `--server-token-env <var>` names.
+
+**From `openwave serve`:** the token is the second line it prints. Capture the
+daemon's stdout directly:
+
+```sh
+cargo run -p openwave-cli -- serve > server.log &
+export OPENWAVE_SERVER_URL=http://$(grep -m1 'listening on http://' server.log | sed 's|.*http://||')
+export OPENWAVE_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
+```
+
+**From the desktop app: not currently possible.** The desktop mints its own
+per-launch token and hands it straight to its webview; nothing displays or
+writes it out, so there is no supported way to attach to a running desktop
+instance today. To drive the desktop's chats from the CLI, quit the app first
+and run `openwave serve` (or the CLI command) against its data directory — while
+the app is running, that directory is claimed.
+
 ## Environment
 
 | Variable | Effect |
 | --- | --- |
-| `OPENWAVE_DATA_DIR` | Where the database, blobs, and logs live. Defaults to `./.openwave` under the current directory. |
+| `OPENWAVE_DATA_DIR` | Where the database, blobs, and logs live. Defaults to `./.openwave` under the current directory. Ignored when attaching to a running server. |
+| `OPENWAVE_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it, and `serve`/`mcp`/`rehome-secrets` ignore it. |
+| `OPENWAVE_SERVER_TOKEN` | Bearer token for that server, unless `--server-token-env <var>` names a different variable. |
 | `OPENWAVE_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
 | `OPENWAVE_DATABASE_URL` | Required for `self_host`. |
 | `OPENWAVE_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
@@ -314,7 +379,10 @@ the server does not discover models or verify entitlement before a request.
 <Callout>
 `openwave serve` defaults to `./.openwave` in your current directory, which is
 **not** the desktop app's data directory. Point `OPENWAVE_DATA_DIR` at the
-desktop's application data directory if you want the CLI to see the same chats.
+desktop's application data directory if you want the CLI to see the same chats —
+and quit the app first, since a running desktop instance claims that directory
+and the CLI will refuse to start a second server over it. See
+[Attaching to a running server](#attaching-to-a-running-server).
 </Callout>
 
 Logs are written to `logs/openwave.log` under the data directory.

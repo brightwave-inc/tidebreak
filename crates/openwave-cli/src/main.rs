@@ -37,6 +37,13 @@
 //! same way the desktop's settings pages do — over the server's own routes.
 //! See [`setup`]; secrets are read from stdin or a named environment variable,
 //! never from a command-line argument.
+//!
+//! Every client command above embeds its own server by default. `--server
+//! <url>` (or `OPENWAVE_SERVER_URL`) makes it a pure client of one that is
+//! already running instead, with the bearer token coming from
+//! `OPENWAVE_SERVER_TOKEN` — see [`connect`]. That is how a second process
+//! reaches a data directory a desktop app or daemon already owns; two processes
+//! embedding servers over one data directory is refused.
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -48,6 +55,7 @@ use openwave_core::{
 };
 
 mod api;
+mod connect;
 mod print;
 mod setup;
 mod tui;
@@ -84,7 +92,12 @@ usage: openwave serve
 
 The setup commands take --output-format text|json. A key is read from stdin, or
 from the environment variable named by --from-env — never from an argument,
-which every process on the machine can read.";
+which every process on the machine can read.
+
+tui, -p, and the setup commands also take --server <url> [--server-token-env
+<var>], which talks to a server that is already running instead of embedding
+one. The token comes from OPENWAVE_SERVER_TOKEN, or from the named variable;
+it is never an argument either.";
 
 #[tokio::main]
 async fn main() {
@@ -104,17 +117,23 @@ async fn main() {
 /// reports anything but `0`, since only it distinguishes a failure of the
 /// command from a failure of the work the command drove.
 async fn run() -> Result<i32> {
-    let mut args = std::env::args_os().skip(1);
+    let (args, server_flags) = take_server_flags(std::env::args_os().skip(1).collect());
+    let mut args = args.into_iter();
     match args.next().as_deref() {
         // Default to `serve` so a bare `openwave` runs the daemon.
-        None => serve().await.map(|()| 0),
+        None => {
+            server_flags.refuse("serve");
+            serve().await.map(|()| 0)
+        }
         Some(command) if command == OsStr::new("serve") => {
+            server_flags.refuse("serve");
             if args.next().is_some() {
                 usage_error("serve does not accept arguments");
             }
             serve().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("mcp") => {
+            server_flags.refuse("mcp");
             let Some(workspace) = args.next() else {
                 usage_error("mcp requires a workspace path");
             };
@@ -124,6 +143,7 @@ async fn run() -> Result<i32> {
             serve_mcp(workspace.into()).await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("rehome-secrets") => {
+            server_flags.refuse("rehome-secrets");
             if args.next().is_some() {
                 usage_error("rehome-secrets does not accept arguments");
             }
@@ -152,7 +172,9 @@ async fn run() -> Result<i32> {
                     usage_error("tui accepts only --chat <id> or --new");
                 }
             }
-            tui::run(open.unwrap_or(tui::Open::Pick)).await.map(|()| 0)
+            tui::run(open.unwrap_or(tui::Open::Pick), server_flags.resolve()?)
+                .await
+                .map(|()| 0)
         }
         Some(command) if command == OsStr::new("-p") || command == OsStr::new("--print") => {
             let Some(prompt) = args.next() else {
@@ -197,7 +219,14 @@ async fn run() -> Result<i32> {
                     usage_error(&format!("unknown print-mode argument {flag:?}"));
                 }
             }
-            print::run(prompt, chat, format, permission_mode).await
+            print::run(
+                prompt,
+                chat,
+                format,
+                permission_mode,
+                server_flags.resolve()?,
+            )
+            .await
         }
         Some(command)
             if command == OsStr::new("provider")
@@ -207,12 +236,74 @@ async fn run() -> Result<i32> {
         {
             let family = command.to_string_lossy().into_owned();
             let (command, format) = parse_setup(&family, text_args(args));
-            setup::run(command, format).await.map(|()| 0)
+            setup::run(command, format, server_flags.resolve()?)
+                .await
+                .map(|()| 0)
         }
         Some(other) => {
             usage_error(&format!("unknown command {other:?}"));
         }
     }
+}
+
+/// The `--server` / `--server-token-env` pair, lifted out of the arguments.
+struct ServerFlags {
+    url: Option<String>,
+    token_env: Option<String>,
+}
+
+impl ServerFlags {
+    /// Turn the flags plus the environment into the choice to embed or attach.
+    fn resolve(self) -> Result<connect::Server> {
+        connect::Server::resolve(self.url, self.token_env)
+    }
+
+    /// Refuse the flags on a command that has no client to point elsewhere.
+    ///
+    /// Only the explicit flag is an error. `OPENWAVE_SERVER_URL` is ambient —
+    /// a shell that exports it so its `-p` runs attach must still be able to
+    /// start a daemon.
+    fn refuse(&self, command: &str) {
+        if self.url.is_some() || self.token_env.is_some() {
+            usage_error(&format!(
+                "{command} runs a server rather than connecting to one, so it takes no --server"
+            ));
+        }
+    }
+}
+
+/// Pull `--server <url>` and `--server-token-env <var>` out of the arguments
+/// wherever they appear, leaving the rest for the per-command parsers.
+///
+/// A pre-pass rather than an option on each parser: the flags apply to every
+/// client command, and no command takes a value beginning with `--` (each
+/// parser rejects one), so nothing else can legitimately be spelled this way.
+fn take_server_flags(args: Vec<OsString>) -> (Vec<OsString>, ServerFlags) {
+    let mut flags = ServerFlags {
+        url: None,
+        token_env: None,
+    };
+    let mut rest = Vec::with_capacity(args.len());
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let slot = if arg == OsStr::new("--server") {
+            &mut flags.url
+        } else if arg == OsStr::new("--server-token-env") {
+            &mut flags.token_env
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        let name = arg.to_string_lossy().into_owned();
+        match args.next() {
+            Some(value) => match value.into_string() {
+                Ok(value) if !value.starts_with("--") => *slot = Some(value),
+                _ => usage_error(&format!("{name} requires a value")),
+            },
+            None => usage_error(&format!("{name} requires a value")),
+        }
+    }
+    (rest, flags)
 }
 
 /// The remaining arguments as UTF-8. Setup arguments are provider names, model

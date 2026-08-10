@@ -1,9 +1,10 @@
 //! `openwave tui` — interactive terminal chat.
 //!
 //! Boots the same in-process server `openwave serve` runs, spawns its accept
-//! loop on a background task, and drives it over the loopback HTTP+WebSocket
-//! API with the per-launch bearer token — the contract the desktop webview
-//! consumes. Logging is file-only: the TUI owns the terminal.
+//! loop on a background task, and drives it over the HTTP+WebSocket API with
+//! the per-launch bearer token — the contract the desktop webview consumes.
+//! With `--server` it skips the boot and drives a server already running
+//! instead. Logging is file-only: the TUI owns the terminal.
 
 mod app;
 mod composer;
@@ -28,20 +29,12 @@ pub enum Open {
 }
 
 /// Boot the server, open (or resume) the chat, and run the interactive loop.
-pub async fn run(open: Open) -> Result<()> {
-    let config = crate::profile_config()?;
-    openwave_server::logging::init_logging_file_only(&config.data_dir);
-    let server = openwave_server::bind_configured(config).await?;
-    let addr = server.local_addr();
-    let token = server.token().to_owned();
-    // `serve` takes ownership of the Server, whose drop aborts the background
-    // workers (turn worker etc.); keeping this JoinHandle alive for the whole
-    // session is what keeps the engine running.
-    let serve = tokio::spawn(server.serve());
-
-    let result = attach(Client::new(addr, &token)?, open).await;
-    serve.abort();
-    result
+pub async fn run(open: Open, server: crate::connect::Server) -> Result<()> {
+    // The session owns an embedded server's accept loop, and with it the
+    // background workers; holding it for the whole TUI session is what keeps
+    // the engine running. Attached, it owns nothing.
+    let session = crate::connect::Session::open(&server).await?;
+    attach(session.client().clone(), open).await
 }
 
 /// Resolve which chat to attach to, then hand the terminal to the app.

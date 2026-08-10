@@ -42,7 +42,17 @@ struct ChatCreated {
 }
 
 impl Client {
+    /// A client for a server bound in this process.
     pub fn new(addr: SocketAddr, token: &str) -> Result<Self> {
+        Self::attach(format!("http://{addr}"), token)
+    }
+
+    /// A client for a server running somewhere else, named by its base URL.
+    ///
+    /// `base` is already normalized (scheme present, no trailing slash) — see
+    /// [`crate::connect`], which is the only thing that builds one from user
+    /// input.
+    pub fn attach(base: String, token: &str) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|error| AgentError::msg(format!("invalid server token: {error}")))?;
@@ -56,7 +66,7 @@ impl Client {
             })?;
         Ok(Self {
             http,
-            base: format!("http://{addr}"),
+            base,
             token: token.to_owned(),
         })
     }
