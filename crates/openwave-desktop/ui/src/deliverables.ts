@@ -1,5 +1,58 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * Conversation outputs are read and edited over the server's HTTP routes, the
+ * same ones a headless client uses — only the native save dialog still goes
+ * through the shell (see `exportDeliverable` below).
+ *
+ * The connection is module state because these functions are called from
+ * components, hooks, and cell renderers that have no client in hand; the Tauri
+ * bridge they replaced was a process-wide handle too. The shell binds it once,
+ * beside the `ApiClient` it builds from the same address and token.
+ */
+let connection: { baseUrl: string; token: string } | null = null;
+
+export function connectOutputs(baseUrl: string, token: string): void {
+  connection = { baseUrl, token };
+}
+
+async function outputRequest(
+  path: string,
+  init?: { method?: string; body?: unknown },
+): Promise<Response> {
+  if (!connection) throw new Error("OpenWave is still starting");
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${connection.token}`,
+  };
+  if (init?.body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(`${connection.baseUrl}${path}`, {
+    method: init?.method,
+    headers,
+    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+  if (response.ok) return response;
+  // Surface the server's own message: these strings are what the panels show.
+  let detail = response.statusText;
+  try {
+    const body = (await response.json()) as { message?: string };
+    if (body.message) detail = body.message;
+  } catch {
+    /* keep the status text */
+  }
+  throw new Error(detail);
+}
+
+async function outputJson<T>(
+  path: string,
+  init?: { method?: string; body?: unknown },
+): Promise<T> {
+  return (await (await outputRequest(path, init)).json()) as T;
+}
+
+function outputPath(chatId: string, outputId: string): string {
+  return `/chats/${encodeURIComponent(chatId)}/outputs/${encodeURIComponent(outputId)}`;
+}
+
 export type DeliverableSummary = {
   outputId: string;
   filename: string;
@@ -106,7 +159,7 @@ export type SaveOutputRevisionResult =
  * Publish an edit of a text output as a new user-authored revision.
  *
  * `expectedRevisionId` is the revision the editor was opened on and is enforced
- * natively: if another revision became current, nothing is written and the
+ * by the server: if another revision became current, nothing is written and the
  * result names the revision to reload.
  */
 export async function saveOutputRevision(
@@ -116,8 +169,9 @@ export async function saveOutputRevision(
   content: string,
 ): Promise<SaveOutputRevisionResult> {
   return parseSaveOutputRevisionResult(
-    await invoke("save_output_revision", {
-      request: { chatId, outputId, expectedRevisionId, content },
+    await outputJson(`${outputPath(chatId, outputId)}/revisions`, {
+      method: "POST",
+      body: { expectedRevisionId, content },
     }),
   );
 }
@@ -145,7 +199,7 @@ export async function listDeliverables(
   chatId: string,
 ): Promise<DeliverablesCatalog> {
   return parseDeliverablesCatalog(
-    await invoke("list_deliverables", { request: { chatId } }),
+    await outputJson(`/chats/${encodeURIComponent(chatId)}/outputs`),
   );
 }
 
@@ -153,9 +207,7 @@ export async function readDeliverable(
   chatId: string,
   outputId: string,
 ): Promise<DeliverablePreview> {
-  return parseDeliverablePreview(
-    await invoke("read_deliverable", { request: { chatId, outputId } }),
-  );
+  return parseDeliverablePreview(await outputJson(outputPath(chatId, outputId)));
 }
 
 /**
@@ -170,11 +222,19 @@ export async function readDeliverableFile(
   outputId: string,
   revisionId?: string,
 ): Promise<DeliverableFile> {
-  return parseDeliverableFile(
-    await invoke("read_deliverable_file", {
-      request: { chatId, outputId, revisionId: revisionId ?? null },
-    }),
+  const query =
+    revisionId === undefined
+      ? ""
+      : `?revision_id=${encodeURIComponent(revisionId)}`;
+  const response = await outputRequest(
+    `${outputPath(chatId, outputId)}/content${query}`,
   );
+  return parseDeliverableFile({
+    outputId,
+    revisionId: response.headers.get("x-openwave-revision-id") ?? revisionId,
+    mediaType: (response.headers.get("content-type") ?? "").split(";")[0].trim(),
+    bytes: new Uint8Array(await response.arrayBuffer()),
+  });
 }
 
 export async function restoreOutput(
@@ -182,7 +242,9 @@ export async function restoreOutput(
   outputId: string,
 ): Promise<DeliverableSummary> {
   return parseDeliverableSummary(
-    await invoke("restore_output", { request: { chatId, outputId } }),
+    await outputJson(`${outputPath(chatId, outputId)}/restore`, {
+      method: "POST",
+    }),
   );
 }
 
@@ -205,7 +267,7 @@ export async function listOutputRevisions(
   outputId: string,
 ): Promise<OutputRevisionsCatalog> {
   return parseOutputRevisionsCatalog(
-    await invoke("list_output_revisions", { request: { chatId, outputId } }),
+    await outputJson(`${outputPath(chatId, outputId)}/revisions`),
     outputId,
   );
 }
@@ -216,9 +278,9 @@ export async function readOutputRevision(
   revisionId: string,
 ): Promise<DeliverablePreview> {
   return parseDeliverablePreview(
-    await invoke("read_output_revision", {
-      request: { chatId, outputId, revisionId },
-    }),
+    await outputJson(
+      `${outputPath(chatId, outputId)}/revisions/${encodeURIComponent(revisionId)}`,
+    ),
   );
 }
 
@@ -228,9 +290,10 @@ export async function restoreOutputRevision(
   revisionId: string,
 ): Promise<DeliverableSummary> {
   return parseDeliverableSummary(
-    await invoke("restore_output_revision", {
-      request: { chatId, outputId, revisionId },
-    }),
+    await outputJson(
+      `${outputPath(chatId, outputId)}/revisions/${encodeURIComponent(revisionId)}/restore`,
+      { method: "POST" },
+    ),
   );
 }
 
@@ -239,7 +302,7 @@ export async function deleteOutput(
   outputId: string,
 ): Promise<DeliverableSummary> {
   return parseDeliverableSummary(
-    await invoke("delete_output", { request: { chatId, outputId } }),
+    await outputJson(outputPath(chatId, outputId), { method: "DELETE" }),
   );
 }
 
@@ -370,52 +433,26 @@ export function parseDeliverablePreview(value: unknown): DeliverablePreview {
 
 export function parseDeliverableFile(value: unknown): DeliverableFile {
   if (
-    !isExactRecord(value, [
-      "outputId",
-      "revisionId",
-      "mediaType",
-      "contentBase64",
-    ]) ||
+    !isExactRecord(value, ["outputId", "revisionId", "mediaType", "bytes"]) ||
     !isOpaqueId(value.outputId) ||
     !isOpaqueId(value.revisionId) ||
     !isDeliverableMediaType(value.mediaType) ||
-    typeof value.contentBase64 !== "string" ||
-    value.contentBase64.length === 0
+    !(value.bytes instanceof Uint8Array)
   ) {
     throw new Error("Invalid output file response");
   }
-  let bytes: Uint8Array;
-  try {
-    bytes = decodeBase64(value.contentBase64);
-  } catch {
-    throw new Error("Invalid output file response");
-  }
-  if (bytes.byteLength === 0 || bytes.byteLength > deliverableByteCeiling(value.mediaType)) {
+  if (
+    value.bytes.byteLength === 0 ||
+    value.bytes.byteLength > deliverableByteCeiling(value.mediaType)
+  ) {
     throw new Error("Invalid output file response");
   }
   return {
     outputId: value.outputId,
     revisionId: value.revisionId,
     mediaType: value.mediaType,
-    bytes,
+    bytes: value.bytes,
   };
-}
-
-/**
- * Decode base64 in chunks so a 16 MB artifact does not blow the argument stack
- * the way a single `Uint8Array.from(..., charCodeAt)` would.
- */
-function decodeBase64(encoded: string): Uint8Array {
-  const binary = atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < binary.length; offset += chunkSize) {
-    const end = Math.min(offset + chunkSize, binary.length);
-    for (let i = offset; i < end; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-  }
-  return bytes;
 }
 
 export function parseOutputExportResult(

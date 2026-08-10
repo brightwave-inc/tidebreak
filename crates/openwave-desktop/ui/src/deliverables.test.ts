@@ -280,37 +280,32 @@ describe("deliverable renderer projections", () => {
     expect(invokeMock.mock.calls[1]?.[1]).toEqual(invokeMock.mock.calls[0]?.[1]);
   });
 
-  it("decodes a pathless output file payload and rejects empty or oversized ones", () => {
+  it("accepts an output file's bytes and rejects empty or mislabelled ones", () => {
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    const contentBase64 = btoa(String.fromCharCode(...bytes));
     expect(
       parseDeliverableFile({
         outputId,
         revisionId,
         mediaType: "image/png",
-        contentBase64,
+        bytes,
       }),
-    ).toEqual({
-      outputId,
-      revisionId,
-      mediaType: "image/png",
-      bytes,
-    });
+    ).toEqual({ outputId, revisionId, mediaType: "image/png", bytes });
     expect(() =>
       parseDeliverableFile({
         outputId,
         revisionId,
         mediaType: "image/png",
-        contentBase64: "",
+        bytes: new Uint8Array(),
       }),
     ).toThrow("Invalid output file response");
+    // The content route names the revision it served in a header; a response
+    // without one cannot be attributed to immutable bytes.
     expect(() =>
       parseDeliverableFile({
         outputId,
-        revisionId,
+        revisionId: undefined,
         mediaType: "image/png",
-        contentBase64,
-        path: "/private/scratch/chart.png",
+        bytes,
       }),
     ).toThrow("Invalid output file response");
   });

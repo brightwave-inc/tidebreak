@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Media type used when nothing identifies the bytes. The server accepts it and
 /// stores the source; it simply will not be searchable.
-pub(crate) const OPAQUE_MEDIA_TYPE: &str = "application/octet-stream";
+pub const OPAQUE_MEDIA_TYPE: &str = "application/octet-stream";
 
 /// Bytes inspected when deciding a media type.
 ///
@@ -18,7 +18,7 @@ pub(crate) const OPAQUE_MEDIA_TYPE: &str = "application/octet-stream";
 /// first few hundred bytes, except the Zip-container formats, whose central
 /// directory `infer` reads from the local file header near the start. Bounding
 /// the window keeps sniffing cheap for a multi-megabyte document.
-pub(crate) const SNIFF_WINDOW_BYTES: usize = 8_192;
+pub const SNIFF_WINDOW_BYTES: usize = 8_192;
 
 /// Text formats that carry no magic number, so only the name can distinguish
 /// them. All of these reach the same plain-text parser, so a wrong guess here
@@ -73,7 +73,7 @@ const ZIP_CONTAINER_EXTENSIONS: &[(&str, &str)] = &[
 /// leading tags, so a Markdown file that opens with an HTML comment sniffs as
 /// HTML. The extension is the better signal there, and both answers reach the
 /// same parser regardless.
-pub(crate) fn sniff_media_type(bytes: &[u8], file_name: Option<&str>) -> String {
+pub fn sniff_media_type(bytes: &[u8], file_name: Option<&str>) -> String {
     let extension = extension_of(file_name);
     let window = &bytes[..bytes.len().min(SNIFF_WINDOW_BYTES)];
 
@@ -105,7 +105,7 @@ pub(crate) fn sniff_media_type(bytes: &[u8], file_name: Option<&str>) -> String 
 
 /// Media type for a file chosen from the local picker, where the absolute path
 /// is available but only its final component may inform the answer.
-pub(crate) fn sniff_media_type_for_path(bytes: &[u8], path: &Path) -> String {
+pub fn sniff_media_type_for_path(bytes: &[u8], path: &Path) -> String {
     sniff_media_type(bytes, path.file_name().and_then(|name| name.to_str()))
 }
 

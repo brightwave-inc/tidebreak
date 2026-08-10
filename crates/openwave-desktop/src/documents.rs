@@ -796,7 +796,8 @@ fn prepare_selected_document(
             return Err("Files must be 16 MB or smaller".to_owned());
         }
         digest.update(&buffer[..read]);
-        let missing = crate::media_type::SNIFF_WINDOW_BYTES.saturating_sub(sniff_bytes.len());
+        let missing =
+            openwave_server::media_type::SNIFF_WINDOW_BYTES.saturating_sub(sniff_bytes.len());
         sniff_bytes.extend_from_slice(&buffer[..read.min(missing)]);
     }
     if byte_len == 0 {
@@ -806,7 +807,7 @@ fn prepare_selected_document(
         .map_err(|_| "Could not read the selected document".to_owned())?;
     let sha256: [u8; 32] = digest.finalize().into();
     Ok(PreparedDocumentImport {
-        media_type: crate::media_type::sniff_media_type_for_path(
+        media_type: openwave_server::media_type::sniff_media_type_for_path(
             &sniff_bytes,
             Path::new(&display_name),
         ),

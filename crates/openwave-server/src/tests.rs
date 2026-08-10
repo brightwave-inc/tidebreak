@@ -47,6 +47,7 @@ mod conversations;
 mod documents;
 mod image_attachment;
 mod lifecycle;
+mod outputs;
 mod root_attachment;
 mod sandbox;
 mod websocket;

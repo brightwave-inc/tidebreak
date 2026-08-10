@@ -1,54 +1,36 @@
-//! Native bridge for durable conversation outputs.
+//! Native save-to-disk for a conversation output.
 //!
-//! The renderer names an output only by opaque identity. Authoritative output
-//! ownership and immutable revision metadata come from the product store;
-//! private scratch paths and selected export destinations terminate inside this
-//! module. Native exports are keyed by a renderer-minted operation identity so
-//! an ambiguous response can recover one exact terminal receipt.
+//! Everything a conversation output *is* — its catalog, previews, revision
+//! history, restores, edits, and its bytes — now lives on the server's HTTP
+//! surface, where a headless client reaches it too (decision record 5). What
+//! is left here is the one thing that genuinely needs the native shell: the
+//! save dialog, and the write to the path a reader chooses. The bytes come
+//! from `GET /chats/{chat}/outputs/{output}/content` like any other client's
+//! would, so there is no second implementation of output storage in the shell.
+//!
+//! Native exports are keyed by a renderer-minted operation identity so an
+//! ambiguous bridge response can recover one exact terminal receipt rather
+//! than repeating a write that may already have happened.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
-use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use chrono::Utc;
-use openwave_core::{
-    deliverable_media_type, media_type_is_text, revision_byte_ceiling, ChatId, OutputId,
-    OutputRecord, OutputRevision, OutputRevisionId, Store, MAX_BINARY_DELIVERABLE_BYTES,
-    OUTPUTS_DIRECTORY,
-};
+use openwave_core::{ChatId, OutputId, OutputRevisionId, MAX_BINARY_DELIVERABLE_BYTES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
-use tokio::sync::oneshot;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::client_execution::{
     OutputExportFailureReason, OutputExportPhase, OutputExportReceipt, OutputExportTerminal,
     ReceiptStore,
 };
-use crate::documents::resolve_conversation_scope;
+use crate::documents::{local_client, native_auth, pick_export_path};
 use crate::host_access::HostAccess;
-
-const MAX_DELIVERABLES: usize = 100;
-const MAX_PREVIEW_CHARACTERS: usize = 100_000;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct DeliverablesRequest {
-    chat_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct DeliverableRequest {
-    chat_id: Uuid,
-    output_id: OutputId,
-}
+use crate::{wait_server_info, AppState};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -56,130 +38,6 @@ pub(crate) struct ExportDeliverableRequest {
     operation_id: Uuid,
     chat_id: Uuid,
     output_id: OutputId,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DeliverableSummary {
-    output_id: OutputId,
-    filename: String,
-    media_type: String,
-    size_bytes: u64,
-    revision_count: u32,
-    updated_at: String,
-    /// Background run that produced the current revision, when the output was
-    /// submitted by a background agent rather than a foreground turn. The
-    /// renderer uses it to badge the output and correlate it with the agent-run
-    /// surface; it is a display key, not authority.
-    producing_run_id: Option<Uuid>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DeliverablesCatalog {
-    deliverables: Vec<DeliverableSummary>,
-    truncated: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DeliverablePreview {
-    output_id: OutputId,
-    filename: String,
-    media_type: String,
-    /// Lets the detail panel gate its version-history affordance without a
-    /// second catalog fetch.
-    revision_count: u32,
-    /// The revision this preview (or empty binary placeholder) was built from,
-    /// so an inline viewer can address the same immutable bytes.
-    revision_id: OutputRevisionId,
-    content: String,
-    truncated: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct OutputRevisionRequest {
-    chat_id: Uuid,
-    output_id: OutputId,
-    revision_id: OutputRevisionId,
-}
-
-/// Read one revision's full bytes for an inline viewer.
-///
-/// `revision_id` is optional: omit it to read the output's current revision.
-/// Bytes travel as base64 so they share one IPC argument with identity — the
-/// same shape pasted images use — rather than as a JSON number array.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct DeliverableFileRequest {
-    chat_id: Uuid,
-    output_id: OutputId,
-    revision_id: Option<OutputRevisionId>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DeliverableFile {
-    output_id: OutputId,
-    revision_id: OutputRevisionId,
-    media_type: String,
-    content_base64: String,
-}
-
-/// One row of an output's version history, oldest ordinal highest in the list.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OutputRevisionInfo {
-    revision_id: OutputRevisionId,
-    ordinal: u32,
-    size_bytes: u64,
-    created_at: String,
-    /// Who produced the revision: `agent` (a foreground turn),
-    /// `backgroundAgent` (a run), or `user` (an edit or restore).
-    produced_by: &'static str,
-    is_current: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OutputRevisionsCatalog {
-    output_id: OutputId,
-    revisions: Vec<OutputRevisionInfo>,
-}
-
-/// Publish a user's edit of a text output as a new user-authored revision.
-///
-/// `expected_revision_id` is the revision the editor was opened on. It is a
-/// precondition, not a hint: if anything published a newer revision in the
-/// meantime the save is refused and the renderer is told which revision is
-/// current, so the person reloads and reconciles instead of silently discarding
-/// work they never saw.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SaveOutputRevisionRequest {
-    chat_id: Uuid,
-    output_id: OutputId,
-    expected_revision_id: OutputRevisionId,
-    content: String,
-}
-
-/// The outcome of one save. A conflict is an expected product state with its own
-/// reconcile path, not a failure, so it travels as a value rather than an error.
-#[derive(Debug, Serialize)]
-#[serde(
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    tag = "status"
-)]
-pub(crate) enum SaveOutputRevisionResult {
-    /// The edit published a new revision; the payload previews it.
-    Saved(DeliverablePreview),
-    /// Another revision became current after the editor opened.
-    Conflict {
-        /// The revision that is current now — what the renderer should reload.
-        current_revision_id: OutputRevisionId,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -192,310 +50,27 @@ pub(crate) struct OutputExportResult {
     terminal: OutputExportTerminal,
 }
 
-#[tauri::command]
-pub(crate) async fn list_deliverables(
-    host_access: State<'_, HostAccess>,
-    request: DeliverablesRequest,
-) -> Result<DeliverablesCatalog, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    let mut outputs = store
-        .list_outputs(chat_id, (MAX_DELIVERABLES + 1) as u64)
-        .await
-        .map_err(|_| "Could not load this conversation's outputs".to_owned())?;
-    let truncated = outputs.len() > MAX_DELIVERABLES;
-    outputs.truncate(MAX_DELIVERABLES);
-    let mut deliverables = Vec::with_capacity(outputs.len());
-    for output in outputs {
-        let revision = store
-            .get_output_revision(output.current_revision)
-            .await
-            .map_err(|_| "Could not load this conversation's outputs".to_owned())?
-            .ok_or_else(|| "Could not load this conversation's outputs".to_owned())?;
-        deliverables.push(summary_from_record(&output, &revision)?);
-    }
-    Ok(DeliverablesCatalog {
-        deliverables,
-        truncated,
-    })
+/// The fields of the server's output preview this command needs: which exact
+/// revision it is about to export, and what to call the file it suggests.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputIdentity {
+    revision_id: OutputRevisionId,
+    filename: String,
 }
 
-#[tauri::command]
-pub(crate) async fn read_deliverable(
-    app: AppHandle,
-    host_access: State<'_, HostAccess>,
-    request: DeliverableRequest,
-) -> Result<DeliverablePreview, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let (output, revision) =
-        require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    revision_preview(&app, chat_id, &output, &revision).await
-}
-
-/// Return one revision's complete bytes for an inline viewer (office, PDF, image).
-///
-/// Unlike [`read_deliverable`], this is not capped to a text preview and is not
-/// limited to curated text media types — viewers that already draw source
-/// documents reuse the same engines against these bytes.
-#[tauri::command]
-pub(crate) async fn read_deliverable_file(
-    app: AppHandle,
-    host_access: State<'_, HostAccess>,
-    request: DeliverableFileRequest,
-) -> Result<DeliverableFile, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let (output, revision) = match request.revision_id {
-        None => require_live_output(host_access.store(), chat_id, request.output_id).await?,
-        Some(revision_id) => {
-            let (output, _) =
-                require_live_output(host_access.store(), chat_id, request.output_id).await?;
-            let store = host_access
-                .store()
-                .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-            let revision = store
-                .get_output_revision(revision_id)
-                .await
-                .map_err(|_| "Could not load that version".to_owned())?
-                .filter(|revision| revision.output_id == output.id)
-                .ok_or_else(|| "That version does not belong to this output".to_owned())?;
-            (output, revision)
-        }
-    };
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
-    let read_output = output.clone();
-    let read_revision = revision.clone();
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &read_revision)
-    })
-    .await
-    .map_err(|_| "Could not open that output".to_owned())??;
-    Ok(DeliverableFile {
-        output_id: output.id,
-        revision_id: revision.id,
-        media_type: output.media_type.clone(),
-        content_base64: BASE64.encode(bytes),
-    })
-}
-
-/// Build the bounded preview of one exact revision's content.
-async fn revision_preview(
-    app: &AppHandle,
-    chat_id: ChatId,
-    output: &OutputRecord,
-    revision: &OutputRevision,
-) -> Result<DeliverablePreview, String> {
-    // Binary artifacts have no inline text preview; the renderer keys its
-    // viewer (or export-only placeholder) off the media type, and uses
-    // `revision_id` to fetch the full bytes when a viewer can draw them.
-    if !media_type_is_text(&output.media_type) {
-        return Ok(DeliverablePreview {
-            output_id: output.id,
-            filename: output.filename.clone(),
-            media_type: output.media_type.clone(),
-            revision_count: output.revision_count,
-            revision_id: revision.id,
-            content: String::new(),
-            truncated: false,
-        });
-    }
-    let scratch_root = crate::data_dir(app)?.join("scratch");
-    let read_output = output.clone();
-    let read_revision = revision.clone();
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &read_revision)
-    })
-    .await
-    .map_err(|_| "Could not preview that output".to_owned())??;
-    preview_from_bytes(output, revision, bytes)
-}
-
-/// List an output's version history, newest revision first.
-#[tauri::command]
-pub(crate) async fn list_output_revisions(
-    host_access: State<'_, HostAccess>,
-    request: DeliverableRequest,
-) -> Result<OutputRevisionsCatalog, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let (output, _) = require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    let revisions = store
-        .list_output_revisions(output.id)
-        .await
-        .map_err(|_| "Could not load that output's versions".to_owned())?;
-    Ok(OutputRevisionsCatalog {
-        output_id: output.id,
-        revisions: revisions
-            .into_iter()
-            .map(|revision| OutputRevisionInfo {
-                revision_id: revision.id,
-                ordinal: revision.ordinal,
-                size_bytes: revision.byte_len,
-                created_at: revision.created_at.to_rfc3339(),
-                produced_by: if revision.producing_run_id.is_some() {
-                    "backgroundAgent"
-                } else if revision.turn_id.is_some() {
-                    "agent"
-                } else {
-                    "user"
-                },
-                is_current: revision.id == output.current_revision,
-            })
-            .collect(),
-    })
-}
-
-/// Preview one exact (possibly non-current) revision's content.
-#[tauri::command]
-pub(crate) async fn read_output_revision(
-    app: AppHandle,
-    host_access: State<'_, HostAccess>,
-    request: OutputRevisionRequest,
-) -> Result<DeliverablePreview, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let (output, _) = require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    let revision = store
-        .get_output_revision(request.revision_id)
-        .await
-        .map_err(|_| "Could not load that version".to_owned())?
-        .filter(|revision| revision.output_id == output.id)
-        .ok_or_else(|| "That version does not belong to this output".to_owned())?;
-    revision_preview(&app, chat_id, &output, &revision).await
-}
-
-/// Restore an output to an earlier version by appending a new revision with
-/// that version's content. Append-only: nothing is rewound or lost.
-#[tauri::command]
-pub(crate) async fn restore_output_revision(
-    app: AppHandle,
-    host_access: State<'_, HostAccess>,
-    request: OutputRevisionRequest,
-) -> Result<DeliverableSummary, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?
-        .clone();
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
-    let scratch =
-        tauri::async_runtime::spawn_blocking(move || open_chat_scratch(&scratch_root, chat_id))
-            .await
-            .map_err(|_| "Could not restore that version".to_owned())??;
-    openwave_core::restore_output_to_revision(
-        &*store,
-        &scratch,
-        chat_id,
-        request.output_id,
-        request.revision_id,
-        Utc::now(),
-    )
-    .await
-    .map_err(|error| match error {
-        openwave_core::AgentError::Store(message) => message,
-        _ => "Could not restore that version".to_owned(),
-    })?;
-    let (output, revision) =
-        require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    summary_from_record(&output, &revision)
-}
-
-/// Save an edited text output as a new user-authored revision.
-///
-/// Append-only, exactly like a restore: the previous revision keeps its id and
-/// its bytes, and this publishes a new head marked as produced by the user. The
-/// edit is conditional on the revision it started from still being current.
-#[tauri::command]
-pub(crate) async fn save_output_revision(
-    app: AppHandle,
-    host_access: State<'_, HostAccess>,
-    request: SaveOutputRevisionRequest,
-) -> Result<SaveOutputRevisionResult, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?
-        .clone();
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
-    let scratch =
-        tauri::async_runtime::spawn_blocking(move || open_chat_scratch(&scratch_root, chat_id))
-            .await
-            .map_err(|_| "Could not save your changes".to_owned())??;
-    match openwave_core::save_user_output_revision(
-        &*store,
-        &scratch,
-        chat_id,
-        request.output_id,
-        request.expected_revision_id,
-        &request.content,
-        Utc::now(),
-    )
-    .await
-    {
-        Ok(_) => {
-            let (output, revision) =
-                require_live_output(host_access.store(), chat_id, request.output_id).await?;
-            Ok(SaveOutputRevisionResult::Saved(
-                revision_preview(&app, chat_id, &output, &revision).await?,
-            ))
-        }
-        Err(openwave_core::AgentError::OutputRevisionConflict {
-            current_revision, ..
-        }) => Ok(SaveOutputRevisionResult::Conflict {
-            current_revision_id: current_revision,
-        }),
-        Err(openwave_core::AgentError::Store(message)) => Err(message),
-        Err(_) => Err("Could not save your changes".to_owned()),
-    }
-}
-
-/// Soft-delete an output. The explicit inverse is `restore_output`, which the
-/// catalog offers as Undo.
-#[tauri::command]
-pub(crate) async fn delete_output(
-    host_access: State<'_, HostAccess>,
-    request: DeliverableRequest,
-) -> Result<DeliverableSummary, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let (output, revision) =
-        require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    let summary = summary_from_record(&output, &revision)?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    store
-        .delete_output(output.id, Utc::now())
-        .await
-        .map_err(|_| "Could not delete that output".to_owned())?;
-    Ok(summary)
-}
-
-/// Open the exact conversation's private scratch directory, refusing symlinked
-/// components.
-fn open_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, String> {
-    let Some(root) = open_regular_directory(scratch_root)? else {
-        return Err("Output content is unavailable".to_owned());
-    };
-    let chat_name = chat_id.to_string();
-    if !is_regular_child_directory(&root, &chat_name)? {
-        return Err("Output content is unavailable".to_owned());
-    }
-    root.open_dir_nofollow(&chat_name)
-        .map_err(|_| "Output content is unavailable".to_owned())
-}
-
+/// Save one output's current revision wherever the reader chooses.
 #[tauri::command]
 pub(crate) async fn export_deliverable(
     app: AppHandle,
+    app_state: State<'_, std::sync::Arc<AppState>>,
     host_access: State<'_, HostAccess>,
     request: ExportDeliverableRequest,
 ) -> Result<OutputExportResult, String> {
-    if request.operation_id.is_nil() || request.output_id.as_uuid().is_nil() {
+    if request.operation_id.is_nil()
+        || request.output_id.as_uuid().is_nil()
+        || request.chat_id.is_nil()
+    {
         return Err("Invalid output export request".to_owned());
     }
     let _export = host_access.output_exports.lock().await;
@@ -510,42 +85,34 @@ pub(crate) async fn export_deliverable(
         return recover_output_export_receipt(&host_access.receipts, &mut receipt);
     }
 
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let (output, revision) =
-        require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    let chat_id = ChatId::from(request.chat_id);
+    let info = wait_server_info(app_state.inner()).await?;
+    let identity = output_identity(&info, chat_id, request.output_id)
+        .await
+        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
+
+    let content = match output_bytes(&info, chat_id, request.output_id, identity.revision_id).await
+    {
+        Some(content) => content,
+        None => {
+            // Nothing durable has been recorded yet, so this failure is
+            // reported directly rather than through a receipt.
+            return Err("Could not read that output".to_owned());
+        }
+    };
     let mut receipt = OutputExportReceipt::new(
         request.operation_id,
         chat_id,
-        output.id,
-        revision.id,
-        output.filename.clone(),
-        revision.byte_len,
-        revision.sha256,
+        request.output_id,
+        identity.revision_id,
+        identity.filename.clone(),
+        content.len() as u64,
+        Sha256::digest(&content).into(),
     );
     host_access
         .receipts
         .save_output_export(&receipt)
         .map_err(private_receipt_error)?;
-
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
-    let read_output = output.clone();
-    let read_revision = revision.clone();
-    let content = match tauri::async_runtime::spawn_blocking(move || {
-        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &read_revision)
-    })
-    .await
-    {
-        Ok(Ok(content)) => content,
-        Ok(Err(_)) | Err(_) => {
-            return terminalize_output_export(
-                &host_access.receipts,
-                &mut receipt,
-                OutputExportTerminal::Failed {
-                    reason: OutputExportFailureReason::SourceUnavailable,
-                },
-            );
-        }
-    };
 
     let picker = match host_access.picker.try_lock() {
         Ok(picker) => picker,
@@ -559,7 +126,7 @@ pub(crate) async fn export_deliverable(
             );
         }
     };
-    let destination = match pick_export_path(&app, &output.filename).await {
+    let destination = match pick_export_path(&app, "Save output", &identity.filename).await {
         Ok(Some(destination)) if destination.is_absolute() => destination,
         Ok(None) => {
             return terminalize_output_export(
@@ -572,9 +139,7 @@ pub(crate) async fn export_deliverable(
             return terminalize_output_export(
                 &host_access.receipts,
                 &mut receipt,
-                OutputExportTerminal::Failed {
-                    reason: OutputExportFailureReason::DestinationUnavailable,
-                },
+                destination_unavailable(),
             );
         }
     };
@@ -587,19 +152,13 @@ pub(crate) async fn export_deliverable(
         .save_output_export(&receipt)
         .map_err(private_receipt_error)?;
 
-    // A picker can remain open while the output or conversation is deleted.
-    // Revalidate the exact durable identities before the one authorized write.
-    if require_exact_revision(
-        host_access.store(),
-        chat_id,
-        output.id,
-        revision.id,
-        revision.byte_len,
-        revision.sha256,
-    )
-    .await
-    .is_err()
-    {
+    // A picker can remain open while the output or conversation is deleted, or
+    // while something publishes a newer revision. Revalidate the exact durable
+    // identity through the same route before the one authorized write.
+    let still_current = output_identity(&info, chat_id, request.output_id)
+        .await
+        .is_some_and(|current| current.revision_id == receipt.revision_id);
+    if !still_current {
         return terminalize_output_export(
             &host_access.receipts,
             &mut receipt,
@@ -615,13 +174,15 @@ pub(crate) async fn export_deliverable(
         .save_output_export(&receipt)
         .map_err(private_receipt_error)?;
     let write_destination = destination.clone();
+    let byte_len = receipt.byte_len;
+    let sha256 = receipt.sha256;
     let write = tauri::async_runtime::spawn_blocking(move || {
         write_exported_deliverable(&write_destination, &content)
     })
     .await;
     let terminal = match write {
         Ok(Ok(())) => OutputExportTerminal::Completed,
-        Ok(Err(_)) | Err(_) if destination_matches_revision(&destination, &revision) => {
+        Ok(Err(_)) | Err(_) if destination_matches(&destination, byte_len, sha256) => {
             OutputExportTerminal::Completed
         }
         Ok(Err(_)) | Err(_) => OutputExportTerminal::Failed {
@@ -631,202 +192,65 @@ pub(crate) async fn export_deliverable(
     terminalize_output_export(&host_access.receipts, &mut receipt, terminal)
 }
 
-#[tauri::command]
-pub(crate) async fn restore_output(
-    host_access: State<'_, HostAccess>,
-    request: DeliverableRequest,
-) -> Result<DeliverableSummary, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let store = host_access
-        .store()
-        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    // A restore targets a soft-deleted output, so it cannot go through the
-    // live-only `require_live_output`. Bind it to the exact conversation before
-    // clearing the retraction.
-    let output = store
-        .get_output(request.output_id)
-        .await
-        .map_err(|_| "Could not restore that output".to_owned())?
-        .filter(|output| output.chat_id == chat_id)
-        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
-    store
-        .restore_output(output.id, Utc::now())
-        .await
-        .map_err(|_| "Could not restore that output".to_owned())?;
-    let (output, revision) =
-        require_live_output(host_access.store(), chat_id, request.output_id).await?;
-    summary_from_record(&output, &revision)
+/// The terminal both destination failures share: a dialog that could not be
+/// opened, and a recovery that will not re-issue a delayed write.
+fn destination_unavailable() -> OutputExportTerminal {
+    OutputExportTerminal::Failed {
+        reason: OutputExportFailureReason::DestinationUnavailable,
+    }
 }
 
-pub(crate) async fn require_live_output(
-    store: Option<&std::sync::Arc<dyn Store>>,
+fn outputs_path(chat_id: ChatId, output_id: OutputId) -> String {
+    format!("/chats/{chat_id}/outputs/{output_id}")
+}
+
+/// Which revision the output is on right now, and what to call its file.
+async fn output_identity(
+    info: &crate::NativeServerInfo,
     chat_id: ChatId,
     output_id: OutputId,
-) -> Result<(OutputRecord, OutputRevision), String> {
-    let store = store.ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    let output = store
-        .get_output(output_id)
-        .await
-        .map_err(|_| "Could not load that output".to_owned())?
-        .filter(|output| output.chat_id == chat_id && output.deleted_at.is_none())
-        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
-    let revision = store
-        .get_output_revision(output.current_revision)
-        .await
-        .map_err(|_| "Could not load that output".to_owned())?
-        .filter(|revision| revision.output_id == output.id)
-        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
-    Ok((output, revision))
+) -> Option<OutputIdentity> {
+    let response = native_auth(
+        local_client().get(format!(
+            "{}{}",
+            info.base_url,
+            outputs_path(chat_id, output_id)
+        )),
+        info,
+    )
+    .send()
+    .await
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<OutputIdentity>().await.ok()
 }
 
-pub(crate) async fn require_exact_revision(
-    store: Option<&std::sync::Arc<dyn Store>>,
+/// One exact revision's complete bytes, as the server serves them to every
+/// other client.
+async fn output_bytes(
+    info: &crate::NativeServerInfo,
     chat_id: ChatId,
     output_id: OutputId,
     revision_id: OutputRevisionId,
-    byte_len: u64,
-    sha256: [u8; 32],
-) -> Result<(), String> {
-    let store = store.ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    let output = store
-        .get_output(output_id)
-        .await
-        .map_err(|_| "Could not load that output".to_owned())?
-        .filter(|output| {
-            output.chat_id == chat_id
-                && output.deleted_at.is_none()
-                && output.current_revision == revision_id
-        })
-        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
-    let revision = store
-        .get_output_revision(revision_id)
-        .await
-        .map_err(|_| "Could not load that output".to_owned())?
-        .filter(|revision| {
-            revision.output_id == output.id
-                && revision.byte_len == byte_len
-                && revision.sha256 == sha256
-        })
-        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
-    if revision.id != revision_id {
-        return Err("Output not found in this conversation".to_owned());
+) -> Option<Vec<u8>> {
+    let response = native_auth(
+        local_client().get(format!(
+            "{}{}/content?revision_id={revision_id}",
+            info.base_url,
+            outputs_path(chat_id, output_id)
+        )),
+        info,
+    )
+    .send()
+    .await
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
     }
-    Ok(())
-}
-
-fn summary_from_record(
-    output: &OutputRecord,
-    revision: &OutputRevision,
-) -> Result<DeliverableSummary, String> {
-    // Text outputs derive their media type from the filename; binary artifacts
-    // carry an explicit media type with an arbitrary extension, so only text is
-    // held to the filename-derived type. Each kind keeps its own size ceiling.
-    if output.deleted_at.is_some()
-        || output.current_revision != revision.id
-        || output.id != revision.output_id
-        || output.revision_count == 0
-        || revision.byte_len > revision_byte_ceiling(&output.media_type) as u64
-        || (media_type_is_text(&output.media_type)
-            && deliverable_media_type(&output.filename) != Some(output.media_type.as_str()))
-    {
-        return Err("Could not load this conversation's outputs".to_owned());
-    }
-    Ok(DeliverableSummary {
-        output_id: output.id,
-        filename: output.filename.clone(),
-        media_type: output.media_type.clone(),
-        size_bytes: revision.byte_len,
-        revision_count: output.revision_count,
-        updated_at: output.updated_at.to_rfc3339(),
-        producing_run_id: revision.producing_run_id.map(|run_id| *run_id.as_uuid()),
-    })
-}
-
-pub(crate) fn read_output_revision_bytes(
-    scratch_root: &Path,
-    chat_id: ChatId,
-    output: &OutputRecord,
-    revision: &OutputRevision,
-) -> Result<Vec<u8>, String> {
-    let ceiling = revision_byte_ceiling(&output.media_type);
-    if output.chat_id != chat_id
-        || output.deleted_at.is_some()
-        || revision.output_id != output.id
-        || revision.byte_len > ceiling as u64
-    {
-        return Err("Output not found in this conversation".to_owned());
-    }
-    let Some(root) = open_regular_directory(scratch_root)? else {
-        return Err("Output content is unavailable".to_owned());
-    };
-    let chat_name = chat_id.to_string();
-    let output_name = output.id.to_string();
-    if !is_regular_child_directory(&root, &chat_name)? {
-        return Err("Output content is unavailable".to_owned());
-    }
-    let chat = root
-        .open_dir_nofollow(&chat_name)
-        .map_err(|_| "Output content is unavailable".to_owned())?;
-    if !is_regular_child_directory(&chat, OUTPUTS_DIRECTORY)? {
-        return Err("Output content is unavailable".to_owned());
-    }
-    let outputs = chat
-        .open_dir_nofollow(OUTPUTS_DIRECTORY)
-        .map_err(|_| "Output content is unavailable".to_owned())?;
-    if !is_regular_child_directory(&outputs, &output_name)? {
-        return Err("Output content is unavailable".to_owned());
-    }
-    let revisions = outputs
-        .open_dir_nofollow(&output_name)
-        .map_err(|_| "Output content is unavailable".to_owned())?;
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let file = revisions
-        .open_with(revision.id.to_string(), &options)
-        .map_err(|_| "Output content is unavailable".to_owned())?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| "Output content is unavailable".to_owned())?;
-    if !metadata.is_file() || metadata.len() != revision.byte_len {
-        return Err("Output content is unavailable".to_owned());
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((ceiling + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Output content is unavailable".to_owned())?;
-    if bytes.len() as u64 != revision.byte_len
-        || bytes.len() > ceiling
-        || <[u8; 32]>::from(Sha256::digest(&bytes)) != revision.sha256
-    {
-        return Err("Output content is unavailable".to_owned());
-    }
-    Ok(bytes)
-}
-
-fn preview_from_bytes(
-    output: &OutputRecord,
-    revision: &OutputRevision,
-    bytes: Vec<u8>,
-) -> Result<DeliverablePreview, String> {
-    let text =
-        String::from_utf8(bytes).map_err(|_| "Output is not a supported text file".to_owned())?;
-    if text.contains('\0')
-        || deliverable_media_type(&output.filename) != Some(output.media_type.as_str())
-    {
-        return Err("Output is not a supported text file".to_owned());
-    }
-    let mut characters = text.chars();
-    let content: String = characters.by_ref().take(MAX_PREVIEW_CHARACTERS).collect();
-    let truncated = characters.next().is_some();
-    Ok(DeliverablePreview {
-        output_id: output.id,
-        filename: output.filename.clone(),
-        media_type: output.media_type.clone(),
-        revision_count: output.revision_count,
-        revision_id: revision.id,
-        content,
-        truncated,
-    })
+    let bytes = response.bytes().await.ok()?;
+    (!bytes.is_empty() && bytes.len() <= MAX_BINARY_DELIVERABLE_BYTES).then(|| bytes.to_vec())
 }
 
 fn recover_output_export_receipt(
@@ -839,9 +263,7 @@ fn recover_output_export_receipt(
             OutputExportPhase::Prepared => OutputExportTerminal::Cancelled,
             // A destination was durably selected, but dispatch was not. Recovery
             // refuses to issue a delayed write after native state may have moved.
-            OutputExportPhase::DestinationSelected => OutputExportTerminal::Failed {
-                reason: OutputExportFailureReason::DestinationUnavailable,
-            },
+            OutputExportPhase::DestinationSelected => destination_unavailable(),
             // Once dispatch may have begun, recovery only verifies the exact
             // digest. It never repeats the write.
             OutputExportPhase::DispatchStarted => {
@@ -887,10 +309,6 @@ fn output_export_result(receipt: &OutputExportReceipt) -> Result<OutputExportRes
     })
 }
 
-fn destination_matches_revision(destination: &Path, revision: &OutputRevision) -> bool {
-    destination_matches(destination, revision.byte_len, revision.sha256)
-}
-
 fn destination_matches(destination: &Path, byte_len: u64, sha256: [u8; 32]) -> bool {
     if !destination.is_absolute() || byte_len > MAX_BINARY_DELIVERABLE_BYTES as u64 {
         return false;
@@ -924,61 +342,6 @@ fn destination_matches(destination: &Path, byte_len: u64, sha256: [u8; 32]) -> b
         return false;
     }
     bytes.len() as u64 == byte_len && <[u8; 32]>::from(Sha256::digest(&bytes)) == sha256
-}
-
-fn open_regular_directory(path: &Path) -> Result<Option<Dir>, String> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("Could not open private outputs".to_owned()),
-    };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("Private output storage is invalid".to_owned());
-    }
-    let directory = Dir::open_ambient_dir(path, ambient_authority())
-        .map_err(|_| "Could not open private outputs".to_owned())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let opened = directory
-            .dir_metadata()
-            .map_err(|_| "Could not open private outputs".to_owned())?;
-        if metadata.dev() != cap_std::fs::MetadataExt::dev(&opened)
-            || metadata.ino() != cap_std::fs::MetadataExt::ino(&opened)
-        {
-            return Err("Private output storage changed while it was opened".to_owned());
-        }
-    }
-    Ok(Some(directory))
-}
-
-fn is_regular_child_directory(parent: &Dir, name: &str) -> Result<bool, String> {
-    match parent.symlink_metadata(name) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
-        Ok(_) => Err("Private output storage is invalid".to_owned()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err("Could not inspect private outputs".to_owned()),
-    }
-}
-
-async fn pick_export_path(app: &AppHandle, filename: &str) -> Result<Option<PathBuf>, String> {
-    let (tx, rx) = oneshot::channel();
-    let mut picker = app
-        .dialog()
-        .file()
-        .set_title("Save output")
-        .set_file_name(filename);
-    if let Some(window) = app.get_webview_window("main") {
-        picker = picker.set_parent(&window);
-    }
-    picker.save_file(move |path| {
-        let _ = tx.send(path);
-    });
-    rx.await
-        .map_err(|_| "The save dialog closed unexpectedly".to_owned())?
-        .map(tauri_plugin_dialog::FilePath::into_path)
-        .transpose()
-        .map_err(|_| "The save dialog returned an invalid destination".to_owned())
 }
 
 fn write_exported_deliverable(destination: &Path, content: &[u8]) -> Result<(), String> {
@@ -1037,314 +400,7 @@ fn private_receipt_error(_error: std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone as _, Utc};
-
     use super::*;
-
-    fn output_record(
-        chat_id: ChatId,
-        filename: &str,
-        content: &[u8],
-    ) -> (OutputRecord, OutputRevision) {
-        let output_id = OutputId::new();
-        let revision_id = OutputRevisionId::new();
-        let created_at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
-        (
-            OutputRecord {
-                id: output_id,
-                chat_id,
-                filename: filename.to_owned(),
-                media_type: deliverable_media_type(filename).unwrap().to_owned(),
-                current_revision: revision_id,
-                revision_count: 1,
-                created_at,
-                updated_at: created_at,
-                deleted_at: None,
-            },
-            OutputRevision {
-                id: revision_id,
-                output_id,
-                ordinal: 1,
-                byte_len: content.len() as u64,
-                sha256: Sha256::digest(content).into(),
-                turn_id: None,
-                producing_run_id: None,
-                created_at,
-            },
-        )
-    }
-
-    /// The renderer branches on `status` and reads the saved preview from the
-    /// same object, so the two variants have to project exactly that shape. A
-    /// conflict is a value with the revision to reconcile against, never an
-    /// error string the renderer would have to parse.
-    #[test]
-    fn a_save_projects_its_outcome_as_a_status_tagged_object() {
-        let (output, revision) = output_record(ChatId::new(), "brief.md", b"# Brief");
-        let saved = serde_json::to_value(SaveOutputRevisionResult::Saved(
-            preview_from_bytes(&output, &revision, b"# Brief".to_vec()).unwrap(),
-        ))
-        .unwrap();
-        assert_eq!(saved["status"], "saved");
-        assert_eq!(saved["revisionId"], revision.id.to_string());
-        assert_eq!(saved["content"], "# Brief");
-
-        let conflict = serde_json::to_value(SaveOutputRevisionResult::Conflict {
-            current_revision_id: revision.id,
-        })
-        .unwrap();
-        assert_eq!(conflict["status"], "conflict");
-        assert_eq!(conflict["currentRevisionId"], revision.id.to_string());
-    }
-
-    fn revision_path(root: &Path, output: &OutputRecord, revision: &OutputRevision) -> PathBuf {
-        root.join(output.chat_id.to_string())
-            .join(OUTPUTS_DIRECTORY)
-            .join(output.id.to_string())
-            .join(revision.id.to_string())
-    }
-
-    #[test]
-    fn catalog_and_preview_project_durable_opaque_identity() {
-        let content = b"# Brief";
-        let (output, revision) = output_record(ChatId::new(), "brief.md", content);
-        let summary = summary_from_record(&output, &revision).unwrap();
-        assert_eq!(summary.output_id, output.id);
-        assert_eq!(summary.size_bytes, content.len() as u64);
-        assert_eq!(summary.revision_count, 1);
-
-        let preview = preview_from_bytes(&output, &revision, content.to_vec()).unwrap();
-        assert_eq!(preview.output_id, output.id);
-        assert_eq!(preview.revision_id, revision.id);
-        assert_eq!(preview.content, "# Brief");
-        let serialized = serde_json::to_value(preview).unwrap();
-        assert_eq!(
-            serialized
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
-            [
-                "content",
-                "filename",
-                "mediaType",
-                "outputId",
-                "revisionCount",
-                "revisionId",
-                "truncated"
-            ]
-        );
-        for forbidden in ["path", "scratch", "chatId", "token", "sha256"] {
-            assert!(!serialized.to_string().contains(forbidden));
-        }
-    }
-
-    fn binary_output_record(
-        chat_id: ChatId,
-        filename: &str,
-        media_type: &str,
-        content: &[u8],
-    ) -> (OutputRecord, OutputRevision) {
-        let output_id = OutputId::new();
-        let revision_id = OutputRevisionId::new();
-        let created_at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
-        (
-            OutputRecord {
-                id: output_id,
-                chat_id,
-                filename: filename.to_owned(),
-                media_type: media_type.to_owned(),
-                current_revision: revision_id,
-                revision_count: 1,
-                created_at,
-                updated_at: created_at,
-                deleted_at: None,
-            },
-            OutputRevision {
-                id: revision_id,
-                output_id,
-                ordinal: 1,
-                byte_len: content.len() as u64,
-                sha256: Sha256::digest(content).into(),
-                turn_id: None,
-                producing_run_id: None,
-                created_at,
-            },
-        )
-    }
-
-    #[test]
-    fn binary_artifacts_beyond_the_text_cap_are_cataloged_read_and_exported() {
-        let scratch = tempfile::tempdir().unwrap();
-        // A binary artifact larger than the 512 KiB text cap.
-        let mut content = b"\x89PNG\r\n\x1a\n".to_vec();
-        content.resize(700 * 1024, 9);
-        let (output, revision) =
-            binary_output_record(ChatId::new(), "chart.png", "image/png", &content);
-
-        // It is a valid catalog entry despite its non-text media type and its
-        // size exceeding the text ceiling.
-        let summary = summary_from_record(&output, &revision).unwrap();
-        assert_eq!(summary.media_type, "image/png");
-        assert_eq!(summary.size_bytes, content.len() as u64);
-
-        // Its bytes round-trip out of private scratch unchanged.
-        let path = revision_path(scratch.path(), &output, &revision);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &content).unwrap();
-        assert_eq!(
-            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).unwrap(),
-            content
-        );
-
-        // And they export to a chosen destination as raw bytes.
-        let destination_root = tempfile::tempdir().unwrap();
-        let destination = destination_root.path().join("chart.png");
-        write_exported_deliverable(&destination, &content).unwrap();
-        assert_eq!(std::fs::read(&destination).unwrap(), content);
-        assert!(destination_matches_revision(&destination, &revision));
-    }
-
-    #[test]
-    fn immutable_revision_reads_are_exactly_scoped_and_content_addressed() {
-        let scratch = tempfile::tempdir().unwrap();
-        let content = b"private";
-        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
-        let path = revision_path(scratch.path(), &output, &revision);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, content).unwrap();
-
-        assert_eq!(
-            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).unwrap(),
-            content
-        );
-        assert!(
-            read_output_revision_bytes(scratch.path(), ChatId::new(), &output, &revision).is_err()
-        );
-        std::fs::write(path, b"tampered").unwrap();
-        assert!(
-            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).is_err()
-        );
-    }
-
-    /// A background run executes in its own `agent-run-{id}` workspace, not in
-    /// the conversation's scratch directory. Its published revisions must still
-    /// land where the catalog reader looks, or every file a background run
-    /// produces renders as unavailable. Publisher and reader are driven against
-    /// each other here because that gap is invisible to either alone.
-    #[tokio::test]
-    async fn a_background_runs_published_output_is_readable_from_the_chats_scratch() {
-        use openwave_code_execution::ExecutionWorkspaceId;
-        use openwave_core::{AgentRunId, CallId, Chat, DbStore, SecretProvider, Store};
-        use std::sync::Arc;
-
-        struct NoSecrets;
-
-        #[async_trait::async_trait]
-        impl SecretProvider for NoSecrets {
-            async fn get_secret(&self, _key: &str) -> openwave_core::Result<Option<String>> {
-                Ok(None)
-            }
-            async fn set_secret(&self, _key: &str, _value: &str) -> openwave_core::Result<()> {
-                Ok(())
-            }
-            async fn delete_secret(&self, _key: &str) -> openwave_core::Result<()> {
-                Ok(())
-            }
-        }
-
-        let database = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                database.path().join("t.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
-        let chat = Chat {
-            id: ChatId::new(),
-            project_id: None,
-            title: None,
-            model: None,
-            reasoning_effort: None,
-            permission_mode: None,
-            network_policy: Default::default(),
-            attachment_revision: 0,
-            root_attachments: Vec::new(),
-            created_at: Utc::now(),
-        };
-        store.create_chat(&chat).await.unwrap();
-
-        // The run wrote a file under `output/` in its own workspace, and the
-        // conversation's scratch does not exist yet.
-        let scratch_root = tempfile::tempdir().unwrap();
-        let run_id = AgentRunId::sandbox_for_spawn_call(CallId::new());
-        let workspace = ExecutionWorkspaceId::parse(format!("agent-run-{run_id}")).unwrap();
-        let output_dir = scratch_root
-            .path()
-            .join(workspace.as_str())
-            .join(openwave_core::EXEC_OUTPUT_DIRECTORY);
-        std::fs::create_dir_all(&output_dir).unwrap();
-        let content = b"# Q3 revenue\n\nUp.";
-        std::fs::write(output_dir.join("summary.md"), content).unwrap();
-
-        let provider = openwave_server::code_execution::ConfiguredCodeExecutionProvider::new(
-            store.clone(),
-            Arc::new(NoSecrets),
-            scratch_root.path(),
-        );
-        let scan = provider
-            .collect_agent_run_outputs(&workspace, chat.id, CallId::new(), run_id)
-            .await
-            .unwrap();
-        assert_eq!(scan.entries.len(), 1, "{:?}", scan.notes);
-
-        let output = store
-            .list_outputs(chat.id, 10)
-            .await
-            .unwrap()
-            .pop()
-            .expect("the run's file should be a conversation output");
-        let revision = store
-            .get_output_revision(output.current_revision)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(revision.producing_run_id, Some(run_id));
-        assert_eq!(
-            read_output_revision_bytes(scratch_root.path(), chat.id, &output, &revision).unwrap(),
-            content
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn private_revision_and_export_destinations_reject_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let scratch = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let content = b"private";
-        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
-        let path = revision_path(scratch.path(), &output, &revision);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let outside_source = outside.path().join("source.txt");
-        std::fs::write(&outside_source, content).unwrap();
-        symlink(&outside_source, &path).unwrap();
-        assert!(
-            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).is_err()
-        );
-
-        let destination = outside.path().join("destination.txt");
-        let target = outside.path().join("target.txt");
-        std::fs::write(&target, "keep").unwrap();
-        symlink(&target, &destination).unwrap();
-        assert!(write_exported_deliverable(&destination, b"replace").is_err());
-        assert!(!destination_matches_revision(&destination, &revision));
-        assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
-    }
 
     #[test]
     fn exact_export_retries_recover_completed_cancelled_and_ambiguous_receipts() {
@@ -1352,17 +408,24 @@ mod tests {
         let receipts = ReceiptStore::open(private.path()).unwrap();
         let destination_root = tempfile::tempdir().unwrap();
         let content = b"exact";
-        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
+        let chat_id = ChatId::new();
+        let output_id = OutputId::new();
+        let revision_id = OutputRevisionId::new();
+        let sha256: [u8; 32] = Sha256::digest(content).into();
 
-        let mut cancelled = OutputExportReceipt::new(
-            Uuid::new_v4(),
-            output.chat_id,
-            output.id,
-            revision.id,
-            output.filename.clone(),
-            revision.byte_len,
-            revision.sha256,
-        );
+        let new_receipt = |operation_id: Uuid| {
+            OutputExportReceipt::new(
+                operation_id,
+                chat_id,
+                output_id,
+                revision_id,
+                "brief.txt".to_owned(),
+                content.len() as u64,
+                sha256,
+            )
+        };
+
+        let mut cancelled = new_receipt(Uuid::new_v4());
         receipts.save_output_export(&cancelled).unwrap();
         let first_cancel = recover_output_export_receipt(&receipts, &mut cancelled).unwrap();
         let mut cancelled_retry = receipts
@@ -1379,15 +442,7 @@ mod tests {
         ));
 
         let interrupted_destination = destination_root.path().join("interrupted.txt");
-        let mut interrupted = OutputExportReceipt::new(
-            Uuid::new_v4(),
-            output.chat_id,
-            output.id,
-            revision.id,
-            output.filename.clone(),
-            revision.byte_len,
-            revision.sha256,
-        );
+        let mut interrupted = new_receipt(Uuid::new_v4());
         interrupted.phase = OutputExportPhase::DestinationSelected;
         interrupted.destination = Some(interrupted_destination.clone());
         receipts.save_output_export(&interrupted).unwrap();
@@ -1406,15 +461,7 @@ mod tests {
 
         let destination = destination_root.path().join("brief.txt");
         std::fs::write(&destination, content).unwrap();
-        let mut completed = OutputExportReceipt::new(
-            Uuid::new_v4(),
-            output.chat_id,
-            output.id,
-            revision.id,
-            output.filename.clone(),
-            revision.byte_len,
-            revision.sha256,
-        );
+        let mut completed = new_receipt(Uuid::new_v4());
         completed.phase = OutputExportPhase::DispatchStarted;
         completed.destination = Some(destination);
         receipts.save_output_export(&completed).unwrap();
@@ -1426,15 +473,7 @@ mod tests {
 
         let ambiguous_destination = destination_root.path().join("ambiguous.txt");
         std::fs::write(&ambiguous_destination, b"different").unwrap();
-        let mut ambiguous = OutputExportReceipt::new(
-            Uuid::new_v4(),
-            output.chat_id,
-            output.id,
-            revision.id,
-            output.filename,
-            revision.byte_len,
-            revision.sha256,
-        );
+        let mut ambiguous = new_receipt(Uuid::new_v4());
         ambiguous.phase = OutputExportPhase::DispatchStarted;
         ambiguous.destination = Some(ambiguous_destination);
         receipts.save_output_export(&ambiguous).unwrap();
@@ -1477,6 +516,28 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn export_destinations_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let destination = outside.path().join("destination.txt");
+        let target = outside.path().join("target.txt");
+        std::fs::write(&target, "keep").unwrap();
+        symlink(&target, &destination).unwrap();
+        assert!(write_exported_deliverable(&destination, b"replace").is_err());
+        assert!(!destination_matches(
+            &destination,
+            7,
+            Sha256::digest(b"replace").into()
+        ));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+    }
+
+    /// The renderer names an output by opaque identity only: a request that
+    /// tries to smuggle a host path in is rejected outright, and the receipt
+    /// that comes back names no destination.
     #[test]
     fn requests_and_export_results_are_renderer_safe() {
         assert!(
@@ -1507,52 +568,6 @@ mod tests {
             ["operationId", "outputId", "reason", "revisionId", "status"]
         );
         for forbidden in ["path", "destination", "content", "sha256", "chatId"] {
-            assert!(!serialized.to_string().contains(forbidden));
-        }
-    }
-
-    /// The version-history rows cross the renderer boundary with exactly the
-    /// display fields and nothing that names host state.
-    #[test]
-    fn revision_history_rows_are_renderer_safe() {
-        assert!(
-            serde_json::from_value::<OutputRevisionRequest>(serde_json::json!({
-                "chatId": Uuid::new_v4(),
-                "outputId": OutputId::new(),
-                "revisionId": OutputRevisionId::new(),
-                "path": "/tmp/private"
-            }))
-            .is_err()
-        );
-        let catalog = OutputRevisionsCatalog {
-            output_id: OutputId::new(),
-            revisions: vec![OutputRevisionInfo {
-                revision_id: OutputRevisionId::new(),
-                ordinal: 2,
-                size_bytes: 900,
-                created_at: "2026-07-30T00:00:00+00:00".into(),
-                produced_by: "user",
-                is_current: true,
-            }],
-        };
-        let serialized = serde_json::to_value(&catalog).unwrap();
-        assert_eq!(
-            serialized["revisions"][0]
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
-            [
-                "createdAt",
-                "isCurrent",
-                "ordinal",
-                "producedBy",
-                "revisionId",
-                "sizeBytes"
-            ]
-        );
-        for forbidden in ["path", "sha256", "chatId", "turnId", "runId"] {
             assert!(!serialized.to_string().contains(forbidden));
         }
     }

@@ -25,7 +25,6 @@ mod deliverables;
 mod documents;
 mod host_access;
 mod image_attachments;
-mod media_type;
 mod node_install;
 mod office_install;
 mod office_pdf;
@@ -307,16 +306,7 @@ pub fn run() {
             attachments::attach_dropped_chat_files,
             image_attachments::publish_chat_image,
             documents::export_library_document,
-            deliverables::list_deliverables,
-            deliverables::read_deliverable,
-            deliverables::read_deliverable_file,
             deliverables::export_deliverable,
-            deliverables::restore_output,
-            deliverables::list_output_revisions,
-            deliverables::read_output_revision,
-            deliverables::restore_output_revision,
-            deliverables::save_output_revision,
-            deliverables::delete_output,
             chat_debug::copy_chat_debug_bundle,
             chat_debug::save_chat_debug_bundle,
             office_pdf::convert_presentation_to_pdf,
