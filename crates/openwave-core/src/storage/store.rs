@@ -2490,6 +2490,17 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// [`Store::list_pending_chat_prompts`] restricted to conversations that
+    /// belong to `owner`. A cross-chat read, so it is owner-scoped like the
+    /// inbox it projects the same parked rows for.
+    async fn list_pending_chat_prompts_scoped(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<PendingChatPrompt>> {
+        let _ = owner;
+        self.list_pending_chat_prompts().await
+    }
+
     /// Every item waiting on `owner`, across their conversations, oldest first.
     ///
     /// A read model over the same parked rows the per-chat recovery routes
