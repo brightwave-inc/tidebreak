@@ -526,7 +526,12 @@ image_attachments?: Array<TranscriptImageAttachment>,
  * Files submitted with this user message. Their bytes remain behind the
  * existing chat-scoped document endpoints.
  */
-file_attachments?: Array<TranscriptFileAttachment>, };
+file_attachments?: Array<TranscriptFileAttachment>, 
+/**
+ * Skills this user message explicitly invoked, in submitted order. Absent
+ * for the ordinary message that invoked none.
+ */
+invoked_skills?: Array<string>, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.

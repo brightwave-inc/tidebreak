@@ -28,7 +28,7 @@ mod client_wait;
 mod multi_agent_run_wait;
 mod resolution;
 mod sandbox_spawn;
-mod steer;
+pub(in crate::db) mod steer;
 
 pub(in crate::db) use client_wait::{
     advance_turn_after_client_resolution_on, park_turn_for_client_tool_call,
