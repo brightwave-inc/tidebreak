@@ -36,8 +36,8 @@ use super::config::{
     sandbox_system_prompt, SandboxAgentRunWorkerOutcome, SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
 };
 use super::model_step::{
-    complete_sandbox_task, delegated_file_admission_matches, sandbox_request, sandbox_row_budget,
-    SandboxCompletion, SandboxToolCallDisposition, SandboxToolCallIntent,
+    complete_sandbox_task, delegated_file_admission_matches, sandbox_request, SandboxCompletion,
+    SandboxToolCallDisposition, SandboxToolCallIntent,
 };
 
 #[derive(Default)]
@@ -1325,7 +1325,8 @@ async fn cancellation_fence_prevents_a_stale_worker_from_parking_web_search() {
                     arguments: serde_json::json!({"query":"OpenWave"}),
                     disposition: SandboxToolCallDisposition::Execute,
                 }],
-                &sandbox_row_budget(&[]),
+                0,
+                100,
                 "",
             )
             .await
@@ -2881,98 +2882,6 @@ async fn a_sandbox_run_keeps_a_plan_and_is_reminded_once_before_it_finishes() {
     );
 }
 
-/// Plan bookkeeping has its own allowance and cannot starve the work the task
-/// is for.
-///
-/// The failure this pins is the one the shared budget would cause: a run told
-/// to keep its checklist current spends rows on it, and if those rows came out
-/// of the same 16 the commands and searches use, the run would run out of
-/// budget describing work it never got to do. At the plan cap only the plan
-/// tool goes away — everything else is still offered — and the durable store
-/// has to agree, or one of these parks would come back a conflict.
-#[tokio::test]
-async fn plan_rows_have_their_own_cap_and_leave_the_work_budget_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let chat = sandbox_chat();
-    store.create_chat(&chat).await.unwrap();
-    let provider = Arc::new(TaskPlanThenDoneProvider::with_plan_calls(
-        openwave_core::MAX_SANDBOX_TASK_PLAN_CALLS,
-    ));
-    let worker = SandboxAgentRunWorker::new(
-        store.clone(),
-        test_secrets(),
-        Arc::new(FixedResolver(provider.clone())),
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
-        Arc::new(EventBus::default()),
-        AgentConfig {
-            model: "sandbox-model".into(),
-            // Generous, so the step budget is never what withdraws a tool here.
-            max_steps: 64,
-            ..AgentConfig::default()
-        },
-        None,
-        SandboxAgentRunWorkerConfig::default(),
-    );
-    let plans = crate::sandbox_task_plan_worker::SandboxTaskPlanWorker::new(
-        store.clone(),
-        Arc::new(Notify::new()),
-        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerConfig::default(),
-    );
-    let spawn = CallId::new();
-    let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
-    admit_sandbox(&store, chat.id, spawn, "Research this.").await;
-
-    for _ in 0..openwave_core::MAX_SANDBOX_TASK_PLAN_CALLS {
-        assert!(matches!(
-            worker.run_once().await.unwrap(),
-            SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
-        ));
-        assert!(matches!(
-            plans.run_once().await.unwrap(),
-            crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerOutcome::Resolved(_)
-        ));
-    }
-    let calls = store
-        .list_sandbox_tool_calls_for_agent_run(id)
-        .await
-        .unwrap();
-    assert_eq!(calls.len(), openwave_core::MAX_SANDBOX_TASK_PLAN_CALLS);
-
-    // The plan is spent; the task's own tools are untouched.
-    let spent = sandbox_request(
-        &AgentConfig {
-            model: "m".into(),
-            max_steps: 64,
-            ..AgentConfig::default()
-        },
-        "task".into(),
-        &calls,
-        &*store,
-        false,
-    )
-    .await
-    .unwrap();
-    let offered: Vec<&str> = spent.tools.iter().map(|tool| tool.name.as_str()).collect();
-    assert_eq!(
-        offered,
-        vec![
-            SANDBOX_EXEC_TOOL,
-            openwave_core::SANDBOX_WEB_SEARCH_TOOL,
-            openwave_core::SANDBOX_DONE_TOOL,
-            openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
-        ]
-    );
-}
-
 /// A run one model step from its ceiling submits instead of being reminded.
 ///
 /// The reminder parks a row the next completion has to read, so it can only be
@@ -3045,17 +2954,18 @@ async fn a_run_at_its_last_step_submits_rather_than_being_reminded() {
     );
 }
 
-/// Spend a run's whole work budget on finished search rows.
+/// Spend a run's steps up to the point its cadence withdraws the parking tools.
 ///
 /// The rows are written directly rather than driven through the worker: what
-/// is under test is the step *after* the budget is gone, and sixteen real
+/// is under test is the step *after* the cadence is spent, and driving real
 /// model steps would only add the time it takes to reach it.
-async fn spend_the_work_budget(
+async fn spend_the_cadence(
     store: &Arc<dyn Store>,
     id: openwave_core::AgentRunId,
     chat_id: ChatId,
+    steps: usize,
 ) {
-    for step in 0..openwave_core::MAX_SANDBOX_TOOL_CALLS {
+    for step in 0..steps {
         let worker_lease = uuid::Uuid::new_v4();
         assert_eq!(
             store
@@ -3104,18 +3014,18 @@ async fn spend_the_work_budget(
     }
 }
 
-/// A run that calls a tool after its budget is gone is answered, not killed.
+/// A run that calls a tool after its cadence is spent is answered, not killed.
 ///
-/// This is the production failure the reserve exists for. Three background
-/// runs spent all sixteen work rows producing documents, called a work tool
+/// This is the production failure the grace steps exist for. Three background
+/// runs spent their whole tool budget producing documents, called a work tool
 /// once more after it had been withdrawn from the request, and were failed
 /// outright — then retried to their attempt ceiling, each retry replaying the
 /// identical transcript into the identical wall, and the finished work was
 /// discarded.
 ///
-/// The budget is still a hard bound: the call does not run. What changes is
-/// that the refusal is a receipt the model can read, written into the row each
-/// budget keeps back for it, and the run gets the step it needs to hand over
+/// The cadence is still where work stops: the call does not run. What changes
+/// is that the refusal is a receipt the model can read, parked in one of the
+/// grace steps kept for it, and the run gets the step it needs to hand over
 /// what it already produced.
 #[tokio::test]
 async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_the_run() {
@@ -3140,8 +3050,7 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
         Arc::new(EventBus::default()),
         AgentConfig {
             model: "sandbox-model".into(),
-            // Generous, so the row budget is the only thing under test.
-            max_steps: 64,
+            max_steps: 8,
             ..AgentConfig::default()
         },
         None,
@@ -3150,7 +3059,10 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
     let spawn = CallId::new();
     let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
     admit_sandbox(&store, chat.id, spawn, "Produce a document.").await;
-    spend_the_work_budget(&store, id, chat.id).await;
+    // Seven of eight steps spent: the next request is the first one whose
+    // parking tools are withdrawn (a checkpoint needs the step that parks it
+    // and the step that consumes it).
+    spend_the_cadence(&store, id, chat.id, 7).await;
 
     // The model searches anyway. That must not kill the run.
     let refused = match worker.run_once().await.unwrap() {
@@ -3200,8 +3112,8 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
         })
         .collect();
     assert!(
-        notice.contains("entire tool budget") && notice.contains("done"),
-        "the exhausted request should say the budget is gone, got {notice:?}"
+        notice.contains("entire step budget") && notice.contains("done"),
+        "the exhausted request should say the cadence is spent, got {notice:?}"
     );
 
     // And the run gets the step it needs to hand over the work it already did.

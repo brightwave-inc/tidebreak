@@ -6,9 +6,8 @@ use sea_orm::{
 
 use crate::agent_tools::{
     sandbox_call_is_parallel_eligible, validate_sandbox_exec_arguments,
-    validate_sandbox_read_delegated_file_arguments, SandboxAgentFileResource,
-    MAX_SANDBOX_TASK_PLAN_CALLS, MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL,
-    SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_TOOL_CALL_REFUSAL_RESERVE,
+    validate_sandbox_read_delegated_file_arguments, SandboxAgentFileResource, SANDBOX_EXEC_TOOL,
+    SANDBOX_READ_DELEGATED_FILE_TOOL,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
@@ -175,43 +174,24 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
     // the worker only regains it once every call in the step resolves. So an
     // unresolved sibling means this park came from a worker running on a stale
     // view, and the chain is bounded because the worker replays all of it on
-    // every claim. The caller truncates an oversized step before it gets here;
-    // this keeps the durable bound regardless of what the caller computed.
+    // every claim.
+    //
+    // That resolution invariant is the only thing enforced here. Policy — how
+    // many steps a run gets before it must check in — is the worker's to
+    // apply; the step guard in request assembly bounds the chain transitively,
+    // because rows cannot accumulate without model steps accumulating.
     let siblings = entities::sandbox_tool_call::Entity::find()
         .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(agent_run_id.0))
         .select_only()
         .column(entities::sandbox_tool_call::Column::Status)
-        .column(entities::sandbox_tool_call::Column::Name)
-        .into_tuple::<(String, String)>()
+        .into_tuple::<String>()
         .all(&transaction)
         .await
         .map_err(store_err)?;
     let all_resolved = siblings
         .iter()
-        .all(|(status, _)| status_from_db(status).is_ok_and(SandboxToolCallStatus::is_terminal));
-    // Two budgets, counted by tool name. Plan bookkeeping is deliberately not
-    // charged to the work budget — a run told to keep its checklist current
-    // would otherwise spend the allowance for the exec and search calls the
-    // task is for — so the durable bound has to know which row is which. The
-    // caller trims an oversized step before it gets here; this keeps both
-    // bounds regardless of what the caller computed.
-    //
-    // Each bound carries [`SANDBOX_TOOL_CALL_REFUSAL_RESERVE`] rows past what
-    // the run may spend on executed calls. Those rows exist so the worker can
-    // answer a call made after a budget ran out; nothing here distinguishes
-    // them, because a rejected row is a row and the caller decides what goes
-    // in it.
-    let plan_row = |name: &str| name == crate::UPDATE_TASK_PLAN_TOOL;
-    let existing_plan_rows = siblings.iter().filter(|(_, name)| plan_row(name)).count();
-    let added_plan_rows = entries
-        .iter()
-        .filter(|entry| plan_row(&entry.call.name))
-        .count();
-    let over_budget = existing_plan_rows.saturating_add(added_plan_rows)
-        > MAX_SANDBOX_TASK_PLAN_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE)
-        || (siblings.len() - existing_plan_rows).saturating_add(entries.len() - added_plan_rows)
-            > MAX_SANDBOX_TOOL_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE);
-    if !all_resolved || over_budget {
+        .all(|status| status_from_db(status).is_ok_and(SandboxToolCallStatus::is_terminal));
+    if !all_resolved {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::IdentityConflict);
     }
@@ -295,6 +275,16 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_calls(
         .col_expr(
             entities::agent_run::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+        )
+        // A committed checkpoint is proof of progress, so it buys the run
+        // another full window: the deadline is a stall detector, not a total
+        // wall clock, and only a run that makes no durable progress for a
+        // whole window ever crosses it.
+        .col_expr(
+            entities::agent_run::Column::DeadlineAt,
+            sea_orm::sea_query::Expr::value(Some(
+                now + crate::model::AgentRun::DEFAULT_MAX_DURATION,
+            )),
         )
         .col_expr(
             entities::agent_run::Column::UpdatedAt,
@@ -1353,6 +1343,15 @@ where
         .col_expr(
             entities::agent_run::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(now),
+        )
+        // A settled batch is executor-side progress, and a slow tool must not
+        // eat the run's next window: the stall deadline restarts here exactly
+        // as it does when the run itself checkpoints.
+        .col_expr(
+            entities::agent_run::Column::DeadlineAt,
+            sea_orm::sea_query::Expr::value(Some(
+                now + crate::model::AgentRun::DEFAULT_MAX_DURATION,
+            )),
         )
         .col_expr(
             entities::agent_run::Column::UpdatedAt,

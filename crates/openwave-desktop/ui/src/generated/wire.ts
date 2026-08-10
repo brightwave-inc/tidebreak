@@ -2255,6 +2255,17 @@ chat_defaults: StickyChatDefaults,
  */
 max_active_background_agents: number, 
 /**
+ * Model steps a background agent takes before it must check in.
+ *
+ * A cadence, not a cap: reaching it never fails the run — the agent wraps
+ * up with what it has and reports back for direction.
+ */
+sandbox_agent_checkin_steps: number, 
+/**
+ * Consecutive failed tool calls after which a background agent checks in.
+ */
+sandbox_agent_error_checkin: number, 
+/**
  * When and how hard semantic compaction may run.
  */
 compaction: CompactionSettings, 

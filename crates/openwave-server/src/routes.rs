@@ -4,6 +4,8 @@
 //! submodule; other handler clusters live in sibling modules under `routes/`.
 
 pub(crate) const MAX_ACTIVE_BACKGROUND_AGENTS_SETTING: &str = "agents.max_active_background_agents";
+pub(crate) const SANDBOX_AGENT_CHECKIN_STEPS_SETTING: &str = "agents.sandbox_agent_checkin_steps";
+pub(crate) const SANDBOX_AGENT_ERROR_CHECKIN_SETTING: &str = "agents.sandbox_agent_error_checkin";
 pub(crate) const COMPACTION_THRESHOLD_FRACTION_SETTING: &str = "compaction.threshold_fraction";
 pub(crate) const COMPACTION_TARGET_FRACTION_SETTING: &str = "compaction.target_fraction";
 pub(crate) const COMPACTION_MIN_THRESHOLD_TOKENS_SETTING: &str = "compaction.min_threshold_tokens";

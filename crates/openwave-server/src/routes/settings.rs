@@ -36,8 +36,16 @@ use super::{
     COMPACTION_MIN_THRESHOLD_TOKENS_SETTING, COMPACTION_PROTECT_RECENT_MESSAGES_SETTING,
     COMPACTION_TARGET_FRACTION_SETTING, COMPACTION_THRESHOLD_FRACTION_SETTING,
     MAX_ACTIVE_BACKGROUND_AGENTS_SETTING, MODEL_VISIBILITY_OVERRIDES_SETTING,
+    SANDBOX_AGENT_CHECKIN_STEPS_SETTING, SANDBOX_AGENT_ERROR_CHECKIN_SETTING,
     SERVED_BYTES_CONTENT_POLICY,
 };
+
+/// Largest accepted check-in cadence. Steps are the expensive unit — each is a
+/// model completion over the whole replayed chain — so this is "absurd but
+/// finite", not a number anyone should reach.
+const MAX_SANDBOX_AGENT_CHECKIN_STEPS: u32 = 1_000;
+/// Largest accepted consecutive-error threshold before a run checks in.
+const MAX_SANDBOX_AGENT_ERROR_CHECKIN: u32 = 100;
 
 /// Host-tunable chat compaction cadence and retention.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
@@ -104,6 +112,13 @@ pub struct Settings {
     pub chat_defaults: StickyChatDefaults,
     /// Maximum nonterminal spawned agents allowed in one chat.
     pub max_active_background_agents: u32,
+    /// Model steps a background agent takes before it must check in.
+    ///
+    /// A cadence, not a cap: reaching it never fails the run — the agent wraps
+    /// up with what it has and reports back for direction.
+    pub sandbox_agent_checkin_steps: u32,
+    /// Consecutive failed tool calls after which a background agent checks in.
+    pub sandbox_agent_error_checkin: u32,
     /// When and how hard semantic compaction may run.
     #[serde(default)]
     pub compaction: CompactionSettings,
@@ -150,6 +165,10 @@ pub struct SettingsUpdate {
     pub model: Option<Option<String>>,
     #[serde(default)]
     pub max_active_background_agents: Option<u32>,
+    #[serde(default)]
+    pub sandbox_agent_checkin_steps: Option<u32>,
+    #[serde(default)]
+    pub sandbox_agent_error_checkin: Option<u32>,
     #[serde(default)]
     pub compaction: Option<CompactionSettingsUpdate>,
     /// The complete set of per-model visibility deviations to persist.
@@ -232,6 +251,34 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(steps) = body.sandbox_agent_checkin_steps {
+        if steps == 0 || steps > MAX_SANDBOX_AGENT_CHECKIN_STEPS {
+            return Err(ServerError::bad_request(format!(
+                "sandbox_agent_checkin_steps must be in 1..={MAX_SANDBOX_AGENT_CHECKIN_STEPS}"
+            )));
+        }
+        state
+            .store
+            .set_setting(
+                SANDBOX_AGENT_CHECKIN_STEPS_SETTING,
+                &serde_json::json!(steps),
+            )
+            .await?;
+    }
+    if let Some(errors) = body.sandbox_agent_error_checkin {
+        if errors == 0 || errors > MAX_SANDBOX_AGENT_ERROR_CHECKIN {
+            return Err(ServerError::bad_request(format!(
+                "sandbox_agent_error_checkin must be in 1..={MAX_SANDBOX_AGENT_ERROR_CHECKIN}"
+            )));
+        }
+        state
+            .store
+            .set_setting(
+                SANDBOX_AGENT_ERROR_CHECKIN_SETTING,
+                &serde_json::json!(errors),
+            )
+            .await?;
+    }
     if let Some(update) = body.compaction {
         let mut next = read_compaction_settings(&*state.store).await?;
         if let Some(value) = update.threshold_fraction {
@@ -270,6 +317,8 @@ async fn read_settings(state: &AppState) -> Result<Settings, ServerError> {
         has_api_key: has_api_key(&*state.secrets).await,
         chat_defaults: read_sticky_chat_defaults(state).await?,
         max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
+        sandbox_agent_checkin_steps: read_sandbox_agent_checkin_steps(&*state.store).await?,
+        sandbox_agent_error_checkin: read_sandbox_agent_error_checkin(&*state.store).await?,
         compaction: read_compaction_settings(&*state.store).await?,
         model_visibility_overrides: read_model_visibility_overrides(&*state.store).await?,
     })
@@ -322,6 +371,44 @@ pub(crate) async fn read_max_active_background_agents(
         .and_then(|value| serde_json::from_value::<u32>(value).ok())
         .filter(|limit| *limit > 0 && *limit <= AgentRun::MAX_CONCURRENCY_LIMIT)
         .unwrap_or(AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS))
+}
+
+/// The stored check-in cadence, as the number of model steps one background
+/// run may take before it must wrap up and report back.
+pub(crate) async fn read_sandbox_agent_checkin_steps(
+    store: &dyn Store,
+) -> openwave_core::Result<u32> {
+    Ok(read_sandbox_agent_checkin_steps_override(store)
+        .await?
+        .unwrap_or(openwave_core::DEFAULT_SANDBOX_AGENT_CHECKIN_STEPS as u32))
+}
+
+/// The stored cadence only if one was explicitly set.
+///
+/// The sandbox worker distinguishes "no choice recorded" (keep the boot
+/// configuration's step budget) from "the user chose a cadence" (override it),
+/// so the two cannot fight over runs when no setting exists.
+pub(crate) async fn read_sandbox_agent_checkin_steps_override(
+    store: &dyn Store,
+) -> openwave_core::Result<Option<u32>> {
+    Ok(store
+        .get_setting(SANDBOX_AGENT_CHECKIN_STEPS_SETTING)
+        .await?
+        .and_then(|value| serde_json::from_value::<u32>(value).ok())
+        .filter(|steps| *steps > 0 && *steps <= MAX_SANDBOX_AGENT_CHECKIN_STEPS))
+}
+
+/// The stored consecutive tool-error threshold after which a background run
+/// checks in rather than continuing to thrash.
+pub(crate) async fn read_sandbox_agent_error_checkin(
+    store: &dyn Store,
+) -> openwave_core::Result<u32> {
+    Ok(store
+        .get_setting(SANDBOX_AGENT_ERROR_CHECKIN_SETTING)
+        .await?
+        .and_then(|value| serde_json::from_value::<u32>(value).ok())
+        .filter(|errors| *errors > 0 && *errors <= MAX_SANDBOX_AGENT_ERROR_CHECKIN)
+        .unwrap_or(openwave_core::DEFAULT_SANDBOX_AGENT_ERROR_CHECKIN as u32))
 }
 
 /// Absolute floor / ceiling for `min_threshold_tokens`.

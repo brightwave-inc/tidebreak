@@ -9,7 +9,7 @@ import { AgentsPanel } from "./AgentsPanel";
 afterEach(cleanup);
 
 describe("AgentsPanel", () => {
-  it("loads and saves the per-chat active background-agent cap", async () => {
+  it("loads and saves the agent limits and check-in cadences", async () => {
     const settings: RuntimeSettings = {
       model: null,
       has_api_key: false,
@@ -20,6 +20,8 @@ describe("AgentsPanel", () => {
         network_policy: null,
       },
       max_active_background_agents: 5,
+      sandbox_agent_checkin_steps: 100,
+      sandbox_agent_error_checkin: 5,
       compaction: {
         threshold_fraction: 0.75,
         target_fraction: 0.25,
@@ -31,6 +33,8 @@ describe("AgentsPanel", () => {
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,
       max_active_background_agents: 8,
+      sandbox_agent_checkin_steps: 250,
+      sandbox_agent_error_checkin: 3,
     });
     const client = {
       getSettings: vi.fn().mockResolvedValue(settings),
@@ -39,13 +43,19 @@ describe("AgentsPanel", () => {
 
     render(<AgentsPanel client={client} />);
     await screen.findByText("Active background agents per chat");
-    const input = screen.getByRole("spinbutton");
-    expect(input).toHaveValue(5);
-    fireEvent.change(input, { target: { value: "8" } });
+    const [limit, steps, errors] = screen.getAllByRole("spinbutton");
+    expect(limit).toHaveValue(5);
+    expect(steps).toHaveValue(100);
+    expect(errors).toHaveValue(5);
+    fireEvent.change(limit, { target: { value: "8" } });
+    fireEvent.change(steps, { target: { value: "250" } });
+    fireEvent.change(errors, { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() =>
       expect(putSettings).toHaveBeenCalledWith({
         max_active_background_agents: 8,
+        sandbox_agent_checkin_steps: 250,
+        sandbox_agent_error_checkin: 3,
       }),
     );
   });

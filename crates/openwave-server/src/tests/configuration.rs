@@ -61,6 +61,8 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert!(settings["model"].is_null());
     assert_eq!(settings["max_active_background_agents"], 5);
+    assert_eq!(settings["sandbox_agent_checkin_steps"], 100);
+    assert_eq!(settings["sandbox_agent_error_checkin"], 5);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.75);
     assert_eq!(settings["compaction"]["target_fraction"], 0.25);
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 50000);
@@ -79,6 +81,8 @@ async fn settings_default_then_update_roundtrips() {
                     serde_json::json!({
                         "model": "claude-x",
                         "max_active_background_agents": 7,
+                        "sandbox_agent_checkin_steps": 250,
+                        "sandbox_agent_error_checkin": 3,
                         "compaction": {
                             "threshold_fraction": 0.8,
                             "target_fraction": 0.3,
@@ -96,6 +100,8 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
     assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
+    assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
     assert_eq!(settings["compaction"]["target_fraction"], 0.3);
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 40000);
@@ -115,6 +121,8 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
     assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
+    assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
 }

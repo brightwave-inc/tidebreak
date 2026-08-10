@@ -11,12 +11,24 @@ use openwave_core::{
     validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments, AgentConfig,
     AgentError, AgentRun, ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider,
     ProviderEvent, RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus,
-    StopReason, Store, ToolCallRecord, TurnWebSearch, MAX_SANDBOX_TASK_PLAN_CALLS,
-    MAX_SANDBOX_TOOL_CALLS, SANDBOX_EXEC_TOOL, SANDBOX_TOOL_CALL_REFUSAL_RESERVE,
-    UPDATE_TASK_PLAN_TOOL,
+    StopReason, Store, ToolCallRecord, TurnWebSearch, SANDBOX_EXEC_TOOL, UPDATE_TASK_PLAN_TOOL,
 };
 
 use super::config::*;
+
+/// Model steps a run may spend past its cadence answering calls it should not
+/// have made.
+///
+/// Tool advertisement is withdrawn two steps before the cadence ends, but
+/// withdrawal is not a guarantee: a model that has called `exec` on every step
+/// of a long transcript will sometimes call it once more after it disappears.
+/// That call still has to be answered — the transcript is rebuilt from durable
+/// rows, so a call with no row never happened and would be re-made on replay —
+/// and the answer costs a model step like any other. The grace is the room
+/// those refusal steps live in. It is never advertised and nothing in it
+/// executes; by the time it is spent the transcript says twice, in words, that
+/// the run must finish.
+pub(super) const SANDBOX_STEP_REFUSAL_GRACE: usize = 2;
 
 pub(super) fn delegated_file_admission_matches(
     run: &AgentRun,
@@ -67,18 +79,14 @@ pub(super) async fn sandbox_request(
     store: &dyn Store,
     delegated_file_available: bool,
 ) -> Result<ChatRequest> {
-    // Three different budgets ride on this list. Work rows are what the run has
-    // spent of its durable tool allowance; plan rows are the separate, smaller
-    // allowance its own bookkeeping gets; steps are how many model completions
-    // it has already needed. One step can hold several rows, so they diverge.
-    let SandboxRowBudget { work, plan } = sandbox_row_budget(calls);
+    // Steps are the one budget this request rides on: each is one model
+    // completion, and the whole chain is replayed on every claim, so the
+    // cadence bounds context growth and model spend at once. Rows are not
+    // separately bounded — they cannot grow without steps growing.
     let steps = sandbox_call_steps(calls);
-    if work > MAX_SANDBOX_TOOL_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE)
-        || plan > MAX_SANDBOX_TASK_PLAN_CALLS.saturating_add(SANDBOX_TOOL_CALL_REFUSAL_RESERVE)
+    if config.max_steps == 0
+        || steps.len().saturating_add(1) > config.max_steps + SANDBOX_STEP_REFUSAL_GRACE
     {
-        return Err(AgentError::msg("sandbox tool budget exceeded"));
-    }
-    if config.max_steps == 0 || steps.len().saturating_add(1) > config.max_steps {
         return Err(AgentError::msg("sandbox model-step budget exceeded"));
     }
     let mut messages = vec![ChatMessage::text(Role::User, task)];
@@ -122,12 +130,12 @@ pub(super) async fn sandbox_request(
             reasoning: MessageReasoning::default(),
         });
     }
-    // A tool that runs out of budget simply stops being offered, and a model
+    // A tool that runs out of cadence simply stops being offered, and a model
     // reading a transcript where it used that tool on every step reads the
     // absence as an oversight rather than a rule — then calls it anyway. Say
-    // it in words instead. The notice is derived from the run's own row counts,
+    // it in words instead. The notice is derived from the run's own step count,
     // so a replayed claim rebuilds the identical request.
-    if let Some(notice) = budget_notice(config, work, plan) {
+    if let Some(notice) = cadence_notice(config, steps.len()) {
         if let Some(last) = messages.last_mut() {
             last.content.push(ContentBlock::Text { text: notice });
         }
@@ -144,12 +152,9 @@ pub(super) async fn sandbox_request(
         messages,
         // A checkpoint costs one model completion now and one more to consume
         // its receipt, so anything that parks is advertised only while the
-        // remaining step budget can pay for both — never advertise work the
-        // budget cannot consume. Each row budget then withdraws its own tools
-        // independently: a run that has spent its work allowance can still
-        // record what it managed to do, and a run that has spent its plan
-        // allowance keeps every tool the task is actually for.
-        tools: sandbox_tools(config, steps.len(), work, plan, delegated_file_available),
+        // remaining cadence can pay for both — never advertise work the run
+        // cannot consume.
+        tools: sandbox_tools(config, steps.len(), delegated_file_available),
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         reasoning_effort: config.reasoning_effort,
@@ -168,56 +173,24 @@ pub(super) async fn sandbox_request(
     })
 }
 
-/// What a run has spent of each durable row allowance.
-///
-/// `update_task_plan` rows are counted apart from the rest deliberately. The
-/// run is told to keep its plan current as steps finish, so charging that to
-/// the work budget would let bookkeeping starve the exec and search calls the
-/// delegated task is actually for. The separate cap still bounds a model that
-/// does nothing but rewrite its checklist. The durable store enforces the same
-/// split, so the two cannot disagree about what a run has left.
-pub(super) struct SandboxRowBudget {
-    pub(super) work: usize,
-    pub(super) plan: usize,
-}
-
-pub(super) fn sandbox_row_budget(calls: &[SandboxToolCall]) -> SandboxRowBudget {
-    let plan = calls
-        .iter()
-        .filter(|call| call.name == UPDATE_TASK_PLAN_TOOL)
-        .count();
-    SandboxRowBudget {
-        work: calls.len() - plan,
-        plan,
-    }
-}
-
 /// What to tell a run whose tools have started disappearing under it.
 ///
-/// Withdrawing a tool is how a budget is enforced, but it is not how a budget
-/// is communicated: nothing in the request says a tool used to be there. This
-/// is the sentence that says so, and it names `done` explicitly because the
-/// only useful move left is to submit what the run already has.
+/// Withdrawing a tool is how the cadence is enforced, but it is not how the
+/// cadence is communicated: nothing in the request says a tool used to be
+/// there. This is the sentence that says so, and it names `done` explicitly
+/// because the only useful move left is to submit what the run already has.
 ///
 /// A run whose model has no tools at all is not told anything — it has no move
 /// to make, and the step budget ends it.
-fn budget_notice(config: &AgentConfig, work_rows: usize, plan_rows: usize) -> Option<String> {
+fn cadence_notice(config: &AgentConfig, steps: usize) -> Option<String> {
     if !config.tools_supported {
         return None;
     }
-    let work_spent = work_rows >= MAX_SANDBOX_TOOL_CALLS;
-    let plan_spent = plan_rows >= MAX_SANDBOX_TASK_PLAN_CALLS;
-    if work_spent {
+    if steps.saturating_add(2) > config.max_steps {
         Some(
-            "You have used this task's entire tool budget. exec and search are no longer \
+            "You have used this task's entire step budget. exec and search are no longer \
              available and calling them will not run anything. Finish now: call done with the \
              filenames you wrote under output/ and a short summary of what you produced."
-                .to_owned(),
-        )
-    } else if plan_spent {
-        Some(
-            "You have used this task's entire update_task_plan budget, so that tool is no longer \
-             available. Your other tools are unaffected — keep working and finish with done."
                 .to_owned(),
         )
     } else {
@@ -229,8 +202,6 @@ fn budget_notice(config: &AgentConfig, work_rows: usize, plan_rows: usize) -> Op
 fn sandbox_tools(
     config: &AgentConfig,
     steps: usize,
-    work_rows: usize,
-    plan_rows: usize,
     delegated_file_available: bool,
 ) -> Vec<openwave_core::ToolSpec> {
     if !config.tools_supported {
@@ -240,10 +211,8 @@ fn sandbox_tools(
         return Vec::new();
     }
     let can_checkpoint = steps.saturating_add(2) <= config.max_steps;
-    let work_available = can_checkpoint && work_rows < MAX_SANDBOX_TOOL_CALLS;
-    let plan_available = can_checkpoint && plan_rows < MAX_SANDBOX_TASK_PLAN_CALLS;
     let mut tools = Vec::new();
-    if work_available {
+    if can_checkpoint {
         tools.push(sandbox_exec_tool_spec());
         // The host tool and the provider's own search are one capability with
         // one name, so the host one is advertised for exactly the runs the host
@@ -252,8 +221,6 @@ fn sandbox_tools(
         if config.web_search == TurnWebSearch::Host {
             tools.push(sandbox_web_search_tool_spec());
         }
-    }
-    if plan_available {
         tools.push(sandbox_update_task_plan_tool_spec());
     }
     // Both of these terminate the run in place of a final answer, so they need
@@ -262,7 +229,7 @@ fn sandbox_tools(
     // to hand them over.
     tools.push(sandbox_done_tool_spec());
     tools.push(sandbox_folder_access_proposal_tool_spec());
-    if work_available && delegated_file_available {
+    if can_checkpoint && delegated_file_available {
         tools.push(sandbox_read_delegated_file_tool_spec());
     }
     tools
