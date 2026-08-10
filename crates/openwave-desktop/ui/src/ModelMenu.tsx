@@ -21,6 +21,7 @@ import {
   providerLabel,
 } from "./ModelSelection";
 import { isModelVisible, type ModelVisibilityOverrides } from "./modelVisibility";
+import { useManagedPolicy } from "./managedPolicy";
 import { useUiStore } from "./UiStore";
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "./ProviderIcons";
@@ -155,12 +156,17 @@ export function visibleModelGroups(
  * it undiscoverable.
  *
  * The gateway is left out: what it serves is policy, not a key the reader can
- * paste in, so a setup CTA would point at nothing they can do.
+ * paste in, so a setup CTA would point at nothing they can do. A managed
+ * profile drops every row for the same reason — the server refuses each
+ * provider credential write, so setting one up is not something the reader can
+ * do there either.
  */
 export function notConnectedProviders(
   models: readonly ModelInfo[],
   providers: readonly ProviderInfo[],
+  managed: boolean = false,
 ): { provider: ProviderKind; modelCount: number }[] {
+  if (managed) return [];
   const status = new Map(providers.map((info) => [info.kind, info]));
   return groupByProvider(models)
     .filter((group) => {
@@ -326,12 +332,13 @@ export function ModelMenu({
   onChange: (key: ModelSelectionKey | null) => void | Promise<void>;
 }) {
   const known = modelForSelection(models, value);
+  const { managed } = useManagedPolicy();
   const canonical = canonicalModelSelection(models, value);
   const isDefault = value === null;
   const resolvedDefault = modelForSelection(models, defaultKey);
   const anyAvailable = models.some((model) => model.available);
   const groups = visibleModelGroups(models, canonical, visibilityOverrides);
-  const unconfigured = notConnectedProviders(models, providers);
+  const unconfigured = notConnectedProviders(models, providers, managed);
   const hiddenCount = hiddenModelCount(models, canonical, visibilityOverrides);
   const notConnectedCollapsed = useUiStore(
     (state) => state.modelMenuNotConnectedCollapsed,
@@ -423,7 +430,9 @@ export function ModelMenu({
             <div>
               <DropdownMenuSeparator />
               <p className="text-muted-foreground px-2 py-2 text-sm">
-                Configure a provider in Settings to choose a model.
+                {managed
+                  ? "Models are provided by your organization's gateway. None are available yet — contact your administrator."
+                  : "Configure a provider in Settings to choose a model."}
               </p>
             </div>
           )}
