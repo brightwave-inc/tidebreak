@@ -76,8 +76,22 @@ pub(crate) fn static_headers(
 /// Exposed so configuration layers can reject an invalid URL before accepting
 /// a definition, with the same rules the transport applies.
 pub fn validate_http_url(url: &str) -> Result<()> {
+    validate_http_url_with_credentials(url, false)
+}
+
+/// Validate an MCP HTTP endpoint with its credential posture.
+///
+/// Cleartext HTTP is accepted only without credentials, or when the URL names
+/// a literal loopback address. A hostname such as `localhost` is not sufficient
+/// evidence here: static bearer/configured headers must not depend on ambient
+/// DNS or hosts-file configuration to remain on-machine.
+pub fn validate_http_url_with_credentials(url: &str, has_credentials: bool) -> Result<()> {
     let parsed =
         reqwest::Url::parse(url).map_err(|_| mcp_message("external server URL is invalid"))?;
+    validate_parsed_http_url(&parsed, has_credentials)
+}
+
+fn validate_parsed_http_url(parsed: &reqwest::Url, has_credentials: bool) -> Result<()> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(mcp_message("external server URL must use http or https"));
     }
@@ -89,7 +103,23 @@ pub fn validate_http_url(url: &str) -> Result<()> {
     if parsed.host_str().is_none() {
         return Err(mcp_message("external server URL must name a host"));
     }
+    if has_credentials && parsed.scheme() == "http" && !is_literal_loopback(parsed) {
+        return Err(mcp_message(
+            "credentialed external server URLs must use https unless they name a literal loopback address",
+        ));
+    }
     Ok(())
+}
+
+fn is_literal_loopback(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .map(|host| {
+            host.strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host)
+        })
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback())
 }
 
 impl HttpWire {
@@ -98,9 +128,9 @@ impl HttpWire {
         bearer_token: Option<&str>,
         configured: reqwest::header::HeaderMap,
     ) -> Result<Self> {
-        validate_http_url(url)?;
         let url =
             reqwest::Url::parse(url).map_err(|_| mcp_message("external server URL is invalid"))?;
+        validate_parsed_http_url(&url, bearer_token.is_some() || !configured.is_empty())?;
         if bearer_token.is_some_and(|token| {
             token.is_empty() || token.bytes().any(|byte| byte.is_ascii_control())
         }) {
@@ -200,6 +230,10 @@ impl HttpWire {
             }
             None => self.authorization.clone(),
         };
+        validate_parsed_http_url(
+            &self.url,
+            authorization.is_some() || !self.configured.is_empty(),
+        )?;
         // One map, built configured-first and then overwritten by every
         // client-generated header, so a configured entry can never displace
         // what this transport says about itself — whatever the builder's
@@ -433,6 +467,7 @@ mod tests {
     #[test]
     fn url_validation_rejects_unsupported_shapes() {
         assert!(validate_http_url("http://127.0.0.1:9000/mcp").is_ok());
+        assert!(validate_http_url("http://remote.example/mcp").is_ok());
         assert!(validate_http_url("https://gateway.example/mcp/tools").is_ok());
         for url in [
             "ftp://host/mcp",
@@ -442,6 +477,59 @@ mod tests {
         ] {
             assert!(validate_http_url(url).is_err(), "{url} must be rejected");
         }
+    }
+
+    #[test]
+    fn credentialed_http_requires_a_literal_loopback_address() {
+        for url in [
+            "http://127.0.0.1:9000/mcp",
+            "http://127.27.4.9/mcp",
+            "http://[::1]:9000/mcp",
+            "https://gateway.example/mcp",
+        ] {
+            assert!(
+                validate_http_url_with_credentials(url, true).is_ok(),
+                "{url} should be accepted"
+            );
+        }
+        for url in [
+            "http://gateway.example/mcp",
+            "http://192.0.2.10/mcp",
+            "http://localhost:9000/mcp",
+        ] {
+            assert!(
+                validate_http_url_with_credentials(url, true).is_err(),
+                "{url} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_rejects_remote_cleartext_credentials() {
+        assert!(HttpWire::with_headers(
+            "http://gateway.example/mcp",
+            Some("secret"),
+            HeaderMap::new(),
+        )
+        .is_err());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_static("secret"),
+        );
+        assert!(HttpWire::with_headers("http://gateway.example/mcp", None, headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_bearer_rejects_an_otherwise_uncredentialed_remote_http_url() {
+        let wire =
+            HttpWire::with_headers("http://gateway.example/mcp", None, HeaderMap::new()).unwrap();
+        let error = wire
+            .post(&serde_json::json!({}), Some("dynamic-secret"))
+            .await
+            .expect_err("dynamic credentials must not cross remote cleartext HTTP");
+        assert!(error.to_string().contains("must use https"), "{error}");
     }
 
     #[test]

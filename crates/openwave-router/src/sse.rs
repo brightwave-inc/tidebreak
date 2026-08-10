@@ -16,6 +16,28 @@ use futures::{Stream, StreamExt};
 /// client-visible failure.
 pub const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 8 * 1024;
 
+/// Largest one provider SSE frame retained before normalization.
+///
+/// Provider frames are untrusted successful-response bytes. A missing blank-line
+/// delimiter must not turn the residual buffer into an unbounded allocation,
+/// and a delimited frame receives the same ceiling before UTF-8 decoding and
+/// JSON parsing. One MiB leaves ample room for ordinary provider events while
+/// staying well below the larger durable turn payload limits.
+pub const MAX_PROVIDER_SSE_FRAME_BYTES: usize = 1024 * 1024;
+
+/// A provider SSE frame or unterminated residual exceeded the fixed ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SseFrameTooLarge;
+
+impl std::fmt::Display for SseFrameTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "stream frame exceeds the {MAX_PROVIDER_SSE_FRAME_BYTES}-byte limit"
+        )
+    }
+}
+
 /// Consume at most [`MAX_PROVIDER_ERROR_BODY_BYTES`] from an HTTP byte stream.
 ///
 /// The caller drops the remaining response stream after this returns. Invalid
@@ -42,12 +64,17 @@ where
     String::from_utf8_lossy(&body).into_owned()
 }
 
-/// Naive byte-substring search.
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
+fn find_frame_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
+    for index in 0..buffer.len() {
+        let remaining = &buffer[index..];
+        if remaining.starts_with(b"\n\n") {
+            return Some((index, 2));
+        }
+        if remaining.starts_with(b"\r\n\r\n") {
+            return Some((index, 4));
+        }
     }
-    haystack.windows(needle.len()).position(|w| w == needle)
+    None
 }
 
 /// Drain all complete SSE frames from `buffer`, returning each frame's decoded
@@ -58,25 +85,93 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// network chunks is never decoded until all its bytes have arrived.
 pub fn drain_frames(buffer: &mut Vec<u8>) -> Vec<String> {
     let mut frames = Vec::new();
+    let mut frame_start = 0;
     loop {
-        let lf = find_subslice(buffer, b"\n\n");
-        let crlf = find_subslice(buffer, b"\r\n\r\n");
-        let (content_end, consume_to) = match (lf, crlf) {
-            (Some(i), Some(j)) => {
-                if i <= j {
-                    (i, i + 2)
-                } else {
-                    (j, j + 4)
-                }
-            }
-            (Some(i), None) => (i, i + 2),
-            (None, Some(j)) => (j, j + 4),
-            (None, None) => break,
+        let remaining = &buffer[frame_start..];
+        let Some((content_end, delimiter_len)) = find_frame_delimiter(remaining) else {
+            break;
         };
-        frames.push(String::from_utf8_lossy(&buffer[..content_end]).into_owned());
-        buffer.drain(..consume_to);
+        frames.push(String::from_utf8_lossy(&remaining[..content_end]).into_owned());
+        frame_start += content_end + delimiter_len;
+    }
+    if frame_start != 0 {
+        buffer.drain(..frame_start);
     }
     frames
+}
+
+fn residual_fits_frame_limit(buffer: &[u8]) -> bool {
+    if buffer.len() <= MAX_PROVIDER_SSE_FRAME_BYTES {
+        return true;
+    }
+    matches!(
+        &buffer[MAX_PROVIDER_SSE_FRAME_BYTES..],
+        b"\n" | b"\r" | b"\r\n" | b"\r\n\r"
+    )
+}
+
+/// Append one network chunk without allowing either a complete frame or the
+/// incomplete residual to grow beyond [`MAX_PROVIDER_SSE_FRAME_BYTES`].
+///
+/// The chunk is admitted in bounded slices, draining complete frames between
+/// slices. This matters because one HTTP body chunk can itself be much larger
+/// than the frame ceiling; extending the residual with the whole chunk before
+/// checking would merely move the unbounded allocation one layer earlier.
+pub fn push_frames(
+    buffer: &mut Vec<u8>,
+    mut chunk: &[u8],
+) -> Result<Vec<String>, SseFrameTooLarge> {
+    const MAX_PARTIAL_DELIMITER_BYTES: usize = 3;
+
+    let mut frames = Vec::new();
+    while !chunk.is_empty() {
+        let hard_buffer_limit = MAX_PROVIDER_SSE_FRAME_BYTES + MAX_PARTIAL_DELIMITER_BYTES;
+        let room = hard_buffer_limit.saturating_sub(buffer.len());
+        if room == 0 {
+            // The only valid residual at this length is an exact-size frame
+            // followed by the first three bytes of a CRLF delimiter. Admit
+            // its final newline directly, then drain the now-complete frame.
+            if residual_fits_frame_limit(buffer) && chunk.first() == Some(&b'\n') {
+                buffer.push(b'\n');
+                chunk = &chunk[1..];
+            } else {
+                return Err(SseFrameTooLarge);
+            }
+        } else {
+            let take = room.min(chunk.len());
+            buffer.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
+        }
+
+        for frame in drain_frames(buffer) {
+            if frame.len() > MAX_PROVIDER_SSE_FRAME_BYTES {
+                return Err(SseFrameTooLarge);
+            }
+            frames.push(frame);
+        }
+
+        // Bytes beyond an exact-size frame are admissible only when they are a
+        // partial delimiter. This rejects oversized content immediately rather
+        // than treating any arbitrary three-byte suffix as framing overhead.
+        if !residual_fits_frame_limit(buffer) {
+            return Err(SseFrameTooLarge);
+        }
+    }
+    Ok(frames)
+}
+
+/// Decode an unterminated final SSE frame after applying the same byte ceiling
+/// as [`push_frames`].
+pub fn finish_frame(buffer: &mut Vec<u8>) -> Result<Option<String>, SseFrameTooLarge> {
+    if buffer.is_empty() {
+        return Ok(None);
+    }
+    if buffer.len() > MAX_PROVIDER_SSE_FRAME_BYTES {
+        return Err(SseFrameTooLarge);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(std::mem::take(buffer).as_slice()).into_owned(),
+    ))
 }
 
 /// Extract the concatenated `data:` payload from one SSE frame.
@@ -458,6 +553,71 @@ mod tests {
         let frames = drain_frames(&mut buf);
         assert_eq!(frames.len(), 1);
         assert_eq!(frame_data(&frames[0]).unwrap()["t"], "café");
+    }
+
+    #[test]
+    fn bounded_push_accepts_many_frames_in_one_large_chunk() {
+        let frame = b"data: {\"ok\":true}\n\n";
+        let repetitions = MAX_PROVIDER_SSE_FRAME_BYTES / frame.len() + 2;
+        let chunk = frame.repeat(repetitions);
+        let mut buffer = Vec::new();
+        let frames = push_frames(&mut buffer, &chunk).unwrap();
+        assert_eq!(frames.len(), repetitions);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn bounded_push_rejects_an_oversized_delimited_frame() {
+        let mut chunk = vec![b'x'; MAX_PROVIDER_SSE_FRAME_BYTES + 1];
+        chunk.extend_from_slice(b"\n\n");
+        let mut buffer = Vec::new();
+        assert_eq!(push_frames(&mut buffer, &chunk), Err(SseFrameTooLarge));
+        assert!(buffer.len() <= MAX_PROVIDER_SSE_FRAME_BYTES + 3);
+    }
+
+    #[test]
+    fn bounded_push_rejects_an_oversized_unterminated_residual() {
+        let chunk = vec![b'x'; MAX_PROVIDER_SSE_FRAME_BYTES + 4];
+        let mut buffer = Vec::new();
+        assert_eq!(push_frames(&mut buffer, &chunk), Err(SseFrameTooLarge));
+        assert!(buffer.len() <= MAX_PROVIDER_SSE_FRAME_BYTES + 3);
+    }
+
+    #[test]
+    fn exact_size_frames_accept_split_lf_and_crlf_delimiters() {
+        for delimiter in [b"\n\n".as_slice(), b"\r\n\r\n".as_slice()] {
+            let mut buffer = vec![b'x'; MAX_PROVIDER_SSE_FRAME_BYTES];
+            for (index, byte) in delimiter.iter().enumerate() {
+                let frames = push_frames(&mut buffer, std::slice::from_ref(byte)).unwrap();
+                if index + 1 == delimiter.len() {
+                    assert_eq!(frames, vec!["x".repeat(MAX_PROVIDER_SSE_FRAME_BYTES)]);
+                } else {
+                    assert!(frames.is_empty());
+                }
+            }
+            assert!(buffer.is_empty());
+        }
+    }
+
+    #[test]
+    fn delimiter_does_not_excuse_oversized_frame_content() {
+        let mut chunk = vec![b'x'; MAX_PROVIDER_SSE_FRAME_BYTES + 1];
+        chunk.extend_from_slice(b"\r\n\r\n");
+        let mut buffer = Vec::new();
+        assert_eq!(push_frames(&mut buffer, &chunk), Err(SseFrameTooLarge));
+    }
+
+    #[test]
+    fn final_frame_obeys_the_same_ceiling() {
+        let mut exact = vec![b'x'; MAX_PROVIDER_SSE_FRAME_BYTES];
+        assert_eq!(
+            finish_frame(&mut exact).unwrap().unwrap().len(),
+            MAX_PROVIDER_SSE_FRAME_BYTES
+        );
+        assert!(exact.is_empty());
+
+        let mut oversized = vec![b'x'; MAX_PROVIDER_SSE_FRAME_BYTES + 1];
+        assert_eq!(finish_frame(&mut oversized), Err(SseFrameTooLarge));
     }
 
     #[test]

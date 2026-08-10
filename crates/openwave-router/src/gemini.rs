@@ -29,8 +29,8 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
     classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
-    classify_provider_error_redacting, drain_frames, frame_data_raw, read_bounded_error_body,
-    safe_http_error, safe_http_error_redacting,
+    classify_provider_error_redacting, finish_frame, frame_data_raw, push_frames,
+    read_bounded_error_body, safe_http_error, safe_http_error_redacting,
 };
 use crate::BearerTokenSource;
 
@@ -336,8 +336,16 @@ impl ModelProvider for GeminiProvider {
                         return;
                     }
                 };
-                buffer.extend_from_slice(&chunk);
-                for frame in drain_frames(&mut buffer) {
+                let frames = match push_frames(&mut buffer, &chunk) {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        yield ProviderEvent::Failed {
+                            error: ProviderErrorInfo::provider(format!("{provider} {error}")),
+                        };
+                        return;
+                    }
+                };
+                for frame in frames {
                     let Some(data) = frame_data_raw(&frame) else {
                         continue;
                     };
@@ -360,8 +368,16 @@ impl ModelProvider for GeminiProvider {
                     }
                 }
             }
-            if !buffer.is_empty() {
-                let frame = String::from_utf8_lossy(&buffer).into_owned();
+            let final_frame = match finish_frame(&mut buffer) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    yield ProviderEvent::Failed {
+                        error: ProviderErrorInfo::provider(format!("{provider} {error}")),
+                    };
+                    return;
+                }
+            };
+            if let Some(frame) = final_frame {
                 if let Some(data) = frame_data_raw(&frame) {
                     let data = match serde_json::from_str::<Value>(&data) {
                         Ok(data) => data,
@@ -1410,25 +1426,27 @@ fn emit_usage(state: &mut StreamState, events: &mut Vec<ProviderEvent>) {
 }
 
 fn gemini_usage(metadata: &Value) -> Usage {
-    let prompt = u32_at(metadata, "promptTokenCount");
-    let cached = u32_at(metadata, "cachedContentTokenCount");
+    let prompt = u64_at(metadata, "promptTokenCount");
+    let cached = u64_at(metadata, "cachedContentTokenCount");
     Usage {
         // Gemini's prompt count includes the cached portion.
-        input_tokens: prompt.saturating_sub(cached),
+        input_tokens: saturating_u32(prompt.saturating_sub(cached)),
         // Thoughts are billed output in addition to candidate tokens.
-        output_tokens: u32_at(metadata, "candidatesTokenCount")
-            .saturating_add(u32_at(metadata, "thoughtsTokenCount")),
-        cache_read_input_tokens: cached,
+        output_tokens: saturating_u32(
+            u64_at(metadata, "candidatesTokenCount")
+                .saturating_add(u64_at(metadata, "thoughtsTokenCount")),
+        ),
+        cache_read_input_tokens: saturating_u32(cached),
         cache_creation_input_tokens: 0,
     }
 }
 
-fn u32_at(value: &Value, key: &str) -> u32 {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .min(u64::from(u32::MAX)) as u32
+fn u64_at(value: &Value, key: &str) -> u64 {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn refusal_details(reason: &str) -> RefusalDetails {
@@ -2015,6 +2033,24 @@ mod tests {
                     reason: StopReason::ToolUse
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn usage_counts_subtract_before_saturating() {
+        assert_eq!(
+            gemini_usage(&json!({
+                "promptTokenCount": u64::from(u32::MAX) + 1,
+                "cachedContentTokenCount": 1,
+                "candidatesTokenCount": u64::MAX,
+                "thoughtsTokenCount": 1,
+            })),
+            Usage {
+                input_tokens: u32::MAX,
+                output_tokens: u32::MAX,
+                cache_read_input_tokens: 1,
+                cache_creation_input_tokens: 0,
+            }
         );
     }
 

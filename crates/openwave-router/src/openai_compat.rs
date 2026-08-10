@@ -23,7 +23,7 @@ use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{
-    classify_in_band_error, classify_provider_error, drain_frames, frame_data,
+    classify_in_band_error, classify_provider_error, finish_frame, frame_data, push_frames,
     read_bounded_error_body,
 };
 
@@ -197,8 +197,18 @@ impl ModelProvider for OpenAiCompatProvider {
                         return;
                     }
                 };
-                buffer.extend_from_slice(&chunk);
-                for frame in drain_frames(&mut buffer) {
+                let frames = match push_frames(&mut buffer, &chunk) {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        yield ProviderEvent::Failed {
+                            error: ProviderErrorInfo::provider(format!(
+                                "{} {error}", state.provider_id
+                            )),
+                        };
+                        return;
+                    }
+                };
+                for frame in frames {
                     if let Some(data) = frame_data(&frame) {
                         for event in normalize(&data, &mut state) {
                             yield event;
@@ -206,8 +216,18 @@ impl ModelProvider for OpenAiCompatProvider {
                     }
                 }
             }
-            if !buffer.is_empty() {
-                let frame = String::from_utf8_lossy(&buffer).into_owned();
+            let final_frame = match finish_frame(&mut buffer) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    yield ProviderEvent::Failed {
+                        error: ProviderErrorInfo::provider(format!(
+                            "{} {error}", state.provider_id
+                        )),
+                    };
+                    return;
+                }
+            };
+            if let Some(frame) = final_frame {
                 if let Some(data) = frame_data(&frame) {
                     for event in normalize(&data, &mut state) {
                         yield event;
@@ -654,15 +674,15 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         // either way; if the stream already stopped, this trailing chunk is the
         // only chance to emit it. OpenAI's `prompt_tokens` is the full prompt;
         // cached details are optional.
-        let prompt = u32_at(usage, "prompt_tokens");
+        let prompt = usage_u64_at(usage, "prompt_tokens");
         let cached = usage
             .get("prompt_tokens_details")
-            .map(|d| u32_at(d, "cached_tokens"))
+            .map(|d| usage_u64_at(d, "cached_tokens"))
             .unwrap_or(0);
         state.usage = Usage {
-            input_tokens: prompt.saturating_sub(cached),
-            output_tokens: u32_at(usage, "completion_tokens"),
-            cache_read_input_tokens: cached,
+            input_tokens: saturating_u32(prompt.saturating_sub(cached)),
+            output_tokens: saturating_u32(usage_u64_at(usage, "completion_tokens")),
+            cache_read_input_tokens: saturating_u32(cached),
             cache_creation_input_tokens: 0,
         };
         if state.stopped && state.has_unemitted_usage() {
@@ -700,7 +720,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         }
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for tc in tool_calls {
-                let index = u32_at(tc, "index");
+                let index = match stream_index(tc, state) {
+                    Ok(index) => index,
+                    Err(error) => return vec![ProviderEvent::Failed { error }],
+                };
                 let buf = state.tool_calls.entry(index).or_default();
                 if let Some(id) = tc.get("id").and_then(Value::as_str) {
                     if !id.is_empty() {
@@ -765,8 +788,28 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     events
 }
 
-fn u32_at(value: &Value, key: &str) -> u32 {
-    value.get(key).and_then(Value::as_u64).unwrap_or(0) as u32
+fn usage_u64_at(value: &Value, key: &str) -> u64 {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn stream_index(
+    data: &Value,
+    state: &mut StreamState,
+) -> std::result::Result<u32, ProviderErrorInfo> {
+    let Some(index) = data.get("index").and_then(Value::as_u64) else {
+        return Ok(0);
+    };
+    u32::try_from(index).map_err(|_| {
+        state.terminal = true;
+        ProviderErrorInfo::provider(format!(
+            "{} returned an invalid tool-call index",
+            state.provider_id
+        ))
+    })
 }
 
 fn map_stop_reason(reason: &str) -> StopReason {
@@ -1080,6 +1123,39 @@ mod tests {
             .iter()
             .flat_map(|c| normalize(c, &mut state))
             .collect()
+    }
+
+    #[test]
+    fn usage_counts_saturate_instead_of_wrapping() {
+        let events = run(&[json!({
+            "usage": {
+                "prompt_tokens": u64::from(u32::MAX) + 1,
+                "prompt_tokens_details": {"cached_tokens": 1},
+                "completion_tokens": u64::from(u32::MAX) + 1
+            },
+            "choices": [{"delta": {}, "finish_reason": "stop"}]
+        })]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Usage(Usage {
+                input_tokens: u32::MAX,
+                output_tokens: u32::MAX,
+                cache_read_input_tokens: 1,
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn oversized_tool_call_index_fails_the_stream() {
+        let events = run(&[json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": u64::from(u32::MAX) + 1,
+                "id": "call_1",
+                "function": {"name": "read_file", "arguments": "{}"}
+            }]}}]
+        })]);
+        assert!(matches!(events.as_slice(), [ProviderEvent::Failed { .. }]));
     }
 
     #[test]

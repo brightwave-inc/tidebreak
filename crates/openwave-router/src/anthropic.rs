@@ -24,7 +24,8 @@ use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
     classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
-    classify_provider_error_redacting, drain_frames, frame_data, read_bounded_error_body,
+    classify_provider_error_redacting, finish_frame, frame_data, push_frames,
+    read_bounded_error_body,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -243,8 +244,18 @@ impl ModelProvider for AnthropicProvider {
                             return;
                         }
                     };
-                    buffer.extend_from_slice(&chunk);
-                    for frame in drain_frames(&mut buffer) {
+                    let frames = match push_frames(&mut buffer, &chunk) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            yield ProviderEvent::Failed {
+                                error: ProviderErrorInfo::provider(format!(
+                                    "{provider_name} {error}"
+                                )),
+                            };
+                            return;
+                        }
+                    };
+                    for frame in frames {
                         if let Some(data) = frame_data(&frame) {
                             for event in normalize(&data, &mut state) {
                                 yield event;
@@ -253,8 +264,18 @@ impl ModelProvider for AnthropicProvider {
                     }
                 }
                 // Flush a final frame that wasn't terminated by a blank line.
-                if !buffer.is_empty() {
-                    let frame = String::from_utf8_lossy(&buffer).into_owned();
+                let final_frame = match finish_frame(&mut buffer) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        yield ProviderEvent::Failed {
+                            error: ProviderErrorInfo::provider(format!(
+                                "{provider_name} {error}"
+                            )),
+                        };
+                        return;
+                    }
+                };
+                if let Some(frame) = final_frame {
                     if let Some(data) = frame_data(&frame) {
                         for event in normalize(&data, &mut state) {
                             yield event;
@@ -1151,8 +1172,22 @@ fn end_of_stream(state: &StreamState) -> Option<ProviderEvent> {
     })
 }
 
-fn u32_at(value: &Value, key: &str) -> u32 {
-    value.get(key).and_then(Value::as_u64).unwrap_or(0) as u32
+fn usage_u32_at(value: &Value, key: &str) -> u32 {
+    u32::try_from(value.get(key).and_then(Value::as_u64).unwrap_or(0)).unwrap_or(u32::MAX)
+}
+
+fn stream_index(
+    data: &Value,
+    state: &mut StreamState,
+) -> std::result::Result<u32, ProviderErrorInfo> {
+    let Some(index) = data.get("index").and_then(Value::as_u64) else {
+        return Ok(0);
+    };
+    u32::try_from(index).map_err(|_| {
+        let provider = stream_provider_label(state).to_string();
+        state.terminal = true;
+        ProviderErrorInfo::provider(format!("{provider} returned an invalid stream block index"))
+    })
 }
 
 /// Map one parsed Anthropic stream event into zero or more `ProviderEvent`s.
@@ -1180,14 +1215,18 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         }
         Some("message_start") => {
             if let Some(usage) = data.get("message").and_then(|m| m.get("usage")) {
-                state.input_tokens = u32_at(usage, "input_tokens");
-                state.cache_read_input_tokens = u32_at(usage, "cache_read_input_tokens");
-                state.cache_creation_input_tokens = u32_at(usage, "cache_creation_input_tokens");
+                state.input_tokens = usage_u32_at(usage, "input_tokens");
+                state.cache_read_input_tokens = usage_u32_at(usage, "cache_read_input_tokens");
+                state.cache_creation_input_tokens =
+                    usage_u32_at(usage, "cache_creation_input_tokens");
             }
             Vec::new()
         }
         Some("content_block_start") => {
-            let index = u32_at(data, "index");
+            let index = match stream_index(data, state) {
+                Ok(index) => index,
+                Err(error) => return vec![ProviderEvent::Failed { error }],
+            };
             let block = data.get("content_block");
             // Capture before normalizing: a continuation replays the provider's
             // own blocks, not this adapter's reading of them.
@@ -1295,7 +1334,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             }
         }
         Some("content_block_delta") => {
-            let index = u32_at(data, "index");
+            let index = match stream_index(data, state) {
+                Ok(index) => index,
+                Err(error) => return vec![ProviderEvent::Failed { error }],
+            };
             let delta = match data.get("delta") {
                 Some(delta) => delta,
                 None => return Vec::new(),
@@ -1360,7 +1402,10 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             }
         }
         Some("content_block_stop") => {
-            let index = u32_at(data, "index");
+            let index = match stream_index(data, state) {
+                Ok(index) => index,
+                Err(error) => return vec![ProviderEvent::Failed { error }],
+            };
             state.open_tool_blocks.remove(&index);
             // A closed server tool call has its whole argument JSON; park it
             // under the id its result block will name.
@@ -1377,7 +1422,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
             if let Some(usage) = data.get("usage") {
                 events.push(ProviderEvent::Usage(Usage {
                     input_tokens: state.input_tokens,
-                    output_tokens: u32_at(usage, "output_tokens"),
+                    output_tokens: usage_u32_at(usage, "output_tokens"),
                     cache_read_input_tokens: state.cache_read_input_tokens,
                     cache_creation_input_tokens: state.cache_creation_input_tokens,
                 }));
@@ -1932,6 +1977,39 @@ mod tests {
             .iter()
             .flat_map(|e| normalize(e, &mut state))
             .collect()
+    }
+
+    #[test]
+    fn usage_counts_saturate_instead_of_wrapping() {
+        let events = run(&[
+            json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": u64::from(u32::MAX) + 1}}
+            }),
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": u64::MAX}
+            }),
+        ]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Usage(Usage {
+                input_tokens: u32::MAX,
+                output_tokens: u32::MAX,
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn oversized_structural_index_fails_the_stream() {
+        let events = run(&[json!({
+            "type": "content_block_start",
+            "index": u64::from(u32::MAX) + 1,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"}
+        })]);
+        assert!(matches!(events.as_slice(), [ProviderEvent::Failed { .. }]));
     }
 
     fn search_origin(model: &str) -> ReasoningOrigin {
