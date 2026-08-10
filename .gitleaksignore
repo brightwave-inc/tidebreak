@@ -1,0 +1,6 @@
+# Test fixtures for the debug-export credential scrubber: literal PEM
+# markers around placeholder bodies, asserted to come out `[redacted]`.
+# The fingerprint is pinned to the commit that introduced the fixture;
+# rewriting the file cannot clear it because the secret-scan lane walks
+# the full history.
+92ee76f115a6d8dbe2602151007ca7b188f7606c:crates/openwave-desktop/src/chat_debug.rs:private-key:1620
