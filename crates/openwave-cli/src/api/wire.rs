@@ -596,6 +596,60 @@ pub struct McpServersInfo {
     pub servers: Vec<McpServerInfo>,
 }
 
+/// One row of a conversation's outputs catalog.
+///
+/// The output routes answer in the shape the desktop renderer already
+/// validates, which is why these fields are camelCase where the rest of the
+/// API is not — moving the surface off Tauri was a transport change, not a
+/// payload change.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSummary {
+    pub output_id: openwave_core::OutputId,
+    pub filename: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub revision_count: u32,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputsCatalog {
+    pub deliverables: Vec<OutputSummary>,
+    /// Whether the conversation has more outputs than one answer carries.
+    pub truncated: bool,
+}
+
+/// One output's bounded text preview.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputPreview {
+    pub filename: String,
+    pub media_type: String,
+    pub revision_id: openwave_core::OutputRevisionId,
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// One row of an output's version history.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputRevisionRow {
+    pub revision_id: openwave_core::OutputRevisionId,
+    pub ordinal: u32,
+    pub size_bytes: u64,
+    pub created_at: String,
+    pub produced_by: String,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputRevisions {
+    pub revisions: Vec<OutputRevisionRow>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

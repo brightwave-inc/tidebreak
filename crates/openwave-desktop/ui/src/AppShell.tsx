@@ -22,6 +22,7 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
+import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
@@ -167,6 +168,9 @@ export function AppShell() {
         if (cancelled) return;
         setInfo(server);
         setClient(new ApiClient(server.baseUrl, server.token));
+        // Outputs are read over the same API; their module holds the
+        // connection because they are called from places with no client.
+        connectOutputs(server.baseUrl, server.token);
         setStatus(`connected ${server.baseUrl}`);
       } catch (err) {
         if (!cancelled) setBootError(String(err));

@@ -3,7 +3,9 @@
 
 use std::net::SocketAddr;
 
-use openwave_core::{AgentError, AgentRunId, CallId, ChatId, Result, TurnId};
+use openwave_core::{
+    AgentError, AgentRunId, CallId, ChatId, OutputId, OutputRevisionId, Result, TurnId,
+};
 use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -13,8 +15,8 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
     AgentActivityItem, AgentRunSnapshot, ChatSummary, GrantRung, InboxItem, ModelCatalog,
-    PendingApprovalSnapshot, PendingPlan, PendingQuestions, ProviderInfo, ProvidersList,
-    Transcript,
+    OutputPreview, OutputRevisions, OutputsCatalog, PendingApprovalSnapshot, PendingPlan,
+    PendingQuestions, ProviderInfo, ProvidersList, Transcript,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -610,6 +612,130 @@ impl Client {
         )))
     }
 
+    // ------------------------------------------------------------------
+    // Conversation outputs. The same routes the desktop reads outputs
+    // through; writing the bytes to a path is the caller's job, because only
+    // the caller knows where they should land.
+    // ------------------------------------------------------------------
+
+    /// The conversation's live outputs.
+    pub async fn list_outputs(&self, chat: ChatId) -> Result<OutputsCatalog> {
+        self.get_json(format!("{}/chats/{chat}/outputs", self.base))
+            .await
+    }
+
+    /// One output's bounded text preview: its current revision, or an exact one.
+    pub async fn read_output(
+        &self,
+        chat: ChatId,
+        output: OutputId,
+        revision: Option<OutputRevisionId>,
+    ) -> Result<OutputPreview> {
+        let url = match revision {
+            None => format!("{}/chats/{chat}/outputs/{output}", self.base),
+            Some(revision) => format!(
+                "{}/chats/{chat}/outputs/{output}/revisions/{revision}",
+                self.base
+            ),
+        };
+        self.get_json(url).await
+    }
+
+    /// An output's version history.
+    pub async fn list_output_revisions(
+        &self,
+        chat: ChatId,
+        output: OutputId,
+    ) -> Result<OutputRevisions> {
+        self.get_json(format!(
+            "{}/chats/{chat}/outputs/{output}/revisions",
+            self.base
+        ))
+        .await
+    }
+
+    /// One revision's complete bytes — what an export writes to disk.
+    pub async fn read_output_bytes(
+        &self,
+        chat: ChatId,
+        output: OutputId,
+        revision: Option<OutputRevisionId>,
+    ) -> Result<Vec<u8>> {
+        let mut url = format!("{}/chats/{chat}/outputs/{output}/content", self.base);
+        if let Some(revision) = revision {
+            url.push_str(&format!("?revision_id={revision}"));
+        }
+        let response = self.http.get(url).send().await.map_err(request_error)?;
+        Ok(Self::expect_success(response)
+            .await?
+            .bytes()
+            .await
+            .map_err(request_error)?
+            .to_vec())
+    }
+
+    /// Attach one local file to a conversation as a source document, returning
+    /// its document id. The media type decides which parser the server runs, so
+    /// it is sniffed from the bytes rather than taken from the file name.
+    pub async fn attach_document(
+        &self,
+        chat: ChatId,
+        title: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/chats/{chat}/documents/raw?title={}",
+                self.base,
+                urlencode(title)
+            ))
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(request_error)?;
+        let value = Self::expect_success(response)
+            .await?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(request_error)?;
+        value["document_id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| AgentError::msg("ingest answered without a document id"))
+    }
+
+    /// Publish one local image for a conversation, returning the identity a
+    /// later turn references.
+    pub async fn attach_image(
+        &self,
+        chat: ChatId,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String> {
+        let response = self
+            .http
+            .post(format!("{}/chats/{chat}/attachments/images", self.base))
+            // The route re-derives the format from the bytes and refuses a
+            // declaration that disagrees, so this must be the sniffed type.
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(request_error)?;
+        let value = Self::expect_success(response)
+            .await?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(request_error)?;
+        value["attachment_id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| AgentError::msg("image publish answered without an attachment id"))
+    }
+
     /// GET a JSON body, lifting failures the way every other route does.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
         let response = self.http.get(url).send().await.map_err(request_error)?;
@@ -662,4 +788,19 @@ impl Client {
 /// mapping in one place.
 fn request_error(error: reqwest::Error) -> AgentError {
     AgentError::msg(format!("request failed: {error}"))
+}
+
+/// Percent-encode a query value. Titles are file names, so this only has to be
+/// correct, not fast.
+fn urlencode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }

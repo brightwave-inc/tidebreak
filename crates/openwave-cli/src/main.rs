@@ -25,6 +25,11 @@
 //! a session can be resumed without knowing its id; `--new` skips straight to a
 //! fresh chat, and `--chat` resumes one by id.
 //!
+//! `openwave output list|show|revisions|export <chat> …` reads a conversation's
+//! outputs and writes one to a path, and `openwave attach <chat> <file>` puts a
+//! local file into a conversation. Both drive the same server routes the desktop
+//! does.
+//!
 //! `openwave -p "<prompt>"` runs one turn without a terminal: same engine, no
 //! terminal. stdout carries the assistant's text (or, with
 //! `--output-format json`, the turn's event stream as NDJSON), and the exit
@@ -56,6 +61,7 @@ use openwave_core::{
 
 mod api;
 mod connect;
+mod outputs;
 mod print;
 mod setup;
 mod tui;
@@ -70,6 +76,12 @@ usage: openwave serve
        openwave tui [--chat <id> | --new]
        openwave -p <prompt> [--chat <id>] [--output-format text|json]
                   [--permission-mode ask|auto|allow|plan]
+
+       openwave output list <chat>
+       openwave output show <chat> <output> [--revision <id>]
+       openwave output revisions <chat> <output>
+       openwave output export <chat> <output> <path> [--revision <id>]
+       openwave attach <chat> <file>
 
        openwave provider list
        openwave provider set-key <kind> [--from-env <var>]
@@ -94,9 +106,9 @@ The setup commands take --output-format text|json. A key is read from stdin, or
 from the environment variable named by --from-env — never from an argument,
 which every process on the machine can read.
 
-tui, -p, and the setup commands also take --server <url> [--server-token-env
-<var>], which talks to a server that is already running instead of embedding
-one. The token comes from OPENWAVE_SERVER_TOKEN, or from the named variable;
+tui, -p, output, attach, and the setup commands also take --server <url>
+[--server-token-env <var>], which talks to a server that is already running
+instead of embedding one. The token comes from OPENWAVE_SERVER_TOKEN, or from the named variable;
 it is never an argument either.";
 
 #[tokio::main]
@@ -173,6 +185,28 @@ async fn run() -> Result<i32> {
                 }
             }
             tui::run(open.unwrap_or(tui::Open::Pick), server_flags.resolve()?)
+                .await
+                .map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("output") => {
+            output_command(&mut args, server_flags.resolve()?)
+                .await
+                .map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("attach") => {
+            let Some(chat) = args.next() else {
+                usage_error("attach requires a chat id");
+            };
+            let Ok(chat) = ChatId::from_str(&chat.to_string_lossy()) else {
+                usage_error("attach expects a chat UUID");
+            };
+            let Some(file) = args.next() else {
+                usage_error("attach requires a file path");
+            };
+            if args.next().is_some() {
+                usage_error("attach accepts exactly one chat id and one file path");
+            }
+            outputs::attach(chat, file.into(), server_flags.resolve()?)
                 .await
                 .map(|()| 0)
         }
@@ -527,6 +561,89 @@ fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
         definition["env_from"] = env_from.into();
     }
     definition
+}
+
+/// Parse and run one `openwave output …` subcommand.
+///
+/// Positional chat and output ids, matching `openwave attach <chat> <file>`;
+/// the only flag is `--revision <id>`, which names an exact version instead of
+/// the current one.
+async fn output_command(
+    args: &mut impl Iterator<Item = OsString>,
+    server: connect::Server,
+) -> Result<()> {
+    let subcommand = args.next().unwrap_or_default();
+    let chat = match args.next() {
+        Some(chat) => match ChatId::from_str(&chat.to_string_lossy()) {
+            Ok(chat) => chat,
+            Err(_) => usage_error("output commands expect a chat UUID"),
+        },
+        None => usage_error("output commands require a chat id"),
+    };
+
+    if subcommand == OsStr::new("list") {
+        if args.next().is_some() {
+            usage_error("output list accepts only a chat id");
+        }
+        return outputs::run(outputs::Command::List { chat }, server).await;
+    }
+
+    let output = match args.next() {
+        Some(output) => match openwave_core::OutputId::from_str(&output.to_string_lossy()) {
+            Ok(output) => output,
+            Err(_) => usage_error("output commands expect an output UUID"),
+        },
+        None => usage_error("output commands require an output id"),
+    };
+
+    // `export` takes its destination before the flags, so it is read here
+    // rather than inside the flag loop.
+    let destination = if subcommand == OsStr::new("export") {
+        match args.next() {
+            Some(path) => Some(std::path::PathBuf::from(path)),
+            None => usage_error("output export requires a destination path"),
+        }
+    } else {
+        None
+    };
+
+    let mut revision = None;
+    while let Some(flag) = args.next() {
+        if flag == OsStr::new("--revision") {
+            let Some(id) = args.next() else {
+                usage_error("--revision requires a revision id");
+            };
+            match openwave_core::OutputRevisionId::from_str(&id.to_string_lossy()) {
+                Ok(id) => revision = Some(id),
+                Err(_) => usage_error("--revision expects a revision UUID"),
+            }
+        } else {
+            usage_error(&format!("unknown output argument {flag:?}"));
+        }
+    }
+
+    let command = if subcommand == OsStr::new("show") {
+        outputs::Command::Show {
+            chat,
+            output,
+            revision,
+        }
+    } else if subcommand == OsStr::new("revisions") {
+        if revision.is_some() {
+            usage_error("output revisions lists every version and takes no --revision");
+        }
+        outputs::Command::Revisions { chat, output }
+    } else if subcommand == OsStr::new("export") {
+        outputs::Command::Export {
+            chat,
+            output,
+            revision,
+            destination: destination.expect("export always reads a destination above"),
+        }
+    } else {
+        usage_error("output accepts list, show, revisions, or export");
+    };
+    outputs::run(command, server).await
 }
 
 fn usage_error(message: &str) -> ! {

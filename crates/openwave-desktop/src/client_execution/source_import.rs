@@ -94,7 +94,7 @@ pub(super) async fn execute(
     };
 
     let media_type =
-        crate::media_type::sniff_media_type(&source.bytes, Some(request.title.as_str()));
+        openwave_server::media_type::sniff_media_type(&source.bytes, Some(request.title.as_str()));
     let byte_len = source.bytes.len() as u64;
     match publish(state, app, context, request, &media_type, source).await {
         Ok(accepted) => imported(ImportConnectedFileResult::Imported {

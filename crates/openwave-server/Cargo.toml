@@ -49,10 +49,15 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 cap-std = { workspace = true }
+# Symlink-refusing directory traversal for private output storage.
+cap-fs-ext = { workspace = true }
 # Image header inspection only: format sniffing from magic bytes and reading
 # dimensions without decoding pixels. Default features are off so the lean build
 # pulls just the four codecs OpenWave's allowlist accepts.
 image = { workspace = true }
+# Magic-number content sniffing for imported documents. Default features off:
+# only the format matchers are used, not the std file helpers.
+infer = { version = "=0.22.0", default-features = false }
 # Managed-preferences (MDM) plist decoding for the macOS policy reader. A
 # regular dependency, not a macOS-only one, so the extraction stays
 # unit-testable on every OS.

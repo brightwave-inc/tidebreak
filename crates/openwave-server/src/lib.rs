@@ -48,11 +48,17 @@ pub mod logging;
 mod managed_policy;
 mod mcp_config;
 mod mcp_curated;
+/// Trusted decision about what imported bytes actually are, made from the
+/// bytes rather than from whoever named them.
+pub mod media_type;
 mod model_registry;
 mod model_roles;
 /// OpenAPI ingest into the bounded operation catalog a `rest_api` connected
 /// app stores and the governed REST executor validates against.
 pub mod openapi_catalog;
+/// Reading a conversation output's immutable revision bytes out of private
+/// scratch — shared by the HTTP routes and the desktop's native save dialog.
+pub mod output_files;
 mod pairing;
 mod plugin_install;
 mod plugin_mcp;
@@ -592,6 +598,38 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(routes::MAX_PLAN_DECISION_BODY_BYTES)),
         )
         .route("/chats/{id}/task-plan", get(routes::get_task_plan))
+        // Conversation outputs. Everything but writing the bytes to a chosen
+        // path is here, so the desktop and a headless client read, edit, and
+        // export the same outputs through the same implementation.
+        .route("/chats/{chat_id}/outputs", get(routes::list_chat_outputs))
+        .route(
+            "/chats/{chat_id}/outputs/{output_id}",
+            get(routes::get_chat_output).delete(routes::delete_chat_output),
+        )
+        .route(
+            "/chats/{chat_id}/outputs/{output_id}/content",
+            get(routes::get_chat_output_content),
+        )
+        .route(
+            "/chats/{chat_id}/outputs/{output_id}/restore",
+            post(routes::restore_chat_output),
+        )
+        .route(
+            "/chats/{chat_id}/outputs/{output_id}/revisions",
+            get(routes::list_chat_output_revisions)
+                .post(routes::save_chat_output_revision)
+                .layer(DefaultBodyLimit::max(
+                    routes::MAX_OUTPUT_REVISION_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/chats/{chat_id}/outputs/{output_id}/revisions/{revision_id}",
+            get(routes::get_chat_output_revision),
+        )
+        .route(
+            "/chats/{chat_id}/outputs/{output_id}/revisions/{revision_id}/restore",
+            post(routes::restore_chat_output_revision),
+        )
         .route("/chats/{id}/approvals", get(routes::list_pending_approvals))
         .route(
             "/chats/{id}/approvals/{call_id}",

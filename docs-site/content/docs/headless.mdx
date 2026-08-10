@@ -25,6 +25,12 @@ openwave tui [--chat <id> | --new]
 openwave -p <prompt> [--chat <id>] [--output-format text|json]
            [--permission-mode ask|auto|allow|plan]
 
+openwave output list <chat>
+openwave output show <chat> <output> [--revision <id>]
+openwave output revisions <chat> <output>
+openwave output export <chat> <output> <path> [--revision <id>]
+openwave attach <chat> <file>
+
 openwave provider list
 openwave provider set-key <kind> [--from-env <var>]
 openwave provider remove-key <kind>
@@ -45,8 +51,9 @@ openwave mcp-server remove <name>
 
 A bare `openwave` with no arguments runs `serve`.
 
-`tui`, `-p`, and the setup commands additionally take `--server <url>` and
-`--server-token-env <var>` — see [Attaching to a running server](#attaching-to-a-running-server).
+`tui`, `-p`, `output`, `attach`, and the setup commands additionally take
+`--server <url>` and `--server-token-env <var>` — see
+[Attaching to a running server](#attaching-to-a-running-server).
 
 ### `serve`
 
@@ -266,6 +273,41 @@ to edit them. `--command` (with repeatable `--arg`), `--url`, and
 Secret material is named, not given: `--env-from` forwards a variable from the
 parent environment, and `--bearer-token-env` names the variable holding a
 remote server's token. Both are resolved when the server connects.
+
+### `output`
+
+A turn's files land as conversation outputs. These read them, and write one to
+a path — the same routes the desktop's Outputs panel uses, so a file produced
+in the app is readable here and the other way round.
+
+```sh
+cargo run -p openwave-cli -- output list <chat-uuid>
+cargo run -p openwave-cli -- output show <chat-uuid> <output-uuid>
+cargo run -p openwave-cli -- output revisions <chat-uuid> <output-uuid>
+cargo run -p openwave-cli -- output export <chat-uuid> <output-uuid> ./report.md
+```
+
+`list` prints one tab-separated row per output, starting with the id the other
+subcommands take. `show` writes the text preview to stdout and names the
+revision it read on stderr, so `openwave output show … > draft.md` is exactly
+the text. `revisions` lists an output's version history — every version keeps
+its own id and bytes, including after a restore, because history is
+append-only. `export` writes the complete bytes of a revision, which is the
+only way to get a binary artifact (a chart, a spreadsheet) out.
+
+`--revision <id>` names an exact version instead of the current one on `show`
+and `export`.
+
+### `attach`
+
+Puts a local file into a conversation, the same way the app's attach button
+does. What the bytes are decides where they go: an image is published as an
+image attachment, everything else is ingested as a source document. The id it
+prints on stdout is what a later turn references.
+
+```sh
+cargo run -p openwave-cli -- attach <chat-uuid> ./contract.pdf
+```
 
 ### `mcp`
 

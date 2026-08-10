@@ -19,10 +19,11 @@ use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-use crate::{
-    deliverables::{read_output_revision_bytes, require_exact_revision, require_live_output},
-    host_access::HostAccess,
+use openwave_server::output_files::{
+    read_output_revision_bytes, require_exact_revision, require_live_output,
 };
+
+use crate::host_access::HostAccess;
 
 use super::{
     control_plane, control_plane_error, private_receipt_error, FolderOperationPhase,
@@ -270,7 +271,7 @@ async fn prepare_receipt(
         })
         .ok_or_else(|| "connected root is no longer attached".to_owned())?;
     let _ = chat;
-    let (output, revision) = require_live_output(Some(store), chat_id, output_id).await?;
+    let (output, revision) = require_live_output(store, chat_id, output_id).await?;
     let mut receipt = OutputWritebackReceipt::new(
         chat_id,
         call.id,
@@ -339,7 +340,7 @@ async fn execute_receipt(
         });
     if !attached
         || require_exact_revision(
-            Some(store),
+            store,
             receipt.chat_id,
             receipt.output_id,
             receipt.revision_id,
@@ -385,8 +386,7 @@ async fn execute_receipt(
     }
 
     let scratch_root = crate::data_dir(app)?.join("scratch");
-    let (output, revision) =
-        require_live_output(Some(store), receipt.chat_id, receipt.output_id).await?;
+    let (output, revision) = require_live_output(store, receipt.chat_id, receipt.output_id).await?;
     if revision.id != receipt.revision_id {
         return terminalize(
             state,

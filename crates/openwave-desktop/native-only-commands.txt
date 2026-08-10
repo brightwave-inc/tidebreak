@@ -59,15 +59,6 @@ restart_for_update: relaunches the app to apply a staged native update.
 # set. Each should become a server route with a CLI client; until then they are
 # listed so the gate stays honest about what is already owed.
 publish_chat_image: TODO(record 5) — publishes pasted image bytes from the renderer; no native shell involvement, belongs on the ingest routes.
-list_deliverables: TODO(record 5) — reads the store directly; record 5 item 5 moves output listing to server routes.
-read_deliverable: TODO(record 5) — store-direct output preview; belongs on a server route.
-read_deliverable_file: TODO(record 5) — store-direct revision bytes; belongs on a server route.
-list_output_revisions: TODO(record 5) — store-direct revision history; belongs on a server route.
-read_output_revision: TODO(record 5) — store-direct revision read; belongs on a server route.
-restore_output_revision: TODO(record 5) — store-direct revision restore; belongs on a server route.
-save_output_revision: TODO(record 5) — store-direct user revision write; belongs on a server route.
-delete_output: TODO(record 5) — store-direct soft delete; belongs on a server route.
-restore_output: TODO(record 5) — store-direct undelete; belongs on a server route.
 list_connected_folders: TODO(record 5) — broker read with no native UI; headless consumers need the same listing.
 list_approved_folders: TODO(record 5) — broker read with no native UI.
 list_capability_consents: TODO(record 5) — broker read with no native UI; the consent projection should be a route.
