@@ -18,7 +18,8 @@ import { OptionListbox, optionElementId, type OptionRow } from "@/components/Opt
  * tools menu — render these same rows and pick with the same code, so a bundle
  * reached one way behaves exactly as it does the other. A flat list rather than
  * a section per kind: the reader is looking for a name, and the kind only
- * decides what picking does, which the row says on its right.
+ * decides what picking does, which the row says on its right. A row that cannot
+ * be picked right now says why there instead.
  */
 export function pluginOptionRows(
   options: readonly SlashOption[],
@@ -28,7 +29,8 @@ export function pluginOptionRows(
     label: option.label,
     description: option.description,
     icon: optionIcon(option),
-    hint: optionKindLabel(option),
+    hint: option.unavailable ?? optionKindLabel(option),
+    disabled: option.unavailable !== undefined,
   }));
 }
 
@@ -88,6 +90,9 @@ export function PluginsPanel({
       const option = matches[index];
       if (!option) return;
       event.preventDefault();
+      // A row that cannot be picked leaves the panel exactly as it is; its hint
+      // already says what is in the way.
+      if (option.unavailable) return;
       onPick(option);
     }
   }
