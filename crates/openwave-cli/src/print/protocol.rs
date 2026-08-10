@@ -455,4 +455,31 @@ mod tests {
             "{wrong_call:?}"
         );
     }
+
+    /// Host folder access is not something a driver may grant. The protocol's
+    /// vocabulary is closed at approval/plan/questions, so no stdin line can
+    /// resolve a `request_folder_access` call however it is spelled — a driven
+    /// run refuses folders exactly like an undriven one, and standing consent
+    /// comes only from `openwave folder connect`.
+    ///
+    /// If a folder verb is ever added here, this fails first and on purpose:
+    /// it is the guard on that decision, not an accident of the parser.
+    #[test]
+    fn no_decision_line_can_grant_a_folder() {
+        let call_id = CallId::new();
+        for line in [
+            r#"{"type":"folder","decision":"allow"}"#,
+            r#"{"type":"folder_access","decision":"approve","path":"/srv/data"}"#,
+            r#"{"type":"request_folder_access","decision":"approve"}"#,
+            // An approval-shaped line must not be repurposed either: it can only
+            // ever answer a pending approval, and a folder request never is one.
+            r#"{"type":"approval","decision":"approve","path":"/srv/data"}"#,
+        ] {
+            let parsed = parse_decision(line, &plan(call_id));
+            assert!(
+                parsed.is_err(),
+                "a driver line was accepted as a folder decision: {line}"
+            );
+        }
+    }
 }

@@ -20,6 +20,12 @@ path = "src/main.rs"
 # built-in file tools for `openwave mcp`; server persistence features still come
 # through `openwave-server`. This avoids directly enabling unrelated defaults.
 openwave-core = { path = "../openwave-core", default-features = false, features = ["tools"] }
+# `openwave folder …` decides local command reach exactly as the desktop does,
+# so an operator-provisioned folder carries the same grants on the same host.
+openwave-code-execution = { path = "../openwave-code-execution" }
+# The capability store behind connected folders. `openwave folder …` opens it
+# in-process the way the desktop's sidecar opens it, against the same data dir.
+openwave-host-broker = { path = "../openwave-host-broker" }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-server = { path = "../openwave-server" }
 # Timestamps on transcript entries and inbox rows.
@@ -43,6 +49,7 @@ tokio-tungstenite = { workspace = true }
 ratatui-textarea = "=0.9.2"
 # Display-width clipping for lines rendered into fixed scrollback/panel buffers.
 unicode-width = "=0.2.0"
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

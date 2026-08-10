@@ -109,6 +109,7 @@ fn base_url(value: &str) -> Result<String> {
 pub struct Session {
     client: Client,
     serve: Option<tokio::task::JoinHandle<Result<()>>>,
+    client_executor_token: Option<String>,
 }
 
 impl Session {
@@ -121,9 +122,11 @@ impl Session {
                 openwave_server::logging::init_logging_file_only(&config.data_dir);
                 let server = openwave_server::bind_configured(config).await?;
                 let client = Client::new(server.local_addr(), server.token())?;
+                let client_executor_token = server.client_executor_token().to_owned();
                 Ok(Self {
                     client,
                     serve: Some(tokio::spawn(server.serve())),
+                    client_executor_token: Some(client_executor_token),
                 })
             }
             // Nothing local is touched in attach mode: no data directory, no
@@ -131,12 +134,26 @@ impl Session {
             Server::Attach { base, token } => Ok(Self {
                 client: Client::attach(base.clone(), token)?,
                 serve: None,
+                client_executor_token: None,
             }),
         }
     }
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// The second per-launch credential, for the routes that execute a
+    /// client-owned tool call — present only when this process is the server.
+    ///
+    /// Attaching deliberately gets nothing. That credential is the native-only
+    /// boundary: it says "I am the trusted surface for this server", and a
+    /// client that merely holds a bearer token is not, no matter which process
+    /// started it. The bearer is all `--server` conveys, and there is no flag
+    /// to hand over the executor token — so an attached run cannot execute a
+    /// client tool call on somebody else's server, which is the point.
+    pub fn client_executor_token(&self) -> Option<&str> {
+        self.client_executor_token.as_deref()
     }
 }
 

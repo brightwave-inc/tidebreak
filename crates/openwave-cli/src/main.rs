@@ -43,6 +43,14 @@
 //! See [`setup`]; secrets are read from stdin or a named environment variable,
 //! never from a command-line argument.
 //!
+//! `openwave folder connect|list|disconnect` is the headless equivalent of the
+//! desktop's folder picker: an operator records standing consent for a host
+//! folder, which the broker stamps as operator configuration. It is deliberate
+//! provisioning only — nothing here answers a folder request an agent made
+//! during a turn. See [`folder`]. Unlike the client commands it works on local
+//! broker state and the local data directory, so it embeds and takes no
+//! `--server`.
+//!
 //! Every client command above embeds its own server by default. `--server
 //! <url>` (or `OPENWAVE_SERVER_URL`) makes it a pure client of one that is
 //! already running instead, with the bearer token coming from
@@ -61,6 +69,7 @@ use openwave_core::{
 
 mod api;
 mod connect;
+mod folder;
 mod outputs;
 mod print;
 mod setup;
@@ -102,6 +111,10 @@ usage: openwave serve
                   [--timeout-ms <ms>] [--disabled]
        openwave mcp-server remove <name>
 
+       openwave folder connect <path> --chat <id>
+       openwave folder list [--chat <id>]
+       openwave folder disconnect <path-or-root-id> --chat <id>
+
 The setup commands take --output-format text|json. A key is read from stdin, or
 from the environment variable named by --from-env — never from an argument,
 which every process on the machine can read.
@@ -109,7 +122,8 @@ which every process on the machine can read.
 tui, -p, output, attach, and the setup commands also take --server <url>
 [--server-token-env <var>], which talks to a server that is already running
 instead of embedding one. The token comes from OPENWAVE_SERVER_TOKEN, or from the named variable;
-it is never an argument either.";
+it is never an argument either. The folder commands do not: they provision
+local host consent in this machine's own broker state.";
 
 #[tokio::main]
 async fn main() {
@@ -273,6 +287,17 @@ async fn run() -> Result<i32> {
             setup::run(command, format, server_flags.resolve()?)
                 .await
                 .map(|()| 0)
+        }
+        // Folder consent is host-machine state: the broker's own state file and
+        // this profile's data directory. There is nothing to point at another
+        // server, and pointing at one would say the grant lands somewhere it
+        // does not — so `--server` is refused rather than ignored.
+        Some(command) if command == OsStr::new("folder") => {
+            server_flags.refuse("folder");
+            match folder::parse(args) {
+                Ok(command) => folder::run(command).await.map(|()| 0),
+                Err(message) => usage_error(&message),
+            }
         }
         Some(other) => {
             usage_error(&format!("unknown command {other:?}"));

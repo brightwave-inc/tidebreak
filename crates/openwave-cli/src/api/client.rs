@@ -784,6 +784,103 @@ impl Client {
     }
 }
 
+/// The second per-launch credential, presented on the client-executor routes.
+///
+/// These routes exist for the trusted surface that executes a client-owned tool
+/// call — in the desktop, the native shell that opens the folder picker. A
+/// headless run has no such surface, which is exactly why print mode needs
+/// them: it must answer a parked call rather than leave the turn hanging on a
+/// consent flow that can never appear.
+const CLIENT_EXECUTOR_HEADER: &str = "x-openwave-client-executor";
+
+/// One parked client-executed tool call, as much as the CLI acts on.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PendingClientCall {
+    pub id: CallId,
+    pub name: String,
+    #[serde(default)]
+    pub client_executor_id: Option<uuid::Uuid>,
+}
+
+impl Client {
+    /// Every client-owned tool call currently parked on this chat.
+    pub async fn pending_client_executions(
+        &self,
+        executor_token: &str,
+        chat: ChatId,
+    ) -> Result<Vec<PendingClientCall>> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/chats/{chat}/client-executions/pending/raw",
+                self.base
+            ))
+            .header(CLIENT_EXECUTOR_HEADER, executor_token)
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response)
+            .await?
+            .json::<Vec<PendingClientCall>>()
+            .await
+            .map_err(request_error)
+    }
+
+    /// Take ownership of one parked call so it can be resolved.
+    pub async fn claim_client_execution(
+        &self,
+        executor_token: &str,
+        chat: ChatId,
+        call_id: CallId,
+        executor_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/chats/{chat}/client-executions/{call_id}/claim",
+                self.base
+            ))
+            .header(CLIENT_EXECUTOR_HEADER, executor_token)
+            .json(&serde_json::json!({
+                "executor_id": executor_id,
+                "lease_token": lease_token,
+            }))
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response).await?;
+        Ok(())
+    }
+
+    /// Report the terminal, model-facing result of one claimed call.
+    pub async fn resolve_client_execution(
+        &self,
+        executor_token: &str,
+        chat: ChatId,
+        call_id: CallId,
+        lease_token: uuid::Uuid,
+        result: &str,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/chats/{chat}/client-executions/{call_id}/resolve",
+                self.base
+            ))
+            .header(CLIENT_EXECUTOR_HEADER, executor_token)
+            .json(&serde_json::json!({
+                "lease_token": lease_token,
+                "resolution": { "status": "completed", "result": result },
+            }))
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response).await?;
+        Ok(())
+    }
+}
+
 /// reqwest's `Display` already strips nothing for loopback URLs, but keep the
 /// mapping in one place.
 fn request_error(error: reqwest::Error) -> AgentError {

@@ -3373,3 +3373,176 @@ async fn a_turn_replaces_its_task_plan_and_journals_only_a_refresh_hint() {
         "the second call replaced the first list rather than merging into it"
     );
 }
+
+/// A headless run has no folder-consent surface, so `openwave -p` answers a
+/// mid-turn `request_folder_access` itself with the contract's own `Declined`
+/// result — the same answer a desktop prompt gives when the user closes it.
+///
+/// This is the shape the CLI's refusal has to keep: the turn resumes instead of
+/// hanging on consent that can never arrive, the model is told access was
+/// declined rather than that something failed, and nothing in the sequence can
+/// end in a grant — declining is the only terminal a headless run can reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_headless_folder_request_resumes_the_turn_with_the_declined_result() {
+    struct FolderRequestThenFinishProvider {
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for FolderRequestThenFinishProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("folder-request-then-finish")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(req);
+            let first = requests.len() == 1;
+            drop(requests);
+            let events = if first {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "folder_1".into(),
+                        name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment:
+                            r#"{"reason":"Read the quarterly reports","requested_capabilities":["read_files"]}"#
+                                .into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "continuing without that folder".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register_validated_client(
+        openwave_core::request_folder_access_tool_spec(),
+        openwave_core::ApprovalClass::ReadOnly,
+        openwave_core::validate_request_folder_access_arguments,
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FolderRequestThenFinishProvider {
+            requests: requests.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "read my reports").await,
+        StatusCode::ACCEPTED
+    );
+
+    let call = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(call) = store
+                .list_pending_client_tool_calls(chat.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .next()
+            {
+                break call;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the folder request should park the turn");
+    assert_eq!(call.name, openwave_core::REQUEST_FOLDER_ACCESS_TOOL);
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::WaitingForClient
+    );
+
+    // Exactly what `openwave -p` does on seeing the call: claim it, then
+    // resolve it with the typed declined result.
+    let lease_token = uuid::Uuid::new_v4();
+    let claim = post_native_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/client-executions/{}/claim", chat.id, call.id),
+        serde_json::json!({
+            "executor_id": uuid::Uuid::new_v4(),
+            "lease_token": lease_token,
+        }),
+    )
+    .await;
+    assert_eq!(claim.status(), StatusCode::OK);
+    let declined =
+        serde_json::to_string(&openwave_core::RequestFolderAccessResult::Declined).unwrap();
+    assert_eq!(declined, r#"{"status":"declined"}"#);
+    let resolved = post_native_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id),
+        serde_json::json!({
+            "lease_token": lease_token,
+            "resolution": { "status": "completed", "result": declined },
+        }),
+    )
+    .await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    state.turn_job_wake.notify_one();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(
+        matches!(
+            events.last().map(|event| &event.event),
+            Some(AgentEvent::TurnCompleted { .. })
+        ),
+        "the turn did not resume: {:?}",
+        events.last()
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    openwave_core::ContentBlock::ToolResult { tool_use_id, content, .. }
+                        if tool_use_id == "folder_1" && content == r#"{"status":"declined"}"#
+                )
+            })
+        }),
+        "the model was not told the folder request was declined"
+    );
+}
