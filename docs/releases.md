@@ -431,15 +431,22 @@ request title** and **Pull request body**.
 
 Branch protection on `main` requires the individual CI jobs, not an aggregate
 wrapper — there is none. The required contexts are `change scope`, `semantic PR
-title`, `release policy`, `secret scan (gitleaks)`, `rustfmt`, `clippy`,
-`desktop test`, `test`, `postgres state machine`, and `desktop UI`. Every lane
-a change's scope can reach runs on the pull request itself; a lane outside the
-scope reports a successful skip, which is what lets a required check pass
-without running. Green PR checks are full platform-neutral validation — see
-[`CLAUDE.md`](../CLAUDE.md) — re-backed by the same lanes on every Rust-scoped
-push to `main` and on the weekly scheduled run. Keep the whole set required so
-the skip-reporting stays wired up, and add any new always-running lane to the
-list.
+title`, `release policy`, `secret scan (gitleaks)`, `supply-chain advisories
+(cargo-deny)`, `unused deps (cargo-machete)`, `rustfmt`, `clippy`,
+`desktop test`, `test`, `postgres state machine`, and `desktop UI`, each pinned
+to the GitHub Actions app (`app_id` 15368) so no other app can satisfy them.
+Every lane a change's scope can reach runs on the pull request itself; a lane
+outside the scope reports a successful skip, which is what lets a required
+check pass without running. Green PR checks are full platform-neutral
+validation — see [`CLAUDE.md`](../CLAUDE.md) — re-backed by the same lanes on
+every Rust-scoped push to `main` and on the weekly scheduled run. Keep the
+whole set required so the skip-reporting stays wired up, and add any new
+always-running lane to the list.
+
+The `semantic version label` check from the release-draft workflow stays
+non-required: the required `semantic PR title` job already fails unless the
+managed release labels match the title, so requiring the label job too would
+add nothing.
 
 `Windows cargo check` is intentionally separate from the required contexts. It
 runs automatically for Rust-scoped pushes to `main`, weekly schedules, and
