@@ -107,7 +107,13 @@ object, designed against the same threat:
   credential reference for `rest_api`; namespace, command, args, cwd,
   selected env names, URL for the retired `mcp_server` vocabulary).
 - The grant is created by explicit user consent on a sheet that lists every
-  binding. It is revocable from the Apps library.
+  binding. It is revocable from the Apps library. A gateway row is presented
+  as the network access it is — it counts toward the combined-consent
+  exfiltration warning exactly as a local operations row does — and carries a
+  qualifier saying the call runs through the organization's gateway as the
+  signed-in user. The row names the gateway app's id, its display name, and
+  the pinned operation ids; the gateway's own URL never reaches the renderer,
+  the same names-only posture the `rest_api` rows hold.
 - Every invoke checks, live: the tool is in the current revision's manifest,
   the manifest entry is covered by the grant, **and** the bound server's
   current definition still matches the granted fingerprint. A reconfigured

@@ -233,11 +233,17 @@ pub(crate) fn catalog_sha256_from_operation_ids(operation_ids: &[String]) -> Str
     hex
 }
 
-/// One gateway connected app's display name and current fingerprint — the
-/// gateway-side twin of [`AppFingerprint`], keyed by the gateway's app id
-/// rather than a local record id.
+/// One gateway connected app's display name, live operation catalog, and
+/// current fingerprint — the gateway-side twin of [`AppFingerprint`], keyed
+/// by the gateway's app id rather than a local record id.
+///
+/// `operation_ids` is the catalog the fingerprint was taken over, kept beside
+/// it so consent can check a manifest's pins against what the gateway
+/// currently declares — the gateway-side twin of the `rest_api` catalog
+/// lookup, without a second live read.
 pub(crate) struct GatewayAppFingerprint {
     pub(crate) name: String,
+    pub(crate) operation_ids: Vec<String>,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -295,6 +301,12 @@ pub(crate) struct CurrentFingerprints {
     /// re-consent rather than matching a fingerprint over a catalog nobody
     /// read.
     pub(crate) gateway_apps: BTreeMap<String, GatewayAppFingerprint>,
+    /// Whether a gateway session answered the catalog read at all. False
+    /// means the profile has no session to ask — unmanaged, signed out, or a
+    /// gateway too old to serve catalogs — which consent reports differently
+    /// from a session that answered and did not name the app. Vacuously true
+    /// when no gateway app was needed, since nothing was read.
+    pub(crate) gateway_session: bool,
 }
 
 impl CurrentFingerprints {
@@ -336,11 +348,13 @@ pub(crate) async fn current_fingerprints(
             folders.insert(folder.root_id, folder.display_name);
         }
     }
-    let gateway_apps = current_gateway_app_fingerprints(state, needed_gateway_apps).await;
+    let gateway = current_gateway_app_fingerprints(state, needed_gateway_apps).await;
+    let gateway_session = gateway.is_some();
     Ok(CurrentFingerprints {
         apps,
         folders,
-        gateway_apps,
+        gateway_apps: gateway.unwrap_or_default(),
+        gateway_session,
     })
 }
 
@@ -398,31 +412,34 @@ pub(crate) trait GatewayCatalogSource: Send + Sync {
 
 /// The current fingerprint of every readable gateway connected app among
 /// `needed`, by the gateway's app id.
+///
+/// `None` carries the source's own `None` through: no session answered, as
+/// distinct from a session that answered without naming an app.
 async fn current_gateway_app_fingerprints(
     state: &AppState,
     needed: &BTreeSet<String>,
-) -> BTreeMap<String, GatewayAppFingerprint> {
+) -> Option<BTreeMap<String, GatewayAppFingerprint>> {
     if needed.is_empty() {
-        return BTreeMap::new();
+        return Some(BTreeMap::new());
     }
-    let Some((base_url, catalogs)) = state.gateway_catalogs.gateway_app_catalogs(needed).await
-    else {
-        return BTreeMap::new();
-    };
-    catalogs
-        .into_iter()
-        .map(|(id, catalog)| {
-            let catalog_sha256 = catalog_sha256_from_operation_ids(&catalog.operation_ids);
-            let fingerprint = gateway_app_fingerprint(&base_url, &id, &catalog_sha256);
-            (
-                id,
-                GatewayAppFingerprint {
-                    name: catalog.name,
-                    fingerprint,
-                },
-            )
-        })
-        .collect()
+    let (base_url, catalogs) = state.gateway_catalogs.gateway_app_catalogs(needed).await?;
+    Some(
+        catalogs
+            .into_iter()
+            .map(|(id, catalog)| {
+                let catalog_sha256 = catalog_sha256_from_operation_ids(&catalog.operation_ids);
+                let fingerprint = gateway_app_fingerprint(&base_url, &id, &catalog_sha256);
+                (
+                    id,
+                    GatewayAppFingerprint {
+                        name: catalog.name,
+                        operation_ids: catalog.operation_ids,
+                        fingerprint,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Every stored `rest_api` record whose definition parses, read live.
@@ -653,6 +670,7 @@ mod tests {
             apps: BTreeMap::new(),
             folders: BTreeMap::new(),
             gateway_apps: BTreeMap::new(),
+            gateway_session: false,
         };
         let granted = |fingerprint: [u8; 32]| {
             AppGrantBinding::GatewayOperations(

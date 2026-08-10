@@ -32,6 +32,7 @@ const GRANTED: AppGrantState = {
     {
       app: "22222222-2222-4222-8222-222222222222",
       folder: null,
+      gateway_app: null,
       access: null,
       name: "issues",
       operation_ids: ["listIssues"],
@@ -47,6 +48,7 @@ const STALE: AppGrantState = {
     {
       app: "11111111-1111-4111-8111-111111111111",
       folder: null,
+      gateway_app: null,
       access: null,
       name: "cmd",
       operation_ids: ["doThing"],
@@ -56,6 +58,7 @@ const STALE: AppGrantState = {
     {
       app: "22222222-2222-4222-8222-222222222222",
       folder: null,
+      gateway_app: null,
       access: null,
       name: "issues",
       operation_ids: ["listIssues"],
@@ -384,6 +387,7 @@ describe("AppDetailView", () => {
         {
           app: null,
           folder: "33333333-3333-4333-8333-333333333333",
+          gateway_app: null,
           access: "read_write",
           name: "Tax documents",
           operation_ids: null,
@@ -393,6 +397,7 @@ describe("AppDetailView", () => {
         {
           app: "22222222-2222-4222-8222-222222222222",
           folder: null,
+          gateway_app: null,
           access: null,
           name: "issues",
           operation_ids: ["listIssues"],
@@ -449,5 +454,50 @@ describe("AppDetailView", () => {
     });
     expect(screen.getByTitle("App: Current app")).toBeInTheDocument();
     expect(screen.queryByTitle("App: Fixture app")).not.toBeInTheDocument();
+  });
+
+  it("counts a gateway row as network access and marks who executes it", async () => {
+    const mixed: AppGrantState = {
+      granted: false,
+      bindings: [
+        {
+          app: null,
+          folder: "33333333-3333-4333-8333-333333333333",
+          gateway_app: null,
+          access: "read",
+          name: "Tax documents",
+          operation_ids: null,
+          granted: false,
+          definition_changed: false,
+        },
+        {
+          app: null,
+          folder: null,
+          gateway_app: "gw-issues",
+          access: null,
+          name: "Issues (gateway)",
+          operation_ids: ["listIssues"],
+          granted: false,
+          definition_changed: false,
+        },
+      ],
+    };
+    render(
+      <AppDetailView appId="app-1" apis={apisWith(mixed)} onBack={() => {}} />,
+    );
+
+    // A gateway app is network access exactly as a local one is, so the
+    // combined-consent warning fires on a folder row plus a gateway row.
+    expect(
+      await screen.findByText(
+        "This app can read 'Tax documents' and send data to 'Issues (gateway)'.",
+      ),
+    ).toBeInTheDocument();
+    // The row still says who runs the call: the org's gateway, not this
+    // machine holding a credential for it.
+    expect(
+      screen.getByText("Runs through your organization’s gateway, as you"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("listIssues")).toBeInTheDocument();
   });
 });

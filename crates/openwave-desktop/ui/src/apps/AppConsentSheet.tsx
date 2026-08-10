@@ -23,7 +23,11 @@ import { Button } from "@/components/ui/button";
  *
  * A manifest that binds both a folder and API operations gets the explicit
  * combined-consent warning (docs/folder-bindings.md): the app can read files
- * and send data out, and the sheet says so before the user agrees.
+ * and send data out, and the sheet says so before the user agrees. A gateway
+ * app's operations are network access exactly as a locally configured app's
+ * are, and count the same way; the row carries a qualifier because who
+ * executes the call differs — the organization's gateway, as the signed-in
+ * user, with no credential held here.
  *
  * The sheet never renders for a manifest with no bindings: the server reports
  * such an app as granted vacuously — there is nothing to consent to.
@@ -62,7 +66,13 @@ export function AppConsentSheet({
         <ul className="flex flex-col gap-2" aria-label="Requested access">
           {state.bindings.map((binding) => (
             <li
-              key={binding.app ?? binding.folder ?? binding.name ?? ""}
+              key={
+                binding.app ??
+                binding.folder ??
+                binding.gateway_app ??
+                binding.name ??
+                ""
+              }
               className="flex flex-col gap-1"
             >
               <div className="flex items-center gap-2 text-sm">
@@ -76,7 +86,9 @@ export function AppConsentSheet({
                   {binding.name ??
                     (binding.folder !== null
                       ? "Unknown folder"
-                      : "Unknown connected app")}
+                      : binding.gateway_app !== null
+                        ? "Unknown gateway app"
+                        : "Unknown connected app")}
                 </span>
                 {binding.granted && (
                   <span className="text-muted-foreground flex items-center gap-1 text-xs">
@@ -93,6 +105,11 @@ export function AppConsentSheet({
                   </span>
                 )}
               </div>
+              {binding.gateway_app !== null && (
+                <span className="text-muted-foreground pl-1 text-xs">
+                  Runs through your organization&rsquo;s gateway, as you
+                </span>
+              )}
               {binding.access !== null && (
                 <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground flex items-center gap-1.5 pl-1 text-xs">
