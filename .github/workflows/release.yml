@@ -1272,6 +1272,16 @@ jobs:
   attach_downloads:
     name: attach GitHub release downloads
     needs: [validate, publish]
+    # `publish` inherits the parked `build_windows` skip through its own needs
+    # (see docs/deferred.md), and an implicit `success()` reads that whole
+    # chain — so without this guard the job skips on green runs. Only the two
+    # jobs this one actually depends on decide whether it runs.
+    if: >-
+      ${{
+        always()
+        && needs.validate.result == 'success'
+        && needs.publish.result == 'success'
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
