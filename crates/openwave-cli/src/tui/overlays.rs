@@ -10,13 +10,36 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use openwave_core::{AgentRunId, ChatId, ProjectId};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui_textarea::TextArea;
 
 use super::render;
 use super::theme;
 use crate::api::wire::{AgentRunSnapshot, ChatSummary, ModelInfo, PendingQuestions};
+
+/// Draw one overlay's chrome — bordered, filled, titled — and its lines inside
+/// it. Shared by the in-session overlays and the startup chat picker so both
+/// read as the same surface.
+pub fn panel(
+    frame: &mut ratatui::Frame,
+    rect: Rect,
+    title: &str,
+    lines: impl FnOnce(usize) -> Vec<Line<'static>>,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border())
+        .style(Style::default().bg(theme::PANEL_BG))
+        .title(Span::styled(format!(" {title} "), theme::accent_bold()));
+    let inner = block.inner(rect);
+    let lines = lines(inner.width as usize);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
 
 /// The slash-command table, Claude Code style: `/name args` in the composer.
 /// Each entry is the canonical name plus a one-line blurb the help overlay and
@@ -112,13 +135,16 @@ pub struct ChatsOverlay {
     chats: Vec<ChatSummary>,
     attention: std::collections::HashSet<ChatId>,
     selected: usize,
-    current: ChatId,
+    /// The chat this session is attached to, or `None` at startup, when the
+    /// picker runs before any chat is open. No row is marked current then, and
+    /// dismissing leaves the TUI rather than returning to a chat.
+    current: Option<ChatId>,
     /// Inline rename state: which row and the input.
     renaming: Option<(ChatId, TextArea<'static>)>,
 }
 
 impl ChatsOverlay {
-    pub fn new(current: ChatId) -> Self {
+    pub fn new(current: Option<ChatId>) -> Self {
         Self {
             chats: Vec::new(),
             attention: std::collections::HashSet::new(),
@@ -227,7 +253,7 @@ impl ChatsOverlay {
         }
         for (i, chat) in self.chats.iter().enumerate() {
             let selected = i == self.selected;
-            let marker = if chat.id == self.current {
+            let marker = if Some(chat.id) == self.current {
                 Span::styled("● ", theme::accent())
             } else if self.attention.contains(&chat.id) {
                 Span::styled("⚠ ", theme::warning())
@@ -260,7 +286,11 @@ impl ChatsOverlay {
         }
         out.push(Line::default());
         out.push(Line::from(Span::styled(
-            "↑↓/tab move · enter open · n new · r rename · d delete · esc close",
+            if self.current.is_some() {
+                "↑↓/tab move · enter open · n new · r rename · d delete · esc close"
+            } else {
+                "↑↓/tab move · enter resume · n new chat · r rename · d delete · esc quit"
+            },
             theme::muted(),
         )));
         out

@@ -21,7 +21,7 @@ the built binary if you have it on your path.
 openwave serve
 openwave mcp <workspace>
 openwave rehome-secrets
-openwave tui [--chat <id>]
+openwave tui [--chat <id> | --new]
 openwave -p <prompt> [--chat <id>] [--output-format text|json]
 ```
 
@@ -56,9 +56,16 @@ over the loopback API.
 ```sh
 cargo run -p openwave-cli -- tui
 cargo run -p openwave-cli -- tui --chat <chat-uuid>
+cargo run -p openwave-cli -- tui --new
 ```
 
-With no `--chat`, it starts a fresh chat.
+With no flags it opens a picker over the existing chats — enter resumes the
+selected one, `n` starts a new chat, `esc` leaves. On a profile with no chats
+yet there is nothing to pick, so it goes straight into a new chat. `--new`
+always skips the picker; `--chat` resumes one by id.
+
+Inside a session, `/chats` (or `ctrl+o`) reopens the same switcher and `/model`
+picks the model for the current chat.
 
 ### `-p` (one-shot)
 

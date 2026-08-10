@@ -21,7 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
@@ -747,7 +747,7 @@ impl App {
 
     fn open_chats(&mut self) {
         self.refresh_chat_list();
-        self.overlay = Some(Overlay::Chats(ChatsOverlay::new(self.chat)));
+        self.overlay = Some(Overlay::Chats(ChatsOverlay::new(Some(self.chat))));
     }
 
     fn open_agents(&mut self) {
@@ -1615,14 +1615,20 @@ impl App {
 }
 
 /// Restores the terminal on drop; the panic hook does the same for panics.
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+pub(super) struct TerminalGuard {
+    pub(super) terminal: Terminal<CrosstermBackend<Stdout>>,
     /// The inline viewport's height, clamped to the terminal's rows.
     live_height: u16,
 }
 
 impl TerminalGuard {
     fn new() -> Result<Self> {
+        Self::with_height(LIVE_HEIGHT)
+    }
+
+    /// Raw mode plus an inline viewport `rows` tall (clamped to the terminal).
+    /// The startup picker takes a taller region than the chat's live area.
+    pub(super) fn with_height(rows: u16) -> Result<Self> {
         enable_raw_mode().map_err(terminal_error)?;
         let mut stdout = io::stdout();
         // Bracketed paste keeps pasted newlines from firing sends; the keyboard
@@ -1634,8 +1640,7 @@ impl TerminalGuard {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )
         .map_err(terminal_error)?;
-        let live_height =
-            LIVE_HEIGHT.min(crossterm::terminal::size().map_or(LIVE_HEIGHT, |(_, r)| r));
+        let live_height = rows.min(crossterm::terminal::size().map_or(rows, |(_, r)| r));
         let terminal = Terminal::with_options(
             CrosstermBackend::new(stdout),
             TerminalOptions {
@@ -1662,7 +1667,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn install_panic_hook() {
+pub(super) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
@@ -1676,7 +1681,7 @@ fn install_panic_hook() {
     }));
 }
 
-fn terminal_error(error: io::Error) -> AgentError {
+pub(super) fn terminal_error(error: io::Error) -> AgentError {
     AgentError::msg(format!("terminal error: {error}"))
 }
 
@@ -1976,22 +1981,13 @@ fn render_overlay(overlay: &mut Overlay, frame: &mut ratatui::Frame) {
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::border())
-        .style(Style::default().bg(theme::PANEL_BG))
-        .title(Span::styled(format!(" {title} "), theme::accent_bold()));
-    let inner = block.inner(rect);
-    let lines = match overlay {
-        Overlay::Chats(overlay) => overlay.lines(inner.width as usize),
-        Overlay::Agents(overlay) => overlay.lines(inner.width as usize),
-        Overlay::Models(overlay) => overlay.lines(inner.width as usize),
-        Overlay::Mode(overlay) => overlay.lines(inner.width as usize),
-        Overlay::Move(overlay) => overlay.lines(inner.width as usize),
-        Overlay::Questions(overlay) => overlay.lines(inner.width as usize),
-        Overlay::Help(overlay) => overlay.lines(inner.width as usize),
-    };
-    frame.render_widget(Clear, rect);
-    frame.render_widget(block, rect);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    super::overlays::panel(frame, rect, title, |width| match overlay {
+        Overlay::Chats(overlay) => overlay.lines(width),
+        Overlay::Agents(overlay) => overlay.lines(width),
+        Overlay::Models(overlay) => overlay.lines(width),
+        Overlay::Mode(overlay) => overlay.lines(width),
+        Overlay::Move(overlay) => overlay.lines(width),
+        Overlay::Questions(overlay) => overlay.lines(width),
+        Overlay::Help(overlay) => overlay.lines(width),
+    });
 }
