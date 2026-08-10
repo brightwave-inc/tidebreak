@@ -30,6 +30,10 @@ const desktopUpdater = readFileSync(
   new URL("../crates/openwave-desktop/src/updater.rs", import.meta.url),
   "utf8",
 );
+const desktopBroker = readFileSync(
+  new URL("../crates/openwave-desktop/src/broker.rs", import.meta.url),
+  "utf8",
+);
 
 function workflowJob(source, name) {
   const marker = `  ${name}:\n`;
@@ -822,9 +826,26 @@ test("the packaged desktop activates the signed updater feed", () => {
   assert.match(desktopUpdater, /updater\.check\(\)\.await/);
   assert.match(desktopUpdater, /update\.download\(/);
   assert.doesNotMatch(desktopUpdater, /download_and_install/);
+  assert.match(desktopUpdater, /install_behind_broker_barrier\(/);
   assert.match(
     desktopUpdater,
-    /state::<HostAccess>\(\)\.shutdown\(\)\.await[\s\S]*staged\.update\.install\(&staged\.bytes\)/,
+    /quiesce\(\)\.await\?;[\s\S]*match install\(\)[\s\S]*Ok\(\(\)\) => \{[\s\S]*shutdown\(\)\.await[\s\S]*Err\(install_error\) => \{[\s\S]*resume\(\)\.await/,
+  );
+  assert.match(
+    desktopUpdater,
+    /\|\| host_access\.quiesce_for_update\(\)[\s\S]*\|\| staged\.update\.install\(&staged\.bytes\)[\s\S]*\|\| host_access\.resume_after_failed_update\(\)[\s\S]*\|\| host_access\.shutdown\(\)/,
+  );
+  assert.match(
+    desktopBroker,
+    /if \*admission != BrokerAdmission::Running[\s\S]*self\.commands\.try_send\(command\)/,
+  );
+  assert.match(
+    desktopBroker,
+    /BrokerCommand::Quiesce \{ reply \} => \{[\s\S]*self\.ensure_session\(\)\.await/,
+  );
+  assert.match(
+    desktopBroker,
+    /BrokerCommand::ResumeAfterFailedUpdate \{ reply \} => \{[\s\S]*self\.allow_session_start = false/,
   );
   assert.match(desktopUpdater, /app\.restart\(\)/);
   assert.match(
