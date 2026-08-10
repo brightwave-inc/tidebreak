@@ -72,7 +72,19 @@ export function getPage(slug?: string[]): PageData | null {
 }
 
 export function getPageRawMarkdown(page: PageData): string {
-  return `# ${page.title} (${page.url})\n\n${page.rawContent}`;
+  return `# ${page.title} (${page.url})\n\n${stripMdxComments(page.rawContent)}`;
+}
+
+/**
+ * Removes MDX and HTML comments. The MDX renderer drops these itself, but the
+ * raw-markdown routes serve the source, where an authoring note would
+ * otherwise be published as text. Kept in sync with the equivalent strip in
+ * scripts/generate-search-index.mjs.
+ */
+export function stripMdxComments(rawContent: string): string {
+  return rawContent
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
 }
 
 export function getSidebar(): SidebarSection[] {

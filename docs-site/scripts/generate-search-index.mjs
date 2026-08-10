@@ -24,6 +24,12 @@ const index = files.map((file) => {
     url: slug ? `/${slug}` : '/',
     content: content
       .replace(/^import\s.+$/gm, '')
+      // MDX comments are expressions, not tags, so the tag strip below leaves
+      // their text behind. Drop them first — this is what keeps an authoring
+      // note out of the index. Kept in sync with stripMdxComments in
+      // src/lib/content.ts, which does the same for the raw-markdown routes.
+      .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/<[^>]+>/g, '')
       .replace(/[#*`\[\]]/g, '')
       .slice(0, 2000),
