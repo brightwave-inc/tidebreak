@@ -15,12 +15,25 @@
 //! choose another route rather than hang, and a plan or a question ends the run
 //! with a distinct exit status and a machine-readable reason. Nothing is ever
 //! cancelled silently.
+//!
+//! A request for another host folder is deliberately **not** one of those.
+//! Folder access is host-machine consent, and the driving protocol has no way
+//! to give it: no request event is emitted for it, it never becomes an
+//! [`Interaction`], and no decision line can name it — the protocol's closed
+//! vocabulary is approval, plan, and questions. A driven run refuses a folder
+//! request exactly as an undriven one does, with the folder contract's own
+//! `declined` result, the same answer an undecided desktop prompt gives.
+//! Standing folder consent comes from `openwave folder connect` and nowhere
+//! else. See [`crate::folder`].
 
 use std::collections::HashMap;
 use std::io::{IsTerminal as _, Write as _};
 
 use futures::StreamExt as _;
-use openwave_core::{AgentError, CallId, ChatId, Result, TurnId};
+use openwave_core::{
+    AgentError, CallId, ChatId, RequestFolderAccessResult, Result, TurnId,
+    REQUEST_FOLDER_ACCESS_TOOL,
+};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::client::{Client, EventSocket};
@@ -49,6 +62,12 @@ const EXIT_INTERRUPTED: i32 = 130;
 /// server is in-process, a dropped connection when it is not.
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long to wait for a folder request to become claimable after its tool
+/// call is announced. The call is checkpointed just after the provider streams
+/// it, so this only covers that gap.
+const FOLDER_REQUEST_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+const FOLDER_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// How the turn is written to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +103,9 @@ pub async fn run(
     // with it the turn worker.
     let session = crate::connect::Session::open(&server).await?;
     let client = session.client().clone();
+    // Present only when this process is the server. Answering a client-owned
+    // tool call is the trusted surface's job, and an attached run is not it.
+    let executor_token = session.client_executor_token().map(str::to_owned);
     let chat = match chat {
         Some(chat) => {
             client.require_chat(chat).await?;
@@ -103,12 +125,21 @@ pub async fn run(
     let driving = format == OutputFormat::Json && !std::io::stdin().is_terminal();
     let mut driver = Driver::from_stdin(driving);
 
-    one_turn(&client, chat, &prompt, format, &mut driver).await
+    one_turn(
+        &client,
+        executor_token.as_deref(),
+        chat,
+        &prompt,
+        format,
+        &mut driver,
+    )
+    .await
 }
 
 /// Post the message and follow the event stream until the turn ends.
 async fn one_turn(
     client: &Client,
+    executor_token: Option<&str>,
     chat: ChatId,
     prompt: &str,
     format: OutputFormat,
@@ -159,7 +190,17 @@ async fn one_turn(
 
         match event {
             ClientEvent::TextDelta { text } => printer.text(&text),
-            ClientEvent::ToolCallStarted { call_id, name } => printer.tool_started(call_id, name),
+            ClientEvent::ToolCallStarted { call_id, name } => {
+                // Refused here, never routed through `settle`: a folder request
+                // is not an `Interaction`, so the driver is never asked and no
+                // decision line can answer it. Whoever is driving gets the same
+                // outcome an unattended run gets.
+                if name == REQUEST_FOLDER_ACCESS_TOOL {
+                    decline_folder_request(client, executor_token, chat, call_id, &mut printer)
+                        .await;
+                }
+                printer.tool_started(call_id, name);
+            }
             ClientEvent::ToolCallCompleted {
                 call_id, status, ..
             } => {
@@ -362,6 +403,87 @@ async fn pending_questions(
         .into_iter()
         .find(|block| call_id.is_none_or(|id| block.call_id == id))
         .map(Interaction::from_questions)
+}
+
+/// Refuse one parked `request_folder_access` call with the typed declined
+/// result.
+///
+/// The refusal is deliberately the folder contract's existing `Declined`
+/// variant and not a new failure code: to the model, a headless run must be
+/// indistinguishable from a user who closed the picker, so no prompt-shaped
+/// retry looks worthwhile and no path exists that could end in a grant. This
+/// never consults the driver — folder access is host-machine consent, and
+/// `openwave folder connect` is the only thing that gives it.
+///
+/// Reporting only, never fatal: a folder request the CLI could not answer is
+/// the server owner's to settle, and cancelling someone else's turn over it
+/// would be worse than saying so.
+async fn decline_folder_request(
+    client: &Client,
+    executor_token: Option<&str>,
+    chat: ChatId,
+    call_id: CallId,
+    printer: &mut Printer,
+) {
+    // Attach mode has no client-executor credential and is not the trusted
+    // surface for this server — the process that owns it is, and if that is a
+    // desktop it will show the user a picker. Say so and leave the call alone
+    // rather than pretending to be it.
+    let Some(executor_token) = executor_token else {
+        printer.notice(&format!(
+            "folder request {call_id} left for the attached server's own client executor; \
+             this process holds no executor credential"
+        ));
+        return;
+    };
+    match decline(client, executor_token, chat, call_id).await {
+        Ok(()) => printer.notice(
+            "folder access declined: headless runs connect folders with `openwave folder \
+             connect`, never mid-turn",
+        ),
+        Err(error) => printer.notice(&format!("could not decline the folder request: {error}")),
+    }
+}
+
+/// Claim the parked call and resolve it declined, or say why not.
+async fn decline(
+    client: &Client,
+    executor_token: &str,
+    chat: ChatId,
+    call_id: CallId,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + FOLDER_REQUEST_SETTLE;
+    loop {
+        let pending = client
+            .pending_client_executions(executor_token, chat)
+            .await?;
+        match pending.into_iter().find(|call| call.id == call_id) {
+            Some(call) if call.name != REQUEST_FOLDER_ACCESS_TOOL => {
+                return Err(AgentError::msg("the parked call is not a folder request"));
+            }
+            Some(call) if call.client_executor_id.is_some() => {
+                // Something else owns the call. Never race it: this process has
+                // no way to grant anything, so leaving it alone is safe.
+                return Err(AgentError::msg("the folder request is already claimed"));
+            }
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                return Err(AgentError::msg("the folder request never parked"));
+            }
+            None => tokio::time::sleep(FOLDER_REQUEST_POLL).await,
+        }
+    }
+
+    let executor_id = uuid::Uuid::new_v4();
+    let lease_token = uuid::Uuid::new_v4();
+    client
+        .claim_client_execution(executor_token, chat, call_id, executor_id, lease_token)
+        .await?;
+    let declined = serde_json::to_string(&RequestFolderAccessResult::Declined)
+        .map_err(|error| AgentError::msg(format!("could not encode the refusal: {error}")))?;
+    client
+        .resolve_client_execution(executor_token, chat, call_id, lease_token, &declined)
+        .await
 }
 
 /// The event socket plus the cursor a reconnect resumes from.

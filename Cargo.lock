@@ -4375,7 +4375,9 @@ dependencies = [
  "chrono",
  "crossterm",
  "futures",
+ "openwave-code-execution",
  "openwave-core",
+ "openwave-host-broker",
  "openwave-mcp",
  "openwave-server",
  "pulldown-cmark",
@@ -4389,6 +4391,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]
