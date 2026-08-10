@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+
+import { AppInvokeRefusalError } from "./api";
 import {
   createMcpAppBridge,
   MCP_APPS_PROTOCOL_VERSION,
@@ -15,6 +17,9 @@ const PAYLOAD: McpAppPayload = {
 function harness(
   theme: "light" | "dark" = "dark",
   invokeOperation?: Parameters<typeof createMcpAppBridge>[0]["invokeOperation"],
+  invokeGatewayOperation?: Parameters<
+    typeof createMcpAppBridge
+  >[0]["invokeGatewayOperation"],
 ) {
   const postMessage = vi.fn();
   const frame = { postMessage } as unknown as Window;
@@ -25,6 +30,7 @@ function harness(
     theme: () => currentTheme,
     onHeight,
     invokeOperation,
+    invokeGatewayOperation,
   });
   const fromView = (data: unknown, source: unknown = frame) =>
     bridge.handleMessage({ data, source } as MessageEvent);
@@ -154,6 +160,77 @@ describe("createMcpAppBridge", () => {
       { jsonrpc: "2.0", id: 3, error: { code: -32601, message: "Method not found" } },
     ]);
     expect(invokeOperation).not.toHaveBeenCalled();
+  });
+
+  it("routes operations/call by connected_app_id and surfaces the refusal kind", async () => {
+    const invokeOperation = vi.fn().mockResolvedValue({ is_error: false });
+    const invokeGatewayOperation = vi
+      .fn()
+      .mockRejectedValue(
+        new AppInvokeRefusalError(
+          "gateway_authorization_required",
+          "connect Issues (gateway) at your model gateway to continue",
+        ),
+      );
+    const { fromView, sent } = harness(
+      "dark",
+      invokeOperation,
+      invokeGatewayOperation,
+    );
+
+    // A `connected_app_id` names a gateway connected app — the gateway
+    // shell's own invoke vocabulary — so the same method reaches the relay
+    // leg with the gateway's field names, and never the local one.
+    fromView({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "operations/call",
+      params: {
+        connected_app_id: "gw-issues",
+        operation_id: "listIssues",
+        path_parameters: { id: "7" },
+        query: { state: "open" },
+        body: { note: "hi" },
+      },
+    });
+    expect(invokeGatewayOperation).toHaveBeenCalledWith(
+      "gw-issues",
+      "listIssues",
+      { id: "7" },
+      { state: "open" },
+      { note: "hi" },
+    );
+    expect(invokeOperation).not.toHaveBeenCalled();
+
+    // The refusal crosses machine-readably: the view branches on
+    // `error.data.kind`, never on the prose.
+    await vi.waitFor(() =>
+      expect(sent()).toEqual([
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          error: {
+            code: -32000,
+            message: "connect Issues (gateway) at your model gateway to continue",
+            data: { kind: "gateway_authorization_required" },
+          },
+        },
+      ]),
+    );
+
+    // A legacy call without the field stays local, unchanged.
+    fromView({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "operations/call",
+      params: { operation_id: "listIssues", parameters: { q: "open" } },
+    });
+    expect(invokeOperation).toHaveBeenCalledWith(
+      "listIssues",
+      { q: "open" },
+      undefined,
+    );
+    expect(invokeGatewayOperation).toHaveBeenCalledTimes(1);
   });
 
   it("answers ping and clamps size-changed heights", () => {

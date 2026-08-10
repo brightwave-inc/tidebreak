@@ -374,7 +374,7 @@ export type AppInvokeRefusal = { kind: AppInvokeRefusalKind, message: string, };
  * open the grant sheet — so the kind is a closed generated union rather than
  * a free-form string.
  */
-export type AppInvokeRefusalKind = "app_not_found" | "not_pinned" | "consent_required" | "unknown_tool";
+export type AppInvokeRefusalKind = "app_not_found" | "not_pinned" | "consent_required" | "unknown_tool" | "gateway_unavailable" | "gateway_authorization_required";
 
 /**
  * The library listing: every live app, newest activity first.

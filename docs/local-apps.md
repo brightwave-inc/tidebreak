@@ -46,8 +46,14 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
   that catalog. Every input is read live per request — nothing about a gateway
   app is cached locally — so a profile with no session, an app that loses its
   entitlement, or a re-ingested catalog all fail closed to re-consent. Invoke
-  still has no relay: a gateway binding can be authored and granted, but
-  calling it is the next slice.
+  relays the call to the gateway's shared-app route on a `control`-audience
+  session bearer — after the local ladder passes, never before — and the
+  gateway re-enforces entitlement, its own manifest pin, and credential
+  resolution live per call. A viewer who still needs to connect the bound
+  app at the gateway gets the typed `gateway_authorization_required`
+  refusal (the detail page offers the connect affordance); a profile whose
+  gateway session, deployment, or draft registration cannot answer gets
+  `gateway_unavailable`, with the message naming which.
 
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,

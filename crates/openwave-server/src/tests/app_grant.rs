@@ -238,22 +238,22 @@ async fn body_string(response: axum::response::Response) -> String {
 /// What a fake gateway session holds: the deployment's base URL and one
 /// entry per readable app — id, display name, declared operation ids. `None`
 /// is a profile with no session at all.
-type FakeGatewaySession = Option<(String, Vec<(String, String, Vec<String>)>)>;
+pub(super) type FakeGatewaySession = Option<(String, Vec<(String, String, Vec<String>)>)>;
 
 /// A gateway catalog source standing in for a live session: `None` is a
 /// profile with no session at all, and a present roster answers only the ids
 /// it holds.
-struct FakeGatewayCatalogs(std::sync::Mutex<FakeGatewaySession>);
+pub(super) struct FakeGatewayCatalogs(pub(super) std::sync::Mutex<FakeGatewaySession>);
 
 impl FakeGatewayCatalogs {
-    fn signed_in(base_url: &str, apps: &[(&str, &str, &[&str])]) -> Self {
+    pub(super) fn signed_in(base_url: &str, apps: &[(&str, &str, &[&str])]) -> Self {
         Self(std::sync::Mutex::new(Some((
             base_url.to_owned(),
             Self::roster(apps),
         ))))
     }
 
-    fn roster(apps: &[(&str, &str, &[&str])]) -> Vec<(String, String, Vec<String>)> {
+    pub(super) fn roster(apps: &[(&str, &str, &[&str])]) -> Vec<(String, String, Vec<String>)> {
         apps.iter()
             .map(|(id, name, operations)| {
                 (

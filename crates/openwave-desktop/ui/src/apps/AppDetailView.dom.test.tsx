@@ -86,10 +86,17 @@ function apisWith(grant: AppGrantState): AppsApis {
       body_base64: "e30=",
       is_error: false,
     }),
+    invokeGatewayOperation: vi.fn().mockResolvedValue({
+      status: 200,
+      content_type: "application/json",
+      body_base64: "e30=",
+      is_error: false,
+    }),
     invokeFolder: vi.fn().mockResolvedValue({
       entries: [{ name: "note.txt", directory: false }],
       is_error: false,
     }),
+    gatewayBaseUrl: vi.fn().mockResolvedValue("https://gateway.example.com"),
   };
 }
 
@@ -499,5 +506,79 @@ describe("AppDetailView", () => {
       screen.getByText("Runs through your organization’s gateway, as you"),
     ).toBeInTheDocument();
     expect(screen.getByText("listIssues")).toBeInTheDocument();
+  });
+
+  it("offers a connect affordance when the gateway refuses a relay for want of the viewer's credential", async () => {
+    const apis = apisWith(GRANTED);
+    apis.invokeGatewayOperation = vi
+      .fn()
+      .mockRejectedValue(
+        new AppInvokeRefusalError(
+          "gateway_authorization_required",
+          "connect Issues (gateway) at your model gateway to continue: sign in",
+        ),
+      );
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    const frame = (await screen.findByTitle(
+      "App: Fixture app",
+    )) as HTMLIFrameElement;
+    const contentWindow = frame.contentWindow!;
+    const posted = vi.spyOn(contentWindow, "postMessage");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          id: 9,
+          method: "operations/call",
+          params: {
+            connected_app_id: "gw-issues",
+            operation_id: "listIssues",
+            query: { state: "open" },
+          },
+        },
+        source: contentWindow,
+      }),
+    );
+
+    // The frame's own call is routed to the gateway leg and refused
+    // machine-readably; the host answers with the affordance only the viewer
+    // can act on, and the frame stays mounted — nothing local was revoked.
+    await waitFor(() =>
+      expect(posted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 9,
+          error: expect.objectContaining({
+            data: { kind: "gateway_authorization_required" },
+          }),
+        }),
+        "*",
+      ),
+    );
+    expect(apis.invokeGatewayOperation).toHaveBeenCalledWith(
+      "app-1",
+      "gw-issues",
+      "listIssues",
+      undefined,
+      { state: "open" },
+      undefined,
+    );
+    const connect = await screen.findByRole("button", {
+      name: "Connect at gateway",
+    });
+    expect(
+      screen.getByText(/connect Issues \(gateway\) at your model gateway/),
+    ).toBeInTheDocument();
+    expect(screen.getByTitle("App: Fixture app")).toBeInTheDocument();
+
+    // The button sends the viewer to the gateway's own origin — the gateway's
+    // SSO is the handoff — and the banner clears once it has.
+    fireEvent.click(connect);
+    await waitFor(() => expect(apis.gatewayBaseUrl).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Connect at gateway" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

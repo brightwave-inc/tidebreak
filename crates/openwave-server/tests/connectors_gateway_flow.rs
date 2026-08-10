@@ -19,7 +19,7 @@ use base64::Engine;
 use openwave_core::{Result as CoreResult, SecretProvider};
 use openwave_server::connectors::{
     is_sign_in_required, CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayConnection,
-    RESOURCE_CONTROL, RESOURCE_LLM,
+    GatewayInvokeOutcome, RESOURCE_CONTROL, RESOURCE_LLM,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -68,6 +68,14 @@ struct FakeGateway {
     /// Serve 404 for the per-app catalog read, like a gateway that predates
     /// it while still listing entitlements.
     catalogs_unsupported: AtomicBool,
+    /// Serve 404 for the shared-app invoke route, like a gateway that predates
+    /// shared apps entirely.
+    shared_apps_unsupported: AtomicBool,
+    /// Answer the next shared-app invoke with the typed
+    /// `authorization_required` failure instead of executing it.
+    shared_app_needs_authorization: AtomicBool,
+    /// Shared-app invoke bodies observed, with the bearer's resource.
+    shared_app_invokes: Mutex<Vec<(String, Option<String>, Value)>>,
     /// Attestation context ids observed on refresh grants, in order.
     contexts_seen: Mutex<Vec<String>>,
     /// Reject the next unseen attestation context with `invalid_target`,
@@ -338,6 +346,51 @@ async fn app_operations(
     .into_response()
 }
 
+/// The shared-app invoke route (ADR 0036): the SPA-tier data plane, reached
+/// here on a harness's `control`-audience PKCE session.
+async fn shared_app_invoke(
+    State(gateway): State<Arc<FakeGateway>>,
+    axum::extract::Path(shared_app_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if gateway.shared_apps_unsupported.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let resource = bearer_resource(&gateway, &headers);
+    gateway
+        .shared_app_invokes
+        .lock()
+        .unwrap()
+        .push((shared_app_id, resource.clone(), body));
+    if resource.as_deref() != Some("control") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if gateway
+        .shared_app_needs_authorization
+        .load(Ordering::SeqCst)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": {
+                    "code": "authorization_required",
+                    "message": "Connect Incident API to continue",
+                }
+            })),
+        )
+            .into_response();
+    }
+    Json(json!({
+        "operation_id": "listIncidents",
+        "status": 200,
+        "content_type": "application/json",
+        "headers": { "x-request-id": "abc" },
+        "body": { "incidents": [] },
+    }))
+    .into_response()
+}
+
 async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
     let app = Router::new()
         .route("/api/v1/meta", get(meta))
@@ -348,6 +401,10 @@ async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
         .route("/api/v1/cli/models", get(models))
         .route("/api/v1/cli/apps", get(apps))
         .route("/api/v1/cli/apps/{app_id}/operations", get(app_operations))
+        .route(
+            "/api/apps/shared/{shared_app_id}/invoke",
+            post(shared_app_invoke),
+        )
         .with_state(gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -666,4 +723,78 @@ async fn app_catalogs_read_declared_operations_and_degrade_when_the_surface_is_m
         connection.app_operations("app-incident").await.unwrap(),
         None
     );
+}
+
+/// The shared-app invoke relay: the data-plane half of a gateway app binding.
+/// It has to reach the route with the ordinary `control` session bearer and
+/// the gateway's own five-field body, surface the typed
+/// `authorization_required` as its own outcome rather than as prose, and read
+/// a deployment that does not serve the route as unavailable rather than a
+/// fault — the gateway half is still shipping.
+#[tokio::test]
+async fn shared_app_invokes_relay_on_the_control_session_and_degrade_when_unserved() {
+    let (gateway, connection) = signed_in_connection().await;
+    // The production relay omits absent argument halves entirely (the
+    // gateway's serde defaults refuse an explicit null); the fixture body
+    // mirrors the real wire shape.
+    let request = json!({
+        "connected_app_id": "app-incident",
+        "operation_id": "listIncidents",
+        "query": { "state": "open" },
+    });
+
+    let outcome = connection
+        .invoke_shared_app("shared-1", &request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome,
+        GatewayInvokeOutcome::Executed {
+            status: 200,
+            content_type: Some("application/json".into()),
+            body_base64: base64::engine::general_purpose::STANDARD.encode(br#"{"incidents":[]}"#),
+        }
+    );
+    let seen = gateway.shared_app_invokes.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "shared-1");
+    assert_eq!(
+        seen[0].1.as_deref(),
+        Some("control"),
+        "the relay carries the ordinary control session bearer, never an \
+         attested or endpoint-scoped one"
+    );
+    assert_eq!(seen[0].2, request);
+
+    // The one failure the frame must branch on keeps its own outcome, with
+    // the gateway's own message.
+    gateway
+        .shared_app_needs_authorization
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        connection
+            .invoke_shared_app("shared-1", &request)
+            .await
+            .unwrap()
+            .unwrap(),
+        GatewayInvokeOutcome::AuthorizationRequired {
+            message: "Connect Incident API to continue".into(),
+        }
+    );
+
+    // A deployment that does not serve the route reads as "nothing answers
+    // this pin", the same degradation the entitlement and catalog reads use.
+    gateway
+        .shared_apps_unsupported
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        connection
+            .invoke_shared_app("shared-1", &request)
+            .await
+            .unwrap(),
+        None
+    );
+    // An id outside the binding grammar never reaches the wire at all.
+    assert!(connection.invoke_shared_app("", &request).await.is_err());
 }

@@ -1,4 +1,4 @@
-import { ChevronLeft, ShieldCheck, Trash2 } from "lucide-react";
+import { ChevronLeft, ExternalLink, ShieldCheck, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -6,6 +6,7 @@ import type { AppDetail, AppGrantState } from "@/api";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
+import { openSignInPage } from "@/openSignInPage";
 import { AppConsentSheet } from "./AppConsentSheet";
 import { AppFrame } from "./AppFrame";
 import { friendlyAppsError, updatedLabel } from "./AppsView";
@@ -37,6 +38,11 @@ function revisionSummary(detail: AppDetail): string {
  * decides whether the frame mounts or the sheet renders, and the frame's own
  * `consent_required` refusals fold back into the same gate — the sheet is the
  * one way through, and the server recomputes what it grants.
+ *
+ * A gateway binding adds one affordance the sheet cannot cover: a relayed
+ * call the gateway refused for want of the viewer's own credential. Nothing
+ * local can supply it, so the banner over the frame just sends the viewer to
+ * the gateway to connect the app there.
  */
 export function AppDetailView({
   appId,
@@ -53,6 +59,10 @@ export function AppDetailView({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The server's message from the last gateway_authorization_required
+  // refusal, or null once dismissed. It names the bound app, so the banner
+  // does not have to guess which one needs connecting.
+  const [connectPrompt, setConnectPrompt] = useState<string | null>(null);
   const generationRef = useRef(0);
   const mutationGenerationRef = useRef(0);
   const refreshGenerationRef = useRef(0);
@@ -101,6 +111,7 @@ export function AppDetailView({
     setLoadError(null);
     setActionError(null);
     setBusy(false);
+    setConnectPrompt(null);
     void (async () => {
       try {
         const [loadedDetail, loadedGrant] = await Promise.all([
@@ -208,6 +219,24 @@ export function AppDetailView({
     }
   }
 
+  // The gateway's own SSO is the handoff: the system browser opens its
+  // origin and the viewer's IdP session authenticates there. No credential of
+  // ours travels with it — a URL-borne bearer is exactly what the gateway's
+  // design rejects.
+  async function onConnectAtGateway() {
+    try {
+      const baseUrl = await apis.gatewayBaseUrl();
+      if (!baseUrl) {
+        toast.error("This profile is not paired with a model gateway.");
+        return;
+      }
+      await openSignInPage(baseUrl);
+      setConnectPrompt(null);
+    } catch (caught) {
+      toast.error(friendlyAppsError(caught, "Could not open your gateway."));
+    }
+  }
+
   async function onDelete() {
     const targetAppId = appId;
     const scopeGeneration = generationRef.current;
@@ -280,12 +309,39 @@ export function AppDetailView({
         {detail && grant && (
           <>
             {grant.granted ? (
-              <AppFrame
-                appId={appId}
-                name={detail.name}
-                apis={apis}
-                onConsentRequired={() => void onConsentRequired()}
-              />
+              <>
+                {connectPrompt && (
+                  <div
+                    className="border-warning/40 bg-warning/10 mx-4 flex items-start gap-3 rounded-lg border p-3"
+                    role="alert"
+                  >
+                    <p className="min-w-0 flex-1 text-sm">{connectPrompt}</p>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      onClick={() => void onConnectAtGateway()}
+                    >
+                      <ExternalLink className="size-3.5" aria-hidden="true" />
+                      Connect at gateway
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => setConnectPrompt(null)}
+                    >
+                      <X className="size-4" />
+                      <span className="sr-only">Dismiss</span>
+                    </Button>
+                  </div>
+                )}
+                <AppFrame
+                  appId={appId}
+                  name={detail.name}
+                  apis={apis}
+                  onConsentRequired={() => void onConsentRequired()}
+                  onGatewayConnectRequired={setConnectPrompt}
+                />
+              </>
             ) : (
               <AppConsentSheet
                 state={grant}

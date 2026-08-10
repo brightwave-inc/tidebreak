@@ -727,6 +727,8 @@ export const APP_INVOKE_REFUSAL_KINDS: readonly AppInvokeRefusalKind[] = [
   "not_pinned",
   "consent_required",
   "unknown_tool",
+  "gateway_unavailable",
+  "gateway_authorization_required",
 ];
 
 /**

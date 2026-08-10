@@ -16,7 +16,9 @@ import type { AppsApis } from "./appsApis";
  *
  * A `consent_required` refusal mid-session (revoked, or a server reconfigured
  * while the app was open) is reported upward so the host can re-present the
- * consent sheet; the frame itself just sees a rejected call.
+ * consent sheet; a `gateway_authorization_required` refusal is reported the
+ * same way so the host can offer a connect prompt. The frame itself just sees
+ * a rejected call in both cases.
  *
  * Unlike the inline MCP App card, this frame fills whatever space the panel
  * gives it — the bridge's app-reported height is ignored and tall content
@@ -32,12 +34,20 @@ export function AppFrame({
   name,
   apis,
   onConsentRequired,
+  onGatewayConnectRequired,
 }: {
   appId: string;
   /** Display name, for the frame's accessible title only. */
   name: string;
   apis: AppsApis;
   onConsentRequired?: () => void;
+  /**
+   * The gateway refused a relayed call for want of a credential only the
+   * viewer can supply, and only at the gateway. Reported upward with the
+   * server's message so the host can offer the connect affordance; nothing
+   * here can resolve it.
+   */
+  onGatewayConnectRequired?: (message: string) => void;
 }) {
   const { resolved: resolvedTheme } = useTheme();
   const [state, setState] = useState<FrameState>({ kind: "loading" });
@@ -48,51 +58,50 @@ export function AppFrame({
   themeRef.current = resolvedTheme;
   const onConsentRequiredRef = useRef(onConsentRequired);
   onConsentRequiredRef.current = onConsentRequired;
+  const onGatewayConnectRequiredRef = useRef(onGatewayConnectRequired);
+  onGatewayConnectRequiredRef.current = onGatewayConnectRequired;
 
   // One bridge per mount, created before the frame's document runs — the
   // same ordering contract as McpAppCard, for the same reason.
   useEffect(() => {
+    // Every leg reports the two refusals the host acts on and rethrows: the
+    // frame still sees a rejected call either way.
+    const reportRefusals = (error: unknown) => {
+      if (error instanceof AppInvokeRefusalError) {
+        if (error.kind === "consent_required") onConsentRequiredRef.current?.();
+        if (error.kind === "gateway_authorization_required")
+          onGatewayConnectRequiredRef.current?.(error.message);
+      }
+      throw error;
+    };
     const bridge = createMcpAppBridge({
       frame: () => frameRef.current?.contentWindow ?? null,
       theme: () => themeRef.current,
-      invokeOperation: async (operationId, parameters, body) => {
-        try {
-          return await apis.invokeOperation(
+      invokeOperation: (operationId, parameters, body) =>
+        apis
+          .invokeOperation(appId, operationId, parameters, body)
+          .catch(reportRefusals),
+      invokeGatewayOperation: (
+        gatewayApp,
+        operationId,
+        pathParameters,
+        query,
+        body,
+      ) =>
+        apis
+          .invokeGatewayOperation(
             appId,
+            gatewayApp,
             operationId,
-            parameters,
+            pathParameters,
+            query,
             body,
-          );
-        } catch (error) {
-          if (
-            error instanceof AppInvokeRefusalError &&
-            error.kind === "consent_required"
-          ) {
-            onConsentRequiredRef.current?.();
-          }
-          throw error;
-        }
-      },
-      invokeFolder: async (folder, op, path, contentBase64, replace) => {
-        try {
-          return await apis.invokeFolder(
-            appId,
-            folder,
-            op,
-            path,
-            contentBase64,
-            replace,
-          );
-        } catch (error) {
-          if (
-            error instanceof AppInvokeRefusalError &&
-            error.kind === "consent_required"
-          ) {
-            onConsentRequiredRef.current?.();
-          }
-          throw error;
-        }
-      },
+          )
+          .catch(reportRefusals),
+      invokeFolder: (folder, op, path, contentBase64, replace) =>
+        apis
+          .invokeFolder(appId, folder, op, path, contentBase64, replace)
+          .catch(reportRefusals),
     });
     bridgeRef.current = bridge;
     window.addEventListener("message", bridge.handleMessage);

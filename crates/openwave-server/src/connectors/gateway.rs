@@ -205,6 +205,33 @@ pub struct GatewayOperationSummary {
     pub summary: Option<String>,
 }
 
+/// What one shared-app invoke relay came back as.
+///
+/// Three outcomes, because the frame has three different things to do with
+/// them: render the response, prompt the viewer to connect the bound app at
+/// the gateway, or report a refusal. Nothing else is representable — a
+/// transport or protocol failure is the `Err` half, and a `404` on the route
+/// is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayInvokeOutcome {
+    /// The gateway executed the operation. Status, content type, and body are
+    /// the upstream API's, passed through: the body is base64 so binary
+    /// responses survive JSON, exactly as the local REST path returns them.
+    Executed {
+        status: u16,
+        content_type: Option<String>,
+        body_base64: String,
+    },
+    /// The viewer has no credential the gateway could resolve for the bound
+    /// app — its typed `authorization_required`. The viewer must connect the
+    /// app at the gateway; no local action can supply it.
+    AuthorizationRequired { message: String },
+    /// The gateway refused the call for any other typed reason (an
+    /// unconsented shared app, a manifest the operation is not in, a
+    /// credential resolution failure). The message is the gateway's own.
+    Refused { message: String },
+}
+
 /// One minted access/refresh pair, resource-bound.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenSet {
@@ -553,6 +580,50 @@ impl GatewayAuth {
         }
         let list: OperationListResponse = decode_json(response, "app catalog request").await?;
         Ok(Some(list.into_operations()))
+    }
+
+    /// Relay one shared-app operation call to the gateway as the signed-in
+    /// user — the data-plane half of a local app's gateway binding.
+    ///
+    /// `request` is the invoke body verbatim (`connected_app_id`,
+    /// `operation_id`, `path_parameters`, `query`, `body`); the caller owns
+    /// its assembly, and nothing here interprets the passthrough halves. The
+    /// bearer is the ordinary `control`-audience session token — the same one
+    /// `/api/v1/cli/*` reads carry — never an attested one: these are
+    /// human-initiated frame calls with no model-emitted observation behind
+    /// them.
+    ///
+    /// `Ok(None)` is the route answering `404`: a gateway that does not serve
+    /// shared-app invokes yet, or an id it holds no app for. That reads as
+    /// "nothing answers this pin", the same degradation
+    /// [`apps`](Self::apps) and [`app_operations`](Self::app_operations) use,
+    /// rather than a fault.
+    pub async fn invoke_shared_app(
+        &self,
+        access_token: &str,
+        shared_app_id: &str,
+        request: &serde_json::Value,
+    ) -> Result<Option<GatewayInvokeOutcome>> {
+        validate_gateway_app_id(shared_app_id)?;
+        let mut url = self.endpoint("/api/apps/shared")?;
+        url.path_segments_mut()
+            .map_err(|()| gateway_error("configuration", "could not build endpoint URL"))?
+            .push(shared_app_id)
+            .push("invoke");
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| gateway_error("shared app invoke", error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let body = read_bounded(response, "shared app invoke").await?;
+        decode_shared_app_invoke(status, &body).map(Some)
     }
 
     async fn exchange_code(
@@ -1033,6 +1104,19 @@ impl GatewayConnection {
         self.auth.app_operations(&token, app_id).await
     }
 
+    /// Relay one shared-app operation call with a `control` token; `None`
+    /// when the gateway does not serve the invoke route or holds no such app.
+    pub async fn invoke_shared_app(
+        &self,
+        shared_app_id: &str,
+        request: &serde_json::Value,
+    ) -> Result<Option<GatewayInvokeOutcome>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth
+            .invoke_shared_app(&token, shared_app_id, request)
+            .await
+    }
+
     /// The gateway's MCP endpoint URL for `slug`, under the configured base.
     pub fn mcp_endpoint_url(&self, slug: &str) -> Result<String> {
         validate_mcp_endpoint_slug(slug)?;
@@ -1206,6 +1290,184 @@ pub fn validate_mcp_endpoint_slug(slug: &str) -> Result<()> {
         return Err(gateway_error("configuration", "invalid MCP endpoint slug"));
     }
     Ok(())
+}
+
+/// The most a single gateway response body may occupy in memory. Matches the
+/// governed REST executor's response cap, so a relayed call is bounded exactly
+/// as a locally executed one is.
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read a response body with a hard byte bound.
+///
+/// An honest oversized `Content-Length` is refused before a byte is read; a
+/// lying one is caught by the check-before-extend, so neither turns into an
+/// unbounded allocation. The same shape [`crate::rest_executor`] uses for the
+/// bodies it brings back from third-party APIs.
+async fn read_bounded(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
+    use futures::StreamExt as _;
+
+    let too_large = || gateway_error(operation, "response exceeded its byte budget");
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_GATEWAY_RESPONSE_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| gateway_error(operation, error.without_url()))?;
+        if body.len().saturating_add(chunk.len()) > MAX_GATEWAY_RESPONSE_BYTES {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Read the gateway's shared-app invoke answer, tolerantly — the one place
+/// that knows the wire shape.
+///
+/// **The gateway contract is still settling.** The shared-app invoke route is
+/// being built against this client in a separate repository, so pinning one
+/// exact envelope here would make the two repositories' merge order
+/// load-bearing. Every shape below is accepted instead, and this function is
+/// the only thing that has to change when the contract lands:
+///
+/// - **Typed failures** are read from `{"error": {"code", "message"}}`,
+///   `{"error": "<code>"}` with a sibling `message` or `error_description`,
+///   or a bare top-level `{"code", "message"}`. The code
+///   `authorization_required` becomes [`GatewayInvokeOutcome::AuthorizationRequired`]
+///   — the one outcome the frame must branch on — and every other code
+///   (including `consent_required`, which a first-open viewer may hit) becomes
+///   [`GatewayInvokeOutcome::Refused`] carrying the gateway's own message. A
+///   failure envelope is looked for on any non-2xx answer, and on a 2xx answer
+///   only when the body has an `error` member and no `status` member, so a
+///   passthrough response body can never be misread as one.
+/// - **Executed responses** come from `{operation_id, status, content_type,
+///   headers?, body}` or `{status, content_type, body_base64}`. `status`
+///   falls back to the HTTP status, and `content_type` to a `content-type`
+///   entry in `headers`. `body_base64` is taken verbatim (it must decode);
+///   a `body` string is the response text unless `body_encoding` says
+///   `base64`, and a `body` of any other JSON type is re-serialized compact.
+///   Guessing whether an arbitrary string "looks like" base64 is deliberately
+///   not attempted: it silently corrupts short text bodies.
+fn decode_shared_app_invoke(
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<GatewayInvokeOutcome> {
+    const OPERATION: &str = "shared app invoke";
+
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else {
+        if status.is_success() {
+            return Err(gateway_error(OPERATION, "invalid response body"));
+        }
+        return Err(gateway_error(
+            OPERATION,
+            format!("HTTP status {}", status.as_u16()),
+        ));
+    };
+    let object = payload.as_object();
+    let looks_like_failure = !status.is_success()
+        || object.is_some_and(|payload| {
+            payload.contains_key("error") && !payload.contains_key("status")
+        });
+    if looks_like_failure {
+        if let Some((code, message)) = failure_envelope(&payload) {
+            let message = message.unwrap_or_else(|| code.clone());
+            return Ok(if code == "authorization_required" {
+                GatewayInvokeOutcome::AuthorizationRequired { message }
+            } else {
+                GatewayInvokeOutcome::Refused { message }
+            });
+        }
+        if !status.is_success() {
+            return Err(gateway_error(
+                OPERATION,
+                format!("HTTP status {}", status.as_u16()),
+            ));
+        }
+    }
+    let Some(payload) = object else {
+        return Err(gateway_error(OPERATION, "invalid response body"));
+    };
+    let executed_status = payload
+        .get("status")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .unwrap_or_else(|| status.as_u16());
+    let content_type = payload
+        .get("content_type")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            payload
+                .get("headers")?
+                .as_object()?
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))?
+                .1
+                .as_str()
+                .map(ToOwned::to_owned)
+        });
+    let body_base64 = if let Some(encoded) = payload.get("body_base64") {
+        let encoded = encoded
+            .as_str()
+            .ok_or_else(|| gateway_error(OPERATION, "invalid response body"))?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| gateway_error(OPERATION, "invalid response body"))?;
+        encoded.to_owned()
+    } else {
+        let base64_encoded = payload
+            .get("body_encoding")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"));
+        let bytes = match payload.get("body") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::String(text)) if base64_encoded => {
+                base64::engine::general_purpose::STANDARD
+                    .decode(text)
+                    .map_err(|_| gateway_error(OPERATION, "invalid response body"))?
+            }
+            Some(serde_json::Value::String(text)) => text.clone().into_bytes(),
+            Some(value) => serde_json::to_vec(value)
+                .map_err(|_| gateway_error(OPERATION, "invalid response body"))?,
+        };
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    };
+    Ok(GatewayInvokeOutcome::Executed {
+        status: executed_status,
+        content_type,
+        body_base64,
+    })
+}
+
+/// The `(code, message)` of a typed gateway failure, in any of the shapes the
+/// route may carry it in — see [`decode_shared_app_invoke`].
+fn failure_envelope(payload: &serde_json::Value) -> Option<(String, Option<String>)> {
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    let (holder, code) = match payload.get("error") {
+        Some(serde_json::Value::Object(error)) => (
+            Some(error),
+            text(error.get("code")).or_else(|| text(error.get("error")))?,
+        ),
+        Some(serde_json::Value::String(code)) => (None, code.clone()),
+        _ => (None, text(payload.get("code"))?),
+    };
+    let message = holder
+        .and_then(|error| {
+            text(error.get("message"))
+                .or_else(|| text(error.get("detail")))
+                .or_else(|| text(error.get("description")))
+        })
+        .or_else(|| text(payload.get("message")))
+        .or_else(|| text(payload.get("error_description")));
+    Some((code, message))
 }
 
 async fn decode_json<T: for<'de> Deserialize<'de>>(

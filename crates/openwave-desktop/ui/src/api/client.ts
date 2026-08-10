@@ -651,6 +651,31 @@ export class ApiClient {
   }
 
   /**
+   * Execute one operation of an app's granted gateway binding — the same
+   * invoke route, relayed by the server to the model gateway as the signed-in
+   * user. The field names are the gateway's own invoke vocabulary, so a
+   * bundle authored here speaks the same shape to the gateway's shell;
+   * `path_parameters`, `query`, `body`, and the result are opaque passthrough.
+   */
+  async invokeAppGatewayOperation(
+    appId: string,
+    gatewayApp: string,
+    operationId: string,
+    pathParameters?: unknown,
+    query?: unknown,
+    body?: unknown,
+  ): Promise<AppRestInvokeResult> {
+    const request: Record<string, unknown> = {
+      gateway_app: gatewayApp,
+      operation_id: operationId,
+    };
+    if (pathParameters !== undefined) request.path_parameters = pathParameters;
+    if (query !== undefined) request.query = query;
+    if (body !== undefined) request.body = body;
+    return (await this.postAppInvoke(appId, request)) as AppRestInvokeResult;
+  }
+
+  /**
    * Execute one folder operation of an app's granted folder binding — the
    * `folder` sibling of {@link invokeAppOperation}, with the same refusal
    * contract. File content crosses base64-encoded in both directions;
