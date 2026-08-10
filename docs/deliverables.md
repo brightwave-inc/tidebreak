@@ -155,6 +155,17 @@ is a durable, append-only version history the user can always walk back:
   rewound, renumbered, or lost, and a restore can itself be undone by another
   restore. Restoring content that is already current is a no-op. The appended
   revision carries no producer, which durably marks it as a user action.
+- **Editing is append-only too.** Markdown and plain-text outputs can be edited
+  in place in the detail panel; Save publishes a new user-authored version
+  rather than rewriting the bytes on screen, and the version it started from
+  stays readable at its own id. The save carries that starting version as a
+  precondition, checked inside the same transaction that publishes: if an agent
+  turn or background run published a newer version while the editor was open,
+  nothing is written and the reader is offered the version that won. Content
+  obeys the same bounds as an agent-written text output — non-empty, UTF-8, no
+  NUL, at most 512 KiB — and the structured text types (CSV, JSON, charts,
+  HTML) and binary artifacts are not editable, because a free-text edit of
+  those is as likely to break the document as to fix it.
 - **Delete is explicit and soft.** Deleting an output hides it from the catalog
   while retaining every revision; the catalog offers an inline Undo that
   restores it exactly.

@@ -642,6 +642,27 @@ pub trait Store: Send + Sync {
         output_storage_unavailable()
     }
 
+    /// Append a revision only while `expected_current` is still the output's
+    /// current revision.
+    ///
+    /// This is [`Store::append_output_revision`] under an optimistic-concurrency
+    /// precondition, the same shape the connected-folder write-back already
+    /// binds a revision and digest with. A caller that read one revision, showed
+    /// it to a person, and is now publishing their edit of it must not overwrite
+    /// a newer revision it never saw: when the head has moved the append fails
+    /// with [`AgentError::OutputRevisionConflict`] naming the revision that is
+    /// current now, and nothing is written. An exact retry of an already
+    /// recorded revision id still succeeds, so an ambiguous save is recoverable
+    /// even once the head has advanced past the precondition.
+    async fn append_output_revision_from(
+        &self,
+        _output_id: OutputId,
+        _expected_current: OutputRevisionId,
+        _revision: &NewOutputRevision,
+    ) -> Result<OutputRecord> {
+        output_storage_unavailable()
+    }
+
     /// Fetch one output by opaque id, including a soft-deleted one.
     async fn get_output(&self, _id: OutputId) -> Result<Option<OutputRecord>> {
         output_storage_unavailable()

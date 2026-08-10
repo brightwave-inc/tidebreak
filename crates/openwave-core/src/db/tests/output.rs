@@ -942,7 +942,7 @@ mod output_scan {
 mod restore {
     use super::*;
     use crate::deliverable::{output_revision_relative_path, RevisionProducer};
-    use crate::deliverable_acceptance::restore_output_to_revision;
+    use crate::deliverable_acceptance::{restore_output_to_revision, save_user_output_revision};
     use crate::id::CallId;
     use crate::output_scan::sync_output_directory;
 
@@ -1095,5 +1095,152 @@ mod restore {
                 .await
                 .is_err()
         );
+    }
+
+    /// The whole safety argument for editing in place: a save is conditional on
+    /// the revision it started from, and losing that condition costs nothing but
+    /// the save. The bytes of the revision the editor was opened on — and of the
+    /// one that overtook it — are the same before and after the rejected save.
+    #[tokio::test]
+    async fn a_stale_edit_is_refused_and_leaves_every_earlier_revision_intact() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let output = output_with_history(&store, scratch.path(), chat.id).await;
+        let dir = open_scratch(scratch.path());
+        // The editor opens on v2 ("# Final").
+        let opened_on = output.current_revision;
+
+        // While it is open, the agent publishes v3.
+        let directory = scratch
+            .path()
+            .join(crate::output_scan::EXEC_OUTPUT_DIRECTORY);
+        std::fs::write(directory.join("report.md"), "# Agent revision").unwrap();
+        sync_output_directory(
+            &store,
+            &dir,
+            &dir,
+            chat.id,
+            CallId::new(),
+            RevisionProducer::Turn(TurnId::new()),
+            at(60),
+        )
+        .await
+        .unwrap();
+        let agent_head = store.get_output(output.id).await.unwrap().unwrap();
+        assert_eq!(agent_head.revision_count, 3);
+
+        let before: Vec<_> = store
+            .list_output_revisions(output.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|revision| {
+                let path = scratch
+                    .path()
+                    .join(output_revision_relative_path(output.id, revision.id));
+                (revision, std::fs::read(path).unwrap())
+            })
+            .collect();
+
+        let refused = save_user_output_revision(
+            &store,
+            &dir,
+            chat.id,
+            output.id,
+            opened_on,
+            "# Final, corrected",
+            at(90),
+        )
+        .await
+        .expect_err("an edit of superseded content must not publish");
+        match refused {
+            crate::error::AgentError::OutputRevisionConflict {
+                output_id,
+                current_revision,
+            } => {
+                // The rejection names what to reconcile against.
+                assert_eq!(output_id, output.id);
+                assert_eq!(current_revision, agent_head.current_revision);
+            }
+            other => panic!("expected a revision conflict, got {other:?}"),
+        }
+
+        // Nothing moved, and no revision's stored bytes were touched.
+        let unchanged = store.get_output(output.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.revision_count, 3);
+        assert_eq!(unchanged.current_revision, agent_head.current_revision);
+        let after: Vec<_> = store
+            .list_output_revisions(output.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|revision| {
+                let path = scratch
+                    .path()
+                    .join(output_revision_relative_path(output.id, revision.id));
+                (revision, std::fs::read(path).unwrap())
+            })
+            .collect();
+        assert_eq!(before, after);
+
+        // Reconciling against the revision that won publishes the edit as a new
+        // user-authored head, and still leaves the earlier bytes alone.
+        let saved = save_user_output_revision(
+            &store,
+            &dir,
+            chat.id,
+            output.id,
+            agent_head.current_revision,
+            "# Final, corrected",
+            at(120),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.revision_count, 4);
+        let head = store
+            .get_output_revision(saved.current_revision)
+            .await
+            .unwrap()
+            .unwrap();
+        // Producer absent on both sides: the user wrote this, not a turn or run.
+        assert_eq!(head.turn_id, None);
+        assert_eq!(head.producing_run_id, None);
+        assert_eq!(
+            std::fs::read(
+                scratch
+                    .path()
+                    .join(output_revision_relative_path(output.id, head.id))
+            )
+            .unwrap(),
+            b"# Final, corrected"
+        );
+        for (revision, bytes) in &before {
+            assert_eq!(
+                &std::fs::read(
+                    scratch
+                        .path()
+                        .join(output_revision_relative_path(output.id, revision.id))
+                )
+                .unwrap(),
+                bytes,
+                "revision {} was rewritten",
+                revision.ordinal
+            );
+        }
+
+        // An ambiguous save retried after it committed appends nothing.
+        let retried = save_user_output_revision(
+            &store,
+            &dir,
+            chat.id,
+            output.id,
+            agent_head.current_revision,
+            "# Final, corrected",
+            at(150),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried.revision_count, 4);
+        assert_eq!(retried.current_revision, saved.current_revision);
     }
 }

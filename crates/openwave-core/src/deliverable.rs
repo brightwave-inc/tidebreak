@@ -122,17 +122,24 @@ pub struct OutputRevision {
     pub created_at: DateTime<Utc>,
 }
 
-/// The foreground turn or background run that produced an output revision.
+/// Who produced an output revision: a foreground turn, a background run, or the
+/// person using OpenWave.
 ///
 /// Callers that mint a revision name exactly one producer through this enum; the
 /// store records it into the mutually exclusive `turn_id` / `producing_run_id`
-/// columns.
+/// columns. [`RevisionProducer::User`] leaves both absent, which is how a user
+/// action has always been recorded — restore appended a producerless revision
+/// long before this variant existed. Naming it makes the third case explicit at
+/// the call site instead of leaving it as the meaning of two `None`s, without
+/// changing a single stored row or adding a parallel attribution mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevisionProducer {
     /// A foreground turn produced the revision.
     Turn(TurnId),
     /// A background run produced the revision.
     Run(AgentRunId),
+    /// The user produced the revision directly — a restore or an in-place edit.
+    User,
 }
 
 impl RevisionProducer {
@@ -141,7 +148,7 @@ impl RevisionProducer {
     pub fn turn_id(self) -> Option<TurnId> {
         match self {
             Self::Turn(turn_id) => Some(turn_id),
-            Self::Run(_) => None,
+            Self::Run(_) | Self::User => None,
         }
     }
 
@@ -150,9 +157,41 @@ impl RevisionProducer {
     pub fn producing_run_id(self) -> Option<AgentRunId> {
         match self {
             Self::Run(run_id) => Some(run_id),
-            Self::Turn(_) => None,
+            Self::Turn(_) | Self::User => None,
         }
     }
+}
+
+/// Whether an output's content can be edited in place in the desktop.
+///
+/// Editing publishes a new user-authored revision through the same append-only
+/// path everything else uses, so the only question is whether a plain text box
+/// can faithfully represent the bytes. Markdown and plain text qualify; the
+/// structured text types (CSV, JSON, chart figures, HTML) and every binary
+/// artifact do not, because a free-text edit of those is as likely to break the
+/// document as to fix it.
+#[must_use]
+pub fn media_type_is_editable_text(media_type: &str) -> bool {
+    matches!(media_type, "text/markdown" | "text/plain")
+}
+
+/// Validate the content of a user-authored text revision.
+///
+/// The rules are exactly the ones the `output/` scan applies to a text
+/// deliverable — non-empty, valid UTF-8 (guaranteed by the `&str`), no NUL, and
+/// within the text ceiling — so an edit cannot save bytes the agent's own path
+/// would have refused.
+pub fn validate_editable_text_content(content: &str) -> Result<(), &'static str> {
+    if content.is_empty() {
+        return Err("the file would be empty");
+    }
+    if content.len() > MAX_DELIVERABLE_BYTES {
+        return Err("text outputs are limited to 512 KiB");
+    }
+    if content.contains('\0') {
+        return Err("text outputs must not contain NUL characters");
+    }
+    Ok(())
 }
 
 /// Content-identifying fields of a revision the caller has already written.

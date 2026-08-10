@@ -453,6 +453,20 @@ impl OutputRevisionId {
         name.extend_from_slice(&ordinal.to_be_bytes());
         Self(Uuid::new_v5(&Self::NAMESPACE, &name))
     }
+
+    /// Derive the retry-stable revision identity for one user edit.
+    ///
+    /// An edit is fully described by what it started from and what it produced,
+    /// so the identity covers the (base revision, content digest) pair. Retrying
+    /// an ambiguous save lands on the same revision instead of appending the
+    /// same text twice, while a later edit — necessarily from a different base —
+    /// gets its own identity even if it restores earlier wording.
+    #[must_use]
+    pub fn for_user_edit(base: OutputRevisionId, sha256: &[u8; 32]) -> Self {
+        let mut name = base.as_uuid().as_bytes().to_vec();
+        name.extend_from_slice(sha256);
+        Self(Uuid::new_v5(&Self::NAMESPACE, &name))
+    }
 }
 
 id_type!(

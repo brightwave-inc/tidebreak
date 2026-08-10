@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::id::OutputId;
+use crate::id::{OutputId, OutputRevisionId};
 use crate::ProjectId;
 
 /// Shorthand for results across the core crate.
@@ -89,6 +89,18 @@ pub enum AgentError {
         output_id: OutputId,
     },
 
+    /// A write against an output lost the race for its current revision:
+    /// something published a newer one after the caller read the one it edited.
+    /// The revision that is actually current is carried so the caller can
+    /// reconcile against it instead of overwriting it.
+    #[error("output {output_id} has moved on to revision {current_revision}")]
+    OutputRevisionConflict {
+        /// The output whose head moved.
+        output_id: OutputId,
+        /// The revision that is current now.
+        current_revision: OutputRevisionId,
+    },
+
     /// A failure reaching the secret store (keychain / KMS).
     #[error("secret error: {0}")]
     Secret(String),
@@ -152,7 +164,7 @@ impl AgentError {
             Self::MissingCredential(_) => "missing_credential",
             Self::Store(_) => "store",
             Self::ProjectNotFound(_) => "not_found",
-            Self::OutputFilenameTaken { .. } => "conflict",
+            Self::OutputFilenameTaken { .. } | Self::OutputRevisionConflict { .. } => "conflict",
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
             Self::Authentication(_) => "authentication",

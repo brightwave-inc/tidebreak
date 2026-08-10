@@ -775,6 +775,15 @@ impl Store for DbStore {
         ops::output::append_output_revision(self, output_id, revision).await
     }
 
+    async fn append_output_revision_from(
+        &self,
+        output_id: OutputId,
+        expected_current: OutputRevisionId,
+        revision: &NewOutputRevision,
+    ) -> Result<OutputRecord> {
+        ops::output::append_output_revision_from(self, output_id, expected_current, revision).await
+    }
+
     async fn get_output(&self, id: OutputId) -> Result<Option<OutputRecord>> {
         ops::output::get_output(self, id).await
     }

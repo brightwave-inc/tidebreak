@@ -85,6 +85,62 @@ export function isTextDeliverableMediaType(
   ].includes(value);
 }
 
+/**
+ * Whether an output's content can be edited in place, mirroring the native
+ * `media_type_is_editable_text`.
+ *
+ * Prose formats only. A plain text box is a faithful editor for Markdown and
+ * plain text and a hazard for the structured types, where a free-hand edit is
+ * as likely to break the document as to fix it.
+ */
+export function isEditableTextMediaType(value: string): boolean {
+  return value === "text/markdown" || value === "text/plain";
+}
+
+/** The outcome of saving an edit. A conflict is a state, not a failure. */
+export type SaveOutputRevisionResult =
+  | { status: "saved"; preview: DeliverablePreview }
+  | { status: "conflict"; currentRevisionId: string };
+
+/**
+ * Publish an edit of a text output as a new user-authored revision.
+ *
+ * `expectedRevisionId` is the revision the editor was opened on and is enforced
+ * natively: if another revision became current, nothing is written and the
+ * result names the revision to reload.
+ */
+export async function saveOutputRevision(
+  chatId: string,
+  outputId: string,
+  expectedRevisionId: string,
+  content: string,
+): Promise<SaveOutputRevisionResult> {
+  return parseSaveOutputRevisionResult(
+    await invoke("save_output_revision", {
+      request: { chatId, outputId, expectedRevisionId, content },
+    }),
+  );
+}
+
+export function parseSaveOutputRevisionResult(
+  value: unknown,
+): SaveOutputRevisionResult {
+  if (isRecord(value) && value.status === "conflict") {
+    if (
+      !isExactRecord(value, ["status", "currentRevisionId"]) ||
+      !isOpaqueId(value.currentRevisionId)
+    ) {
+      throw new Error("Invalid output save response");
+    }
+    return { status: "conflict", currentRevisionId: value.currentRevisionId };
+  }
+  if (!isRecord(value) || value.status !== "saved") {
+    throw new Error("Invalid output save response");
+  }
+  const { status: _status, ...preview } = value;
+  return { status: "saved", preview: parseDeliverablePreview(preview) };
+}
+
 export async function listDeliverables(
   chatId: string,
 ): Promise<DeliverablesCatalog> {

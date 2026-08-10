@@ -148,17 +148,19 @@ pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use deliverable::{
-    binary_media_type_for_extension, deliverable_media_type, media_type_is_text,
-    output_revision_relative_path, revision_byte_ceiling, validate_binary_deliverable,
-    validate_deliverable_media_type, validate_deliverable_name, validate_portable_filename,
-    CreateOutput, DeliverableKind, NewOutputRevision, OutputRecord, OutputRevision,
-    RevisionProducer, CHART_FILENAME_SUFFIX, CHART_MEDIA_TYPE, MAX_BINARY_DELIVERABLE_BYTES,
-    MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS,
-    MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
+    binary_media_type_for_extension, deliverable_media_type, media_type_is_editable_text,
+    media_type_is_text, output_revision_relative_path, revision_byte_ceiling,
+    validate_binary_deliverable, validate_deliverable_media_type, validate_deliverable_name,
+    validate_editable_text_content, validate_portable_filename, CreateOutput, DeliverableKind,
+    NewOutputRevision, OutputRecord, OutputRevision, RevisionProducer, CHART_FILENAME_SUFFIX,
+    CHART_MEDIA_TYPE, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_MEDIA_TYPE_CHARS, MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS,
+    OUTPUTS_DIRECTORY,
 };
 #[cfg(feature = "tools")]
 pub use deliverable_acceptance::{
-    accept_workspace_artifact, restore_output_to_revision, WorkspaceArtifactProposal,
+    accept_workspace_artifact, restore_output_to_revision, save_user_output_revision,
+    WorkspaceArtifactProposal,
 };
 pub use error::{AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, Result};
 pub use event::{AgentEvent, SequencedEvent};

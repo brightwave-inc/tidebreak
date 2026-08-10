@@ -82,6 +82,7 @@ function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis
     readRevision: vi.fn().mockResolvedValue(
       preview({ revisionCount: 2, content: "# Findings\n\nEarlier draft." }),
     ),
+    save: vi.fn().mockResolvedValue({ status: "saved", preview: preview() }),
     restoreRevision: vi.fn().mockResolvedValue({
       outputId,
       filename: "Research brief.md",
