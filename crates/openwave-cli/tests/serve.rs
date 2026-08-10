@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -380,6 +381,84 @@ fn a_setup_command_attaches_to_a_running_server() {
         "stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+/// The same rule for the families that read and write a conversation's files.
+/// Their failure mode when `--server` is ignored is not a broken flag but a
+/// silently wrong target: the command reads the local data directory while the
+/// caller believes it reached the deployment. The client here is pointed at a
+/// *different, empty* data directory from the one the server owns, so an
+/// embedding command would answer about a database that has never heard of this
+/// chat — only a command that actually attached can find it.
+#[test]
+fn the_output_and_attach_families_reach_the_attached_server() {
+    let served = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let (_server, url, token) = spawn_serve(served.path());
+    let chat = create_chat(&url, &token);
+
+    let source = elsewhere.path().join("contract.txt");
+    std::fs::write(&source, b"the terms are as follows\n").unwrap();
+    let attached = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["attach", &chat])
+        .arg(&source)
+        .arg("--server")
+        .arg(&url)
+        .env("OPENWAVE_SERVER_TOKEN", &token)
+        .env("OPENWAVE_DATA_DIR", elsewhere.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run an attached attach");
+    let stderr = String::from_utf8_lossy(&attached.stderr).into_owned();
+    assert!(attached.status.success(), "stderr: {stderr}");
+    let ingested = String::from_utf8_lossy(&attached.stdout).trim().to_owned();
+    assert!(
+        openwave_core::DocumentId::from_str(&ingested).is_ok(),
+        "the new document's id belongs on stdout, got {ingested:?}"
+    );
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["output", "list", &chat, "--server"])
+        .arg(&url)
+        .env("OPENWAVE_SERVER_TOKEN", &token)
+        .env("OPENWAVE_DATA_DIR", elsewhere.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run an attached output list");
+    let stderr = String::from_utf8_lossy(&listed.stderr).into_owned();
+    assert!(listed.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("no outputs"),
+        "the attached chat exists and has produced nothing yet: {stderr}"
+    );
+}
+
+/// Create a chat on the running server and return its id, so a command under
+/// test has something on the *server's* side to name.
+fn create_chat(url: &str, token: &str) -> String {
+    let body = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            reqwest::Client::new()
+                .post(format!("{url}/chats"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .expect("create a chat")
+                .error_for_status()
+                .expect("the create route answers 2xx")
+                .json::<serde_json::Value>()
+                .await
+                .expect("the created chat")
+        });
+    body["id"].as_str().expect("the chat's id").to_owned()
 }
 
 /// The other half of the same rule: a second process that tries to *embed* a
