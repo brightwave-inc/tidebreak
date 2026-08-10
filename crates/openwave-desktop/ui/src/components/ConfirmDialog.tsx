@@ -25,6 +25,7 @@ export type ConfirmOptions = {
 };
 
 type PendingConfirm = ConfirmOptions & {
+  id: number;
   resolve: (value: boolean) => void;
 };
 
@@ -41,17 +42,20 @@ export function useConfirm(): {
   const pendingRef = useRef<PendingConfirm | null>(null);
   const queueRef = useRef<PendingConfirm[]>([]);
   const buttonResultRef = useRef<boolean | null>(null);
+  const nextIdRef = useRef(0);
+  const phaseRef = useRef<"idle" | "open" | "closing">("idle");
 
   const activateNext = useCallback(() => {
     const next = queueRef.current.shift() ?? null;
     pendingRef.current = next;
+    phaseRef.current = next ? "open" : "idle";
     setPending(next);
   }, []);
 
   const confirm = useCallback((options: ConfirmOptions) => {
     return new Promise<boolean>((resolve) => {
-      queueRef.current.push({ ...options, resolve });
-      if (pendingRef.current === null) activateNext();
+      queueRef.current.push({ ...options, id: ++nextIdRef.current, resolve });
+      if (phaseRef.current === "idle") activateNext();
     });
   }, [activateNext]);
 
@@ -59,14 +63,24 @@ export function useConfirm(): {
     const current = pendingRef.current;
     if (!current) return;
     pendingRef.current = null;
+    phaseRef.current = "closing";
+    setPending(null);
     current.resolve(result);
-    activateNext();
-  }, [activateNext]);
+  }, []);
+
+  // Render a fully closed dialog before activating the next queued request.
+  // This gives Radix a close commit in which to restore focus, so the next
+  // request starts on its safe Cancel control instead of reusing the previous
+  // destructive action button.
+  useEffect(() => {
+    if (pending === null && phaseRef.current === "closing") activateNext();
+  }, [activateNext, pending]);
 
   useEffect(
     () => () => {
       pendingRef.current?.resolve(false);
       pendingRef.current = null;
+      phaseRef.current = "idle";
       for (const queued of queueRef.current.splice(0)) queued.resolve(false);
     },
     [],
@@ -84,7 +98,7 @@ export function useConfirm(): {
       }}
     >
       {pending && (
-        <AlertDialogContent>
+        <AlertDialogContent key={pending.id}>
           <AlertDialogHeader>
             <AlertDialogTitle>{pending.title}</AlertDialogTitle>
             {pending.description && (

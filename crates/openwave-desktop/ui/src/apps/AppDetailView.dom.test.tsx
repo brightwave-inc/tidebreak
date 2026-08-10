@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppInvokeRefusalError, type AppDetail, type AppGrantState } from "@/api";
@@ -253,6 +261,97 @@ describe("AppDetailView", () => {
       await screen.findByRole("button", { name: "Allow access" }),
     ).toBeInTheDocument();
     expect(screen.queryByTitle(/^App:/)).not.toBeInTheDocument();
+  });
+
+  it("lets revoke own busy state and its grant refresh during a consent_required refusal", async () => {
+    const revoke = deferred<void>();
+    const apis = apisWith(GRANTED);
+    apis.revoke = vi.fn().mockReturnValue(revoke.promise);
+    apis.grantState = vi
+      .fn()
+      .mockResolvedValueOnce(GRANTED)
+      .mockResolvedValue(STALE);
+    apis.invokeOperation = vi
+      .fn()
+      .mockRejectedValue(
+        new AppInvokeRefusalError("consent_required", "Consent required"),
+      );
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    const frame = (await screen.findByTitle(
+      "App: Fixture app",
+    )) as HTMLIFrameElement;
+    fireEvent.click(screen.getByRole("button", { name: "Revoke access" }));
+    expect(apis.revoke).toHaveBeenCalledWith("app-1");
+
+    const contentWindow = frame.contentWindow!;
+    const posted = vi.spyOn(contentWindow, "postMessage");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          id: 7,
+          method: "operations/call",
+          params: { operation_id: "listIssues" },
+        },
+        source: contentWindow,
+      }),
+    );
+    await waitFor(() => expect(posted).toHaveBeenCalled());
+    expect(apis.grantState).toHaveBeenCalledTimes(1);
+
+    await act(async () => revoke.resolve(undefined));
+
+    expect(
+      await screen.findByRole("button", { name: "Allow access" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete app" })).toBeEnabled();
+    expect(apis.grantState).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets delete complete during a consent_required refusal", async () => {
+    const deletion = deferred<void>();
+    const onBack = vi.fn();
+    const apis = apisWith(GRANTED);
+    apis.deleteApp = vi.fn().mockReturnValue(deletion.promise);
+    apis.invokeOperation = vi
+      .fn()
+      .mockRejectedValue(
+        new AppInvokeRefusalError("consent_required", "Consent required"),
+      );
+    render(<AppDetailView appId="app-1" apis={apis} onBack={onBack} />);
+
+    const frame = (await screen.findByTitle(
+      "App: Fixture app",
+    )) as HTMLIFrameElement;
+    fireEvent.click(screen.getByRole("button", { name: "Delete app" }));
+    const confirmation = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(confirmation).getByRole("button", { name: "Delete app" }),
+    );
+    await waitFor(() => expect(apis.deleteApp).toHaveBeenCalledWith("app-1"));
+
+    const contentWindow = frame.contentWindow!;
+    const posted = vi.spyOn(contentWindow, "postMessage");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          id: 8,
+          method: "operations/call",
+          params: { operation_id: "listIssues" },
+        },
+        source: contentWindow,
+      }),
+    );
+    await waitFor(() => expect(posted).toHaveBeenCalled());
+    expect(apis.grantState).toHaveBeenCalledTimes(1);
+
+    await act(async () => deletion.resolve(undefined));
+
+    await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Revoke access" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete app" })).toBeEnabled();
   });
 
   it("gates an ungranted app behind the sheet, marks staleness, and consents body-less", async () => {

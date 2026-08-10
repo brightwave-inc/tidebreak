@@ -126,6 +126,10 @@ export function PermissionModeMenu({
     operationGenerationRef.current += 1;
     savingRef.current = false;
     setSaving(false);
+    return () => {
+      operationGenerationRef.current += 1;
+      savingRef.current = false;
+    };
   }, [scopeKey]);
 
   async function selectMode(mode: PermissionMode) {

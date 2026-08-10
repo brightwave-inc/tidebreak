@@ -19,9 +19,14 @@ function ConfirmationQueueHarness() {
         onClick={() => {
           const first = confirm({
             title: "First confirmation",
-            confirmLabel: "Confirm first",
+            confirmLabel: "Delete first",
+            destructive: true,
           });
-          const second = confirm({ title: "Second confirmation" });
+          const second = confirm({
+            title: "Second confirmation",
+            confirmLabel: "Delete second",
+            destructive: true,
+          });
           void Promise.all([first, second]).then(setResults);
         }}
       >
@@ -33,7 +38,7 @@ function ConfirmationQueueHarness() {
   );
 }
 
-it("settles overlapping confirmations in FIFO order", async () => {
+it("closes between queued confirmations and puts focus on the next cancel", async () => {
   const user = userEvent.setup();
   render(<ConfirmationQueueHarness />);
 
@@ -45,11 +50,13 @@ it("settles overlapping confirmations in FIFO order", async () => {
     screen.queryByRole("heading", { name: "Second confirmation" }),
   ).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole("button", { name: "Confirm first" }));
+  await user.click(screen.getByRole("button", { name: "Delete first" }));
   expect(
     await screen.findByRole("heading", { name: "Second confirmation" }),
   ).toBeInTheDocument();
 
-  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  const cancel = screen.getByRole("button", { name: "Cancel" });
+  await waitFor(() => expect(cancel).toHaveFocus());
+  await user.keyboard("[Space]");
   await waitFor(() => expect(screen.getByText("[true,false]")).toBeVisible());
 });

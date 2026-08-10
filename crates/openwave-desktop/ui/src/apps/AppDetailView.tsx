@@ -54,26 +54,48 @@ export function AppDetailView({
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const generationRef = useRef(0);
-  const actionGenerationRef = useRef(0);
+  const mutationGenerationRef = useRef(0);
+  const refreshGenerationRef = useRef(0);
+  const mutationInFlightRef = useRef(false);
   const appIdRef = useRef(appId);
   appIdRef.current = appId;
   const { confirm, dialog } = useConfirm();
 
-  function actionIsCurrent(
-    targetAppId: string,
-    scopeGeneration: number,
-    actionGeneration: number,
-  ) {
+  function scopeIsCurrent(targetAppId: string, scopeGeneration: number) {
     return (
       appIdRef.current === targetAppId &&
-      generationRef.current === scopeGeneration &&
-      actionGenerationRef.current === actionGeneration
+      generationRef.current === scopeGeneration
+    );
+  }
+
+  function mutationIsCurrent(
+    targetAppId: string,
+    scopeGeneration: number,
+    mutationGeneration: number,
+  ) {
+    return (
+      scopeIsCurrent(targetAppId, scopeGeneration) &&
+      mutationGenerationRef.current === mutationGeneration
+    );
+  }
+
+  function refreshIsCurrent(
+    targetAppId: string,
+    scopeGeneration: number,
+    refreshGeneration: number,
+  ) {
+    return (
+      scopeIsCurrent(targetAppId, scopeGeneration) &&
+      !mutationInFlightRef.current &&
+      refreshGenerationRef.current === refreshGeneration
     );
   }
 
   useEffect(() => {
     const generation = ++generationRef.current;
-    actionGenerationRef.current += 1;
+    mutationGenerationRef.current += 1;
+    refreshGenerationRef.current += 1;
+    mutationInFlightRef.current = false;
     setDetail(null);
     setGrant(null);
     setLoadError(null);
@@ -99,44 +121,64 @@ export function AppDetailView({
   }, [apis, appId]);
 
   async function onConsent() {
+    if (mutationInFlightRef.current) return;
     const targetAppId = appId;
     const scopeGeneration = generationRef.current;
-    const actionGeneration = ++actionGenerationRef.current;
+    const mutationGeneration = ++mutationGenerationRef.current;
+    refreshGenerationRef.current += 1;
+    mutationInFlightRef.current = true;
     setBusy(true);
     setActionError(null);
     try {
       const nextGrant = await apis.consent(targetAppId);
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
         setGrant(nextGrant);
       }
     } catch (caught) {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
         setActionError(friendlyAppsError(caught, "Could not record consent."));
       }
     } finally {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
+        mutationInFlightRef.current = false;
         setBusy(false);
       }
     }
   }
 
   async function onRevoke() {
+    if (mutationInFlightRef.current) return;
     const targetAppId = appId;
     const scopeGeneration = generationRef.current;
-    const actionGeneration = ++actionGenerationRef.current;
+    const mutationGeneration = ++mutationGenerationRef.current;
+    refreshGenerationRef.current += 1;
+    mutationInFlightRef.current = true;
     setBusy(true);
     try {
       await apis.revoke(targetAppId);
       const nextGrant = await apis.grantState(targetAppId);
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
         setGrant(nextGrant);
       }
     } catch (caught) {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
         toast.error(friendlyAppsError(caught, "Could not revoke access."));
       }
     } finally {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
+        mutationInFlightRef.current = false;
         setBusy(false);
       }
     }
@@ -146,16 +188,19 @@ export function AppDetailView({
   // server reconfigured underneath the grant) drops the frame back behind
   // the sheet with the server's fresh projection.
   async function onConsentRequired() {
+    // A refusal from an operation issued before revoke/delete began is stale
+    // relative to that mutation. The mutation's result owns the next state.
+    if (mutationInFlightRef.current) return;
     const targetAppId = appId;
     const scopeGeneration = generationRef.current;
-    const actionGeneration = ++actionGenerationRef.current;
+    const refreshGeneration = ++refreshGenerationRef.current;
     try {
       const nextGrant = await apis.grantState(targetAppId);
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (refreshIsCurrent(targetAppId, scopeGeneration, refreshGeneration)) {
         setGrant(nextGrant);
       }
     } catch {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (refreshIsCurrent(targetAppId, scopeGeneration, refreshGeneration)) {
         setGrant((current) =>
           current ? { ...current, granted: false } : current,
         );
@@ -180,19 +225,29 @@ export function AppDetailView({
     ) {
       return;
     }
-    const actionGeneration = ++actionGenerationRef.current;
+    if (mutationInFlightRef.current) return;
+    const mutationGeneration = ++mutationGenerationRef.current;
+    refreshGenerationRef.current += 1;
+    mutationInFlightRef.current = true;
     setBusy(true);
     try {
       await apis.deleteApp(targetAppId);
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
         onBack();
       }
     } catch (caught) {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
         toast.error(friendlyAppsError(caught, "Could not delete this app."));
       }
     } finally {
-      if (actionIsCurrent(targetAppId, scopeGeneration, actionGeneration)) {
+      if (
+        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
+      ) {
+        mutationInFlightRef.current = false;
         setBusy(false);
       }
     }

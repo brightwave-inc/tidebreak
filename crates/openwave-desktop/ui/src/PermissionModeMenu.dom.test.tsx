@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ManagedPolicy, PermissionMode } from "./api";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { PermissionModeMenu } from "./PermissionModeMenu";
+
+vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 
 afterEach(() => {
   cleanup();
@@ -115,4 +118,41 @@ it("lets a new chat save while an old chat write is still settling", async () =>
 
   resolveOld();
   await waitFor(() => expect(onChange).toHaveBeenCalledTimes(2));
+});
+
+it("does not toast a failed write after keyed chat navigation unmounts it", async () => {
+  let rejectOld!: (reason: Error) => void;
+  const oldWrite = new Promise<void>((_resolve, reject) => {
+    rejectOld = reject;
+  });
+  const onChange = vi.fn().mockReturnValue(oldWrite);
+  const oldChat = render(
+    <PermissionModeMenu
+      scopeKey="chat-1"
+      value="ask"
+      onChange={onChange}
+    />,
+  );
+
+  await userEvent.click(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: /Allow all/ }),
+  );
+  oldChat.unmount();
+  render(
+    <PermissionModeMenu
+      scopeKey="chat-2"
+      value="ask"
+      onChange={vi.fn()}
+    />,
+  );
+
+  await act(async () => rejectOld(new Error("old chat write failed")));
+
+  expect(toast.error).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  ).toBeEnabled();
 });
