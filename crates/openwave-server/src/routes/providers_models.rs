@@ -379,6 +379,15 @@ pub struct ModelInfo {
     pub vendor: Option<ProviderKind>,
     /// How thoroughly OpenWave has exercised this provider/model combination.
     pub verification: crate::model_registry::VerificationTier,
+    /// Whether a picker shows this model without being asked for the full
+    /// catalog — the curated default-visible set.
+    ///
+    /// Presentation only: a model that is not recommended is exactly as
+    /// selectable and supported as one that is. Effective visibility is this
+    /// flag flipped by any matching entry in the reader's
+    /// `model_visibility_overrides` setting; the server never filters the
+    /// catalog by it.
+    pub recommended: bool,
     /// Whether the provider is enabled, configured, credentialed, and able to
     /// serve this model at its configured endpoint/location.
     pub available: bool,
@@ -460,6 +469,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             provider: entry.policy.provider,
             vendor: entry.policy.vendor,
             verification: entry.policy.verification,
+            recommended: entry.policy.recommended,
             available: entry.available,
             context_window: entry.policy.context_window,
             max_output_tokens: entry.policy.max_output_tokens,

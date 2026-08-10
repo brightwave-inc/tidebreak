@@ -2511,6 +2511,21 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// [`Store::list_pending_chat_prompts`] restricted to conversations that
+    /// belong to `owner`. A cross-chat read, so it is owner-scoped like the
+    /// inbox it projects the same parked rows for.
+    ///
+    /// The default refuses rather than falling back to the unscoped read: this
+    /// is the owner boundary itself, and an implementation that forgets the
+    /// override should fail loudly instead of quietly serving every owner's
+    /// prompts.
+    async fn list_pending_chat_prompts_scoped(
+        &self,
+        _owner: &OwnerId,
+    ) -> Result<Vec<PendingChatPrompt>> {
+        turn_storage_unavailable()
+    }
+
     /// Every item waiting on `owner`, across their conversations, oldest first.
     ///
     /// A read model over the same parked rows the per-chat recovery routes

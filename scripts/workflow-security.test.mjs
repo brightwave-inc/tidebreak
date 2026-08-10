@@ -92,14 +92,12 @@ test("workflow container images are pinned by digest", () => {
   assert.doesNotMatch(workflows["ci.yml"], /gitleaks\/gitleaks:latest/);
 });
 
-test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
+test("PR lanes are scope-gated, never label-gated", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");
   const fmt = workflowJob(ci, "fmt");
   const postgres = workflowJob(ci, "postgres");
   const testJob = workflowJob(ci, "test");
-  const fullCiGate =
-    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'full-ci'\)/;
 
   assert.match(
     ci,
@@ -110,7 +108,11 @@ test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
     /pull_request:\n\s+types:\n\s+\[[^\]]*labeled, unlabeled[^\]]*\]/,
   );
   assert.doesNotMatch(ci, /^  build:$/m);
-  assert.doesNotMatch(fmt, /full-ci/);
+  // A pull request's green checks must prove the same commits stay green on
+  // main: no platform-neutral lane may hide behind an opt-in label. The
+  // `windows-ci` opt-in below is the one deliberate exception.
+  assert.doesNotMatch(ci, /full-ci/);
+  assert.doesNotMatch(fmt, /github\.event_name/);
   assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
   // The narrower `workspace` scope must imply the `rust` one. Without this the
   // crate-coverage lanes could be gated on a scope that never ran for them.
@@ -121,14 +123,19 @@ test("heavy CI is opt-in on pull requests and automatic elsewhere", () => {
   assert.doesNotMatch(ci, /^  rust:$/m);
   assert.doesNotMatch(ci, /name: fmt · clippy · build · test/);
 
-  for (const job of [
-    workflowJob(ci, "lint"),
-    workflowJob(ci, "desktop"),
-    testJob,
-    postgres,
-    workflowJob(ci, "ui"),
+  for (const [job, scope] of [
+    [workflowJob(ci, "lint"), "rust"],
+    [workflowJob(ci, "desktop"), "rust"],
+    [testJob, "workspace"],
+    [postgres, "workspace"],
+    [workflowJob(ci, "ui"), "ui"],
   ]) {
-    assert.match(job, fullCiGate);
+    assert.match(
+      job,
+      new RegExp(
+        `if: \\$\\{\\{ needs\\.changes\\.outputs\\.${scope} == 'true' \\}\\}`,
+      ),
+    );
   }
 
   for (const job of [
@@ -172,7 +179,6 @@ test("native Windows CI is an explicit PR opt-in with a main backstop", () => {
     /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\)/;
 
   assert.match(windows, windowsCiGate);
-  assert.doesNotMatch(windows, /'full-ci'/);
   assert.match(
     windows,
     /group: \$\{\{ github\.event_name == 'push' && 'windows-check-main' \|\| format\('windows-check-run-\{0\}', github\.run_id\) \}\}/,

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentActivityHistoryEntry,
   AgentRun,
+  AgentRunProgress,
   AgentRunTaskPlan,
   ApiClient,
 } from "./api";
@@ -51,6 +52,15 @@ export type AgentRuns = {
    * says the plan has moved on.
    */
   loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+  /**
+   * Read one page of a background run's live progress, resuming from the
+   * caller's cursor. The caller holds the cursor because it is what makes the
+   * poll cheap: a run with nothing new to say answers with an empty page.
+   */
+  loadProgress: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
 };
 
 /**
@@ -158,6 +168,14 @@ export function useAgentRuns(
     [client, chatId],
   );
 
+  const loadProgress = useCallback(
+    async (runId: string, afterSequence: number) => {
+      if (!client || !chatId) return { entries: [], nextSequence: afterSequence };
+      return client.listAgentRunProgress(chatId, runId, afterSequence);
+    },
+    [client, chatId],
+  );
+
   return {
     runs,
     loading,
@@ -166,5 +184,6 @@ export function useAgentRuns(
     cancel,
     loadActivity,
     loadTaskPlan,
+    loadProgress,
   };
 }

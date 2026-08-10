@@ -10,7 +10,7 @@ composer, next to the send button, and applies to that chat only.
 | --- | --- |
 | **Plan** | Read-only. The agent explores and proposes a plan. Nothing is edited or run. |
 | **Ask** | Ask before edits and actions that leave the workspace. This is the default. |
-| **Auto** | Workspace edits run on their own; anything that leaves the workspace still asks. |
+| **Auto** | Workspace edits run on their own. Actions that leave the workspace still ask, except for a narrow set a model reviewer may approve for you — see [Automatic approvals in Auto](#automatic-approvals-in-auto). |
 | **Allow all** | Everything runs without asking, in this chat only. |
 
 New chats start in the mode you last chose. A fresh install starts in **Ask**.
@@ -29,12 +29,55 @@ rather than configured:
   external MCP server.
 
 Read-only calls never ask. Workspace calls ask only in **Ask**. Sensitive
-calls ask in **Ask** and in **Auto**, and are the whole reason **Allow all**
-exists.
+calls ask in **Ask** and in **Auto** — with the exception below — and are the
+whole reason **Allow all** exists.
 
 One exception outranks the mode: **replacing a file that already exists in a
 connected folder always asks**, including in Auto and Allow all. Creating a
 new file there does not.
+
+## Automatic approvals in Auto
+
+Auto does more than let workspace edits through. A small, cheap model reviews
+a narrow set of sensitive calls and can approve them on your behalf, so the
+turn does not stop for a card. This happens only in **Auto**, and only for
+these four:
+
+- searching your attached documents in a way that shares the query and
+  matching excerpts with the provider,
+- a web search, which shares the query,
+- fetching a web page,
+- running a command that needs network access.
+
+Everything else that is Sensitive still comes to you in Auto: starting a
+background agent, publishing a local app, and every tool from an external MCP
+server are never sent to the reviewer.
+
+Commands have a second gate in front of the reviewer, and it does most of the
+work. Before a command is even eligible, it must pass the same static shell
+analysis that a broad "allow any command" grant would be held to. That
+analysis refuses interpreters, destructive operations, reads and writes of
+sensitive paths, and anything reaching outside the folder — which means
+script runners and package installers (`python script.py`, `pip install x`)
+never reach the reviewer at all, whatever their arguments look like. What is
+left is a call to a named program with ordinary operands.
+
+The reviewer is only allowed to shorten the path to yes:
+
+- It must answer both *safe* and *confident*. Anything else, and the card
+  comes to you.
+- If it errs, times out, returns something unparseable, or no model is
+  configured for the role, the card comes to you. There is no cheaper
+  fallback.
+- If you answer the card first, your answer wins — the reviewer cannot
+  overturn it.
+
+It runs on the **utility** model role, the same small model used for other
+background work, which you can set under **Settings → Models**. The request
+carries the action being approved and a short digest of the recent
+conversation; tool output is not included.
+
+If you would rather every sensitive call stopped for you, use **Ask**.
 
 ## Plan mode is a refusal, not a queue
 

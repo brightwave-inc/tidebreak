@@ -1,10 +1,12 @@
 import { Fragment, memo, useMemo, useRef } from "react";
+import { Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
   ApiClient,
   AgentRun,
   AgentActivityHistoryEntry,
+  AgentRunProgress,
   AgentRunTaskPlan,
   PendingFolderAccessRequest,
   PendingOutputWritebackRequest,
@@ -176,7 +178,11 @@ export function retryableTurn(
       text: message.text,
       images: message.images ?? [],
       files: message.files ?? [],
-      invokedSkills: failure.invokedSkills ?? message.invokedSkills ?? [],
+      // The message being resent speaks for itself. It is not always the turn's
+      // opening prompt — guidance sent mid-turn becomes a user message too, and
+      // it carries its own invocation — so preferring the turn-level list here
+      // would resend one message's text under another's skills.
+      invokedSkills: message.invokedSkills ?? failure.invokedSkills ?? [],
       voiceInputUsed:
         failure.voiceInputUsed ?? message.voiceInputUsed ?? false,
     };
@@ -218,6 +224,10 @@ type MessageListProps = {
   onLoadBackgroundAgentTaskPlan?: (
     runId: string,
   ) => Promise<AgentRunTaskPlan | null>;
+  onLoadBackgroundAgentProgress?: (
+    runId: string,
+    afterSequence: number,
+  ) => Promise<AgentRunProgress>;
   onOpenBackgroundAgent?: (runId: string) => void;
   onOpenOutput?: (outputId: string) => void;
   /** The connected client, so a background agent row can fetch debug info. */
@@ -288,6 +298,10 @@ export function MessageList({
   onCancelBackgroundAgentRun = async () => undefined,
   onLoadBackgroundAgentActivity = async () => [],
   onLoadBackgroundAgentTaskPlan = async () => null,
+  onLoadBackgroundAgentProgress = async (_runId, afterSequence) => ({
+    entries: [],
+    nextSequence: afterSequence,
+  }),
   onOpenBackgroundAgent,
   onOpenOutput,
   busy,
@@ -340,6 +354,7 @@ export function MessageList({
       cancel: onCancelBackgroundAgentRun,
       loadActivity: onLoadBackgroundAgentActivity,
       loadTaskPlan: onLoadBackgroundAgentTaskPlan,
+      loadProgress: onLoadBackgroundAgentProgress,
       open: onOpenBackgroundAgent,
       openOutput: onOpenOutput,
       client: backgroundAgentClient,
@@ -550,6 +565,10 @@ export function groupMessageItems(
     cancel: (runId: string) => Promise<void>;
     loadActivity: (runId: string) => Promise<AgentActivityHistoryEntry[]>;
     loadTaskPlan: (runId: string) => Promise<AgentRunTaskPlan | null>;
+    loadProgress: (
+      runId: string,
+      afterSequence: number,
+    ) => Promise<AgentRunProgress>;
     open?: (runId: string) => void;
     openOutput?: (outputId: string) => void;
     /** The connected client, so a row's "Copy debug info" can fetch its run. */
@@ -562,6 +581,10 @@ export function groupMessageItems(
     cancel: async () => undefined,
     loadActivity: async () => [],
     loadTaskPlan: async () => null,
+    loadProgress: async (_runId: string, afterSequence: number) => ({
+      entries: [],
+      nextSequence: afterSequence,
+    }),
   },
   retry?: { failureId: string; onRetry: () => void },
 ) {
@@ -731,6 +754,7 @@ export function groupMessageItems(
             onCancel={backgroundAgents.cancel}
             onLoadActivity={backgroundAgents.loadActivity}
             onLoadTaskPlan={backgroundAgents.loadTaskPlan}
+            onLoadProgress={backgroundAgents.loadProgress}
             onOpen={backgroundAgents.open}
             onOpenOutput={backgroundAgents.openOutput}
             {...(backgroundAgents.client && chatId
@@ -1039,6 +1063,35 @@ function AssistantMessageBody({
 }
 
 /**
+ * The skills a durable user message named, read back from the transcript.
+ *
+ * Read-only by construction: the message has already been sent, so there is
+ * nothing to add or remove. It exists so a reader returning to a conversation
+ * can still see what a turn was pointed at — the composer's own chips are
+ * cleared with the text they were attached to.
+ */
+function TranscriptInvokedSkills({ skills }: { skills: readonly string[] }) {
+  return (
+    <ul
+      className="m-0 mt-2 flex list-none flex-wrap gap-1.5 p-0"
+      aria-label="Invoked skills"
+    >
+      {skills.map((name) => (
+        <li
+          key={name}
+          className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-muted-foreground"
+        >
+          <Wand2 size={12} aria-hidden="true" />
+          <span className="max-w-[12rem] truncate text-xs font-medium">
+            {name}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
  * Memoized row: settled messages keep referential identity across reducer
  * transitions, so during streaming only the live assistant bubble (whose
  * message object changes each token) re-renders.
@@ -1178,6 +1231,9 @@ function MessageBubbleImpl({
               <TranscriptFileAttachments files={message.files} />,
             )}
           <MessageMarkdown>{message.text}</MessageMarkdown>
+          {message.invokedSkills && message.invokedSkills.length > 0 && (
+            <TranscriptInvokedSkills skills={message.invokedSkills} />
+          )}
         </article>
         <MessageFooter
           role="user"

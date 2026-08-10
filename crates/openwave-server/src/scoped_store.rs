@@ -386,6 +386,15 @@ impl ScopedStore {
         self.store.list_inbox_items_scoped(&self.owner).await
     }
 
+    /// The per-conversation attention summary over the principal's own chats.
+    /// Another owner's parked prompt is not merely unreadable here, it is
+    /// absent, so the summary cannot even reveal that their chat exists.
+    pub async fn list_pending_chat_prompts(&self) -> Result<Vec<openwave_core::PendingChatPrompt>> {
+        self.store
+            .list_pending_chat_prompts_scoped(&self.owner)
+            .await
+    }
+
     /// The standing grants reachable through the principal's own chats and
     /// projects, newest first.
     pub async fn list_standing_tool_grants(

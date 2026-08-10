@@ -447,6 +447,11 @@ pub struct ChatMessageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file_attachments: Option<Vec<TranscriptFileAttachment>>,
+    /// Skills this user message explicitly invoked, in submitted order. Absent
+    /// for the ordinary message that invoked none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub invoked_skills: Option<Vec<String>>,
 }
 
 /// One renderer-safe image identity attached to a historical user message.
@@ -643,6 +648,7 @@ impl ChatMessageSnapshot {
             citations: Vec::new(),
             image_attachments: None,
             file_attachments: None,
+            invoked_skills: None,
         })
     }
 }
@@ -680,6 +686,10 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(TranscriptFileAttachment::from(attachment));
     }
+    let mut invoked_skills_by_message = std::collections::HashMap::new();
+    for invoked in transcript.message_invoked_skills {
+        invoked_skills_by_message.insert(invoked.message_id, invoked.skills);
+    }
     let mut messages: Vec<ChatMessageSnapshot> = transcript
         .messages
         .into_iter()
@@ -699,6 +709,9 @@ pub async fn list_chat_messages(
                     .unwrap_or_default();
                 snapshot.file_attachments =
                     (!file_attachments.is_empty()).then_some(file_attachments);
+                snapshot.invoked_skills = invoked_skills_by_message
+                    .remove(&snapshot.id)
+                    .filter(|skills| !skills.is_empty());
             }
             Some(snapshot)
         })
@@ -729,6 +742,7 @@ pub async fn list_chat_messages(
                     citations: Vec::new(),
                     image_attachments: None,
                     file_attachments: None,
+                    invoked_skills: None,
                 },
             );
         }

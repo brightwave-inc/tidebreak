@@ -38,6 +38,13 @@ pub struct ChatTranscriptSnapshot {
     pub message_document_attachments: Vec<MessageDocumentAttachment>,
     /// Ordered renderer-safe sources keyed to their assistant message.
     pub citations: Vec<ChatCitationSnapshot>,
+    /// Skills each user message explicitly invoked, keyed to that message.
+    ///
+    /// Derived rather than stored on the message: a turn owns the list its
+    /// opening message carried, and a steer owns its own, so reading it back
+    /// from those rows keeps one authority instead of a copy that can drift.
+    /// Messages that invoked nothing are absent.
+    pub message_invoked_skills: Vec<MessageInvokedSkills>,
     /// Every terminal turn, including outcomes that committed no assistant
     /// message. Keeping status and streamed content together prevents each new
     /// terminal outcome from requiring another transcript side table.
@@ -47,6 +54,13 @@ pub struct ChatTranscriptSnapshot {
     /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
+}
+
+/// The skills one user message explicitly invoked, in submitted order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageInvokedSkills {
+    pub message_id: MessageId,
+    pub skills: Vec<String>,
 }
 
 /// One renderer-safe citation paired with its transcript message.

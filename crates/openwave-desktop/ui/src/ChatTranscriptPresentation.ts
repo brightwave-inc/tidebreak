@@ -162,6 +162,8 @@ export function presentChatTranscript(
           text: entry.text,
           images: entry.images,
           files: entry.files,
+          invokedSkills:
+            entry.invokedSkills.length > 0 ? entry.invokedSkills : undefined,
           createdAt: entry.createdAt,
         } satisfies ChatMessage,
       ];

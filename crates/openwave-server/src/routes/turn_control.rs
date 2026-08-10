@@ -242,6 +242,7 @@ mod image_capability_tests {
         display_name: "Text Only Model",
         provider: ProviderKind::Anthropic,
         verification: crate::model_registry::VerificationTier::Unverified,
+        recommended: false,
         context_window: 200_000,
         max_output_tokens: 64_000,
         input_modalities: &[InputModality::Text],

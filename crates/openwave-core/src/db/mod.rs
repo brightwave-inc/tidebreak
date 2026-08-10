@@ -2183,7 +2183,14 @@ impl Store for DbStore {
     }
 
     async fn list_pending_chat_prompts(&self) -> Result<Vec<crate::PendingChatPrompt>> {
-        ops::chat_prompt::list_pending_chat_prompts(self).await
+        ops::chat_prompt::list_pending_chat_prompts(self, None).await
+    }
+
+    async fn list_pending_chat_prompts_scoped(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<crate::PendingChatPrompt>> {
+        ops::chat_prompt::list_pending_chat_prompts(self, Some(owner)).await
     }
 
     async fn list_inbox_items_scoped(&self, owner: &OwnerId) -> Result<Vec<crate::InboxItem>> {

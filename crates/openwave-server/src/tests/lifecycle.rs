@@ -3099,6 +3099,7 @@ async fn self_host_tokens_resolve_named_principals() {
 async fn routes_scope_root_aggregates_to_the_requesting_principal() {
     let (dir, store) = temp_db_store("self-host-scoping.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
+    let prompts_store = Arc::clone(&store);
     let tokens_file = dir.path().join("tokens");
     std::fs::write(
         &tokens_file,
@@ -3180,6 +3181,27 @@ async fn routes_scope_root_aggregates_to_the_requesting_principal() {
             "{path} must not answer for another owner's chat"
         );
     }
+
+    // The cross-chat prompt summary is a root read, so it is scoped by owner
+    // rather than by a chat id the caller names: Alice's parked question is
+    // hers alone, and Bob's inbox does not even learn her chat exists.
+    park_user_questions_for_route_test(&*prompts_store, chat.id).await;
+    let alice_prompts: Vec<serde_json::Value> =
+        json_body(get(alice, "/chats/pending-prompts".to_owned()).await).await;
+    assert_eq!(
+        alice_prompts
+            .iter()
+            .filter(|summary| summary["chat_id"] == chat.id.to_string())
+            .count(),
+        1,
+        "the owner still sees her own parked prompt"
+    );
+    let bob_prompts: Vec<serde_json::Value> =
+        json_body(get(bob, "/chats/pending-prompts".to_owned()).await).await;
+    assert!(
+        bob_prompts.is_empty(),
+        "the prompt inbox never carries another owner's parked prompts"
+    );
 
     // Mutations answer the same way: nothing to patch, nothing to delete.
     let patch = router

@@ -1,11 +1,13 @@
 //! Opaque cross-conversation prompt summaries for shell-level notification.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::error::Result;
-use crate::model::{ToolCallExecution, ToolCallStatus, TurnClientWaitStatus, TurnRunStatus};
+use crate::model::{
+    OwnerId, ToolCallExecution, ToolCallStatus, TurnClientWaitStatus, TurnRunStatus,
+};
 use crate::storage::{InboxItemKind, PendingChatPrompt};
 use crate::{
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
@@ -26,11 +28,37 @@ pub(in crate::db) struct PendingPromptRow {
 }
 
 /// Fold prompt rows into the per-conversation attention summary.
+///
+/// With an `owner`, the principal's own chats are the scope filter, so a
+/// conversation someone else owns cannot appear in the summary — the same
+/// derivation [`super::inbox::list_inbox_items`] uses for the cross-chat
+/// inbox it shares these rows with.
 pub(in crate::db) async fn list_pending_chat_prompts(
     store: &DbStore,
+    owner: Option<&OwnerId>,
 ) -> Result<Vec<PendingChatPrompt>> {
+    let visible = match owner {
+        Some(owner) => Some(
+            entities::chat::Entity::find()
+                .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+                .all(&store.conn)
+                .await
+                .map_err(store_err)?
+                .into_iter()
+                .map(|chat| chat.id)
+                .collect::<HashSet<_>>(),
+        ),
+        None => None,
+    };
+
     let mut prompts = BTreeMap::<uuid::Uuid, PendingChatPrompt>::new();
     for row in list_pending_prompt_rows(store).await? {
+        if visible
+            .as_ref()
+            .is_some_and(|chat_ids| !chat_ids.contains(&row.chat_id.0))
+        {
+            continue;
+        }
         let entry = prompts
             .entry(row.chat_id.0)
             .or_insert_with(|| PendingChatPrompt {

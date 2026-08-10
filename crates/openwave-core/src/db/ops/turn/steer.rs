@@ -868,7 +868,9 @@ fn turn_steer_from_model(model: entities::turn_steer::Model) -> Result<TurnSteer
 /// A row whose value is not an array of strings is corrupt rather than merely
 /// unusual: the accepted instruction can no longer be described honestly, so
 /// this fails instead of degrading to "no skills were invoked".
-fn invoked_skills_from_steer(model: &entities::turn_steer::Model) -> Result<Vec<String>> {
+pub(in crate::db) fn invoked_skills_from_steer(
+    model: &entities::turn_steer::Model,
+) -> Result<Vec<String>> {
     serde_json::from_value(model.invoked_skills.clone()).map_err(|error| {
         AgentError::Store(format!(
             "turn steer {} has unreadable invoked skills: {error}",

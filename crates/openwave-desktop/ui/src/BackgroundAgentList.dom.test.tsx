@@ -1,11 +1,21 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentActivityHistoryEntry, AgentRun } from "./api";
+import type {
+  AgentActivityHistoryEntry,
+  AgentRun,
+  AgentRunProgress,
+} from "./api";
 import { BackgroundAgentList } from "./BackgroundAgentList";
 
 afterEach(cleanup);
+
+/** No run in these tests narrates anything; the cursor comes back unchanged. */
+const noProgress = async (_runId: string, afterSequence: number) => ({
+  entries: [],
+  nextSequence: afterSequence,
+});
 
 function run(status: AgentRun["status"]): AgentRun {
   return {
@@ -51,6 +61,7 @@ describe("BackgroundAgentList activity disclosure", () => {
         onCancel={async () => undefined}
         onLoadActivity={loadActivity}
         onLoadTaskPlan={async () => null}
+        onLoadProgress={noProgress}
       />
     );
 
@@ -85,5 +96,79 @@ describe("BackgroundAgentList activity disclosure", () => {
     });
     expect(settledTrigger.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("list")).toBeTruthy();
+  });
+});
+
+describe("BackgroundAgentList progress", () => {
+  it("shows a running child's latest line and resumes the poll from the cursor", async () => {
+    vi.useFakeTimers();
+    try {
+      const asked: number[] = [];
+      const pages: Record<number, AgentRunProgress> = {
+        0: {
+          entries: [
+            {
+              sequence: 1,
+              text: "Reading the brief",
+              at: "2026-08-05T18:36:00Z",
+            },
+            {
+              sequence: 2,
+              text: "Drafting the summary",
+              at: "2026-08-05T18:36:30Z",
+            },
+          ],
+          nextSequence: 2,
+        },
+        2: {
+          entries: [
+            {
+              sequence: 3,
+              text: "Checking the figures",
+              at: "2026-08-05T18:37:00Z",
+            },
+          ],
+          nextSequence: 3,
+        },
+      };
+      const loadProgress = async (_runId: string, afterSequence: number) => {
+        asked.push(afterSequence);
+        return (
+          pages[afterSequence] ?? { entries: [], nextSequence: afterSequence }
+        );
+      };
+
+      render(
+        <BackgroundAgentList
+          spawns={[{ callId: "spawn-call", status: "completed" }]}
+          runs={[run("running")]}
+          loading={false}
+          error={null}
+          onRetry={() => undefined}
+          onCancel={async () => undefined}
+          onLoadActivity={async () => []}
+          onLoadTaskPlan={async () => null}
+          onLoadProgress={loadProgress}
+        />,
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The row says what the child is doing, not only that it is doing
+      // something — and it is the newest line, not the first one.
+      expect(screen.getByText("Drafting the summary")).toBeTruthy();
+      expect(screen.queryByText("Reading the brief")).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(screen.getByText("Checking the figures")).toBeTruthy();
+      // The second read resumes where the first page ended rather than
+      // re-reading the stream from the start.
+      expect(asked).toEqual([0, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

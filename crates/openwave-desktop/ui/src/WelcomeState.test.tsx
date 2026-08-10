@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApiClient,
@@ -21,17 +27,32 @@ function executionClient(
 }
 
 describe("WelcomeState", () => {
-  it("renders the greeting and starter prompts when a handler is provided", () => {
-    render(<WelcomeState onSelectPrompt={vi.fn()} />);
+  it("offers the launch outcomes as starter prompts when a handler is provided", () => {
+    const onSelectPrompt = vi.fn();
+    render(<WelcomeState onSelectPrompt={onSelectPrompt} />);
 
     expect(
       screen.getByRole("heading", { name: "How can I help?" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("What can you help me with?")).toBeInTheDocument();
-    expect(screen.getByText("Draft a plan")).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Start a chat" }),
-    ).toBeInTheDocument();
+    for (const label of [
+      "Write a report from files",
+      "Analyze a spreadsheet",
+      "Delegate work in parallel",
+      "Turn a folder into an app",
+    ]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    // Nothing on home offers to search sources any more.
+    expect(screen.queryByText(/search/i)).toBeNull();
+
+    // A prompt has to stand on its own before anything is attached: it asks
+    // for the input it is missing rather than assuming hidden context.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Write a report from files" }),
+    );
+    expect(onSelectPrompt).toHaveBeenCalledWith(
+      expect.stringMatching(/Tell me what to attach/),
+    );
   });
 
   it("omits the starter prompts when no handler is provided", () => {
