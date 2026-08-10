@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Download OpenWave for macOS or Windows, or build it from source.
+description: Download OpenWave for macOS, or build it from source.
 ---
 
 ## macOS
@@ -23,25 +23,15 @@ shasum -a 256 -c OpenWave-macos-apple-silicon.dmg.sha256
 An installed macOS build keeps itself current. It checks for a newer signed
 release in the background and asks before restarting.
 
-## Windows
+## Windows and Linux
 
-Download the installer and run it. It installs per-user and needs no
-administrator elevation.
+There is no prebuilt package for either. Build from source.
 
-[Download for Windows (x86_64)](https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-windows-x86_64-setup.exe)
-
-<Callout type="warn">
-The Windows installer is not yet Authenticode-signed, so SmartScreen warns on
-first run. Verify the download against its `.sha256` sidecar before you accept
-that warning.
-</Callout>
-
-Windows builds do not currently run the in-app update loop. To move to a newer
-version, download and run the newer installer.
-
-## Linux
-
-There is no prebuilt Linux package. Build from source.
+Windows installers shipped through v0.34.0, but the Windows release build is
+paused: releases are macOS-only until it comes back. Nothing about Windows
+support has been withdrawn, and the code that produces the installer is still
+in the tree — it is the build that is parked, for cost reasons. A Windows user
+on the last packaged release has no upgrade path other than building.
 
 ## Build from source
 
