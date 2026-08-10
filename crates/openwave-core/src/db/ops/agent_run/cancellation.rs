@@ -98,6 +98,7 @@ pub(in crate::db) async fn request_agent_run_cancellation(
         AgentRunStatus::Queued
         | AgentRunStatus::Waiting
         | AgentRunStatus::RetryWait
+        | AgentRunStatus::NeedsInput
         | AgentRunStatus::Running => {}
         AgentRunStatus::Active => {
             transaction.commit().await.map_err(store_err)?;
@@ -312,7 +313,8 @@ where
             | AgentRunStatus::Running
             | AgentRunStatus::Cancelling
             | AgentRunStatus::Waiting
-            | AgentRunStatus::RetryWait => {
+            | AgentRunStatus::RetryWait
+            | AgentRunStatus::NeedsInput => {
                 if !terminalize_cancellation_on(
                     conn,
                     &child,
@@ -553,6 +555,13 @@ where
             now,
         )
         .await?;
+    }
+    // A paused run holds its single result slot with the check-in receipt and
+    // its inbox delivery. Cancellation replaces that pause with a terminal
+    // outcome, so both rows go first — the cancellation receipt below is what
+    // the parent should read, whether or not it consumed the check-in.
+    if status == AgentRunStatus::NeedsInput {
+        super::clear_checkin_delivery_on(conn, AgentRunId(run.id)).await?;
     }
     let update = entities::agent_run::Entity::update_many()
         .col_expr(

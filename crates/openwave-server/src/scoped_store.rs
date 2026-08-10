@@ -315,6 +315,15 @@ impl ScopedStore {
         self.store.get_agent_run_result(id).await
     }
 
+    /// [`Store::resume_agent_run_from_checkin`].
+    pub async fn resume_agent_run_from_checkin(
+        &self,
+        id: AgentRunId,
+        guidance: Option<&str>,
+    ) -> Result<Option<openwave_core::AgentRun>> {
+        self.store.resume_agent_run_from_checkin(id, guidance).await
+    }
+
     /// [`Store::request_agent_run_cancellation`].
     pub async fn request_agent_run_cancellation(
         &self,

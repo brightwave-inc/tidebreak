@@ -26,6 +26,16 @@ use super::model_step::*;
 /// run has already had its one push-back.
 const TASK_PLAN_INCOMPLETE: &str = "task_plan_incomplete";
 
+/// Bound the error excerpt a check-in carries: enough to act on, never a blob.
+fn truncate_checkin_detail(text: &str) -> String {
+    const MAX: usize = 1_000;
+    if text.chars().count() <= MAX {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(MAX).collect();
+    format!("{cut}…")
+}
+
 impl SandboxAgentRunWorker {
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
@@ -333,6 +343,53 @@ impl SandboxAgentRunWorker {
         {
             agent_config.max_steps = steps as usize;
         }
+        // Each check-in resume grants one more full window, recorded durably
+        // on the run so a replayed claim computes the same budget.
+        agent_config.max_steps = agent_config.max_steps.saturating_mul(
+            usize::try_from(run.checkin_grants)
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
+        // A run whose trailing tool calls all failed needs direction, not more
+        // of the same: check in with the requester before spending another
+        // model step. Only rows past the last resume count, so the errors one
+        // check-in reported cannot re-trigger the next.
+        let error_threshold =
+            crate::routes::read_sandbox_agent_error_checkin(&*self.store).await? as usize;
+        {
+            let watermark = usize::try_from(run.checkin_watermark).unwrap_or(0);
+            let trailing = previous_calls
+                .iter()
+                .rev()
+                .take_while(|call| call.status == openwave_core::SandboxToolCallStatus::Failed)
+                .count();
+            let past_watermark = previous_calls.len().saturating_sub(watermark);
+            if trailing.min(past_watermark) >= error_threshold {
+                let last_error = match previous_calls.last() {
+                    Some(call) => self
+                        .store
+                        .get_sandbox_tool_call_receipt(call.id)
+                        .await?
+                        .map(|receipt| receipt.result)
+                        .unwrap_or_default(),
+                    None => String::new(),
+                };
+                let steps_used = sandbox_call_steps(&previous_calls).len();
+                return self
+                    .submit_checkin(
+                        &run,
+                        lease_token,
+                        openwave_core::AgentRunCheckInReason::ConsecutiveToolErrors,
+                        steps_used,
+                        &format!(
+                            "The last {trailing} tool call(s) all failed. Most recent error: \
+                             {last}",
+                            last = truncate_checkin_detail(&last_error),
+                        ),
+                    )
+                    .await;
+            }
+        }
         let supports_vendor_web_search = if self.resolver.enforces_model_registry() {
             let Some(policy) =
                 crate::providers::resolve_model_policy(&*self.store, &model, true).await?
@@ -577,6 +634,51 @@ impl SandboxAgentRunWorker {
             }
             Some(FailAgentRunOutcome::Failed(_)) | Some(FailAgentRunOutcome::ExistingFailed(_)) => {
                 Ok(SandboxAgentRunWorkerOutcome::Failed(id))
+            }
+            None => {
+                self.acknowledge_cancellation_or_lease_loss(id, lease_token)
+                    .await
+            }
+        }
+    }
+
+    /// Park the run in `NeedsInput` with a check-in receipt for its parent.
+    ///
+    /// The receipt rides the terminal-submission machinery, so the parent's
+    /// `wait_for_agents` consumes it like any other child outcome; unlike one,
+    /// the run is paused rather than finished, and a resume grants it another
+    /// cadence window.
+    async fn submit_checkin(
+        &self,
+        run: &AgentRun,
+        lease_token: uuid::Uuid,
+        reason: openwave_core::AgentRunCheckInReason,
+        steps_used: usize,
+        detail: &str,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let id = run.id;
+        match self
+            .store
+            .submit_agent_run_checkin(
+                id,
+                lease_token,
+                reason,
+                u32::try_from(steps_used).unwrap_or(u32::MAX),
+                detail,
+            )
+            .await?
+        {
+            Some(SubmitAgentRunResultOutcome::Completed(_))
+            | Some(SubmitAgentRunResultOutcome::Existing(_)) => {
+                self.publish_note(
+                    id,
+                    &format!("checkin:{}:{}", run.attempt_count, run.claim_count),
+                    detail,
+                )
+                .await;
+                // The parent may be parked on a wait this delivery satisfies.
+                self.turn_wake.notify_one();
+                Ok(SandboxAgentRunWorkerOutcome::CheckedIn(id))
             }
             None => {
                 self.acknowledge_cancellation_or_lease_loss(id, lease_token)
@@ -848,39 +950,26 @@ impl SandboxAgentRunWorker {
                 .await;
         }
         // A step past the point the cadence withdrew parking tools called a
-        // tool the request no longer offered. That is a thing models do at the
-        // end of a long transcript, and the run has usually already produced
-        // the work it was asked for, so it is answered rather than killed: the
-        // grace steps exist for exactly this, and the answer tells the model to
-        // finish with `done`. Only when the grace is spent too — the model
-        // ignoring refusals it can now read — is there nowhere left to go.
-        let refusal_only = depth.saturating_add(2) > max_steps;
-        let mut intents = intents;
-        if refusal_only {
-            if depth.saturating_add(1) > max_steps + SANDBOX_STEP_REFUSAL_GRACE {
-                return self
-                    .record_failure(
-                        &run,
-                        lease_token,
-                        AgentError::msg("sandbox tool checkpoint has no budget to park into"),
-                    )
-                    .await;
-            }
-            // One refusal answers the whole step: the transcript is rebuilt
-            // from rows, so the calls that never park simply never happened
-            // and leave no dangling tool use.
-            intents.truncate(1);
-            let last = intents
-                .last_mut()
-                .expect("a non-empty step keeps its first call when refused");
-            last.disposition = SandboxToolCallDisposition::Rejected {
-                error_code: "tool_budget_exhausted",
-                message: "This task's step budget is exhausted and this tool is no longer \
-                          available: the call was not run, and no further call to it will be. \
-                          Finish now by calling done with the filenames you wrote under output/ \
-                          and a summary of what you produced."
-                    .to_owned(),
-            };
+        // tool the request no longer offered: the run wants to keep working
+        // past its window. That is exactly what a check-in is for — the calls
+        // are not parked (a row-less call never happened, so a resumed claim
+        // simply asks the model again under the wider budget), and the run
+        // pauses for its requester instead of being refused or killed.
+        if depth.saturating_add(2) > max_steps {
+            return self
+                .submit_checkin(
+                    &run,
+                    lease_token,
+                    openwave_core::AgentRunCheckInReason::StepCadence,
+                    depth,
+                    &format!(
+                        "Used the whole {max_steps}-step window without finishing; wants to run \
+                         {count} more tool call(s). Resume to grant another window, optionally \
+                         with guidance, or cancel.",
+                        count = intents.len(),
+                    ),
+                )
+                .await;
         }
         let entries: Vec<SandboxToolCallParkEntry> = intents
             .into_iter()

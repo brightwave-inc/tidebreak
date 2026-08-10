@@ -531,6 +531,8 @@ pub mod agent_run {
         pub attempt_count: i32,
         pub max_attempts: i32,
         pub claim_count: i32,
+        pub checkin_grants: i32,
+        pub checkin_watermark: i32,
         pub available_at: DateTimeUtc,
         pub deadline_at: Option<DateTimeUtc>,
         pub lease_token: Option<Uuid>,

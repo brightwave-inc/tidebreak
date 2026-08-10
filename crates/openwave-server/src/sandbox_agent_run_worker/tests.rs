@@ -3014,19 +3014,15 @@ async fn spend_the_cadence(
     }
 }
 
-/// A run that calls a tool after its cadence is spent is answered, not killed.
+/// A run that calls a tool after its cadence is spent checks in, not dies.
 ///
-/// This is the production failure the grace steps exist for. Three background
-/// runs spent their whole tool budget producing documents, called a work tool
-/// once more after it had been withdrawn from the request, and were failed
-/// outright — then retried to their attempt ceiling, each retry replaying the
-/// identical transcript into the identical wall, and the finished work was
-/// discarded.
-///
-/// The cadence is still where work stops: the call does not run. What changes
-/// is that the refusal is a receipt the model can read, parked in one of the
-/// grace steps kept for it, and the run gets the step it needs to hand over
-/// what it already produced.
+/// This is the production failure #1829 first patched with a refusal reserve:
+/// three background runs spent their whole tool budget producing documents,
+/// called a work tool once more after it was withdrawn, and were failed
+/// outright — discarding finished work. The cadence design goes further than
+/// the refusal did: the run pauses in `needs_input` with a check-in receipt
+/// its requester can read, and a resume grants another window (optionally
+/// with guidance) under which the run finishes.
 #[tokio::test]
 async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_the_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -3064,31 +3060,17 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
     // and the step that consumes it).
     spend_the_cadence(&store, id, chat.id, 7).await;
 
-    // The model searches anyway. That must not kill the run.
-    let refused = match worker.run_once().await.unwrap() {
-        SandboxAgentRunWorkerOutcome::ToolCheckpointed(call_id) => call_id,
-        outcome => panic!("the over-budget step should be answered, got {outcome:?}"),
-    };
-    assert_ne!(
-        store.get_agent_run(id).await.unwrap().unwrap().status,
-        AgentRunStatus::Failed
+    // The model searches anyway. That must pause the run, not kill it.
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::CheckedIn(id)
     );
-    let receipt = store
-        .get_sandbox_tool_call_receipt(refused)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(receipt.status, SandboxToolCallStatus::Failed);
-    assert_eq!(receipt.error_code.as_deref(), Some("tool_budget_exhausted"));
-    assert!(
-        receipt.result.contains("no longer available"),
-        "the refusal should say why the call did not run, got {:?}",
-        receipt.result
-    );
+    let paused = store.get_agent_run(id).await.unwrap().unwrap();
+    assert_eq!(paused.status, AgentRunStatus::NeedsInput);
+    assert_eq!(paused.checkin_grants, 0);
 
-    // That step's request is the one the budget ran out on: the work tools are
-    // gone from it, and it says so in words rather than leaving the model to
-    // infer a rule from an absence.
+    // The request the cadence ran out on withdrew the work tools and said so
+    // in words rather than leaving the model to infer a rule from an absence.
     let spent_request = provider.requests.lock().unwrap()[0].clone();
     let offered: Vec<&str> = spent_request
         .tools
@@ -3098,7 +3080,7 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
     assert!(
         !offered.contains(&openwave_core::SANDBOX_WEB_SEARCH_TOOL)
             && !offered.contains(&SANDBOX_EXEC_TOOL),
-        "work tools should be withdrawn at the cap, got {offered:?}"
+        "work tools should be withdrawn at the cadence, got {offered:?}"
     );
     let notice: String = spent_request
         .messages
@@ -3116,9 +3098,36 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
         "the exhausted request should say the cadence is spent, got {notice:?}"
     );
 
-    // And the run gets the step it needs to hand over the work it already did.
+    // A resume grants another window and folds guidance into the task.
+    let resumed = store
+        .resume_agent_run_from_checkin(id, Some("Wrap up now: submit what you have."))
+        .await
+        .unwrap()
+        .expect("a paused run resumes");
+    assert_eq!(resumed.status, AgentRunStatus::RetryWait);
+    assert_eq!(resumed.checkin_grants, 1);
+    assert!(resumed
+        .input
+        .as_deref()
+        .unwrap()
+        .contains("Wrap up now: submit what you have."));
+
+    // Under the doubled window the run finishes and hands over its work.
     assert_eq!(
         worker.run_once().await.unwrap(),
         SandboxAgentRunWorkerOutcome::Completed(id)
+    );
+    let resumed_request = provider.requests.lock().unwrap()[1].clone();
+    assert!(
+        resumed_request
+            .messages
+            .first()
+            .unwrap()
+            .content
+            .iter()
+            .any(
+                |block| matches!(block, ContentBlock::Text { text } if text.contains("Wrap up now"))
+            ),
+        "the resumed request should carry the guidance in its task text"
     );
 }

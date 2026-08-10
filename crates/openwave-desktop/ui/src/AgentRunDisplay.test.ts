@@ -10,6 +10,7 @@ describe("background-agent display vocabulary", () => {
   it("keeps live work ahead of settled outcomes", () => {
     expect(AGENT_RUN_STATUS_GROUPS.map((group) => group.label)).toEqual([
       "Running",
+      "Needs input",
       "Stopping",
       "Completed",
       "Stopped",
@@ -28,6 +29,7 @@ describe("background-agent display vocabulary", () => {
       "cancelling",
       "waiting",
       "retry_wait",
+      "needs_input",
       "completed",
       "failed",
       "cancelled",

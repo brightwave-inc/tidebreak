@@ -118,6 +118,18 @@ pub(super) fn agent_run_table() -> TableCreateStatement {
         .col(ColumnDef::new(AgentRun::MaxAttempts).integer().not_null())
         .col(ColumnDef::new(AgentRun::ClaimCount).integer().not_null())
         .col(
+            ColumnDef::new(AgentRun::CheckinGrants)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRun::CheckinWatermark)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
             ColumnDef::new(AgentRun::AvailableAt)
                 .timestamp_with_time_zone()
                 .not_null(),
@@ -321,6 +333,7 @@ fn agent_run_shape_check() -> SimpleExpr {
         AgentRunStatus::Cancelling.as_str(),
         AgentRunStatus::Waiting.as_str(),
         AgentRunStatus::RetryWait.as_str(),
+        AgentRunStatus::NeedsInput.as_str(),
         AgentRunStatus::Completed.as_str(),
         AgentRunStatus::Failed.as_str(),
         AgentRunStatus::Cancelled.as_str(),
@@ -404,6 +417,7 @@ fn agent_run_finished_check() -> SimpleExpr {
             AgentRunStatus::Cancelling.as_str(),
             AgentRunStatus::Waiting.as_str(),
             AgentRunStatus::RetryWait.as_str(),
+            AgentRunStatus::NeedsInput.as_str(),
         ])
         .and(Expr::col(AgentRun::FinishedAt).is_null());
     terminal_finished.or(nonterminal_unfinished)

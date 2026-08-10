@@ -107,7 +107,7 @@ WHERE w.status = 'waiting' AND w.condition = 'all'
   AND tc.error_detail IS NULL AND tc.resolved_at IS NULL
   AND tc.client_executor_id IS NULL AND tc.client_lease_token IS NULL
   AND tc.client_lease_expires_at IS NULL AND tc.created_at = w.parked_at
-  AND c.tier = 'background' AND c.status IN ('completed', 'failed', 'cancelled')
+  AND c.tier = 'background' AND c.status IN ('completed', 'failed', 'cancelled', 'needs_input')
   AND m.open = TRUE
   AND i.status = 'pending' AND i.claim_count = 0
   AND i.lease_token IS NULL AND i.lease_expires_at IS NULL

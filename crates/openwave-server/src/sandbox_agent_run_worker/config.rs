@@ -148,6 +148,7 @@ pub(crate) enum SandboxAgentRunWorkerOutcome {
     RetryScheduled(openwave_core::AgentRunId),
     Failed(openwave_core::AgentRunId),
     Cancelled(openwave_core::AgentRunId),
+    CheckedIn(openwave_core::AgentRunId),
     ParentWaitSetResumed(openwave_core::CallId),
     ToolCheckpointed(openwave_core::CallId),
     LeaseLost(openwave_core::AgentRunId),

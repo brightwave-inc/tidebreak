@@ -178,7 +178,7 @@ terminal_text: string | null, created_at: string, updated_at: string, spawn_call
 /**
  * Durable lifecycle of an [`AgentRun`].
  */
-export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "waiting" | "retry_wait" | "completed" | "failed" | "cancelled";
+export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "waiting" | "retry_wait" | "needs_input" | "completed" | "failed" | "cancelled";
 
 /**
  * Renderer-safe durable projection of one background run's current plan.

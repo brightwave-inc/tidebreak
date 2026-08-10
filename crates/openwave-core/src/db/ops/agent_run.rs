@@ -59,6 +59,8 @@ where
         attempt_count: Set(0),
         max_attempts: Set(0),
         claim_count: Set(0),
+        checkin_grants: Set(0),
+        checkin_watermark: Set(0),
         available_at: Set(created_at),
         deadline_at: Set(None),
         lease_token: Set(None),
@@ -192,6 +194,8 @@ pub(in crate::db) async fn accept_agent_run(
             AgentRunTier::Background => AgentRun::DEFAULT_MAX_ATTEMPTS,
         }),
         claim_count: Set(0),
+        checkin_grants: Set(0),
+        checkin_watermark: Set(0),
         available_at: Set(now),
         deadline_at: Set(match tier {
             AgentRunTier::Foreground => None,
@@ -536,6 +540,8 @@ where
             _ => AgentRun::DEFAULT_MAX_ATTEMPTS,
         }),
         claim_count: Set(0),
+        checkin_grants: Set(0),
+        checkin_watermark: Set(0),
         available_at: Set(created_at),
         deadline_at: Set(Some(created_at + AgentRun::DEFAULT_MAX_DURATION)),
         lease_token: Set(None),
@@ -1513,6 +1519,35 @@ pub(in crate::db) async fn submit_agent_run_result(
     .await
 }
 
+/// Park a background run in `NeedsInput` with a check-in receipt its parent
+/// can consume through the ordinary wait machinery.
+///
+/// This shares the terminal submission path deliberately: the receipt and
+/// inbox delivery are fenced by the exact same lease identities, so the wait
+/// scan needs no new joins to see a paused child. The only differences are
+/// the run's resulting status and that nothing here is final — a resume
+/// deletes the receipt and delivery again.
+pub(in crate::db) async fn submit_agent_run_checkin(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    reason: crate::model::AgentRunCheckInReason,
+    steps_used: u32,
+    detail: &str,
+) -> Result<Option<SubmitAgentRunResultOutcome>> {
+    submit_agent_run_result_payload(
+        store,
+        id,
+        lease_token,
+        AgentRunResultPayload::CheckIn {
+            reason,
+            steps_used,
+            detail: detail.to_owned(),
+        },
+    )
+    .await
+}
+
 /// Submit a background run's files as its terminal receipt.
 pub(in crate::db) async fn submit_agent_run_submission(
     store: &DbStore,
@@ -1642,10 +1677,18 @@ async fn submit_agent_run_result_payload(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
+    // A check-in parks; everything else finishes. Same receipt, same inbox,
+    // same fencing — only where the run lands differs.
+    let checkin = matches!(payload, AgentRunResultPayload::CheckIn { .. });
+    let (next_status, finished_at) = if checkin {
+        (AgentRunStatus::NeedsInput, None)
+    } else {
+        (AgentRunStatus::Completed, Some(now))
+    };
     let updated = entities::agent_run::Entity::update_many()
         .col_expr(
             entities::agent_run::Column::Status,
-            sea_orm::sea_query::Expr::value(AgentRunStatus::Completed.as_str()),
+            sea_orm::sea_query::Expr::value(next_status.as_str()),
         )
         .col_expr(
             entities::agent_run::Column::LeaseToken,
@@ -1657,7 +1700,7 @@ async fn submit_agent_run_result_payload(
         )
         .col_expr(
             entities::agent_run::Column::FinishedAt,
-            sea_orm::sea_query::Expr::value(Some(now)),
+            sea_orm::sea_query::Expr::value(finished_at),
         )
         .col_expr(
             entities::agent_run::Column::LastErrorCode,
@@ -1773,6 +1816,165 @@ where
     C: sea_orm::ConnectionTrait,
 {
     super::acquire_advisory_lock(conn, super::AdvisoryLockName::AgentRunClaim).await
+}
+
+/// Remove a paused run's check-in receipt and its inbox delivery.
+///
+/// The result slot is unique per run, so the receipt must be gone before the
+/// run can produce a terminal outcome — whether it resumes toward one or is
+/// cancelled into one. Consumed deliveries are removed too: once the run
+/// moves on, the pause they described no longer exists.
+pub(in crate::db) async fn clear_checkin_delivery_on<C>(conn: &C, id: AgentRunId) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let Some(receipt) = entities::agent_run_result::Entity::find_by_id(id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(());
+    };
+    if receipt.payload_kind != "check_in" {
+        return Err(AgentError::Store(format!(
+            "sandbox run {id} holds a non-check-in receipt where a check-in was expected"
+        )));
+    }
+    entities::agent_run_inbox::Entity::delete_many()
+        .filter(entities::agent_run_inbox::Column::ChildRunId.eq(id.0))
+        .filter(entities::agent_run_inbox::Column::ResultLeaseToken.eq(receipt.lease_token))
+        .filter(entities::agent_run_inbox::Column::ResultAttemptCount.eq(receipt.attempt_count))
+        .filter(entities::agent_run_inbox::Column::ResultClaimCount.eq(receipt.claim_count))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    entities::agent_run_result::Entity::delete_by_id(id.0)
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// Maximum guidance length one resume may append to a paused run's task.
+pub(in crate::db) const MAX_CHECKIN_GUIDANCE_CHARS: usize = 4_096;
+
+/// Resume a run parked in `NeedsInput`, granting it another cadence window.
+///
+/// The check-in receipt and delivery are deleted, the grant and row watermark
+/// are recorded durably so replay computes the same budgets, and any guidance
+/// is appended to the run's own task text — the one durable instruction
+/// stream every future claim rebuilds the transcript from. Returns `None`
+/// when the run is not paused.
+pub(in crate::db) async fn resume_agent_run_from_checkin(
+    store: &DbStore,
+    id: AgentRunId,
+    guidance: Option<&str>,
+) -> Result<Option<AgentRun>> {
+    if let Some(guidance) = guidance {
+        if guidance.trim().is_empty() || guidance.chars().count() > MAX_CHECKIN_GUIDANCE_CHARS {
+            return Err(AgentError::Store(format!(
+                "check-in guidance requires 1..={MAX_CHECKIN_GUIDANCE_CHARS} characters"
+            )));
+        }
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if run.tier != AgentRunTier::Background.as_str()
+        || run.status != AgentRunStatus::NeedsInput.as_str()
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    clear_checkin_delivery_on(&transaction, id).await?;
+    let rows = entities::sandbox_tool_call::Entity::find()
+        .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(id.0))
+        .count(&transaction)
+        .await
+        .map_err(store_err)?;
+    let watermark = i32::try_from(rows)
+        .map_err(|_| AgentError::Store("sandbox run has an implausible row count".into()))?;
+    let input = match guidance {
+        None => run.input.clone(),
+        Some(guidance) => {
+            let base = run.input.clone().unwrap_or_default();
+            let appended = format!(
+                "{base}\n\n[Guidance from your requester at check-in {n}]: {guidance}",
+                n = run.checkin_grants + 1
+            );
+            if appended.len() > AgentRun::MAX_INPUT_LEN {
+                transaction.rollback().await.map_err(store_err)?;
+                return Err(AgentError::Store(
+                    "check-in guidance would overflow the run's task text".into(),
+                ));
+            }
+            Some(appended)
+        }
+    };
+    let updated = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::RetryWait.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::CheckinGrants,
+            sea_orm::sea_query::Expr::value(run.checkin_grants + 1),
+        )
+        .col_expr(
+            entities::agent_run::Column::CheckinWatermark,
+            sea_orm::sea_query::Expr::value(watermark),
+        )
+        .col_expr(
+            entities::agent_run::Column::Input,
+            sea_orm::sea_query::Expr::value(input),
+        )
+        .col_expr(
+            entities::agent_run::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        // Retry-wait rows carry a machine-readable cause by invariant; this
+        // one is a grant, not a failure, and the next claim clears it.
+        .col_expr(
+            entities::agent_run::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Some("checkin_resumed".to_owned())),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Some(
+                "resumed by the requester after a check-in".to_owned(),
+            )),
+        )
+        // A fresh no-progress window: the pause was the user's time, not the
+        // run's.
+        .col_expr(
+            entities::agent_run::Column::DeadlineAt,
+            sea_orm::sea_query::Expr::value(Some(now + AgentRun::DEFAULT_MAX_DURATION)),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::NeedsInput.as_str()))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at))
+        .filter(entities::agent_run::Column::CheckinGrants.eq(run.checkin_grants))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let resumed = find_by_id_on(&transaction, id)
+        .await?
+        .ok_or_else(|| AgentError::Store("resumed sandbox run disappeared".into()))?;
+    let resumed = agent_run_from_model(resumed)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(resumed))
 }
 
 async fn find_expired_deadline_on<C>(
@@ -2259,6 +2461,8 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
         input: model.input,
         model: model.model,
         attempt_count: model.attempt_count,
+        checkin_grants: model.checkin_grants,
+        checkin_watermark: model.checkin_watermark,
         max_attempts: model.max_attempts,
         claim_count: model.claim_count,
         available_at: model.available_at,
@@ -2332,6 +2536,7 @@ fn agent_run_status_from_db(value: &str) -> Result<AgentRunStatus> {
         "cancelling" => AgentRunStatus::Cancelling,
         "waiting" => AgentRunStatus::Waiting,
         "retry_wait" => AgentRunStatus::RetryWait,
+        "needs_input" => AgentRunStatus::NeedsInput,
         "completed" => AgentRunStatus::Completed,
         "failed" => AgentRunStatus::Failed,
         "cancelled" => AgentRunStatus::Cancelled,
@@ -2421,6 +2626,15 @@ fn validate_agent_run_result_payload(payload: &AgentRunResultPayload) -> Result<
             "invalid sandbox folder-access proposal".into(),
         )),
         AgentRunResultPayload::Cancelled { .. } => Ok(()),
+        AgentRunResultPayload::CheckIn { detail, .. } => {
+            if detail.trim().is_empty() || detail.chars().count() > AgentRun::MAX_RESULT_LEN {
+                return Err(AgentError::Store(format!(
+                    "agent-run check-in detail requires 1..={} characters",
+                    AgentRun::MAX_RESULT_LEN
+                )));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2430,6 +2644,7 @@ fn agent_run_result_payload_kind(payload: &AgentRunResultPayload) -> &'static st
         AgentRunResultPayload::Submission { .. } => "submission",
         AgentRunResultPayload::FolderAccessProposal { .. } => "folder_access_proposal",
         AgentRunResultPayload::Cancelled { .. } => "cancelled",
+        AgentRunResultPayload::CheckIn { .. } => "check_in",
     }
 }
 
@@ -2447,6 +2662,15 @@ fn agent_run_result_payload_json(payload: &AgentRunResultPayload) -> Result<Stri
         AgentRunResultPayload::FolderAccessProposal { request } => serde_json::to_string(request),
         AgentRunResultPayload::Cancelled { reason } => serde_json::to_string(&serde_json::json!({
             "reason": reason.as_str(),
+        })),
+        AgentRunResultPayload::CheckIn {
+            reason,
+            steps_used,
+            detail,
+        } => serde_json::to_string(&serde_json::json!({
+            "reason": reason.as_str(),
+            "steps_used": steps_used,
+            "detail": detail,
         })),
     }
     .map_err(|error| AgentError::Store(format!("serialize agent-run result payload: {error}")))
@@ -2500,6 +2724,24 @@ fn agent_run_result_payload_from_columns(kind: &str, json: &str) -> Result<Agent
             })?;
             AgentRunResultPayload::Cancelled { reason }
         }
+        "check_in" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct CheckInPayload {
+                reason: String,
+                steps_used: u32,
+                detail: String,
+            }
+            let payload = serde_json::from_str::<CheckInPayload>(json)
+                .map_err(|_| AgentError::Store("invalid stored check-in result payload".into()))?;
+            let reason = crate::model::AgentRunCheckInReason::parse(&payload.reason)
+                .ok_or_else(|| AgentError::Store("invalid stored check-in reason".into()))?;
+            AgentRunResultPayload::CheckIn {
+                reason,
+                steps_used: payload.steps_used,
+                detail: payload.detail,
+            }
+        }
         _ => {
             return Err(AgentError::Store(
                 "invalid stored agent-run result payload kind".into(),
@@ -2544,6 +2786,21 @@ fn agent_run_result_display_text(payload: &AgentRunResultPayload) -> String {
                 "Sandbox task was cancelled because its parent turn failed.".to_owned()
             }
         },
+        AgentRunResultPayload::CheckIn {
+            reason,
+            steps_used,
+            detail,
+        } => {
+            let why = match reason {
+                crate::model::AgentRunCheckInReason::StepCadence => {
+                    format!("Checked in after using its {steps_used}-step window.")
+                }
+                crate::model::AgentRunCheckInReason::ConsecutiveToolErrors => {
+                    format!("Checked in after repeated tool errors ({steps_used} steps taken).")
+                }
+            };
+            format!("{why}\n{detail}")
+        }
     }
 }
 

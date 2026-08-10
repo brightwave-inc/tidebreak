@@ -38,10 +38,10 @@ pub use messages::{
     MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS,
 };
 pub use runs::{
-    AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunExecutionLocation,
-    AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry, AgentRunResult,
-    AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier, Chat,
-    DelegatedFileReadClaim, SandboxAgentAdmission, SandboxSpawnCheckpoint,
+    AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunCheckInReason,
+    AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunProgressEntry,
+    AgentRunResult, AgentRunResultPayload, AgentRunStatus, AgentRunSubmittedOutput, AgentRunTier,
+    Chat, DelegatedFileReadClaim, SandboxAgentAdmission, SandboxSpawnCheckpoint,
     SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallParkEntry,
     SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus,
 };

@@ -702,6 +702,56 @@ pub async fn post_agent_run_cancel(
     ))
 }
 
+/// Body of `POST /chats/{chat_id}/agent-runs/{run_id}/resume`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AgentRunResumeBody {
+    /// Optional direction folded into the run's task before it continues.
+    #[serde(default)]
+    pub guidance: Option<String>,
+}
+
+/// `POST /chats/{chat_id}/agent-runs/{run_id}/resume` — resume a background
+/// run that checked in, granting it another cadence window.
+///
+/// Guidance, when present, is appended durably to the run's task text so
+/// every later claim replays it. A run that is not paused in `needs_input`
+/// is refused with `409` and nothing changes.
+pub async fn post_agent_run_resume(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+    Json(body): Json<AgentRunResumeBody>,
+) -> Result<StatusCode, ServerError> {
+    let guidance = body
+        .guidance
+        .as_deref()
+        .map(str::trim)
+        .filter(|guidance| !guidance.is_empty());
+    store.require_chat(chat_id).await?;
+    let run = store
+        .get_agent_run(run_id)
+        .await?
+        .filter(|run| run.chat_id == chat_id && run.tier == AgentRunTier::Background);
+    let Some(_) = run else {
+        return Err(ServerError::not_found(format!(
+            "agent run {run_id} not found"
+        )));
+    };
+    match store
+        .resume_agent_run_from_checkin(run_id, guidance)
+        .await?
+    {
+        Some(_) => {
+            // The scheduler should notice the freshly available run promptly.
+            state.agent_run_wake.notify_one();
+            Ok(StatusCode::ACCEPTED)
+        }
+        None => Err(ServerError::conflict(
+            "sandbox run is not paused at a check-in",
+        )),
+    }
+}
+
 /// Body of `POST /chats/{chat_id}/agent-runs/{run_id}/steer`.
 #[derive(Debug, Deserialize)]
 pub struct AgentRunSteerBody {
