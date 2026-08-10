@@ -432,6 +432,10 @@ impl Agent {
                             current: checkpoint.as_ref(),
                             attempted_boundary: &mut checkpoint_attempt_boundary,
                             events,
+                            // The threshold is the automatic trigger, and this
+                            // pass answers no particular request.
+                            ignore_threshold: false,
+                            focus: None,
                         })
                         .await?;
                     if let Some(created) = created {

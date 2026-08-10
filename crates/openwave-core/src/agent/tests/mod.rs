@@ -5748,7 +5748,13 @@ impl ModelProvider for SemanticCheckpointProvider {
     }
 
     async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let maintenance = request.system.as_deref() == Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT);
+        // Prefix rather than equality: a compaction the user asked for may carry
+        // their focus line after the standing instructions, and it is still the
+        // maintenance call.
+        let maintenance = request
+            .system
+            .as_deref()
+            .is_some_and(|system| system.starts_with(CONTEXT_CHECKPOINT_SYSTEM_PROMPT));
         self.requests.lock().unwrap().push(request);
         if maintenance {
             self.summary_calls.fetch_add(1, Ordering::SeqCst);
@@ -6079,6 +6085,74 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         ),
         "one compaction runs, and it reports success: {compaction:?}"
     );
+}
+
+#[tokio::test]
+async fn compacting_on_request_ignores_the_threshold_and_steers_the_summary() {
+    let (store, chat, _workspace) = cancel_test_chat().await;
+    append_semantic_checkpoint_history(&store, chat.id).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let summary_calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(SemanticCheckpointProvider {
+        requests: requests.clone(),
+        summary_calls: summary_calls.clone(),
+        foreground_calls: Arc::new(AtomicUsize::new(0)),
+        malformed_summary: false,
+        tool_first: false,
+    });
+    // A window this chat comes nowhere near filling: the automatic pass would
+    // decline, so a checkpoint here is the request itself acting as the trigger.
+    let agent = Agent::new(
+        provider,
+        Arc::new(ToolRegistry::new()),
+        store.clone(),
+        AgentConfig {
+            model: "large-context-model".into(),
+            context_window: 1_000_000,
+            utility_model: Some(test_utility_model()),
+            compaction: CompactionPolicy {
+                threshold_fraction: 0.75,
+                target_fraction: 0.0001,
+                min_threshold_tokens: 0,
+                protect_recent_messages: 2,
+            },
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = unbounded();
+    let created = agent
+        .compact_now(chat.id, Some("the rollout date"), &tx)
+        .await
+        .unwrap();
+    drop(tx);
+    let events = rx.collect::<Vec<_>>().await;
+
+    assert!(
+        created.is_some(),
+        "the requested compaction wrote a checkpoint"
+    );
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                AgentEvent::CompactionStarted,
+                AgentEvent::CompactionFinished { compacted: true }
+            ]
+        ),
+        "the caller sees the same pair a turn's compaction reports: {events:?}"
+    );
+    let requests = requests.lock().unwrap();
+    let system = requests[0]
+        .system
+        .clone()
+        .expect("the maintenance call carries its instructions");
+    assert!(
+        system.starts_with(CONTEXT_CHECKPOINT_SYSTEM_PROMPT),
+        "the standing instructions survive the focus line"
+    );
+    assert!(system.contains("the rollout date"));
 }
 
 #[tokio::test]

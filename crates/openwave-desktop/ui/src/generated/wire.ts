@@ -752,6 +752,18 @@ export type CodeExecutionProviderKind = "local" | "e2b" | "daytona" | "docker";
 export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
+ * What one on-demand compaction did.
+ */
+export type CompactionRun = { 
+/**
+ * Whether a checkpoint was written. `false` is a complete, ordinary answer:
+ * the chat had too little history to give up, its recent messages are all
+ * protected, or the summarizer declined. Nothing is wrong, and nothing
+ * changed — the caller says so rather than leaving the reader with silence.
+ */
+compacted: boolean, };
+
+/**
  * Host-tunable chat compaction cadence and retention.
  */
 export type CompactionSettings = { 

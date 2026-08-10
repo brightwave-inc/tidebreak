@@ -38,6 +38,7 @@ mod app_grant;
 mod app_invoke;
 mod app_library;
 mod chat_titling;
+mod compaction;
 mod configuration;
 mod conformance;
 mod connected_apps;
