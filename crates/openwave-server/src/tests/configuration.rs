@@ -1328,7 +1328,7 @@ async fn models_catalog_includes_enabled_credentialed_providers() {
 }
 
 #[tokio::test]
-async fn xai_settings_publish_explicit_model_capabilities() {
+async fn xai_settings_publish_curated_and_explicit_model_capabilities() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
 
@@ -1349,7 +1349,7 @@ async fn xai_settings_publish_explicit_model_capabilities() {
         .unwrap();
     assert_eq!(endpoint_override.status(), StatusCode::BAD_REQUEST);
 
-    let missing_models = router
+    let key_only = router
         .clone()
         .oneshot(
             Request::builder()
@@ -1369,7 +1369,9 @@ async fn xai_settings_publish_explicit_model_capabilities() {
         )
         .await
         .unwrap();
-    assert_eq!(missing_models.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(key_only.status(), StatusCode::OK);
+    let configured: serde_json::Value = json_body(key_only).await;
+    assert_eq!(configured["models"], serde_json::json!([]));
 
     let put = router
         .clone()
@@ -1413,6 +1415,13 @@ async fn xai_settings_publish_explicit_model_capabilities() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let catalog: serde_json::Value = json_body(response).await;
+    let grok = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["key"] == "xai::grok-4.5")
+        .unwrap();
+    assert!(grok["available"].as_bool().unwrap());
     let model = catalog["models"]
         .as_array()
         .unwrap()
