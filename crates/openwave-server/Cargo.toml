@@ -15,6 +15,10 @@ workspace = true
 # `OPENWAVE_DATABASE_URL` names. Off by default: the desktop profile is
 # SQLite-only and the driver is a heavy build-time dependency.
 postgres = ["openwave-core/postgres"]
+# Compile the scripted model provider in, so a test in another crate can drive
+# a real turn through the binary. Off by default and never enabled by a release
+# build: see `src/scripted_provider.rs`.
+scripted-provider = []
 
 [dependencies]
 openwave-shell-policy = { path = "../openwave-shell-policy" }
