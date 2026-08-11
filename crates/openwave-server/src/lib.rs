@@ -855,7 +855,7 @@ impl Server {
 
 /// Default model when none is configured via settings or per-chat. Overridable
 /// with `OPENWAVE_MODEL`.
-const DEFAULT_MODEL: &str = "claude-opus-5";
+const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
 ///

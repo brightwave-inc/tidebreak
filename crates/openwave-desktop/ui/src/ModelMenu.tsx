@@ -46,8 +46,8 @@ import { cn } from "@/lib/utils";
  * model — muscle memory is worth more here than catalog order.
  */
 const PROVIDER_ORDER: readonly ProviderKind[] = [
-  "anthropic",
   "openai",
+  "anthropic",
   "xai",
   "gemini",
   "fireworks",

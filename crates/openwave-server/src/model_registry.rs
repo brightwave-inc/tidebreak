@@ -83,6 +83,12 @@ const EFFORT_LOW_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Medium,
     ReasoningEffort::High,
 ];
+const EFFORT_LOW_TO_XHIGH: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+];
 const EFFORT_LOW_TO_MAX: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
@@ -448,6 +454,23 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
+    // xAI publishes a 500,000-token input limit for Grok 4.5 but no output
+    // ceiling. Keep the output cap conservative until the exact model is
+    // exercised end to end. Its first-party Responses route carries image
+    // input and a low-through-xhigh reasoning scale.
+    ModelSpec {
+        id: "grok-4.5",
+        display_name: "Grok 4.5",
+        provider: ProviderKind::Xai,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 500_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_XHIGH,
+    },
     // Gemini rows are intentionally limited to ids currently published by
     // Google. All four accept images, expose thinking levels through `high`,
     // and have 1,048,576 input / 65,536 output token limits; the Flash rows
@@ -471,7 +494,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         display_name: "Gemini 3.5 Flash",
         provider: ProviderKind::Gemini,
         verification: VerificationTier::Verified,
-        recommended: false,
+        recommended: true,
         context_window: 1_048_576,
         max_output_tokens: 65_536,
         input_modalities: TEXT_AND_IMAGE,
@@ -1021,11 +1044,11 @@ mod tests {
     #[test]
     fn the_built_in_default_is_the_first_curated_row_of_its_provider() {
         let spec = find(crate::DEFAULT_MODEL).expect("the default model must be curated");
-        assert_eq!(spec.provider, ProviderKind::Anthropic);
+        assert_eq!(spec.provider, ProviderKind::Openai);
         // The default has to be the current generation, not a pin that happened
         // to be current when it was written down.
         assert_eq!(
-            models_for(ProviderKind::Anthropic).next().map(|s| s.id),
+            models_for(ProviderKind::Openai).next().map(|s| s.id),
             Some(crate::DEFAULT_MODEL),
         );
         // A default the picker hides by default would be selected for every
@@ -1046,6 +1069,22 @@ mod tests {
                  credentials it renders an empty provider"
             );
         }
+    }
+
+    #[test]
+    fn grok_4_5_and_gemini_3_5_flash_are_curated_defaults() {
+        let grok = find_for(ProviderKind::Xai, "grok-4.5").unwrap();
+        assert_eq!(grok.context_window, 500_000);
+        assert_eq!(grok.max_output_tokens, 32_768);
+        assert!(grok.recommended);
+        assert!(grok.accepts(InputModality::Image));
+        assert_eq!(grok.reasoning_efforts, EFFORT_LOW_TO_XHIGH);
+
+        assert!(
+            find_for(ProviderKind::Gemini, "gemini-3.5-flash")
+                .unwrap()
+                .recommended
+        );
     }
 
     #[test]
