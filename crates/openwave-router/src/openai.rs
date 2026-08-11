@@ -191,7 +191,14 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let body = build_request_json_for(&req, self.profile)?;
+        let mut body = build_request_json_for(&req, self.profile)?;
+        if self.chatgpt_account_id.is_some() {
+            // The ChatGPT Codex backend rejects `max_output_tokens` outright
+            // ("Unsupported parameter"); only Platform API requests may carry it.
+            if let Some(object) = body.as_object_mut() {
+                object.remove("max_output_tokens");
+            }
+        }
         let wire_provider = self.profile.provider();
         let provider_label = self.provider_label;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
@@ -1662,7 +1669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chatgpt_oauth_sends_bearer_account_and_originator_headers() {
+    async fn chatgpt_oauth_sends_codex_headers_without_max_output_tokens() {
         use std::sync::Arc;
 
         use axum::extract::{Request, State};
@@ -1689,6 +1696,7 @@ mod tests {
             account: Option<String>,
             beta: Option<String>,
             originator: Option<String>,
+            body: Value,
         }
 
         async fn capture(
@@ -1696,7 +1704,7 @@ mod tests {
             request: Request,
         ) -> impl IntoResponse {
             let headers = request.headers();
-            let captured = Captured {
+            let mut captured = Captured {
                 authorization: headers
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok())
@@ -1713,7 +1721,12 @@ mod tests {
                     .get("originator")
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned),
+                body: Value::Null,
             };
+            let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            captured.body = serde_json::from_slice(&bytes).unwrap();
             if let Some(tx) = tx.lock().unwrap().take() {
                 let _ = tx.send(captured);
             }
@@ -1755,5 +1768,7 @@ mod tests {
         assert_eq!(captured.account.as_deref(), Some("acct-xyz"));
         assert_eq!(captured.beta.as_deref(), Some("responses=v1"));
         assert_eq!(captured.originator.as_deref(), Some("openwave"));
+        // The ChatGPT Codex backend rejects `max_output_tokens` with a 400.
+        assert!(captured.body.get("max_output_tokens").is_none());
     }
 }
