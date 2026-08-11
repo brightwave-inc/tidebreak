@@ -186,7 +186,7 @@ pub fn analyze_shell_command(command: &str, ruleset: &ShellRuleSet) -> ShellAnal
         return ShellAnalysis::new(ShellVerdict::Ask, "no executable command found");
     }
 
-    evaluate(&acc, ruleset)
+    evaluate(&acc, ruleset, Expansion::Pending)
 }
 
 /// Classify one already-parsed `argv` against `ruleset`.
@@ -215,11 +215,72 @@ pub fn analyze_argv(argv: &[String], ruleset: &ShellRuleSet) -> ShellAnalysis {
         }],
         ..Collected::default()
     };
-    evaluate(&acc, ruleset)
+    evaluate(&acc, ruleset, Expansion::Resolved)
+}
+
+/// Whether the collected tokens are still subject to shell expansion.
+///
+/// The analyzer literalizes a word without running it: a parameter expansion
+/// or command substitution contributes its *source text* to the token, and
+/// glob metacharacters survive verbatim. So on the parsed path a token is a
+/// spelling of what will run, not the thing itself, and a path check over it
+/// can be dodged by writing the path in a form the shell resolves later. On
+/// the `argv` path there is no shell between the check and the `execve`, so a
+/// token is exactly the operand the program receives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Expansion {
+    /// Parsed from a command line: expansions and globs are still unresolved.
+    Pending,
+    /// An already-resolved `argv`: the tokens are what the program will see.
+    Resolved,
+}
+
+/// A token that names a path but still carries something the shell will
+/// resolve after this analysis: a parameter expansion, a command
+/// substitution, or a pathname-expansion metacharacter that could be hiding a
+/// literal.
+///
+/// Such a token cannot be checked against the sensitive-path markers at all —
+/// `$HOME/.ssh/authorized_keys` and `/et[c]/shadow` both miss every marker
+/// while naming a file the floor exists to protect.
+///
+/// The shape rules keep it narrow. An expansion only matters in something
+/// already shaped like a path, so `echo $USER` is untouched. A glob matters
+/// when the token is rooted outside the working tree (`/…`, `~…`), climbs
+/// (`..`), or hides a character inside a directory name (`[`, `?` with a
+/// separator) — which leaves the everyday relative globs (`*.py`, `src/*`,
+/// `src/**/*.rs`) exactly as they were, since they can only expand to
+/// non-hidden entries under a directory the grant already covers.
+fn unvettable_path_argument(token: &str) -> bool {
+    let expansion = token.contains('$') || token.contains('`');
+    let path_shaped = token.contains('/') || token.starts_with('~');
+    if expansion && path_shaped {
+        return true;
+    }
+    if !token.contains(['*', '?', '[']) {
+        return false;
+    }
+    token.starts_with('/')
+        || token.starts_with('~')
+        || token.contains("..")
+        || (path_shaped && token.contains(['[', '?']))
+}
+
+/// A redirect target the analyzer cannot resolve to a path.
+///
+/// Stricter than [`unvettable_path_argument`] because it needs no shape test:
+/// a redirect operand *is* a path, so a bare `$F` names a file just as much as
+/// `$HOME/x` does — and `F=~/.ssh/authorized_keys` followed by `>> $F` is the
+/// whole reason this exists.
+fn unvettable_redirect_target(token: &str) -> bool {
+    token.contains(['$', '`', '*', '?', '['])
 }
 
 /// The three tiers, applied to whatever leaves were collected.
-fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
+fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> ShellAnalysis {
+    let pending = expansion == Expansion::Pending;
+    let unvettable_argument = |token: &str| pending && unvettable_path_argument(token);
+    let unvettable_target = |token: &str| pending && unvettable_redirect_target(token);
     // (1) Deny floor — wins over every allow rule, including `All`.
     for sc in &acc.simples {
         if INTERPRETERS.contains(&basename(&sc.program)) {
@@ -234,6 +295,13 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Deny,
                     format!("write to sensitive path: {target}"),
+                    &sc.display(),
+                );
+            }
+            if unvettable_target(target) {
+                return ShellAnalysis::with_offender(
+                    ShellVerdict::Deny,
+                    format!("write to a path that cannot be vetted: {target}"),
                     &sc.display(),
                 );
             }
@@ -253,6 +321,13 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
             return ShellAnalysis::with_offender(
                 ShellVerdict::Deny,
                 format!("write to sensitive path: {target}"),
+                target,
+            );
+        }
+        if unvettable_target(target) {
+            return ShellAnalysis::with_offender(
+                ShellVerdict::Deny,
+                format!("write to a path that cannot be vetted: {target}"),
                 target,
             );
         }
@@ -290,12 +365,26 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
                     &sc.display(),
                 );
             }
+            if unvettable_argument(token) {
+                return ShellAnalysis::with_offender(
+                    ShellVerdict::Ask,
+                    format!("unresolved path in arguments: {}", sc.display()),
+                    &sc.display(),
+                );
+            }
         }
         for target in &sc.read_targets {
             if hits_sensitive(target) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
                     format!("read from sensitive path: {target}"),
+                    &sc.display(),
+                );
+            }
+            if unvettable_target(target) {
+                return ShellAnalysis::with_offender(
+                    ShellVerdict::Ask,
+                    format!("read from a path that cannot be vetted: {target}"),
                     &sc.display(),
                 );
             }
@@ -319,6 +408,13 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet) -> ShellAnalysis {
             return ShellAnalysis::with_offender(
                 ShellVerdict::Ask,
                 format!("redirect to sensitive path: {target}"),
+                target,
+            );
+        }
+        if unvettable_target(target) {
+            return ShellAnalysis::with_offender(
+                ShellVerdict::Ask,
+                format!("redirect to a path that cannot be vetted: {target}"),
                 target,
             );
         }

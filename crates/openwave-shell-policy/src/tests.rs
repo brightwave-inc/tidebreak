@@ -404,6 +404,14 @@ const NEVER_ALLOW: &[&str] = &[
     "cat ~/.config/gcloud/credentials.db",
     // negated pipeline must not downgrade the interpreter deny floor
     "! bash -c id",
+    // paths the analyzer cannot resolve: the literal it checks is not the path
+    // that will be opened, so the sensitive-path floor has nothing to match on
+    "F=~/.ssh/authorized_keys; echo added >> $F",
+    "echo added >> $HOME_SSH_KEYS",
+    "cp payload ~/.bashr[c]",
+    "cat /et[c]/shadow",
+    "tee .g[i]t/hooks/pre-commit",
+    "cat < $SECRET_FILE",
 ];
 
 #[test]
@@ -555,6 +563,12 @@ fn covered_commands_auto_approve() {
             "GOFLAGS=-mod=vendor go build ./...",
             allow(vec![prefix(&["go", "build"])]),
         ),
+        // A glob that can only expand inside the granted folder is ordinary work
+        // and stays covered, as does an expansion that names no path.
+        ("ls *.rs", allow(vec![prefix(&["ls"])])),
+        ("grep -r foo src/*", readonly()),
+        ("grep -r foo src/**/*.rs", readonly()),
+        ("echo $USER", readonly()),
     ];
     for (command, ruleset) in &cases {
         assert_eq!(
@@ -643,6 +657,10 @@ fn structural_unsafe_returns_deny() {
         "eval rm",
         "echo x > ~/.ssh/authorized_keys",
         "cat secrets > .env",
+        // The redirect operand is a path by definition, so one the analyzer
+        // cannot resolve reaches the same floor as a named sensitive path.
+        "echo added >> $F",
+        "cat report > ~/out.*",
     ] {
         assert_eq!(
             verdict(command, &all),
@@ -809,6 +827,16 @@ fn an_argv_reaches_the_same_floor_as_a_parsed_command() {
     // And an ordinary covered command runs.
     assert_eq!(
         analyze_argv(&argv(&["cargo", "test"]), &allow(vec![prefix(&["cargo"])])).verdict,
+        ShellVerdict::Allow
+    );
+    // An argv operand is already resolved — no shell will expand it — so a
+    // token that would be unvettable in a command line is just a literal here.
+    assert_eq!(
+        analyze_argv(
+            &argv(&["grep", "foo", "/et[c]/shadow"]),
+            &allow(vec![prefix(&["grep"])])
+        )
+        .verdict,
         ShellVerdict::Allow
     );
 }
