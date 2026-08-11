@@ -33,6 +33,7 @@
 //! are already connected; it has no path to a new grant.
 
 use std::collections::HashMap;
+use std::future::Future as _;
 use std::io::{IsTerminal as _, Write as _};
 
 use futures::StreamExt as _;
@@ -69,11 +70,19 @@ const EXIT_INTERRUPTED: i32 = 130;
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long to wait for a folder request to become claimable after its tool
-/// call is announced. The call is checkpointed just after the provider streams
-/// it, so this only covers that gap.
-const FOLDER_REQUEST_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often a folder refusal asks whether its call has become claimable, and
+/// the ceiling that interval backs off to.
+///
+/// There is no deadline. `ToolCallStarted` is announced the moment the provider
+/// begins streaming the call, and what follows is not a short gap: the call
+/// parks only if it survives the client checkpoint, and an isolated client call
+/// is taken last, after every sibling in its step is terminal — which can be
+/// minutes. A call that fails the checkpoint (invalid arguments, a capability
+/// the tool does not offer) is declined by the agent itself and never parks at
+/// all. So the refusal waits for as long as the turn runs and reports nothing
+/// when the call never arrives; the turn ending is what ends the wait.
 const FOLDER_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const FOLDER_REQUEST_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How the turn is written to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +192,11 @@ async fn one_turn(
     driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
 ) -> Result<i32> {
     let turn_id = TurnId::new();
+    // Installed before the turn exists. Until the handler is registered SIGINT
+    // keeps its default disposition, and a signal landing there would kill this
+    // process outright — abandoning the very turn the interrupt is supposed to
+    // cancel.
+    let mut interrupt = Interrupt::watch().await;
     // Subscribe before posting: the turn can start before this returns, and the
     // socket's replay only reaches back to the cursor it was opened at.
     let mut stream = Stream::open(client, chat).await?;
@@ -192,7 +206,7 @@ async fn one_turn(
     // A resumed chat replays its history first; nothing before this turn's own
     // `TurnStarted` is ours to print.
     let mut ours = false;
-    let mut interrupt = Interrupt::watch();
+    let mut declines = FolderDeclines::new();
 
     let outcome = loop {
         let frame = tokio::select! {
@@ -200,6 +214,20 @@ async fn one_turn(
             () = interrupt.fired() => {
                 break halted(client, chat, turn_id, &interrupted(), &mut printer).await;
             }
+            report = declines.reported() => match report {
+                FolderDecline::Noted(message) => {
+                    printer.notice(&message);
+                    continue;
+                }
+                FolderDecline::Unanswerable { call_id, message } => {
+                    let halt = Halt {
+                        reason: HaltReason::DecisionFailed,
+                        call_id: Some(call_id),
+                        message,
+                    };
+                    break halted(client, chat, turn_id, &halt, &mut printer).await;
+                }
+            },
         };
 
         let Some((raw, event)) = frame else {
@@ -219,17 +247,12 @@ async fn one_turn(
                 // Refused here, never routed through `settle`: a folder request
                 // is not an `Interaction`, so the driver is never asked and no
                 // decision line can answer it. Whoever is driving gets the same
-                // outcome an unattended run gets.
-                let undeclined = if name == REQUEST_FOLDER_ACCESS_TOOL {
-                    decline_folder_request(client, executor_token, chat, call_id, &mut printer)
-                        .await
-                } else {
-                    None
-                };
-                printer.tool_started(call_id, name);
-                if let Some(halt) = undeclined {
-                    break halted(client, chat, turn_id, &halt, &mut printer).await;
+                // outcome an unattended run gets. The refusal runs off the loop,
+                // which keeps the turn's own output flowing while it waits.
+                if name == REQUEST_FOLDER_ACCESS_TOOL {
+                    declines.start(client, executor_token, chat, call_id, &mut printer);
                 }
+                printer.tool_started(call_id, name);
             }
             ClientEvent::ToolCallCompleted {
                 call_id, status, ..
@@ -370,7 +393,16 @@ async fn settle(
     apply(client, chat, interaction, decision, printer).await
 }
 
-/// SIGINT, observable from every place the run can block.
+/// SIGINT, observable from both waits that can outlast the user's patience: the
+/// wait for the next journal frame, and a driven run's wait for a decision line.
+///
+/// It is not observable from everything. The HTTP client carries no request
+/// timeout, so a call to an unresponsive `--server` host — applying a decision,
+/// reading a pending request, cancelling the turn — still blocks with the
+/// interrupt unwatched, and because a handler is installed a second Ctrl-C no
+/// longer kills the process either. Bounding those is a matter of giving the
+/// client a request timeout, which is every CLI surface's business and not this
+/// module's to decide.
 ///
 /// The signal is watched on its own task — a `ctrl_c()` future created per wait
 /// could miss one that lands between two waits — and the flag it sets stays
@@ -378,13 +410,29 @@ async fn settle(
 struct Interrupt(tokio::sync::watch::Receiver<bool>);
 
 impl Interrupt {
-    fn watch() -> Self {
+    /// Returns once the handler is registered, so no window is left in which
+    /// SIGINT still takes its default disposition.
+    async fn watch() -> Self {
         let (fired, seen) = tokio::sync::watch::channel(false);
+        let (installed, registered) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
+            let mut signal = std::pin::pin!(tokio::signal::ctrl_c());
+            // Registration happens on the first poll, so report readiness only
+            // after one has been made.
+            let first = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(signal.as_mut().poll(context))
+            })
+            .await;
+            let _ = installed.send(());
+            let interrupted = match first {
+                std::task::Poll::Ready(result) => result.is_ok(),
+                std::task::Poll::Pending => signal.await.is_ok(),
+            };
+            if interrupted {
                 let _ = fired.send(true);
             }
         });
+        let _ = registered.await;
         Self(seen)
     }
 
@@ -538,88 +586,173 @@ fn lookup_failed(kind: &str, call_id: Option<CallId>, error: &AgentError) -> Hal
     }
 }
 
-/// Refuse one parked `request_folder_access` call with the typed declined
-/// result.
+/// The `request_folder_access` refusals this run has in flight.
 ///
-/// The refusal is deliberately the folder contract's existing `Declined`
-/// variant and not a new failure code: to the model, a headless run must be
-/// indistinguishable from a user who closed the picker, so no prompt-shaped
-/// retry looks worthwhile and no path exists that could end in a grant. This
-/// never consults the driver — folder access is host-machine consent, and
-/// `openwave folder connect` is the only thing that gives it.
-///
-/// Reporting only where the answer is somebody else's to give: an attached run
-/// holds no executor credential, and the process that does — a desktop, say —
-/// will settle the call itself. Where this process *is* that surface, an
-/// undeliverable refusal is fatal instead. Nothing else will ever answer the
-/// call, so a run that carried on would sit on a permanently parked turn,
-/// producing no output and no exit at all.
-async fn decline_folder_request(
-    client: &Client,
-    executor_token: Option<&str>,
-    chat: ChatId,
-    call_id: CallId,
-    printer: &mut Printer,
-) -> Option<Halt> {
-    // Attach mode has no client-executor credential and is not the trusted
-    // surface for this server — the process that owns it is, and if that is a
-    // desktop it will show the user a picker. Say so and leave the call alone
-    // rather than pretending to be it.
-    let Some(executor_token) = executor_token else {
-        printer.notice(&format!(
-            "folder request {call_id} left for the attached server's own client executor; \
-             this process holds no executor credential"
-        ));
-        return None;
-    };
-    match decline(client, executor_token, chat, call_id).await {
-        Ok(()) => {
-            printer.notice(
-                "folder access declined: headless runs connect folders with `openwave folder \
-                 connect`, never mid-turn",
-            );
-            None
+/// Each refusal runs on its own task and reports back over one channel, for two
+/// reasons. Waiting inline blocked the event loop, so the assistant text
+/// streaming while a refusal waited was held back and — when the wait ended the
+/// run — never printed at all. And no wait bounded in advance is right: the
+/// call may park immediately, park minutes later behind an isolated sibling, or
+/// never park because the agent declined it at the checkpoint. Off the loop,
+/// the refusal simply waits for as long as the turn does.
+struct FolderDeclines {
+    reports: tokio::sync::mpsc::UnboundedSender<FolderDecline>,
+    inbox: tokio::sync::mpsc::UnboundedReceiver<FolderDecline>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// What a refusal has to say. Only a call seen sitting in the pending set can
+/// produce [`FolderDecline::Unanswerable`]: a call that never parked is the
+/// agent's own business, and ending the run over one would fail a turn the
+/// server is completing perfectly well.
+enum FolderDecline {
+    /// Worth saying, not worth stopping for.
+    Noted(String),
+    /// The call is parked, and the refusal this run owes it cannot be
+    /// delivered. Nothing else will answer it, so the turn would wait forever.
+    Unanswerable { call_id: CallId, message: String },
+}
+
+impl FolderDeclines {
+    fn new() -> Self {
+        let (reports, inbox) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            reports,
+            inbox,
+            tasks: Vec::new(),
         }
-        Err(error) => Some(Halt {
-            reason: HaltReason::DecisionFailed,
-            call_id: Some(call_id),
-            message: format!(
-                "the folder request could not be declined: {error}; the turn is parked on an \
-                 answer this run cannot deliver"
-            ),
-        }),
+    }
+
+    /// Refuse one announced `request_folder_access` call.
+    ///
+    /// The refusal is deliberately the folder contract's existing `Declined`
+    /// variant and not a new failure code: to the model, a headless run must be
+    /// indistinguishable from a user who closed the picker, so no prompt-shaped
+    /// retry looks worthwhile and no path exists that could end in a grant. This
+    /// never consults the driver — folder access is host-machine consent, and
+    /// `openwave folder connect` is the only thing that gives it.
+    fn start(
+        &mut self,
+        client: &Client,
+        executor_token: Option<&str>,
+        chat: ChatId,
+        call_id: CallId,
+        printer: &mut Printer,
+    ) {
+        // Attach mode has no client-executor credential and is not the trusted
+        // surface for this server — the process that owns it is, and if that is
+        // a desktop it will show the user a picker. Say so and leave the call
+        // alone rather than pretending to be it.
+        let Some(executor_token) = executor_token else {
+            printer.notice(&format!(
+                "folder request {call_id} left for the attached server's own client executor; \
+                 this process holds no executor credential"
+            ));
+            return;
+        };
+        let client = client.clone();
+        let executor_token = executor_token.to_owned();
+        let reports = self.reports.clone();
+        self.tasks.push(tokio::spawn(async move {
+            if let Some(report) = decline(&client, &executor_token, chat, call_id).await {
+                let _ = reports.send(report);
+            }
+        }));
+    }
+
+    /// The next thing a refusal has to report. Pends forever when there is
+    /// nothing to say, which is the common case: this side holds a sender, so
+    /// the channel never closes and never resolves on its own.
+    async fn reported(&mut self) -> FolderDecline {
+        match self.inbox.recv().await {
+            Some(report) => report,
+            None => std::future::pending().await,
+        }
     }
 }
 
-/// Claim the parked call and resolve it declined, or say why not.
+/// Ends every refusal still in flight when the turn is over, however it ended.
+impl Drop for FolderDeclines {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+/// Wait for one folder request to become claimable, then resolve it declined.
+///
+/// `None` means there is nothing to report — including the ordinary case where
+/// the call never parks, because the agent refused it at the checkpoint and is
+/// carrying the turn on without it. Each way this can end is answered on its
+/// own terms rather than as one undifferentiated failure:
+///
+/// - **Never parked, or unreadable.** Not evidence of anything: keep asking. A
+///   poll that fails says nothing about the call, so it is retried too.
+/// - **Parked, and claimed by somebody else.** Never race it — this process has
+///   no way to grant anything. But it is also the only surface that answers for
+///   this server, so a claim it does not hold is a call it cannot settle.
+/// - **Parked, and the claim or the resolve failed.** The refusal is owed and
+///   undeliverable, which is the one shape that must end the run.
+/// - **Parked, but not a folder request.** Impossible by construction — the name
+///   came from the announcement of this same call — and not this run's answer to
+///   give if it happens. Say so and leave it.
 async fn decline(
     client: &Client,
     executor_token: &str,
     chat: ChatId,
     call_id: CallId,
-) -> Result<()> {
-    let deadline = std::time::Instant::now() + FOLDER_REQUEST_SETTLE;
+) -> Option<FolderDecline> {
+    let mut wait = FOLDER_REQUEST_POLL;
     loop {
-        let pending = client
-            .pending_client_executions(executor_token, chat)
-            .await?;
-        match pending.into_iter().find(|call| call.id == call_id) {
-            Some(call) if call.name != REQUEST_FOLDER_ACCESS_TOOL => {
-                return Err(AgentError::msg("the parked call is not a folder request"));
+        if let Ok(pending) = client.pending_client_executions(executor_token, chat).await {
+            match pending.into_iter().find(|call| call.id == call_id) {
+                Some(call) if call.name != REQUEST_FOLDER_ACCESS_TOOL => {
+                    return Some(FolderDecline::Noted(format!(
+                        "folder request {call_id} parked as a {} call and was left alone",
+                        call.name
+                    )));
+                }
+                Some(call) if call.client_executor_id.is_some() => {
+                    return Some(FolderDecline::Unanswerable {
+                        call_id,
+                        message: format!(
+                            "the folder request is claimed by another executor, and this run \
+                             cannot resolve a claim it does not hold: call {call_id} stays parked"
+                        ),
+                    });
+                }
+                Some(_) => break,
+                None => {}
             }
-            Some(call) if call.client_executor_id.is_some() => {
-                // Something else owns the call. Never race it: this process has
-                // no way to grant anything, so leaving it alone is safe.
-                return Err(AgentError::msg("the folder request is already claimed"));
-            }
-            Some(_) => break,
-            None if std::time::Instant::now() >= deadline => {
-                return Err(AgentError::msg("the folder request never parked"));
-            }
-            None => tokio::time::sleep(FOLDER_REQUEST_POLL).await,
         }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(FOLDER_REQUEST_POLL_MAX);
     }
 
+    match resolve_declined(client, executor_token, chat, call_id).await {
+        Ok(()) => Some(FolderDecline::Noted(
+            "folder access declined: headless runs connect folders with `openwave folder \
+             connect`, never mid-turn"
+                .to_owned(),
+        )),
+        Err(error) => Some(FolderDecline::Unanswerable {
+            call_id,
+            message: format!(
+                "the parked folder request could not be declined: {error}; the turn is waiting \
+                 on an answer this run cannot deliver"
+            ),
+        }),
+    }
+}
+
+/// Claim the parked call and resolve it declined.
+async fn resolve_declined(
+    client: &Client,
+    executor_token: &str,
+    chat: ChatId,
+    call_id: CallId,
+) -> Result<()> {
     let executor_id = uuid::Uuid::new_v4();
     let lease_token = uuid::Uuid::new_v4();
     client
