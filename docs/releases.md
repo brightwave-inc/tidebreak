@@ -417,6 +417,13 @@ see exactly what a change to either lockfile adds to the product's obligations.
   at. Those entries are the ones to review: the notices are a compliance
   artifact, and an undeclared license in a distributed dependency is a question
   for a human, not something the generator should paper over.
+- Both graphs are host-independent today, so regenerating on macOS and checking
+  on Linux agree. `cargo metadata` reports every package the lockfile can ship
+  regardless of target, and no production UI dependency is platform-specific. If
+  one ever is, pnpm will resolve a different closure per platform and the CI
+  lane will disagree with a locally generated file — that disagreement is the
+  signal to decide deliberately which platforms the notices must cover, not to
+  regenerate until it passes.
 - Tauri stages the file, along with `LICENSE` and `NOTICE`, into
   `Contents/Resources/legal/` of the app bundle. The DMG, the `.app.zip`, and
   the updater archive are all derived from that bundle, so the release lane
