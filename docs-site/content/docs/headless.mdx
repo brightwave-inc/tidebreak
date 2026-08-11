@@ -181,8 +181,8 @@ under text output, so an undriven run is always machine-diagnosable.
 | `1` | The turn failed, was refused, or was cancelled. |
 | `2` | Usage error — a bad flag or argument. |
 | `3` | The turn parked on a plan or question and no driver answered. `reason` is `plan_undriven` or `questions_undriven`. |
-| `4` | A decision was made but could not be applied. `reason` is `decision_failed`. |
-| `130` | Interrupted (SIGINT). |
+| `4` | A decision could not be carried through. `reason` is `decision_failed` when one was made and the server refused it, or `pending_lookup_failed` when the parked request itself could not be read. |
+| `130` | Interrupted (SIGINT). The turn is cancelled, and a `halted` object names the reason `interrupted`. |
 
 #### A dev harness
 

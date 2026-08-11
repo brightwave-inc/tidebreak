@@ -192,25 +192,13 @@ async fn one_turn(
     // A resumed chat replays its history first; nothing before this turn's own
     // `TurnStarted` is ours to print.
     let mut ours = false;
-    // Watch for the interrupt on its own task: a `ctrl_c()` future created per
-    // loop iteration could miss a signal that lands between two iterations.
-    let (interrupted, mut interrupt) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = interrupted.send(());
-        }
-    });
+    let mut interrupt = Interrupt::watch();
 
     let outcome = loop {
         let frame = tokio::select! {
             frame = stream.next(client, chat) => frame?,
-            _ = &mut interrupt => {
-                printer.finish();
-                eprintln!("openwave: interrupted; cancelling the turn");
-                // Best effort: the turn may already have finished, which the
-                // server answers with a conflict.
-                let _ = client.cancel_turn(chat, turn_id).await;
-                return Ok(EXIT_INTERRUPTED);
+            () = interrupt.fired() => {
+                break halted(client, chat, turn_id, &interrupted(), &mut printer).await;
             }
         };
 
@@ -232,11 +220,16 @@ async fn one_turn(
                 // is not an `Interaction`, so the driver is never asked and no
                 // decision line can answer it. Whoever is driving gets the same
                 // outcome an unattended run gets.
-                if name == REQUEST_FOLDER_ACCESS_TOOL {
+                let undeclined = if name == REQUEST_FOLDER_ACCESS_TOOL {
                     decline_folder_request(client, executor_token, chat, call_id, &mut printer)
-                        .await;
-                }
+                        .await
+                } else {
+                    None
+                };
                 printer.tool_started(call_id, name);
+                if let Some(halt) = undeclined {
+                    break halted(client, chat, turn_id, &halt, &mut printer).await;
+                }
             }
             ClientEvent::ToolCallCompleted {
                 call_id, status, ..
@@ -258,28 +251,60 @@ async fn one_turn(
                     grant_rungs,
                     preview,
                 };
-                if let Some(halt) = settle(client, chat, &interaction, driver, &mut printer).await {
+                if let Some(halt) = settle(
+                    client,
+                    chat,
+                    &interaction,
+                    driver,
+                    &mut interrupt,
+                    &mut printer,
+                )
+                .await
+                {
                     break halted(client, chat, turn_id, &halt, &mut printer).await;
                 }
             }
             // Neither can be answered from the standing policy, so both reach
             // for the driver first and end the run loudly if there is none.
             ClientEvent::PlanProposed { call_id } => {
-                if let Some(interaction) = pending_plan(client, chat, call_id).await {
-                    if let Some(halt) =
-                        settle(client, chat, &interaction, driver, &mut printer).await
-                    {
-                        break halted(client, chat, turn_id, &halt, &mut printer).await;
+                match pending_plan(client, chat, call_id).await {
+                    Ok(Some(interaction)) => {
+                        if let Some(halt) = settle(
+                            client,
+                            chat,
+                            &interaction,
+                            driver,
+                            &mut interrupt,
+                            &mut printer,
+                        )
+                        .await
+                        {
+                            break halted(client, chat, turn_id, &halt, &mut printer).await;
+                        }
                     }
+                    // Already settled: a decision raced the event.
+                    Ok(None) => {}
+                    Err(halt) => break halted(client, chat, turn_id, &halt, &mut printer).await,
                 }
             }
             ClientEvent::UserQuestionsAsked { call_id } => {
-                if let Some(interaction) = pending_questions(client, chat, call_id).await {
-                    if let Some(halt) =
-                        settle(client, chat, &interaction, driver, &mut printer).await
-                    {
-                        break halted(client, chat, turn_id, &halt, &mut printer).await;
+                match pending_questions(client, chat, call_id).await {
+                    Ok(Some(interaction)) => {
+                        if let Some(halt) = settle(
+                            client,
+                            chat,
+                            &interaction,
+                            driver,
+                            &mut interrupt,
+                            &mut printer,
+                        )
+                        .await
+                        {
+                            break halted(client, chat, turn_id, &halt, &mut printer).await;
+                        }
                     }
+                    Ok(None) => {}
+                    Err(halt) => break halted(client, chat, turn_id, &halt, &mut printer).await,
                 }
             }
             ClientEvent::TurnCompleted { .. } => break 0,
@@ -309,15 +334,27 @@ async fn one_turn(
 
 /// Settle one parked interaction: ask the driver, fall back to the standing
 /// policy, and carry the decision out. `Some(halt)` ends the run.
+///
+/// The interrupt is watched here too. A driven run waiting on a decision line
+/// receives no further frames — the turn is parked on this very answer — so an
+/// interrupt only the frame loop watched would never be seen, and Ctrl-C would
+/// leave killing the process as the only way out.
 async fn settle(
     client: &Client,
     chat: ChatId,
     interaction: &Interaction,
     driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
+    interrupt: &mut Interrupt,
     printer: &mut Printer,
 ) -> Option<Halt> {
-    let mut control = |event| printer.control(event);
-    let decision = match driver.decide(interaction, &mut control).await {
+    let answered = {
+        let mut control = |event| printer.control(event);
+        tokio::select! {
+            decision = driver.decide(interaction, &mut control) => decision,
+            () = interrupt.fired() => return Some(interrupted()),
+        }
+    };
+    let decision = match answered {
         Some(decision) => decision,
         None => match interaction.undriven() {
             Undriven::Decide(decision) => {
@@ -331,6 +368,46 @@ async fn settle(
         },
     };
     apply(client, chat, interaction, decision, printer).await
+}
+
+/// SIGINT, observable from every place the run can block.
+///
+/// The signal is watched on its own task — a `ctrl_c()` future created per wait
+/// could miss one that lands between two waits — and the flag it sets stays
+/// set, so whichever wait is current sees the same interrupt.
+struct Interrupt(tokio::sync::watch::Receiver<bool>);
+
+impl Interrupt {
+    fn watch() -> Self {
+        let (fired, seen) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = fired.send(true);
+            }
+        });
+        Self(seen)
+    }
+
+    /// Resolves once the interrupt has been seen, and immediately thereafter.
+    async fn fired(&mut self) {
+        while !*self.0.borrow_and_update() {
+            if self.0.changed().await.is_err() {
+                // The watcher is gone, so no signal is coming: never resolve,
+                // leaving the other side of the `select!` to finish the run.
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// The halt an interrupt produces: the turn is cancelled rather than abandoned,
+/// and the run exits 130.
+fn interrupted() -> Halt {
+    Halt {
+        reason: HaltReason::Interrupted,
+        call_id: None,
+        message: "interrupted; cancelling the turn".to_owned(),
+    }
 }
 
 /// Send one decision to the route that owns it.
@@ -415,18 +492,25 @@ async fn halted(
     halt.reason.exit_code()
 }
 
-/// The proposed plan behind a `PlanProposed` event. `None` when it is already
-/// settled — a decision raced the event, and there is nothing left to answer.
+/// The proposed plan behind a `PlanProposed` event.
+///
+/// `Ok(None)` means nothing is pending — a decision raced the event, and there
+/// is nothing left to answer — so the run carries on. A failed lookup is not
+/// that, and must not read as it: the turn is parked on something this run
+/// cannot see, so it halts instead of falling quiet and exiting zero.
 async fn pending_plan(
     client: &Client,
     chat: ChatId,
     call_id: Option<CallId>,
-) -> Option<Interaction> {
-    let pending = client.list_pending_plans(chat).await.ok()?;
-    pending
+) -> std::result::Result<Option<Interaction>, Halt> {
+    let pending = client
+        .list_pending_plans(chat)
+        .await
+        .map_err(|error| lookup_failed("plan", call_id, &error))?;
+    Ok(pending
         .into_iter()
         .find(|plan| call_id.is_none_or(|id| plan.call_id == id))
-        .map(Interaction::from_plan)
+        .map(Interaction::from_plan))
 }
 
 /// The question block behind a `UserQuestionsAsked` event, on the same terms.
@@ -434,12 +518,24 @@ async fn pending_questions(
     client: &Client,
     chat: ChatId,
     call_id: Option<CallId>,
-) -> Option<Interaction> {
-    let pending = client.list_pending_questions(chat).await.ok()?;
-    pending
+) -> std::result::Result<Option<Interaction>, Halt> {
+    let pending = client
+        .list_pending_questions(chat)
+        .await
+        .map_err(|error| lookup_failed("questions", call_id, &error))?;
+    Ok(pending
         .into_iter()
         .find(|block| call_id.is_none_or(|id| block.call_id == id))
-        .map(Interaction::from_questions)
+        .map(Interaction::from_questions))
+}
+
+/// The halt a failed lookup produces, naming what could not be read.
+fn lookup_failed(kind: &str, call_id: Option<CallId>, error: &AgentError) -> Halt {
+    Halt {
+        reason: HaltReason::PendingLookupFailed,
+        call_id,
+        message: format!("the pending {kind} the turn is parked on could not be read: {error}"),
+    }
 }
 
 /// Refuse one parked `request_folder_access` call with the typed declined
@@ -452,16 +548,19 @@ async fn pending_questions(
 /// never consults the driver — folder access is host-machine consent, and
 /// `openwave folder connect` is the only thing that gives it.
 ///
-/// Reporting only, never fatal: a folder request the CLI could not answer is
-/// the server owner's to settle, and cancelling someone else's turn over it
-/// would be worse than saying so.
+/// Reporting only where the answer is somebody else's to give: an attached run
+/// holds no executor credential, and the process that does — a desktop, say —
+/// will settle the call itself. Where this process *is* that surface, an
+/// undeliverable refusal is fatal instead. Nothing else will ever answer the
+/// call, so a run that carried on would sit on a permanently parked turn,
+/// producing no output and no exit at all.
 async fn decline_folder_request(
     client: &Client,
     executor_token: Option<&str>,
     chat: ChatId,
     call_id: CallId,
     printer: &mut Printer,
-) {
+) -> Option<Halt> {
     // Attach mode has no client-executor credential and is not the trusted
     // surface for this server — the process that owns it is, and if that is a
     // desktop it will show the user a picker. Say so and leave the call alone
@@ -471,14 +570,24 @@ async fn decline_folder_request(
             "folder request {call_id} left for the attached server's own client executor; \
              this process holds no executor credential"
         ));
-        return;
+        return None;
     };
     match decline(client, executor_token, chat, call_id).await {
-        Ok(()) => printer.notice(
-            "folder access declined: headless runs connect folders with `openwave folder \
-             connect`, never mid-turn",
-        ),
-        Err(error) => printer.notice(&format!("could not decline the folder request: {error}")),
+        Ok(()) => {
+            printer.notice(
+                "folder access declined: headless runs connect folders with `openwave folder \
+                 connect`, never mid-turn",
+            );
+            None
+        }
+        Err(error) => Some(Halt {
+            reason: HaltReason::DecisionFailed,
+            call_id: Some(call_id),
+            message: format!(
+                "the folder request could not be declined: {error}; the turn is parked on an \
+                 answer this run cannot deliver"
+            ),
+        }),
     }
 }
 
@@ -689,5 +798,31 @@ impl Printer {
             self.dangling_line = false;
         }
         let _ = std::io::stdout().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A poll that fails is not "nothing pending". While the two were the same
+    /// answer, a server the run could not reach read exactly like a plan that
+    /// had already been settled: the run went quiet, left the turn parked, and
+    /// exited zero — the worst shape for a scripted caller, which cannot tell a
+    /// finished turn from a lost one.
+    #[tokio::test]
+    async fn an_unreadable_pending_plan_halts_rather_than_looking_settled() {
+        // A port nothing is listening on, so the poll fails at the transport.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port");
+        let address = listener.local_addr().expect("the bound address");
+        drop(listener);
+        let client = Client::attach(format!("http://{address}"), "token").expect("a client");
+
+        let halt = pending_plan(&client, ChatId::new(), None)
+            .await
+            .expect_err("an unreachable server must not read as nothing pending");
+
+        assert_eq!(halt.reason, HaltReason::PendingLookupFailed);
+        assert_ne!(halt.reason.exit_code(), 0);
     }
 }

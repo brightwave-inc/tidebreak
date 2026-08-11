@@ -216,6 +216,11 @@ pub enum HaltReason {
     PlanUndriven,
     QuestionsUndriven,
     DecisionFailed,
+    /// The request behind a parked interaction could not be read at all, so the
+    /// run cannot tell what it is waiting on.
+    PendingLookupFailed,
+    /// SIGINT reached the run; the turn is cancelled rather than abandoned.
+    Interrupted,
 }
 
 impl HaltReason {
@@ -224,16 +229,21 @@ impl HaltReason {
             Self::PlanUndriven => "plan_undriven",
             Self::QuestionsUndriven => "questions_undriven",
             Self::DecisionFailed => "decision_failed",
+            Self::PendingLookupFailed => "pending_lookup_failed",
+            Self::Interrupted => "interrupted",
         }
     }
 
     /// The process exit status this halt produces. Both undriven reasons share
     /// one code — they are the same fact ("nobody was there to answer") and the
-    /// `reason` field separates them.
+    /// `reason` field separates them. A failed lookup shares the code of a
+    /// failed decision for the same reason: the run reached an interaction and
+    /// could not carry it through.
     pub fn exit_code(self) -> i32 {
         match self {
             Self::PlanUndriven | Self::QuestionsUndriven => super::EXIT_INTERACTION_UNDRIVEN,
-            Self::DecisionFailed => super::EXIT_DECISION_FAILED,
+            Self::DecisionFailed | Self::PendingLookupFailed => super::EXIT_DECISION_FAILED,
+            Self::Interrupted => super::EXIT_INTERRUPTED,
         }
     }
 }
