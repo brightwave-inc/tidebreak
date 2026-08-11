@@ -74,8 +74,9 @@
 //! the split, and the settings surface derives its disclosure from it.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -103,7 +104,7 @@ use crate::{
     MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
-/// The runtime binary, resolved on `PATH`. Any Docker-CLI-compatible runtime
+/// The runtime binary, preferred on `PATH`. Any Docker-CLI-compatible runtime
 /// (`podman`) works through the same code path.
 const DEFAULT_BINARY: &str = "docker";
 /// The in-container workspace root. The image creates it owned by the
@@ -172,6 +173,100 @@ const FILE_MISSING_EXIT: i32 = 66;
 const FILE_TOO_LARGE_EXIT: i32 = 67;
 const DIR_MISSING_EXIT: i32 = 68;
 
+/// The file name to look for while scanning `PATH`. Windows carries the
+/// extension in the file name; the command spawned when `PATH` does hold the
+/// runtime stays the bare name, which the loader resolves through `PATHEXT`.
+#[cfg(windows)]
+const PATH_FILE_NAME: &str = "docker.exe";
+#[cfg(not(windows))]
+const PATH_FILE_NAME: &str = DEFAULT_BINARY;
+
+/// Absolute locations to try when `PATH` carries no runtime CLI at all, in
+/// preference order.
+///
+/// An app launched from Finder inherits launchd's `PATH`
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains none of the directories
+/// Docker Desktop and OrbStack install their CLI shim into. Without this
+/// fallback a running daemon is indistinguishable from an uninstalled one,
+/// and only for GUI launches — the same build started from a terminal works.
+fn fallback_binary_candidates() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = vec![
+            PathBuf::from("/usr/local/bin").join(DEFAULT_BINARY),
+            PathBuf::from("/opt/homebrew/bin").join(DEFAULT_BINARY),
+        ];
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            candidates.push(home.join(".orbstack/bin").join(DEFAULT_BINARY));
+            candidates.push(home.join(".docker/bin").join(DEFAULT_BINARY));
+        }
+        candidates.push(
+            PathBuf::from("/Applications/Docker.app/Contents/Resources/bin").join(DEFAULT_BINARY),
+        );
+        candidates
+    }
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            PathBuf::from("/usr/local/bin").join(DEFAULT_BINARY),
+            PathBuf::from("/usr/bin").join(DEFAULT_BINARY),
+        ]
+    }
+    // Windows resolves installed CLIs through `PATH` reliably, including for
+    // GUI launches, so there is nothing to fall back to.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Vec::new()
+    }
+}
+
+/// The runtime binary this host should invoke.
+///
+/// Resolved fresh on every construction and availability probe — a handful of
+/// `stat` calls — so installing a runtime mid-session is picked up without an
+/// app restart. Shared with the background-agent container backend, which has
+/// the same problem for the same reason.
+pub fn resolve_container_runtime_binary() -> String {
+    resolve_binary(
+        DEFAULT_BINARY,
+        PATH_FILE_NAME,
+        std::env::var_os("PATH").as_deref(),
+        &fallback_binary_candidates(),
+    )
+}
+
+/// `PATH` first, then the well-known locations; the bare name if neither has
+/// it, so the spawn fails and classifies as a missing runtime as before.
+fn resolve_binary(
+    bare_name: &str,
+    path_file_name: &str,
+    path_var: Option<&OsStr>,
+    fallbacks: &[PathBuf],
+) -> String {
+    let on_path = path_var.is_some_and(|var| {
+        std::env::split_paths(var)
+            .any(|dir| !dir.as_os_str().is_empty() && binary_exists(&dir.join(path_file_name)))
+    });
+    if on_path {
+        return bare_name.to_owned();
+    }
+    fallbacks
+        .iter()
+        .find(|candidate| binary_exists(candidate))
+        .map_or_else(
+            || bare_name.to_owned(),
+            |candidate| candidate.to_string_lossy().into_owned(),
+        )
+}
+
+/// Whether a candidate path names a runnable file. Metadata follows symlinks,
+/// so an installer shim pointing into an app bundle counts as present. The
+/// probe itself establishes whether the daemon answers; this only decides
+/// which binary to ask.
+fn binary_exists(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
 /// Direct-command adapter for a container on the host's own runtime.
 pub struct DockerExecutionProvider {
     binary: String,
@@ -233,7 +328,7 @@ impl DockerExecutionProvider {
             ));
         }
         Ok(Self {
-            binary: DEFAULT_BINARY.to_owned(),
+            binary: resolve_container_runtime_binary(),
             image: DOCUMENTS_IMAGE.to_owned(),
             timeout,
             pool,
@@ -305,14 +400,15 @@ impl DockerExecutionProvider {
 
     /// Whether a container runtime can actually serve this host right now.
     ///
-    /// Two distinguishable failures, because the fix differs: no CLI on
-    /// `PATH` at all, or a CLI whose daemon does not answer (Docker Desktop
-    /// not started, the socket not permitted to this user). The answer is
-    /// cached for [`AVAILABILITY_TTL`] in both directions, so a settings
-    /// render costs at most one probe and starting the daemon is picked up
-    /// without a restart.
+    /// Two distinguishable failures, because the fix differs: no CLI to be
+    /// found — neither on `PATH` nor in any of the well-known install
+    /// locations [`resolve_container_runtime_binary`] falls back to — or a
+    /// CLI whose daemon does not answer (Docker Desktop not started, the
+    /// socket not permitted to this user). The answer is cached for
+    /// [`AVAILABILITY_TTL`] in both directions, so a settings render costs at
+    /// most one probe and starting the daemon is picked up without a restart.
     pub async fn availability() -> Result<(), CodeExecutionUnavailableReason> {
-        Self::availability_of(DEFAULT_BINARY).await
+        Self::availability_of(&resolve_container_runtime_binary()).await
     }
 
     /// [`Self::availability`] for a named runtime binary.
@@ -1285,6 +1381,33 @@ mod tests {
             cwd,
         )
         .unwrap()
+    }
+
+    /// The Finder-launch regression: a GUI process inherits launchd's `PATH`,
+    /// which holds no runtime CLI, and reporting that as no runtime installed
+    /// is indistinguishable to the user from an uninstalled Docker. `PATH`
+    /// still wins wherever it does carry one, so nothing changes for a
+    /// terminal launch.
+    #[test]
+    fn falls_back_to_a_well_known_location_only_when_path_has_no_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let on_path = root.path().join("bin");
+        let installed = root.path().join("usr/local/bin");
+        std::fs::create_dir_all(&on_path).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(on_path.join("docker"), b"").unwrap();
+        std::fs::write(installed.join("docker"), b"").unwrap();
+        let fallbacks = [root.path().join("absent/docker"), installed.join("docker")];
+        let path_var = std::env::join_paths([on_path]).unwrap();
+
+        assert_eq!(
+            resolve_binary("docker", "docker", Some(&path_var), &fallbacks),
+            "docker",
+        );
+        assert_eq!(
+            resolve_binary("docker", "docker", None, &fallbacks),
+            installed.join("docker").to_string_lossy(),
+        );
     }
 
     /// The confinement flags are the whole security story of this backend: a
