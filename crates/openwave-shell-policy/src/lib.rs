@@ -244,6 +244,11 @@ enum Expansion {
 /// `$HOME/.ssh/authorized_keys` and `/et[c]/shadow` both miss every marker
 /// while naming a file the floor exists to protect.
 ///
+/// What matters is what the program does with the token, so every rule below
+/// is stated against its [`OperandRole`]. A pattern and a path can be spelled
+/// identically — `.*` is the commonest regex there is and `.e*` names a
+/// credential file — and only the program tells them apart.
+///
 /// Three rules, narrowest first:
 ///
 /// - A **command substitution** counts in any operand of any program. Its text
@@ -251,42 +256,79 @@ enum Expansion {
 ///   is visible here — and unlike a variable it needs no cooperating
 ///   environment: `awk '{print}' $(cat p)` is a complete exfiltration written
 ///   in one line. Enumerating the programs it matters for is hopeless, since
-///   any program that opens a file will do.
+///   any program that opens a file will do. The one exemption is a flag-shaped
+///   token on a program that takes no path operands, which is `make -j$(nproc)`
+///   and its relatives; `sort -o$(cat p)` is a flag too, but `sort` opens paths,
+///   so it stays refused.
 /// - A **parameter expansion** counts in something already shaped like a path,
-///   or in an operand of a program whose operands *are* paths — so `cat $F` is
-///   caught and `echo $USER` is not.
-/// - A **glob** counts when the token is rooted outside the working tree
-///   (`/…`, `~…`), climbs (`..`), or puts a metacharacter in a hidden path
-///   segment. That last one is where the disguises live: the marker list is
-///   almost entirely dotfiles and absolute paths, so `.en?` and `.bashr[c]`
-///   name one specific credential file while matching nothing, and no ordinary
-///   pattern spells a hidden name that way. Everything else — `*.py`, `src/*`,
-///   `report[1].pdf`, `grep '[n]ginx'` — is left alone.
+///   or in an operand the program will open — so `cat $F` is caught and
+///   `echo $USER` is not.
+/// - A **glob** counts in an operand the program will open, when the token is
+///   rooted outside the working tree (`/…`, `~…`), names a hidden directory or
+///   file anywhere along its path, or puts a metacharacter in a segment that
+///   is not the last. The hidden-segment part is where the disguises live: the
+///   marker list is almost entirely dotfiles, so `.en?` names one specific
+///   credential file while matching no marker, and `.git/hook*/pre-commit`
+///   reaches a hook — arbitrary code on the next commit — with every character
+///   of `.git` spelled out. Ordinary patterns do not glob through hidden
+///   directories, so `*.py`, `src/*`, `report[1].pdf` are left alone.
+///
+///   Outside a path operand only the rooted test survives, because everything
+///   else it could say about a token is something a regex says too: `grep
+///   '.*foo'`, `sed -E 's/.*//'` and `awk '/.*x/{print}'` are not paths and
+///   must not be treated as though they were.
 ///
 /// The glob rule is about what a *spelling* can hide, not about where a glob
 /// can reach: a relative glob expands under the working directory, but a `cd`
 /// earlier in the line can move that directory somewhere the grant never
 /// meant to cover. That is a separate gap and not one this predicate closes.
-fn unvettable_path_argument(token: &str, program_takes_paths: bool) -> bool {
+fn unvettable_path_argument(token: &str, role: OperandRole, program_takes_paths: bool) -> bool {
     if token.contains("$(") || token.contains('`') {
-        return true;
+        let exempt_flag = token.starts_with('-') && !program_takes_paths;
+        if !exempt_flag {
+            return true;
+        }
     }
+    // Program text is never opened as a path: `$1` is a field reference and
+    // `s/.*//` is a substitution. Only the substitution rule above applies.
+    if role == OperandRole::Script {
+        return false;
+    }
+    let opens_path = role == OperandRole::Path;
     let path_shaped = token.contains('/') || token.starts_with('~');
-    if token.contains('$') && (path_shaped || program_takes_paths) {
+    if token.contains('$') && (path_shaped || opens_path) {
         return true;
     }
     if !token.contains(GLOB_METACHARACTERS) {
         return false;
     }
-    token.starts_with('/')
-        || token.starts_with('~')
-        || token.contains("..")
-        || token
-            .split('/')
-            .any(|segment| segment.starts_with('.') && segment.contains(GLOB_METACHARACTERS))
+    let rooted = token.starts_with('/') || token.starts_with('~');
+    if !opens_path {
+        return rooted;
+    }
+    let segments: Vec<&str> = token.split('/').collect();
+    let hides_a_segment = segments
+        .iter()
+        .any(|segment| segment.starts_with('.') && *segment != "." && *segment != "..");
+    let globs_a_parent = segments[..segments.len().saturating_sub(1)]
+        .iter()
+        .any(|segment| segment.contains(GLOB_METACHARACTERS));
+    rooted || hides_a_segment || globs_a_parent
 }
 
 const GLOB_METACHARACTERS: [char; 3] = ['*', '?', '['];
+
+/// What a program will do with one of its arguments.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperandRole {
+    /// A path the program opens.
+    Path,
+    /// Program text — a `sed` script or an `awk` program.
+    Script,
+    /// A flag, or an operand of a program whose operands are not paths: a
+    /// pattern, a target name, a number.
+    Other,
+}
 
 /// A redirect target the analyzer cannot resolve to a path.
 ///
@@ -398,23 +440,47 @@ const PATH_OPERAND_PROGRAMS: &[&str] = &[
 /// script is still a path.
 const SCRIPT_FIRST_OPERAND_PROGRAMS: &[&str] = &["awk", "gawk", "mawk", "nawk", "sed", "gsed"];
 
-/// Which of `args` are operands this program will open as paths.
+/// Whether a flag already supplies the script, so no operand slot holds one.
 ///
-/// Flags are not paths, and a leading script operand is not either — the rest
-/// are, for the programs on the list.
-fn path_operand_flags(program: &str, args: &[String]) -> Vec<bool> {
+/// `sed -e p f` and `sed -ep f` and `sed --expression=p f` all run the same
+/// program over the same file, but only the first spends an operand on the
+/// script. Miss the other two and the file lands in the slot that gets
+/// skipped, which is the whole operand check gone. Reading a cluster as
+/// script-supplying when it is not only costs an extra path check, so the test
+/// is deliberately generous: any short cluster containing `e` or `f`, and the
+/// long forms in both spellings.
+fn supplies_script(arg: &str) -> bool {
+    if let Some(long) = arg.strip_prefix("--") {
+        let name = long.split('=').next().unwrap_or(long);
+        return matches!(name, "expression" | "file");
+    }
+    match arg.strip_prefix('-') {
+        Some(cluster) => cluster.contains(['e', 'f']),
+        None => false,
+    }
+}
+
+/// What each of `args` is to this program.
+fn operand_roles(program: &str, args: &[String]) -> Vec<OperandRole> {
     let base = basename(program);
     let takes_paths = PATH_OPERAND_PROGRAMS.contains(&base);
-    let skip_first = SCRIPT_FIRST_OPERAND_PROGRAMS.contains(&base);
+    let script_first = SCRIPT_FIRST_OPERAND_PROGRAMS.contains(&base)
+        && !args.iter().any(|arg| supplies_script(arg));
     let mut seen_operand = false;
     args.iter()
         .map(|arg| {
             if arg.starts_with('-') {
-                return false;
+                return OperandRole::Other;
             }
             let first_operand = !seen_operand;
             seen_operand = true;
-            takes_paths && !(skip_first && first_operand)
+            if script_first && first_operand {
+                OperandRole::Script
+            } else if takes_paths {
+                OperandRole::Path
+            } else {
+                OperandRole::Other
+            }
         })
         .collect()
 }
@@ -422,8 +488,9 @@ fn path_operand_flags(program: &str, args: &[String]) -> Vec<bool> {
 /// The three tiers, applied to whatever leaves were collected.
 fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> ShellAnalysis {
     let pending = expansion == Expansion::Pending;
-    let unvettable_argument =
-        |token: &str, takes_paths: bool| pending && unvettable_path_argument(token, takes_paths);
+    let unvettable_argument = |token: &str, role: OperandRole, takes_paths: bool| {
+        pending && unvettable_path_argument(token, role, takes_paths)
+    };
     let unvettable_target = |token: &str| pending && unvettable_redirect_target(token);
     // (1) Deny floor — wins over every allow rule, including `All`.
     for sc in &acc.simples {
@@ -505,8 +572,9 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                 &sc.display(),
             );
         }
-        let path_operands = path_operand_flags(&sc.program, args);
-        for (token, is_path_operand) in args.iter().zip(path_operands) {
+        let roles = operand_roles(&sc.program, args);
+        let takes_paths = PATH_OPERAND_PROGRAMS.contains(&basename(&sc.program));
+        for (token, role) in args.iter().zip(roles) {
             if hits_sensitive(token) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
@@ -521,7 +589,7 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                     &sc.display(),
                 );
             }
-            if unvettable_argument(token, is_path_operand) {
+            if unvettable_argument(token, role, takes_paths) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
                     format!("unresolved path in arguments: {}", sc.display()),

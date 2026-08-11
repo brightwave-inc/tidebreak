@@ -430,6 +430,20 @@ const NEVER_ALLOW: &[&str] = &[
     "cp payload .bashr?",
     "cp payload .bashr*",
     "cp .en? /tmp/loot",
+    // spelling the hidden segment out and globbing a later one reaches the same
+    // file: `.git/hook*/pre-commit` is arbitrary code on the next commit
+    "cp payload .git/hook*/pre-commit",
+    "tee .git/hook?/pre-commit",
+    "cat .docker/confi*",
+    "cat .kube/confi?",
+    "cat .config/fis?/config.fish",
+    "cp payload .local/bi?/tool",
+    "ls /et[c]/shadow",
+    // a script-supplying flag leaves no operand holding the script, so the
+    // first operand is the file — in every spelling of the flag
+    "sed -ep $SECRET_FILE",
+    "sed --expression=p $SECRET_FILE",
+    "sed -i --expression=s/a/b/ $SECRET_FILE",
     // a command substitution needs no cooperating environment: the agent writes
     // the path into a scratch file and reads it back as an operand
     "awk '{print}' $(cat p)",
@@ -438,6 +452,9 @@ const NEVER_ALLOW: &[&str] = &[
     "cut -c1- $(cat p)",
     "sed -i s/x/y/ $(cat p)",
     "sort -o $(cat p) data",
+    // the flag-shaped exemption that keeps `make -j$(nproc)` must not reach a
+    // program whose flags name files
+    "sort -o$(cat p) data",
     "tar -cf out.tar $(cat p)",
     "cat `cat p`",
 ];
@@ -606,10 +623,20 @@ fn covered_commands_auto_approve() {
         ("grep 'a?b' file.txt", readonly()),
         ("grep -E 'a[b]c' file", readonly()),
         ("grep '[n]ginx' access.log", readonly()),
+        // `.*` is the commonest regex there is, and a regex is not a path
+        ("grep '.*' file.txt", readonly()),
+        ("grep '.*foo' file.txt", readonly()),
+        ("sed 's/.*//' file.txt", allow(vec![prefix(&["sed"])])),
+        ("awk '/.*x/{print}' data.txt", allow(vec![prefix(&["awk"])])),
         // `$1` is a field reference in the script, not a path
         ("awk '{print $1}' data.txt", allow(vec![prefix(&["awk"])])),
         ("sed -n '1,5p' file.txt", allow(vec![prefix(&["sed"])])),
-        ("cat README.md", readonly()),
+        // a substitution in a flag of a program that opens no path operands —
+        // the substituted command is still a leaf and needs its own coverage
+        (
+            "make -j$(nproc)",
+            allow(vec![prefix(&["make"]), prefix(&["nproc"])]),
+        ),
         ("CFLAGS=-I../include make", allow(vec![prefix(&["make"])])),
     ];
     for (command, ruleset) in &cases {
