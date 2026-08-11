@@ -22,7 +22,7 @@ const request = {
 describe("PlanApprovalCard", () => {
   it("approves with one click and no feedback payload", async () => {
     const user = userEvent.setup();
-    const onDecide = vi.fn();
+    const onDecide = vi.fn().mockResolvedValue(true);
     render(
       <PlanApprovalCard
         request={request}
@@ -45,7 +45,7 @@ describe("PlanApprovalCard", () => {
    */
   it("sends block comments back as quoted feedback", async () => {
     const user = userEvent.setup();
-    const onDecide = vi.fn();
+    const onDecide = vi.fn().mockResolvedValue(true);
     render(
       <PlanApprovalCard
         request={request}
@@ -71,6 +71,38 @@ describe("PlanApprovalCard", () => {
     });
   });
 
+  /**
+   * A refused send used to take the comments with it: the card cleared them
+   * before it knew whether the decision had landed, and nothing anywhere could
+   * give them back. The reader would have to read the plan and write every
+   * note again.
+   */
+  it("keeps block comments when the decision does not reach the server", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn().mockResolvedValue(false);
+    render(
+      <PlanApprovalCard
+        request={request}
+        working={false}
+        error="Could not send that decision."
+        onDecide={onDecide}
+        onCancel={vi.fn()}
+      />,
+    );
+    const [firstStep] = screen.getAllByRole("button", { name: "Add comment" });
+    await user.click(firstStep!);
+    await user.type(
+      screen.getByLabelText("What should change"),
+      "Split this into its own slice.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: /Update plan/ }));
+
+    expect(onDecide).toHaveBeenCalled();
+    expect(screen.getByText("1 edit added")).toBeInTheDocument();
+    expect(usePlanComments.getState().byCall["call-1"]).toHaveLength(1);
+  });
+
   it("drops pending edits when they are cancelled", async () => {
     const user = userEvent.setup();
     render(
@@ -78,7 +110,7 @@ describe("PlanApprovalCard", () => {
         request={request}
         working={false}
         error={undefined}
-        onDecide={vi.fn()}
+        onDecide={vi.fn().mockResolvedValue(true)}
         onCancel={vi.fn()}
       />,
     );

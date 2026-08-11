@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
@@ -18,13 +18,8 @@ import {
 import { DocumentDropTarget } from "./DocumentDropTarget";
 import { useFirstMessage } from "./FirstMessage";
 import { hasNativeHost } from "./host";
-import {
-  readyImageAttachment,
-  type ImageAttachment,
-  type PickedImage,
-} from "./ImageAttachments";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
-import { modelForSelection } from "./ModelSelection";
+import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
 import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { pluginsApisFromClient } from "./plugins/pluginsApis";
@@ -34,6 +29,7 @@ import { AppSidebar } from "./sidebar/AppSidebar";
 import { WelcomeState } from "./WelcomeState";
 import type { AttachedFiles } from "./attachments";
 import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
+import { useImageAttachments } from "./useImageAttachments";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
 
@@ -45,18 +41,34 @@ const firstMessageActions = useFirstMessage.getState();
  * A file picker creates a chat before there is a first message. Reconcile the
  * home pickers immediately before that first message is held so changes made
  * while the attachment strip was open govern the turn that follows.
+ *
+ * That includes the model and its reasoning level: the chat was created with
+ * whatever was selected when the attachment opened it, and a reader who picks
+ * a different model before sending expects the turn to run on the one they can
+ * see in the composer.
  */
 export async function applyPendingChatSettings(
   client: Pick<
     typeof import("./api").ApiClient.prototype,
-    "patchChatPermissionMode" | "patchChatNetworkPolicy"
+    | "patchChatModel"
+    | "patchChatReasoningEffort"
+    | "patchChatPermissionMode"
+    | "patchChatNetworkPolicy"
   >,
   chatId: string,
   settings: {
+    model: import("./api").ModelSelectionKey | null;
+    reasoningEffort: import("./api").ReasoningEffort | null;
     permissionMode: import("./api").PermissionMode | null;
     networkPolicy: import("./api").NetworkPolicy;
   },
 ): Promise<void> {
+  chatListActions.replaceChat(
+    await client.patchChatModel(chatId, settings.model),
+  );
+  chatListActions.replaceChat(
+    await client.patchChatReasoningEffort(chatId, settings.reasoningEffort),
+  );
   chatListActions.replaceChat(
     await client.patchChatPermissionMode(chatId, settings.permissionMode),
   );
@@ -123,6 +135,13 @@ export function HomeRoute() {
   const pendingSkills = attachments.skills;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
+  // One chat creation shared by every route into it — the picker, and each file
+  // of a dropped or pasted batch.
+  const creatingPendingChat = useRef<Promise<string> | null>(null);
+  // The same strip a conversation's composer has. Home's bytes are published
+  // into the chat the attachment silently creates, which is why the target is
+  // resolved per upload rather than being the draft's own key.
+  const images = useImageAttachments(client, HOME_DRAFT_KEY, ensurePendingChat);
 
   const chats = useChatListStore((state) => state.chats);
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
@@ -138,14 +157,6 @@ export function HomeRoute() {
     composerDraftActions.setFiles(HOME_DRAFT_KEY, []);
   }, [chatsLoaded, chats, pendingChatId]);
 
-  function setPendingImages(
-    update: (current: readonly ImageAttachment[]) => ImageAttachment[],
-  ) {
-    const current =
-      useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.images ?? [];
-    composerDraftActions.setImages(HOME_DRAFT_KEY, update(current));
-  }
-
   function setPendingFiles(
     update: (current: readonly ImportedDocument[]) => ImportedDocument[],
   ) {
@@ -158,6 +169,19 @@ export function HomeRoute() {
     const existing =
       useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]?.pendingChatId;
     if (existing) return existing;
+    // Images arrive in batches — a multi-file drop uploads every file at once,
+    // and each upload asks for the chat to publish into. One in-flight creation
+    // is shared between them so a three-image drop does not leave two orphan
+    // chats behind it.
+    if (!creatingPendingChat.current) {
+      creatingPendingChat.current = createPendingChat().finally(() => {
+        creatingPendingChat.current = null;
+      });
+    }
+    return creatingPendingChat.current;
+  }
+
+  async function createPendingChat(): Promise<string> {
     const created = await client.createChat(newChat.model ?? undefined, null, {
       reasoningEffort: newChat.reasoningEffort,
       permissionMode: newChat.permissionMode,
@@ -209,12 +233,7 @@ export function HomeRoute() {
       Math.max(0, remaining - pickedImages.length),
     );
     if (pickedImages.length > 0) {
-      setPendingImages((current) => [
-        ...current,
-        ...pickedImages.map((image: PickedImage) =>
-          readyImageAttachment(crypto.randomUUID(), image),
-        ),
-      ]);
+      images.adopt(pickedImages);
     }
     if (pickedFiles.length > 0) {
       setPendingFiles((current) => [...current, ...pickedFiles]);
@@ -263,6 +282,8 @@ export function HomeRoute() {
         chatId = created.id;
       } else {
         await applyPendingChatSettings(client, chatId, {
+          model: effective.model,
+          reasoningEffort: effective.reasoningEffort,
           permissionMode: effective.permissionMode,
           networkPolicy: effective.networkPolicy,
         });
@@ -287,18 +308,29 @@ export function HomeRoute() {
     }
   }
 
-  const composerImages: ComposerImages | undefined =
-    pendingImages.length > 0
-      ? {
-          items: pendingImages,
-          error: null,
-          unsupportedModel: null,
-          onAttachFiles: () => {},
-          onRemove: (id) =>
-            setPendingImages((prev) => prev.filter((img) => img.id !== id)),
-          onRetry: () => {},
-        }
-      : undefined;
+  // Offered whether or not anything is attached yet: a drop or a paste is how
+  // the first image usually arrives, and the composer only claims one when a
+  // strip is there to receive it.
+  const composerImages: ComposerImages = {
+    items: pendingImages,
+    error: images.error,
+    unsupportedModel: textOnlyModelLabel(models, effective.model),
+    onAttachFiles: (selected) => {
+      if (
+        pendingImages.length + pendingFiles.length + selected.length >
+        MAX_IMAGE_ATTACHMENTS
+      ) {
+        setAttachError(
+          `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+        );
+        return;
+      }
+      setAttachError(null);
+      images.attachFiles(selected);
+    },
+    onRemove: images.remove,
+    onRetry: images.retry,
+  };
 
   // Home is the composer alone. The install-wide libraries that used to open
   // as panels here are routes of their own now, so nothing beside the

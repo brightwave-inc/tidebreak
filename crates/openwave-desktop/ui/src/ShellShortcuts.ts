@@ -88,7 +88,12 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     alt: true,
     description: "Go back",
     group: "Navigation",
-    allowInEditable: true,
+    // Option+Arrow is word-by-word caret movement in every macOS text field,
+    // and Alt+Arrow is the same habit elsewhere. Taking it from the composer
+    // would break typing to provide navigation the reader can reach with the
+    // mouse; unlike the mod-chorded shortcuts below, this one is a key
+    // combination people genuinely press while writing.
+    allowInEditable: false,
   },
   {
     id: "history-forward",
@@ -97,7 +102,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     alt: true,
     description: "Go forward",
     group: "Navigation",
-    allowInEditable: true,
+    allowInEditable: false,
   },
   {
     id: "new-chat",

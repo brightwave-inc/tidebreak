@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { toast } from "sonner";
 
 import type {
-  ModelInfo,
   ModelSelectionKey,
   NetworkPolicy,
   PermissionMode,
@@ -44,6 +44,7 @@ import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { warmPresentationConverter } from "./document/officePdf";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
+import { friendlyErrorMessage } from "./lib/utils";
 import { attachChatFiles, type AttachedFiles } from "./attachments";
 import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
 import { DocumentDropTarget } from "./DocumentDropTarget";
@@ -54,7 +55,7 @@ import {
   type ImageAttachment,
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
-import { modelForSelection } from "./ModelSelection";
+import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
@@ -365,18 +366,23 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   async function onQueue() {
     const content = draftRef.current.trim();
     if (!chat || !content) return;
-    await client.postMessage(
-      chatId,
-      crypto.randomUUID(),
-      content,
-      readyImageAttachmentIds(images.attachments),
-      files.map((file) => file.documentId),
-      invokedSkills(),
-      voice.inputUsed,
-      true,
+    await queueComposerMessage(
+      () =>
+        client.postMessage(
+          chatId,
+          crypto.randomUUID(),
+          content,
+          readyImageAttachmentIds(images.attachments),
+          files.map((file) => file.documentId),
+          invokedSkills(),
+          voice.inputUsed,
+          true,
+        ),
+      () => {
+        setComposerDraft("");
+        voice.resetInputUsed();
+      },
     );
-    setComposerDraft("");
-    voice.resetInputUsed();
   }
 
   /**
@@ -897,18 +903,26 @@ function withoutConnectionState(status: string): string {
 }
 
 /**
- * The label of the chat's model when it cannot read images, or `null`.
+ * Park the composer's message on the server queue, and empty the composer only
+ * once the server has it.
  *
- * A chat with no model of its own follows the global default, which the
- * renderer does not resolve; the server still refuses such a turn, so the
- * composer stays quiet rather than guessing at a name it would have to print.
+ * A refused queue is the one send that has nothing to show for itself: no
+ * optimistic bubble goes into the transcript and no turn follows, so a
+ * swallowed rejection would take the message away and leave the reader
+ * watching a queue that never grew. The text stays where it was typed and the
+ * failure is said out loud, the same way the queue tray reports its own.
  */
-function textOnlyModelLabel(
-  models: ModelInfo[],
-  selection: string | null,
-): string | null {
-  const model = modelForSelection(models, selection);
-  return model && !model.multimodal ? model.display_name : null;
+export async function queueComposerMessage(
+  post: () => Promise<unknown>,
+  onQueued: () => void,
+): Promise<void> {
+  try {
+    await post();
+  } catch (err) {
+    toast.error(friendlyErrorMessage(err, "Could not queue that message."));
+    return;
+  }
+  onQueued();
 }
 
 function friendlyAttachError(error: unknown): string {

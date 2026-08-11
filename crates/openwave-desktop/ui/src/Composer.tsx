@@ -341,6 +341,11 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const latestResetKeyRef = useRef(resetKey);
   latestResetKeyRef.current = resetKey;
+  // The draft as it stands now, for the paths that write a whole new value
+  // after an await. Rendering reads the prop; anything that resumes later has
+  // to read this, or it overwrites whatever was typed while it was away.
+  const latestDraftRef = useRef(draft);
+  latestDraftRef.current = draft;
   // dragenter and dragleave fire for every descendant the pointer crosses, so a
   // boolean flickers the drop hint on and off while the file is held still.
   const dragDepthRef = useRef(0);
@@ -562,8 +567,19 @@ export function Composer({
           // read leaves the draft exactly as the reader typed it, token and all.
           return;
         }
-        if (token) applySlashReplacement(draft, token.start, caret, body);
-        else insertAtSelection(body);
+        // The body arrives whenever the fetch settles, and the reader goes on
+        // typing meanwhile. Write into the draft as it stands now rather than
+        // the one this pick started from: the token is replaced only where it
+        // still is, and every keystroke since is kept either way.
+        const current = latestDraftRef.current;
+        const tokenIntact =
+          token !== null &&
+          current.slice(token.start, caret) === draft.slice(token.start, caret);
+        if (token && tokenIntact) {
+          applySlashReplacement(current, token.start, caret, body);
+        } else {
+          insertAtSelection(body, current);
+        }
       })();
       return;
     }
@@ -591,14 +607,14 @@ export function Composer({
   }
 
   /** Text put in where the reader last had the caret, without running words together. */
-  function insertAtSelection(text: string) {
+  function insertAtSelection(text: string, source: string = draft) {
     const remembered = selectionRef.current;
-    const start = Math.min(remembered?.start ?? draft.length, draft.length);
-    const end = Math.min(remembered?.end ?? draft.length, draft.length);
-    const before = draft.slice(0, start);
+    const start = Math.min(remembered?.start ?? source.length, source.length);
+    const end = Math.min(remembered?.end ?? source.length, source.length);
+    const before = source.slice(0, start);
     const gap = before && !/\s$/.test(before) ? " " : "";
     moveCaret(
-      `${before}${gap}${text}${draft.slice(end)}`,
+      `${before}${gap}${text}${source.slice(end)}`,
       before.length + gap.length + text.length,
     );
   }

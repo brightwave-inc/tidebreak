@@ -59,18 +59,19 @@ describe("shell shortcut resolution", () => {
     }
   });
 
-  it("provides Alt+Arrow history navigation from editable fields", () => {
-    expect(
-      resolveShellShortcut(
-        keyEvent({
-          key: "ArrowLeft",
-          code: "ArrowLeft",
-          metaKey: false,
-          altKey: true,
-        }),
-        context(),
-      )?.id,
-    ).toBe("history-back");
+  it("leaves Alt+Arrow to the field the reader is typing in", () => {
+    // Option+Arrow jumps a word in every macOS text field. History navigation
+    // takes it only when focus is somewhere the keys mean nothing else.
+    const back = keyEvent({
+      key: "ArrowLeft",
+      code: "ArrowLeft",
+      metaKey: false,
+      altKey: true,
+    });
+    expect(resolveShellShortcut(back, context())).toBeNull();
+    expect(resolveShellShortcut(back, context({ editable: false }))?.id).toBe(
+      "history-back",
+    );
     expect(
       resolveShellShortcut(
         keyEvent({
@@ -79,7 +80,7 @@ describe("shell shortcut resolution", () => {
           metaKey: false,
           altKey: true,
         }),
-        context({ command: false }),
+        context({ editable: false, command: false }),
       )?.id,
     ).toBe("history-forward");
   });

@@ -136,6 +136,39 @@ it("replaces the token with the prompt body it fetches", async () => {
   expect(menu.onInvoke).not.toHaveBeenCalled();
 });
 
+it("keeps what was typed while the prompt body was still loading", async () => {
+  // Fetching the body is a round trip, and people carry on typing through it.
+  // The insertion used to be built from the draft as it was when the option
+  // was picked, so everything typed in between was overwritten.
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.keyboard(" for the team");
+  release("Write this week's update covering:");
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      expect.stringContaining("Write this week's update covering:"),
+    ),
+  );
+
+  expect(onDraftChange).toHaveBeenLastCalledWith(
+    expect.stringContaining("for the team"),
+  );
+});
+
 it("invokes a picked skill and shows it as a chip the reader can drop", async () => {
   const user = userEvent.setup();
   const onInvoke = vi.fn();
