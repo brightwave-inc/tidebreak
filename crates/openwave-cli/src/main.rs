@@ -685,7 +685,17 @@ fn profile_config() -> Result<Config> {
     let mut config = Config::from_env()?;
     #[cfg(debug_assertions)]
     {
-        config.keychain_service = Some("openwave.dev".into());
+        // `OPENWAVE_KEYCHAIN_SERVICE` lets a headless rig point a debug daemon
+        // at a scratch keychain service. A freshly re-linked binary reading the
+        // shared `openwave.dev` items trips the macOS ACL prompt, which blocks
+        // a session with no UI forever; a scratch service starts empty and
+        // every item it creates is owned by this binary, so nothing prompts.
+        config.keychain_service = Some(
+            std::env::var("OPENWAVE_KEYCHAIN_SERVICE")
+                .ok()
+                .filter(|service| !service.is_empty())
+                .unwrap_or_else(|| "openwave.dev".into()),
+        );
     }
     Ok(config)
 }
