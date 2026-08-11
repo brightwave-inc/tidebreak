@@ -394,6 +394,35 @@ consider required reviewers on `desktop-production` before making the
 repository public. Never add a pull-request trigger to the production workflow
 or expose its environment secrets to code from forks.
 
+### Third-party notices
+
+Every shipped desktop artifact carries the licenses of the software it
+redistributes. `legal/THIRD-PARTY-NOTICES.md` is generated from the resolved
+Cargo workspace graph and the desktop UI's production npm graph by
+`scripts/generate-third-party-notices.mjs`, and is checked in so a reviewer can
+see exactly what a change to either lockfile adds to the product's obligations.
+
+- Regenerate it with `node scripts/generate-third-party-notices.mjs` after any
+  dependency change, from a checkout with UI dependencies installed. CI's
+  `third-party notices` lane runs the same generator with `--check` and fails on
+  drift, and the release build repeats that check before signing, so a tag can
+  never ship notices that disagree with its lockfiles.
+- The generator reads license facts from each package's own vendored files and
+  manifest. `cargo metadata` and `pnpm licenses list` only enumerate the graphs
+  and locate the packages, so neither tool's license classification can rewrite
+  the notices. Declared expressions are reproduced verbatim, including compound
+  ones; identical license texts are stored once and referenced by a
+  content-addressed identifier.
+- A package that declares no license is recorded as such rather than guessed
+  at. Those entries are the ones to review: the notices are a compliance
+  artifact, and an undeclared license in a distributed dependency is a question
+  for a human, not something the generator should paper over.
+- Tauri stages the file, along with `LICENSE` and `NOTICE`, into
+  `Contents/Resources/legal/` of the app bundle. The DMG, the `.app.zip`, and
+  the updater archive are all derived from that bundle, so the release lane
+  verifies the bundled bytes match the checked-in files once, after signing.
+  When the Windows lanes resume they inherit the same resource map.
+
 ## Before 1.0
 
 While the latest published version is below `1.0.0`, fixes increment patch,
@@ -442,9 +471,10 @@ request title** and **Pull request body**.
 Branch protection on `main` requires the individual CI jobs, not an aggregate
 wrapper — there is none. The required contexts are `change scope`, `semantic PR
 title`, `release policy`, `secret scan (gitleaks)`, `supply-chain advisories
-(cargo-deny)`, `unused deps (cargo-machete)`, `rustfmt`, `clippy`,
-`desktop test`, `test`, `postgres state machine`, and `desktop UI`, each pinned
-to the GitHub Actions app (`app_id` 15368) so no other app can satisfy them.
+(cargo-deny)`, `unused deps (cargo-machete)`, `third-party notices`, `rustfmt`,
+`clippy`, `desktop test`, `test`, `postgres state machine`, and `desktop UI`,
+each pinned to the GitHub Actions app (`app_id` 15368) so no other app can
+satisfy them.
 Every lane a change's scope can reach runs on the pull request itself; a lane
 outside the scope reports a successful skip, which is what lets a required
 check pass without running. Green PR checks are full platform-neutral

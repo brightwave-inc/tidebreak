@@ -109,6 +109,7 @@ jobs:
     outputs:
       docs_site: ${{ steps.scope.outputs.docs_site }}
       e2b_cli: ${{ steps.scope.outputs.e2b_cli }}
+      notices: ${{ steps.scope.outputs.notices }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
       workspace: ${{ steps.scope.outputs.workspace }}
@@ -129,6 +130,7 @@ jobs:
             {
               echo "docs_site=true"
               echo "e2b_cli=true"
+              echo "notices=true"
               echo "rust=true"
               echo "ui=true"
               echo "workspace=true"
@@ -167,9 +169,12 @@ jobs:
           # and the openwave-desktop tests. `workspace` gates the lanes that
           # cover everything *except* openwave-desktop, so it can stay false
           # when a change cannot reach them. `workspace` implies `rust`; the
-          # gate below asserts that.
+          # gate below asserts that. `notices` gates the third-party notice
+          # regeneration check, which only the two dependency graphs, the
+          # generator, and the checked-in artifact can change.
           docs_site=false
           e2b_cli=false
+          notices=false
           rust=false
           ui=false
           workspace=false
@@ -180,10 +185,15 @@ jobs:
               docs-site/*) docs_site=true ;;
               .github/e2b-cli/*|.github/workflows/publish-e2b-template.yml)
                 e2b_cli=true ;;
+              # The generated notices are markdown, so they must be matched
+              # before the documentation carve-out swallows them.
+              legal/*|scripts/generate-third-party-notices.mjs)
+                notices=true ;;
               *.md|docs/*|assets/*|.githooks/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
                 docs_site=true
                 e2b_cli=true
+                notices=true
                 rust=true
                 ui=true
                 workspace=true
@@ -195,11 +205,18 @@ jobs:
               # `test` lane rather than the desktop one.
               crates/openwave-desktop/ui/src/generated/*)
                 rust=true; ui=true; workspace=true ;;
+              # The UI production graph is an input to the notices; the rest of
+              # the UI tree is not.
+              crates/openwave-desktop/ui/package.json|crates/openwave-desktop/ui/pnpm-lock.yaml)
+                notices=true; ui=true ;;
               crates/openwave-desktop/ui/*) ui=true ;;
               # Nothing in the workspace depends on openwave-desktop, and the
               # `test` lane already excludes it, so no edit to its own sources
               # can change that lane's result. The desktop lane still covers it.
+              crates/openwave-desktop/Cargo.toml) notices=true; rust=true ;;
               crates/openwave-desktop/*) rust=true ;;
+              Cargo.lock|Cargo.toml|crates/*/Cargo.toml)
+                notices=true; rust=true; workspace=true ;;
               *) rust=true; workspace=true ;;
             esac
           done < "$RUNNER_TEMP/changed-files"
@@ -215,6 +232,7 @@ jobs:
           {
             echo "docs_site=$docs_site"
             echo "e2b_cli=$e2b_cli"
+            echo "notices=$notices"
             echo "rust=$rust"
             echo "ui=$ui"
             echo "workspace=$workspace"
@@ -301,6 +319,44 @@ jobs:
       - name: Check for unused dependencies
         run: cargo machete
 
+
+  notices:
+    name: third-party notices
+    needs: changes
+    # Only the two dependency graphs, the generator, and the checked-in
+    # artifact can change the notices, so this lane is gated on those files
+    # rather than on the whole Rust scope. It resolves both graphs and compiles
+    # nothing.
+    if: ${{ needs.changes.outputs.notices == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
+        with:
+          shared-key: notices-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          cache-targets: false
+          cache-bin: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+      # Regenerate from the resolved graphs and diff against the checked-in
+      # file. The generator refuses to run against a graph it cannot back with
+      # files, so a partial checkout fails loudly instead of reporting a
+      # smaller, "clean" notice file.
+      - name: Check the third-party notices
+        run: node scripts/generate-third-party-notices.mjs --check
 
   fmt:
     name: rustfmt

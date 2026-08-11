@@ -324,6 +324,13 @@ jobs:
         working-directory: crates/openwave-desktop/ui
         run: pnpm install --frozen-lockfile
 
+      # The signed bundle ships legal/THIRD-PARTY-NOTICES.md as a resource, so
+      # the released tag must not carry a stale copy. Both dependency graphs are
+      # already resolved on this runner, and this job gates the signed build, so
+      # drift fails here, before any signing material is loaded.
+      - name: Verify the third-party notices match the released graph
+        run: node scripts/generate-third-party-notices.mjs --check
+
       - name: Compile without production credentials or bundles
         id: compile
         continue-on-error: true
@@ -652,6 +659,26 @@ jobs:
               echo "Required macOS release artifact is missing: ${file:-<empty path>}" >&2
               exit 1
             }
+          done
+
+          # Every macOS artifact below is derived from this app bundle — the
+          # DMG, the zip, and the updater archive — so checking the bundled
+          # legal notices once covers all of them. The bytes must equal the
+          # checked-in files, not merely exist: a resource mapping that
+          # silently stopped resolving would otherwise ship an app whose
+          # notices are empty or stale.
+          for legal_pair in \
+            legal/THIRD-PARTY-NOTICES.md:legal/THIRD-PARTY-NOTICES.md \
+            LICENSE:legal/LICENSE \
+            NOTICE:legal/NOTICE; do
+            source_file="${legal_pair%%:*}"
+            bundled_path="${legal_pair##*:}"
+            bundled="$app_path/Contents/Resources/$bundled_path"
+            [[ -s "$bundled" ]] || {
+              echo "Signed app is missing bundled $bundled_path" >&2
+              exit 1
+            }
+            cmp "$source_file" "$bundled"
           done
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
