@@ -51,23 +51,7 @@ where
     if by_document {
         return Ok(true);
     }
-    let by_tool_preview = entities::tool_call::Entity::find()
-        .select_only()
-        .column(entities::tool_call::Column::ResultPreview)
-        .filter(entities::tool_call::Column::ResultPreview.is_not_null())
-        .into_tuple::<Option<serde_json::Value>>()
-        .all(conn)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .flatten()
-        .filter_map(|value| serde_json::from_value::<crate::ToolResultPreview>(value).ok())
-        .any(|preview| match preview {
-            crate::ToolResultPreview::Exec { images, .. } => {
-                images.iter().any(|image| image.blob_id == blob_id)
-            }
-            _ => false,
-        });
+    let by_tool_preview = tool_preview_references(conn, blob_id).await?;
     if by_tool_preview {
         return Ok(true);
     }
@@ -87,6 +71,48 @@ where
     // overwrote in a user's folder. Reaping one of these deletes the thing undo
     // restores, so it belongs in the union like any other referrer.
     super::exec_file_change::references_blob_on(conn, blob_id).await
+}
+
+/// Whether any tool call's stored result preview still shows `blob_id`.
+///
+/// Only previews whose stored text carries the blob's id are read back: a
+/// preview that references a blob necessarily serializes that id, and a UUID
+/// has one serialized form, so a row that does not mention it cannot be
+/// evidence for it. That keeps the work this does proportional to the rows
+/// that might match rather than to the whole call history, which the
+/// retirement lock is held across.
+///
+/// A candidate row that will not parse counts as a reference. The two failure
+/// directions here are not symmetric: treating an unreadable preview as
+/// "no reference" deletes bytes some card still renders, while treating it as
+/// a reference only keeps a blob alive longer than needed.
+async fn tool_preview_references<C>(conn: &C, blob_id: uuid::Uuid) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let mentions = format!("%{blob_id}%");
+    let candidates = entities::tool_call::Entity::find()
+        .select_only()
+        .column(entities::tool_call::Column::ResultPreview)
+        .filter(entities::tool_call::Column::ResultPreview.is_not_null())
+        .filter(
+            sea_orm::sea_query::Expr::col(entities::tool_call::Column::ResultPreview)
+                .cast_as(sea_orm::sea_query::Alias::new("text"))
+                .like(mentions),
+        )
+        .into_tuple::<Option<serde_json::Value>>()
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(candidates.into_iter().flatten().any(|value| {
+        match serde_json::from_value::<crate::ToolResultPreview>(value) {
+            Ok(crate::ToolResultPreview::Exec { images, .. }) => {
+                images.iter().any(|image| image.blob_id == blob_id)
+            }
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    }))
 }
 
 pub(in crate::db) async fn ensure_orphan(store: &DbStore, blob_id: uuid::Uuid) -> Result<bool> {
