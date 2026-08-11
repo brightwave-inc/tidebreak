@@ -72,7 +72,10 @@
     "resources": {
       "../../scripts/exec-documents/": "exec-scripts/",
       "../../skills/": "skills/",
-      "../../plugins/": "plugins/"
+      "../../plugins/": "plugins/",
+      "../../LICENSE": "legal/LICENSE",
+      "../../NOTICE": "legal/NOTICE",
+      "../../legal/THIRD-PARTY-NOTICES.md": "legal/THIRD-PARTY-NOTICES.md"
     },
     "externalBin": [
       "binaries/openwave-host-broker"
