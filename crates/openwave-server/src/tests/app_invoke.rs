@@ -540,6 +540,304 @@ async fn a_widened_manifest_requires_fresh_consent_for_the_new_operations() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// --- Gateway operation bindings ---
+
+use openwave_core::local_app::AppGatewayOperationsBinding;
+
+use crate::connected_apps::{
+    GatewayDispatchError, GatewayInvokeDispatcher, GatewayOperationRequest,
+};
+use crate::connectors::GatewayInvokeOutcome;
+use crate::tests::app_grant::FakeGatewayCatalogs;
+
+/// What the fake relay should answer next.
+enum GatewayAnswer {
+    Executed,
+    AuthorizationRequired,
+    NoSession,
+    NotRegistered,
+}
+
+/// A relay seam standing in for the gateway's shared-app invoke route,
+/// recording exactly what crossed it.
+struct FakeGatewayDispatch {
+    /// One entry per dispatched call: the invoking app and the five fields of
+    /// the gateway's own invoke vocabulary.
+    calls: StdMutex<Vec<serde_json::Value>>,
+    answer: StdMutex<GatewayAnswer>,
+}
+
+impl FakeGatewayDispatch {
+    fn new() -> Self {
+        Self {
+            calls: StdMutex::new(Vec::new()),
+            answer: StdMutex::new(GatewayAnswer::Executed),
+        }
+    }
+
+    fn answers(&self, answer: GatewayAnswer) {
+        *self.answer.lock().unwrap() = answer;
+    }
+}
+
+#[async_trait]
+impl GatewayInvokeDispatcher for FakeGatewayDispatch {
+    async fn dispatch(
+        &self,
+        app: AppId,
+        request: &GatewayOperationRequest,
+    ) -> Result<GatewayInvokeOutcome, GatewayDispatchError> {
+        self.calls.lock().unwrap().push(json!({
+            "app": app,
+            "gateway_app": request.gateway_app,
+            "operation_id": request.operation_id,
+            "path_parameters": request.path_parameters,
+            "query": request.query,
+            "body": request.body,
+        }));
+        match *self.answer.lock().unwrap() {
+            GatewayAnswer::Executed => Ok(GatewayInvokeOutcome::Executed {
+                status: 201,
+                content_type: Some("application/json".into()),
+                body_base64: base64::engine::general_purpose::STANDARD.encode(br#"{"ok":true}"#),
+            }),
+            GatewayAnswer::AuthorizationRequired => {
+                Ok(GatewayInvokeOutcome::AuthorizationRequired {
+                    message: "sign in to Issues to continue".into(),
+                })
+            }
+            GatewayAnswer::NoSession => Err(GatewayDispatchError::NoSession),
+            GatewayAnswer::NotRegistered => Err(GatewayDispatchError::NotRegistered),
+        }
+    }
+}
+
+/// A profile whose gateway catalog reads and relay both come from fakes,
+/// holding one app that pins `operation_ids` of the gateway app `gateway_app`.
+async fn gateway_test_app(
+    catalogs: Arc<FakeGatewayCatalogs>,
+    relay: Arc<FakeGatewayDispatch>,
+    gateway_app: &str,
+    operation_ids: &[&str],
+) -> (Router, String, AppId, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("gateway-invoke.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.gateway_catalogs = catalogs;
+    state.gateway_dispatch = relay;
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+
+    let app_id = AppId::new();
+    store
+        .create_app(&CreateApp {
+            id: app_id,
+            revision: NewAppRevision {
+                id: AppRevisionId::new(),
+                manifest: AppManifest {
+                    name: "Gateway fixture".into(),
+                    bindings: vec![AppBinding::GatewayOperations(AppGatewayOperationsBinding {
+                        gateway_app: gateway_app.to_owned(),
+                        operation_ids: operation_ids.iter().map(|id| (*id).to_owned()).collect(),
+                    })],
+                },
+                byte_len: 1,
+                sha256: [0; 32],
+                turn_id: None,
+                producing_run_id: None,
+                chat_id: None,
+                created_at: chrono::Utc::now(),
+            },
+        })
+        .await
+        .unwrap();
+    (router, bearer, app_id, dir)
+}
+
+/// The gateway ladder end to end over the API: the local gates all run before
+/// anything leaves the machine, the relay receives exactly the gateway's own
+/// five-field invoke vocabulary, an executed call crosses back as opaque
+/// passthrough, and the two ways nothing can answer are distinguishable —
+/// `gateway_authorization_required` is the viewer's to fix at the gateway,
+/// `gateway_unavailable` is a pin nothing answers. A moved catalog closes the
+/// gate again without a network call.
+#[tokio::test]
+async fn gateway_invokes_walk_the_ladder_before_anything_leaves_the_machine() {
+    let catalogs = Arc::new(FakeGatewayCatalogs::signed_in(
+        "https://gateway.internal.example.com",
+        &[(
+            "gw-issues",
+            "Issues (gateway)",
+            &["listIssues", "createIssue"],
+        )],
+    ));
+    let relay = Arc::new(FakeGatewayDispatch::new());
+    let (router, bearer, app_id, _dir) = gateway_test_app(
+        catalogs.clone(),
+        relay.clone(),
+        "gw-issues",
+        &["listIssues"],
+    )
+    .await;
+    let calls = || relay.calls.lock().unwrap().len();
+
+    // Fail closed before consent, and on every unpinned or malformed shape.
+    // The local and gateway surfaces stay disjoint: `parameters` is the local
+    // operation vocabulary and `query` the gateway's, and neither is quietly
+    // dropped when it lands on the other.
+    let refusals = [
+        (
+            json!({"gateway_app": "gw-issues", "operation_id": "createIssue"}),
+            StatusCode::FORBIDDEN,
+            "not_pinned",
+        ),
+        (
+            json!({"gateway_app": "gw-elsewhere", "operation_id": "listIssues"}),
+            StatusCode::FORBIDDEN,
+            "not_pinned",
+        ),
+        (
+            json!({"gateway_app": "gw-issues", "operation_id": "listIssues"}),
+            StatusCode::FORBIDDEN,
+            "consent_required",
+        ),
+        (
+            json!({"gateway_app": "gw-issues"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_invoke_request",
+        ),
+        (
+            json!({"gateway_app": "gw-issues", "operation_id": "listIssues",
+                   "parameters": {"q": "open"}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_invoke_request",
+        ),
+        (
+            json!({"operation_id": "listIssues", "query": {"q": "open"}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_invoke_request",
+        ),
+    ];
+    for (body, status, kind) in refusals {
+        let response = invoke(&router, &bearer, app_id, body.clone()).await;
+        assert_eq!(response.status(), status, "{body}");
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, kind, "{body}");
+    }
+    assert_eq!(calls(), 0, "no local refusal may reach the gateway");
+
+    // Granted and current: the relay receives the gateway's own vocabulary
+    // verbatim — the bound app id, the operation, and the three passthrough
+    // halves — attributed to the invoking app, and the answer crosses back as
+    // opaque passthrough.
+    consent(&router, &bearer, app_id).await;
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"gateway_app": "gw-issues", "operation_id": "listIssues",
+               "path_parameters": {"id": "7"}, "query": {"state": "open"},
+               "body": {"note": "hi"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = json_body(response).await;
+    assert_eq!(result["status"], json!(201));
+    assert_eq!(result["content_type"], json!("application/json"));
+    assert_eq!(result["is_error"], json!(false));
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(result["body_base64"].as_str().unwrap())
+            .unwrap(),
+        br#"{"ok":true}"#
+    );
+    assert_eq!(
+        relay.calls.lock().unwrap().as_slice(),
+        [json!({
+            "app": app_id,
+            "gateway_app": "gw-issues",
+            "operation_id": "listIssues",
+            "path_parameters": {"id": "7"},
+            "query": {"state": "open"},
+            "body": {"note": "hi"},
+        })]
+    );
+
+    // The gateway's typed `authorization_required` crosses machine-readably
+    // and names the app the viewer would recognize — never the gateway's id
+    // alone, and never as prose the frame would have to match on.
+    relay.answers(GatewayAnswer::AuthorizationRequired);
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"gateway_app": "gw-issues", "operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "gateway_authorization_required");
+    assert!(
+        info.message.contains("Issues (gateway)"),
+        "{}",
+        info.message
+    );
+
+    // A pin nothing can answer is a conflict with current state, and the
+    // message says which of the two reasons it was.
+    for (answer, expected) in [
+        (GatewayAnswer::NoSession, "no gateway session"),
+        (GatewayAnswer::NotRegistered, "not registered"),
+    ] {
+        relay.answers(answer);
+        let response = invoke(
+            &router,
+            &bearer,
+            app_id,
+            json!({"gateway_app": "gw-issues", "operation_id": "listIssues"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "gateway_unavailable");
+        assert!(info.message.contains(expected), "{}", info.message);
+    }
+
+    // A re-ingested catalog moves the fingerprint, so consent is stale and the
+    // call stops at the grant gate — before the relay, not after it.
+    let before = calls();
+    *catalogs.0.lock().unwrap() = Some((
+        "https://gateway.internal.example.com".to_owned(),
+        FakeGatewayCatalogs::roster(&[("gw-issues", "Issues (gateway)", &["listIssues"])]),
+    ));
+    relay.answers(GatewayAnswer::Executed);
+    let response = invoke(
+        &router,
+        &bearer,
+        app_id,
+        json!({"gateway_app": "gw-issues", "operation_id": "listIssues"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "consent_required");
+    assert_eq!(
+        calls(),
+        before,
+        "a stale grant must stop the call before the relay"
+    );
+}
+
 // --- Folder bindings ---
 
 use std::collections::BTreeMap as StdBTreeMap;

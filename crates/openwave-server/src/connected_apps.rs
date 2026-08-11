@@ -502,6 +502,100 @@ pub(crate) fn governed_rest_dispatcher(
     ))
 }
 
+/// One shared-app operation call, as the invoke route assembled it.
+///
+/// The field names are the gateway's own invoke vocabulary (ADR 0036) rather
+/// than a second spelling of it: `gateway_app` is what crosses the wire as
+/// `connected_app_id`, and the three passthrough halves are opaque JSON the
+/// server never interprets — a bundle authored against a harness frame speaks
+/// exactly this shape to the gateway shell.
+pub(crate) struct GatewayOperationRequest {
+    /// The gateway connected app whose operation is being called.
+    pub gateway_app: String,
+    /// The operation id, as the app's catalog declares it.
+    pub operation_id: String,
+    /// Path-template values for the operation, when it takes any.
+    pub path_parameters: Option<serde_json::Value>,
+    /// Query values for the operation, when it takes any.
+    pub query: Option<serde_json::Value>,
+    /// JSON request body, when the operation declares one.
+    pub body: Option<serde_json::Value>,
+}
+
+/// Why a gateway relay could not happen at all — as distinct from a call the
+/// gateway answered, which is a [`GatewayInvokeOutcome`].
+///
+/// Closed on purpose: the invoke route turns each of these into a typed
+/// refusal, and a fourth reading would need its own refusal kind rather than a
+/// free-form message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatewayDispatchError {
+    /// This profile has no gateway session to relay as — unmanaged, signed
+    /// out, or pointed at a deployment it never signed into.
+    NoSession,
+    /// Nothing at the gateway answers for this app: no draft is registered
+    /// for it, or the deployment predates the shared-app invoke route.
+    NotRegistered,
+    /// The gateway was reachable in principle but the call failed —
+    /// transport, protocol, or an answer this client could not read. The
+    /// message is host-authored and bounded; it carries no URL and no
+    /// credential material.
+    Unreachable(String),
+}
+
+/// Dispatch seam for one gateway shared-app relay, so the invoke route can be
+/// driven end to end in tests without an OAuth session against a fake
+/// deployment — the gateway twin of [`RestOperationDispatcher`]. Production is
+/// the relay over the one gateway runtime.
+#[async_trait]
+pub(crate) trait GatewayInvokeDispatcher: Send + Sync {
+    /// Relay `request` on behalf of the local app `app`, which the route has
+    /// already checked the pin, the grant, and the fingerprint currency of.
+    async fn dispatch(
+        &self,
+        app: openwave_core::id::AppId,
+        request: &GatewayOperationRequest,
+    ) -> Result<crate::connectors::GatewayInvokeOutcome, GatewayDispatchError>;
+}
+
+/// Resolves the gateway-side draft a local app was registered as, at the
+/// deployment `gateway_base_url` names.
+///
+/// The seam exists so the registration lifecycle is the only thing a later
+/// slice has to build: invoke already asks the right question, and answering
+/// it differently is an implementation swap rather than a reshaping of the
+/// ladder. Keyed by the gateway's base URL as well as the app, because a
+/// registration belongs to one deployment — a re-paired profile has no draft
+/// there, exactly as it has no current gateway grant.
+#[async_trait]
+pub(crate) trait GatewayDraftSource: Send + Sync {
+    async fn draft_shared_app_id(
+        &self,
+        app: openwave_core::id::AppId,
+        gateway_base_url: &str,
+    ) -> openwave_core::Result<Option<String>>;
+}
+
+/// The v1 draft source: nothing is registered, ever.
+///
+/// Draft registration is its own slice. Until it lands, a gateway binding
+/// walks the whole local ladder — pin, grant, fingerprint currency — and then
+/// refuses with a typed, teachable "not registered at the gateway" rather than
+/// relaying somewhere that could not answer. Replacing this implementation is
+/// all that slice has to do on the invoke path.
+pub(crate) struct NoRegisteredDrafts;
+
+#[async_trait]
+impl GatewayDraftSource for NoRegisteredDrafts {
+    async fn draft_shared_app_id(
+        &self,
+        _app: openwave_core::id::AppId,
+        _gateway_base_url: &str,
+    ) -> openwave_core::Result<Option<String>> {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

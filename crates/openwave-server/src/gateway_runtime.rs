@@ -942,6 +942,130 @@ impl crate::connected_apps::GatewayCatalogSource for GatewayRuntime {
     }
 }
 
+/// The production gateway relay: the one gateway runtime plus the draft-id
+/// seam, wired behind [`GatewayInvokeDispatcher`].
+///
+/// Two lookups before any network call, both fail-closed: the profile must
+/// hold a session at the deployment policy names, and the local app must have
+/// a registered draft there. Only then is the invoke body assembled and
+/// relayed on a `control` bearer.
+pub(crate) struct GatewayRelayDispatcher {
+    runtime: Arc<GatewayRuntime>,
+    drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
+}
+
+/// The relay as production assembles it: over the process's one gateway
+/// runtime, with no draft registration yet (see
+/// [`crate::connected_apps::NoRegisteredDrafts`]).
+pub(crate) fn gateway_relay_dispatcher(
+    runtime: Arc<GatewayRuntime>,
+) -> Arc<dyn crate::connected_apps::GatewayInvokeDispatcher> {
+    Arc::new(GatewayRelayDispatcher {
+        runtime,
+        drafts: Arc::new(crate::connected_apps::NoRegisteredDrafts),
+    })
+}
+
+#[async_trait]
+impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
+    async fn dispatch(
+        &self,
+        app: openwave_core::id::AppId,
+        request: &crate::connected_apps::GatewayOperationRequest,
+    ) -> std::result::Result<
+        crate::connectors::GatewayInvokeOutcome,
+        crate::connected_apps::GatewayDispatchError,
+    > {
+        use crate::connected_apps::GatewayDispatchError;
+
+        // A read that faults is reported as unreachable rather than as "no
+        // session": the distinction the route draws is whether a session
+        // exists, and a failed policy or vault read does not answer that.
+        let unreachable = |context: &'static str| {
+            move |error: openwave_core::AgentError| {
+                tracing::warn!("gateway relay could not {context}: {error}");
+                GatewayDispatchError::Unreachable(format!(
+                    "the gateway could not be reached to {context}"
+                ))
+            }
+        };
+        let policy = self
+            .runtime
+            .policy()
+            .await
+            .map_err(unreachable("read this profile's gateway policy"))?;
+        let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
+            return Err(GatewayDispatchError::NoSession);
+        };
+        let Some(connection) = self
+            .runtime
+            .connection_for(&policy)
+            .await
+            .map_err(unreachable("open a gateway connection"))?
+        else {
+            return Err(GatewayDispatchError::NoSession);
+        };
+        if connection
+            .stored_credentials()
+            .await
+            .map_err(unreachable("read the stored gateway session"))?
+            .is_none()
+        {
+            return Err(GatewayDispatchError::NoSession);
+        }
+        let Some(shared_app_id) = self
+            .drafts
+            .draft_shared_app_id(app, &base_url)
+            .await
+            .map_err(unreachable("resolve this app's gateway draft"))?
+        else {
+            return Err(GatewayDispatchError::NotRegistered);
+        };
+        let body = shared_app_invoke_body(request);
+        match connection.invoke_shared_app(&shared_app_id, &body).await {
+            Ok(Some(outcome)) => Ok(outcome),
+            Ok(None) => Err(GatewayDispatchError::NotRegistered),
+            // A session the gateway no longer honors is "no session" here, the
+            // same reading every other gateway read gives it.
+            Err(error) if is_sign_in_required(&error) => Err(GatewayDispatchError::NoSession),
+            Err(error) => {
+                tracing::warn!("gateway shared-app invoke failed: {error}");
+                Err(GatewayDispatchError::Unreachable(
+                    "the gateway could not complete this call".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
+/// The gateway's own invoke vocabulary, verbatim. Absent halves are omitted
+/// rather than sent as null: the gateway's argument fields default when
+/// missing but refuse an explicit null, matching its `proxy_api` tool's
+/// schema — a null here makes every relayed call an `invalid_request`.
+fn shared_app_invoke_body(
+    request: &crate::connected_apps::GatewayOperationRequest,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "connected_app_id".into(),
+        serde_json::Value::String(request.gateway_app.clone()),
+    );
+    body.insert(
+        "operation_id".into(),
+        serde_json::Value::String(request.operation_id.clone()),
+    );
+    if let Some(path_parameters) = &request.path_parameters {
+        body.insert("path_parameters".into(), path_parameters.clone());
+    }
+    if let Some(query) = &request.query {
+        body.insert("query".into(), query.clone());
+    }
+    if let Some(request_body) = &request.body {
+        body.insert("body".into(), request_body.clone());
+    }
+    serde_json::Value::Object(body)
+}
+
 /// Retire a stored gateway session the resolved policy no longer stands
 /// behind.
 ///
@@ -1079,6 +1203,43 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+
+    /// The relay body is the gateway's `proxy_api` vocabulary: absent halves
+    /// must be absent keys, never null — the gateway's `serde(default)`
+    /// argument maps refuse an explicit null, so a regression here fails
+    /// every relayed call while passing any test that fakes the dispatcher.
+    #[test]
+    fn invoke_body_omits_absent_argument_halves() {
+        let bare = shared_app_invoke_body(&crate::connected_apps::GatewayOperationRequest {
+            gateway_app: "app-1".into(),
+            operation_id: "listMonitors".into(),
+            path_parameters: None,
+            query: None,
+            body: None,
+        });
+        assert_eq!(
+            bare,
+            json!({"connected_app_id": "app-1", "operation_id": "listMonitors"})
+        );
+
+        let full = shared_app_invoke_body(&crate::connected_apps::GatewayOperationRequest {
+            gateway_app: "app-1".into(),
+            operation_id: "getMonitor".into(),
+            path_parameters: Some(json!({"monitor_id": "7"})),
+            query: Some(json!({"verbose": true})),
+            body: Some(json!({"note": "hi"})),
+        });
+        assert_eq!(
+            full,
+            json!({
+                "connected_app_id": "app-1",
+                "operation_id": "getMonitor",
+                "path_parameters": {"monitor_id": "7"},
+                "query": {"verbose": true},
+                "body": {"note": "hi"},
+            })
+        );
+    }
 
     #[derive(Default)]
     struct MockSecrets(std::sync::Mutex<HashMap<String, String>>);

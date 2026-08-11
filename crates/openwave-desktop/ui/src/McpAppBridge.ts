@@ -43,6 +43,25 @@ export type AppOperationInvoker = (
 ) => Promise<AppRestInvokeResult>;
 
 /**
+ * Executes one granted gateway operation on the embedded view's behalf — the
+ * same `operations/call` method, routed by the presence of
+ * `connected_app_id` in the call's params.
+ *
+ * That field is the gateway shell's own invoke vocabulary (its ADR 0036), and
+ * naming it the same here is the whole point: a bundle written against this
+ * bridge runs unmodified in the gateway's shell, and one written there runs
+ * unmodified here. The two hosts differ in where a binding resolves, not in
+ * what the bundle speaks.
+ */
+export type AppGatewayOperationInvoker = (
+  gatewayApp: string,
+  operationId: string,
+  pathParameters: unknown,
+  query: unknown,
+  body: unknown,
+) => Promise<AppRestInvokeResult>;
+
+/**
  * Executes one granted folder operation on the embedded view's behalf — the
  * `fs/*` sibling of the operation invoker, wired to the same invoke route.
  * Content crosses base64-encoded in both directions; rejections map to
@@ -82,6 +101,12 @@ export function createMcpAppBridge(options: {
    * methods its host deliberately declared.
    */
   invokeOperation?: AppOperationInvoker;
+  /**
+   * When present, an `operations/call` naming a `connected_app_id` is routed
+   * here instead — the gateway leg, under the same capability-by-presence
+   * rule. Absent, such a call refuses like any other undeclared capability.
+   */
+  invokeGatewayOperation?: AppGatewayOperationInvoker;
   /**
    * When present, the view may call `fs/list`, `fs/read`, and `fs/write`
    * and the bridge forwards them here — the folder sibling, under the same
@@ -155,7 +180,18 @@ export function createMcpAppBridge(options: {
           post({ jsonrpc: "2.0", id, result: {} });
           break;
         case "operations/call": {
-          const invoke = options.invokeOperation;
+          const params = isRecord(message.params) ? message.params : {};
+          // A `connected_app_id` names a gateway connected app, so the call
+          // is a relay rather than a local execution. Legacy calls without it
+          // stay local; both are the same method, because a bundle should not
+          // have to know which host it is running in.
+          const gatewayApp =
+            typeof params.connected_app_id === "string"
+              ? params.connected_app_id
+              : null;
+          const invoke = gatewayApp
+            ? options.invokeGatewayOperation
+            : options.invokeOperation;
           if (!invoke) {
             post({
               jsonrpc: "2.0",
@@ -164,7 +200,6 @@ export function createMcpAppBridge(options: {
             });
             break;
           }
-          const params = isRecord(message.params) ? message.params : {};
           const operationId =
             typeof params.operation_id === "string" ? params.operation_id : null;
           if (!operationId) {
@@ -178,24 +213,25 @@ export function createMcpAppBridge(options: {
             });
             break;
           }
-          // Parameters, body, and the REST result are opaque passthrough the
+          // Every argument half and the result are opaque passthrough the
           // bridge never interprets; the result object crosses back verbatim.
           // The reply is asynchronous; `post` already refuses after dispose.
-          void invoke(operationId, params.parameters, params.body).then(
+          const call = gatewayApp
+            ? (invoke as AppGatewayOperationInvoker)(
+                gatewayApp,
+                operationId,
+                params.path_parameters,
+                params.query,
+                params.body,
+              )
+            : (invoke as AppOperationInvoker)(
+                operationId,
+                params.parameters,
+                params.body,
+              );
+          void call.then(
             (result) => post({ jsonrpc: "2.0", id, result }),
-            (error: unknown) =>
-              post({
-                jsonrpc: "2.0",
-                id,
-                error:
-                  error instanceof AppInvokeRefusalError
-                    ? {
-                        code: -32000,
-                        message: error.message,
-                        data: { kind: error.kind },
-                      }
-                    : { code: -32000, message: String(error) },
-              }),
+            (error: unknown) => post({ jsonrpc: "2.0", id, error: rpcError(error) }),
           );
           break;
         }
@@ -235,19 +271,7 @@ export function createMcpAppBridge(options: {
           // asynchronous; `post` already refuses after dispose.
           void invoke(folder, op, path, contentBase64, replace).then(
             (result) => post({ jsonrpc: "2.0", id, result }),
-            (error: unknown) =>
-              post({
-                jsonrpc: "2.0",
-                id,
-                error:
-                  error instanceof AppInvokeRefusalError
-                    ? {
-                        code: -32000,
-                        message: error.message,
-                        data: { kind: error.kind },
-                      }
-                    : { code: -32000, message: String(error) },
-              }),
+            (error: unknown) => post({ jsonrpc: "2.0", id, error: rpcError(error) }),
           );
           break;
         }
@@ -300,4 +324,21 @@ export function createMcpAppBridge(options: {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * One rejected invoke as a JSON-RPC error. A typed
+ * {@link AppInvokeRefusalError} keeps its machine-readable kind in
+ * `error.data` — the refusal envelope is host-authored, so surfacing it is
+ * not interpretation, and it is how the view tells "connect this app at the
+ * gateway" from "this call failed".
+ */
+function rpcError(error: unknown): {
+  code: number;
+  message: string;
+  data?: { kind: string };
+} {
+  return error instanceof AppInvokeRefusalError
+    ? { code: -32000, message: error.message, data: { kind: error.kind } }
+    : { code: -32000, message: String(error) };
 }

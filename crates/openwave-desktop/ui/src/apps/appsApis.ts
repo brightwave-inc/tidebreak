@@ -30,6 +30,14 @@ export type AppsApis = {
     parameters?: unknown,
     body?: unknown,
   ): Promise<AppRestInvokeResult>;
+  invokeGatewayOperation(
+    appId: string,
+    gatewayApp: string,
+    operationId: string,
+    pathParameters?: unknown,
+    query?: unknown,
+    body?: unknown,
+  ): Promise<AppRestInvokeResult>;
   invokeFolder(
     appId: string,
     folder: string,
@@ -38,6 +46,15 @@ export type AppsApis = {
     contentBase64?: string,
     replace?: boolean,
   ): Promise<AppFolderInvokeResult>;
+  /**
+   * The paired model gateway's origin, or `null` when this profile has none.
+   *
+   * Only a connect prompt reads it: the gateway's typed
+   * `authorization_required` can be resolved nowhere but at the gateway
+   * itself, and the handoff is its own SSO in the system browser — no token
+   * ever crosses from here.
+   */
+  gatewayBaseUrl(): Promise<string | null>;
 };
 
 export function appsApisFromClient(client: ApiClient): AppsApis {
@@ -52,7 +69,25 @@ export function appsApisFromClient(client: ApiClient): AppsApis {
     viewSession: (appId) => client.createAppViewFrame(appId),
     invokeOperation: (appId, operationId, parameters, body) =>
       client.invokeAppOperation(appId, operationId, parameters, body),
+    invokeGatewayOperation: (
+      appId,
+      gatewayApp,
+      operationId,
+      pathParameters,
+      query,
+      body,
+    ) =>
+      client.invokeAppGatewayOperation(
+        appId,
+        gatewayApp,
+        operationId,
+        pathParameters,
+        query,
+        body,
+      ),
     invokeFolder: (appId, folder, op, path, contentBase64, replace) =>
       client.invokeAppFolder(appId, folder, op, path, contentBase64, replace),
+    gatewayBaseUrl: async () =>
+      (await client.getGatewayStatus()).base_url ?? null,
   };
 }

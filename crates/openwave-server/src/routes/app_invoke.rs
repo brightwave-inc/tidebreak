@@ -1,5 +1,6 @@
 //! `POST /apps/{id}/invoke` — out-of-turn invocation of a local app's pinned
-//! capabilities: declared REST operations of `rest_api` connected apps.
+//! capabilities: declared REST operations of `rest_api` connected apps,
+//! connected folders, and operations of gateway connected apps.
 //!
 //! The first tool execution outside a model turn: the sandboxed app frame
 //! posts a call to the trusted renderer, the renderer forwards it here on its
@@ -10,6 +11,12 @@
 //! manifest bindings, and a live app grant must cover the call — including
 //! that every granted connected app's current definition still matches the
 //! fingerprint recorded at consent.
+//!
+//! A gateway binding is the one surface that leaves the machine: it is
+//! relayed to the gateway's shared-app invoke route as the signed-in user, and
+//! the gateway re-enforces entitlement, its own manifest pin, and the viewer's
+//! credential live on every call. The local ladder runs first regardless, so
+//! an ungranted or stale call never reaches the network.
 //!
 //! Chat approval gates, permission modes, and plan mode deliberately do not
 //! apply: there is no chat. The app grant is the whole policy.
@@ -24,7 +31,10 @@ use openwave_core::id::AppId;
 use openwave_core::local_app::{AppBinding, AppGrantBinding, AppRecord, AppRevision};
 use openwave_core::AgentError;
 
-use crate::connected_apps::{current_fingerprints, current_rest_definitions};
+use crate::connected_apps::{
+    current_fingerprints, current_rest_definitions, GatewayDispatchError, GatewayOperationRequest,
+};
+use crate::connectors::GatewayInvokeOutcome;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::rest_executor::{RestExecuteError, RestOperationRequest};
@@ -37,23 +47,35 @@ pub(crate) const MAX_APP_INVOKE_BODY_BYTES: usize = 256 * 1024;
 
 /// Body of `POST /apps/{id}/invoke` — one of the invocable surfaces.
 ///
-/// Either `operation_id` (with optional `parameters`/`body`) for a declared
-/// REST operation, or `folder` (with `op` and its fields) for a connected
-/// folder — never both, never neither. The passthrough halves (`parameters`,
-/// `body`) are opaque JSON authored inside the sandboxed app frame; the
-/// server hands them to the executor verbatim and the renderer never
-/// interprets them, so — like [`super::McpAppPayload`] — this request has a
-/// hand-written TS twin rather than a generated wire type: the generator's
-/// precision guard rightly refuses `any`-shaped fields.
+/// Exactly one of three: `operation_id` (with optional `parameters`/`body`)
+/// for a declared REST operation of a local `rest_api` record, `gateway_app`
+/// plus `operation_id` (with optional `path_parameters`/`query`/`body`) for a
+/// gateway connected app's operation, or `folder` (with `op` and its fields)
+/// for a connected folder. The passthrough halves (`parameters`,
+/// `path_parameters`, `query`, `body`) are opaque JSON authored inside the
+/// sandboxed app frame; the server hands them to the executor or the gateway
+/// verbatim and the renderer never interprets them, so — like
+/// [`super::McpAppPayload`] — this request has a hand-written TS twin rather
+/// than a generated wire type: the generator's precision guard rightly refuses
+/// `any`-shaped fields.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppInvokeRequest {
-    /// Catalog `operationId` of the pinned REST operation to execute.
+    /// Catalog `operationId` of the pinned operation to execute — of a local
+    /// `rest_api` record, or of `gateway_app` when that is present.
     pub operation_id: Option<String>,
-    /// Declared parameter values for the operation, name → JSON scalar.
+    /// Declared parameter values for a local REST operation, name → JSON
+    /// scalar.
     pub parameters: Option<serde_json::Value>,
     /// JSON request body, only when the operation declares one.
     pub body: Option<serde_json::Value>,
+    /// The gateway's connected-app id, for a gateway operation. Crosses to
+    /// the gateway as `connected_app_id`, the name its own invoke route uses.
+    pub gateway_app: Option<String>,
+    /// Path-template values for a gateway operation.
+    pub path_parameters: Option<serde_json::Value>,
+    /// Query values for a gateway operation.
+    pub query: Option<serde_json::Value>,
     /// Root id of the pinned connected folder, for a folder operation.
     pub folder: Option<openwave_core::id::HostRootId>,
     /// Folder operation: `list`, `read`, or `write`.
@@ -118,6 +140,14 @@ pub enum AppInvokeRefusalKind {
     /// The pinned name does not resolve to a declared catalog operation or an
     /// available connected folder right now.
     UnknownTool,
+    /// The manifest pins a gateway operation but nothing at the gateway
+    /// answers for it: no session, no registered draft, or a deployment that
+    /// does not serve shared-app invokes. The message says which.
+    GatewayUnavailable,
+    /// The gateway reached the bound app and had no credential for this
+    /// viewer. Only the viewer can fix it, and only at the gateway — so the
+    /// frame renders a connect prompt rather than an error.
+    GatewayAuthorizationRequired,
 }
 
 /// The typed refusal body — the `{ kind, message }` shape every route error
@@ -132,12 +162,17 @@ impl AppInvokeRefusal {
     fn status(&self) -> StatusCode {
         match self.kind {
             AppInvokeRefusalKind::AppNotFound => StatusCode::NOT_FOUND,
-            AppInvokeRefusalKind::NotPinned | AppInvokeRefusalKind::ConsentRequired => {
-                StatusCode::FORBIDDEN
-            }
+            AppInvokeRefusalKind::NotPinned
+            | AppInvokeRefusalKind::ConsentRequired
+            // The call was authorized here and refused there, for want of a
+            // credential only the viewer can supply: forbidden, not a
+            // conflict with local state.
+            | AppInvokeRefusalKind::GatewayAuthorizationRequired => StatusCode::FORBIDDEN,
             // The manifest pin exists but nothing configured answers to it —
             // a conflict with current state, not a bad request.
-            AppInvokeRefusalKind::UnknownTool => StatusCode::CONFLICT,
+            AppInvokeRefusalKind::UnknownTool | AppInvokeRefusalKind::GatewayUnavailable => {
+                StatusCode::CONFLICT
+            }
         }
     }
 }
@@ -176,6 +211,7 @@ impl IntoResponse for AppInvokeError {
 /// Which surface one admitted request names.
 enum InvokeSurface {
     Operation(RestOperationRequest),
+    Gateway(GatewayOperationRequest),
     Folder {
         folder: openwave_core::id::HostRootId,
         path: String,
@@ -200,6 +236,12 @@ impl FolderOp {
 }
 
 /// Read the request's surface, refusing a body that names several or none.
+///
+/// The three surfaces take three disjoint field sets, and each refuses the
+/// others' outright rather than ignoring them: a caller that sent `query` to a
+/// local operation, or `parameters` to a gateway one, meant something the
+/// server would not have done, and silently dropping the field is how a call
+/// ends up wider or narrower than its author believed.
 fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvokeError> {
     let invalid = |message: &str| {
         AppInvokeError::Failed(ServerError::unprocessable_kind(
@@ -207,13 +249,33 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
             message,
         ))
     };
-    match (request.operation_id, request.folder) {
-        (Some(operation_id), None) => {
-            if request.op.is_some()
-                || request.path.is_some()
-                || request.content_base64.is_some()
-                || request.replace.is_some()
-            {
+    let folder_fields = request.op.is_some()
+        || request.path.is_some()
+        || request.content_base64.is_some()
+        || request.replace.is_some();
+    match (request.operation_id, request.folder, request.gateway_app) {
+        (Some(operation_id), None, Some(gateway_app)) => {
+            if folder_fields || request.parameters.is_some() {
+                return Err(invalid(
+                    "a gateway_app invoke takes operation_id, path_parameters, query, \
+                     and body and nothing else",
+                ));
+            }
+            Ok(InvokeSurface::Gateway(GatewayOperationRequest {
+                gateway_app,
+                operation_id,
+                path_parameters: request.path_parameters,
+                query: request.query,
+                body: request.body,
+            }))
+        }
+        (Some(operation_id), None, None) => {
+            // `path_parameters` and `query` are the gateway's vocabulary. A
+            // local operation takes its values through `parameters`, which the
+            // catalog validates against declared parameter locations, so
+            // admitting the gateway spellings here would widen the local
+            // surface with fields nothing enforces.
+            if folder_fields || request.path_parameters.is_some() || request.query.is_some() {
                 return Err(invalid(
                     "an operation_id invoke takes parameters and body and nothing else",
                 ));
@@ -226,8 +288,12 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
                 body: request.body,
             }))
         }
-        (None, Some(folder)) => {
-            if request.parameters.is_some() || request.body.is_some() {
+        (None, Some(folder), None) => {
+            if request.parameters.is_some()
+                || request.body.is_some()
+                || request.path_parameters.is_some()
+                || request.query.is_some()
+            {
                 return Err(invalid(
                     "a folder invoke takes op, path, content_base64, and replace \
                      and nothing else",
@@ -266,8 +332,10 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
             };
             Ok(InvokeSurface::Folder { folder, path, op })
         }
+        (None, None, Some(_)) => Err(invalid("a gateway_app invoke needs an operation_id")),
         _ => Err(invalid(
-            "exactly one of operation_id or folder must be provided",
+            "exactly one of operation_id (optionally with gateway_app) or folder \
+             must be provided",
         )),
     }
 }
@@ -297,6 +365,34 @@ pub async fn post_app_invoke(
             )
             .await?;
             dispatch_rest_operation(&state, &revision, &request)
+                .await
+                .map(|result| Json(result).into_response())
+        }
+        InvokeSurface::Gateway(request) => {
+            require_pinned_gateway_operation(
+                &revision,
+                &request.gateway_app,
+                &request.operation_id,
+            )?;
+            let current = require_app_grant(
+                &state,
+                &app,
+                &revision,
+                &Pinned::GatewayOperation {
+                    gateway_app: &request.gateway_app,
+                    operation_id: &request.operation_id,
+                },
+            )
+            .await?;
+            // The consent sheet's label for the app, when the currency read
+            // that just passed carried one — every refusal below names the app
+            // the viewer would recognize, not the gateway's opaque id.
+            let display_name = current
+                .gateway_apps
+                .get(&request.gateway_app)
+                .map_or(request.gateway_app.as_str(), |app| app.name.as_str())
+                .to_owned();
+            dispatch_gateway_operation(&state, app_id, &request, &display_name)
                 .await
                 .map(|result| Json(result).into_response())
         }
@@ -409,9 +505,50 @@ fn require_pinned_folder(
     ))
 }
 
+/// Refuse any gateway operation the current revision's manifest does not pin
+/// under that exact gateway app.
+///
+/// The pin is the pair, never the operation id alone: two gateway apps may
+/// well declare the same id, and a manifest that binds one of them must not
+/// admit a call to the other.
+fn require_pinned_gateway_operation(
+    revision: &AppRevision,
+    gateway_app: &str,
+    operation_id: &str,
+) -> Result<(), AppInvokeError> {
+    let pinned = revision
+        .manifest
+        .bindings
+        .iter()
+        .any(|binding| match binding {
+            AppBinding::GatewayOperations(binding) => {
+                binding.gateway_app == gateway_app
+                    && binding
+                        .operation_ids
+                        .iter()
+                        .any(|pinned| pinned == operation_id)
+            }
+            AppBinding::Operations(_) | AppBinding::Folder(_) => false,
+        });
+    if pinned {
+        return Ok(());
+    }
+    Err(AppInvokeError::refused(
+        AppInvokeRefusalKind::NotPinned,
+        format!(
+            "operation {operation_id:?} of gateway app {gateway_app} is not pinned in \
+             this app's current manifest"
+        ),
+    ))
+}
+
 /// The invoked capability, for the grant gate.
 enum Pinned<'a> {
     Operation(&'a str),
+    GatewayOperation {
+        gateway_app: &'a str,
+        operation_id: &'a str,
+    },
     Folder {
         folder: openwave_core::id::HostRootId,
         writes: bool,
@@ -422,6 +559,10 @@ impl Pinned<'_> {
     fn description(&self) -> String {
         match self {
             Self::Operation(operation_id) => format!("operation {operation_id:?}"),
+            Self::GatewayOperation {
+                gateway_app,
+                operation_id,
+            } => format!("operation {operation_id:?} of gateway app {gateway_app}"),
             Self::Folder { folder, writes } => {
                 if *writes {
                     format!("writing folder {folder}")
@@ -449,13 +590,18 @@ impl Pinned<'_> {
 ///    it. The `mcp_server` fingerprint covers the namespace and the
 ///    `rest_api` fingerprint the base URL, document hash, and credential
 ///    reference, so a repointed record can never keep a grant that now
-///    describes different capabilities.
+///    describes different capabilities. A gateway grant pins the deployment,
+///    the app id, and the catalog hash, so a re-paired profile or a
+///    re-ingested app re-prompts before anything is relayed.
+///
+/// The currency read is returned so callers can label a refusal with what the
+/// gateway currently calls an app, without a second live read.
 async fn require_app_grant(
     state: &AppState,
     app: &AppRecord,
     revision: &AppRevision,
     pinned: &Pinned<'_>,
-) -> Result<(), AppInvokeError> {
+) -> Result<crate::connected_apps::CurrentFingerprints, AppInvokeError> {
     let consent_required =
         |message: String| AppInvokeError::refused(AppInvokeRefusalKind::ConsentRequired, message);
     let Some(grant) = state.store.get_app_grant(app.id).await? else {
@@ -481,7 +627,24 @@ async fn require_app_grant(
                                 == openwave_core::local_app::FolderAccess::ReadWrite)
             )
         }),
-        _ => {
+        // A gateway capability is keyed by the gateway's app id, which the
+        // grant carries directly — there is no local record to resolve it
+        // through, so the pair is matched as bound.
+        Pinned::GatewayOperation {
+            gateway_app,
+            operation_id,
+        } => grant.bindings.iter().any(|binding| {
+            matches!(
+                binding,
+                AppGrantBinding::GatewayOperations(granted)
+                    if granted.gateway_app == *gateway_app
+                        && granted
+                            .operation_ids
+                            .iter()
+                            .any(|granted| granted == operation_id)
+            )
+        }),
+        Pinned::Operation(_) => {
             let connected_app = revision
                 .manifest
                 .bindings
@@ -544,7 +707,7 @@ async fn require_app_grant(
             }));
         }
     }
-    Ok(())
+    Ok(current)
 }
 
 /// Resolve the pinned operation's `rest_api` record and run the governed
@@ -610,6 +773,68 @@ async fn dispatch_rest_operation(
             is_error: true,
             error: Some(error.to_string()),
         }),
+    }
+}
+
+/// Relay one granted gateway operation through the dispatch seam.
+///
+/// Everything local has already passed: the manifest pins the pair, the grant
+/// covers it, and the gateway's catalog still reads as it did at consent. What
+/// is left is the gateway's own live enforcement — entitlement, its manifest,
+/// and the viewer's credential — so its answers map by who can act on them.
+/// An executed call is passthrough, identical to the local REST path. A typed
+/// `authorization_required` is a refusal the *viewer* resolves, at the gateway
+/// and nowhere else, so it crosses machine-readably rather than as prose. Any
+/// other gateway refusal is the app's to present, as an `is_error` result in
+/// the gateway's own words. And a relay that could not happen at all is
+/// `gateway_unavailable`, whose message says which of the two reasons it was.
+async fn dispatch_gateway_operation(
+    state: &AppState,
+    app_id: AppId,
+    request: &GatewayOperationRequest,
+    display_name: &str,
+) -> Result<AppRestInvokeResult, AppInvokeError> {
+    let failure = |error: String| AppRestInvokeResult {
+        status: None,
+        content_type: None,
+        body_base64: None,
+        is_error: true,
+        error: Some(error),
+    };
+    match state.gateway_dispatch.dispatch(app_id, request).await {
+        Ok(GatewayInvokeOutcome::Executed {
+            status,
+            content_type,
+            body_base64,
+        }) => Ok(AppRestInvokeResult {
+            status: Some(status),
+            content_type,
+            body_base64: Some(body_base64),
+            is_error: false,
+            error: None,
+        }),
+        Ok(GatewayInvokeOutcome::AuthorizationRequired { message }) => {
+            Err(AppInvokeError::refused(
+                AppInvokeRefusalKind::GatewayAuthorizationRequired,
+                format!("connect {display_name} at your model gateway to continue: {message}"),
+            ))
+        }
+        Ok(GatewayInvokeOutcome::Refused { message }) => Ok(failure(message)),
+        Err(GatewayDispatchError::NoSession) => Err(AppInvokeError::refused(
+            AppInvokeRefusalKind::GatewayUnavailable,
+            format!(
+                "{display_name} is served by your model gateway, and this profile has no \
+                 gateway session to call it with"
+            ),
+        )),
+        Err(GatewayDispatchError::NotRegistered) => Err(AppInvokeError::refused(
+            AppInvokeRefusalKind::GatewayUnavailable,
+            format!(
+                "this app is not registered at your model gateway, so {display_name} \
+                 cannot be called yet"
+            ),
+        )),
+        Err(GatewayDispatchError::Unreachable(error)) => Ok(failure(error)),
     }
 }
 
