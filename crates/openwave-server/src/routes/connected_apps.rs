@@ -513,7 +513,9 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
         std::collections::BTreeMap::new();
     for grant in state.store.list_live_app_grants().await? {
         for binding in &grant.bindings {
-            // Folder grant bindings name broker roots, not connected apps.
+            // Folder grant bindings name broker roots and gateway grant
+            // bindings name apps the gateway holds; neither is a record on
+            // this surface, and `app()` answers `None` for both.
             if let Some(app) = binding.app() {
                 *used_by.entry(app).or_default() += 1;
             }

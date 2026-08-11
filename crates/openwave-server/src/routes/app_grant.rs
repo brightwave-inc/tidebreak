@@ -17,8 +17,8 @@ use serde::Serialize;
 
 use openwave_core::id::{AppId, ConnectedAppId, HostRootId};
 use openwave_core::local_app::{
-    AppBinding, AppFolderGrantBinding, AppGrant, AppGrantBinding, AppManifest,
-    AppOperationsGrantBinding, AppRecord, AppRevision, FolderAccess,
+    AppBinding, AppFolderGrantBinding, AppGatewayOperationsGrantBinding, AppGrant, AppGrantBinding,
+    AppManifest, AppOperationsGrantBinding, AppRecord, AppRevision, FolderAccess,
 };
 
 use crate::connected_apps::{current_fingerprints, current_rest_definitions, CurrentFingerprints};
@@ -48,11 +48,15 @@ pub struct AppGrantState {
 
 /// One current-manifest binding, projected for the consent sheet.
 ///
-/// Exactly one of `app` and `folder` is present, matching what the binding
-/// names. An app-keyed row carries `operation_ids`; a folder row carries
-/// `access`. The sheet derives the combined-consent exfiltration warning
+/// Exactly one of `app` and `folder` is present for the two locally resolved
+/// vocabularies, matching what the binding names. An app-keyed row carries
+/// `operation_ids`; a folder row carries `access`. A gateway binding carries
+/// its operation ids and, once one reads back, the gateway app's display
+/// name — it names neither a local record nor a root, so both id fields stay
+/// absent until this projection carries the gateway's own id. The sheet
+/// derives the combined-consent exfiltration warning
 /// (docs/folder-bindings.md) from the rows themselves: a manifest with both a
-/// folder row and an operations row can read files and reach the network.
+/// folder row and a network row can read files and reach the network.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantBindingState {
     /// Connected app the manifest binds, by record id, for an app-keyed
@@ -128,6 +132,26 @@ pub async fn post_app_grant(
                     access: binding.access,
                     fingerprint: folder_fingerprint(binding.folder, binding.access),
                 }));
+            }
+            AppBinding::GatewayOperations(binding) => {
+                // A gateway binding pins an app the gateway describes. With
+                // nothing readable answering to the id there is no catalog to
+                // fingerprint, so there is nothing coherent to consent to —
+                // the same fail-closed reading as an unconfigured connected
+                // app or a folder that is no longer approved.
+                let Some(gateway_app) = current.gateway_apps.get(&binding.gateway_app) else {
+                    return Err(ServerError::conflict(format!(
+                        "gateway app {} is not available, so this app cannot be granted",
+                        binding.gateway_app
+                    )));
+                };
+                bindings.push(AppGrantBinding::GatewayOperations(
+                    AppGatewayOperationsGrantBinding {
+                        gateway_app: binding.gateway_app.clone(),
+                        operation_ids: binding.operation_ids.clone(),
+                        fingerprint: gateway_app.fingerprint,
+                    },
+                ));
             }
             AppBinding::Operations(binding) => {
                 // A binding whose connected app is not configured cannot be
@@ -240,13 +264,20 @@ fn binding_covered(pinned: &AppBinding, granted: &AppGrantBinding) -> bool {
             granted.folder == pinned.folder
                 && (granted.access == pinned.access || granted.access == FolderAccess::ReadWrite)
         }
+        (AppBinding::GatewayOperations(pinned), AppGrantBinding::GatewayOperations(granted)) => {
+            granted.gateway_app == pinned.gateway_app
+                && pinned
+                    .operation_ids
+                    .iter()
+                    .all(|operation| granted.operation_ids.iter().any(|held| held == operation))
+        }
         _ => false,
     }
 }
 
 /// The grant binding covering one manifest binding's target, when the grant
 /// names it: app-keyed bindings match by record id, folder bindings by root
-/// id.
+/// id, and gateway bindings by the gateway's app id.
 fn granted_binding_for<'a>(
     grant: Option<&'a AppGrant>,
     binding: &AppBinding,
@@ -256,7 +287,10 @@ fn granted_binding_for<'a>(
         AppBinding::Folder(binding) => {
             matches!(candidate, AppGrantBinding::Folder(granted) if granted.folder == binding.folder)
         }
-        _ => binding.app().is_some() && candidate.app() == binding.app(),
+        AppBinding::GatewayOperations(binding) => candidate
+            .gateway_app()
+            .is_some_and(|granted| granted == binding.gateway_app),
+        AppBinding::Operations(binding) => candidate.app() == Some(binding.app),
     })
 }
 
@@ -282,14 +316,20 @@ pub(crate) fn grant_state(
                 granted_binding.is_some_and(|granted| current.grant_binding_current(granted));
             let (operation_ids, access) = match binding {
                 AppBinding::Operations(binding) => (Some(binding.operation_ids.clone()), None),
+                AppBinding::GatewayOperations(binding) => {
+                    (Some(binding.operation_ids.clone()), None)
+                }
                 AppBinding::Folder(binding) => (None, Some(binding.access)),
             };
             let name = match binding {
                 AppBinding::Folder(binding) => current.folders.get(&binding.folder).cloned(),
-                _ => binding
-                    .app()
-                    .and_then(|app| current.apps.get(&app))
+                AppBinding::GatewayOperations(binding) => current
+                    .gateway_apps
+                    .get(&binding.gateway_app)
                     .map(|app| app.name.clone()),
+                AppBinding::Operations(binding) => {
+                    current.apps.get(&binding.app).map(|app| app.name.clone())
+                }
             };
             AppGrantBindingState {
                 app: binding.app(),

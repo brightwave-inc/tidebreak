@@ -120,6 +120,10 @@ impl CreateAppTool {
     /// approved folder and speaks a live vocabulary: operation bindings
     /// resolve to a `rest_api` record with each pinned `operationId` declared
     /// by its ingested catalog.
+    ///
+    /// A gateway binding names an app only the model gateway can resolve, and
+    /// this door has no roster to resolve it against, so it is refused here:
+    /// admitting one would author a pin the consent surface could not grant.
     async fn check_bindings(&self, manifest: &AppManifest) -> std::result::Result<(), String> {
         if manifest.bindings.is_empty() {
             return Ok(());
@@ -130,6 +134,15 @@ impl CreateAppTool {
             .await
             .map_err(|_| "could not read the configured connected apps".to_owned())?;
         for binding in &manifest.bindings {
+            // A gateway app is the gateway's record, not a local one: nothing
+            // here can name it, and nothing local could grant it.
+            if let AppBinding::GatewayOperations(binding) = binding {
+                return Err(format!(
+                    "gateway app {:?} cannot be bound here; only configured \
+                     connected apps and approved connected folders are bindable",
+                    binding.gateway_app
+                ));
+            }
             // A folder binding resolves against the host's approved
             // connected folders — when this embedding has none, the door
             // says so instead of admitting an ungrantable pin.
@@ -166,7 +179,7 @@ impl CreateAppTool {
             }
             let binding_app = binding
                 .app()
-                .expect("only folder bindings lack a connected app");
+                .expect("folder and gateway bindings returned above");
             let Some(app) = connected.iter().find(|app| app.id == binding_app) else {
                 let configured: Vec<String> = connected
                     .iter()
@@ -185,9 +198,9 @@ impl CreateAppTool {
                 });
             };
             match binding {
-                // Handled above — a folder binding has no connected app to
-                // resolve.
-                AppBinding::Folder(_) => {}
+                // Handled above — neither a folder nor a gateway binding has
+                // a local connected app to resolve.
+                AppBinding::Folder(_) | AppBinding::GatewayOperations(_) => {}
                 AppBinding::Operations(binding) => {
                     if app.kind != ConnectedAppKind::RestApi {
                         return Err(format!(

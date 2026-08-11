@@ -150,6 +150,97 @@ pub(crate) struct AppFingerprint {
     pub(crate) fingerprint: [u8; 32],
 }
 
+/// SHA-256 fingerprint of one gateway connected app as the gateway currently
+/// describes it — the value an app grant pins a gateway binding to.
+///
+/// The digest is taken over the UTF-8 bytes of a compact JSON object with
+/// **exactly these keys, in exactly this order** (serde serializes struct
+/// fields in declaration order, and every key is always present):
+///
+/// ```json
+/// {"v":2,
+///  "kind":"gateway_app",
+///  "gateway_base_url":string,
+///  "gateway_app_id":string,
+///  "catalog_sha256":string}
+/// ```
+///
+/// `gateway_base_url` is the origin of the gateway that served the app, so
+/// re-pairing this profile to a different gateway makes every gateway grant
+/// stale rather than silently carrying consent across deployments.
+/// `catalog_sha256` is the hash of the operation catalog the gateway declared
+/// for the app, so a re-ingested app re-prompts. Entitlement is deliberately
+/// absent: it is the gateway's live predicate, re-evaluated on every call, and
+/// losing it must fail the call rather than revoke the consent. No credential
+/// enters the form because none exists locally — the gateway injects the
+/// viewer's own. `kind` roots the form in the connected-app vocabulary so no
+/// two kinds can collide on a canonical serialization, and `v:2` matches the
+/// `rest_api` and `mcp_server` forms' current version.
+///
+/// **This canonical form is a compatibility surface.** Persisted grants store
+/// the digest; changing the form (or the meaning of any field in it)
+/// invalidates every existing grant and must bump `v`.
+pub(crate) fn gateway_app_fingerprint(
+    gateway_base_url: &str,
+    gateway_app_id: &str,
+    catalog_sha256: &str,
+) -> [u8; 32] {
+    use sha2::Digest as _;
+
+    #[derive(Serialize)]
+    struct CanonicalGatewayApp<'a> {
+        v: u32,
+        kind: &'static str,
+        gateway_base_url: &'a str,
+        gateway_app_id: &'a str,
+        catalog_sha256: &'a str,
+    }
+
+    let canonical = CanonicalGatewayApp {
+        v: 2,
+        kind: "gateway_app",
+        gateway_base_url,
+        gateway_app_id,
+        catalog_sha256,
+    };
+    let bytes = serde_json::to_vec(&canonical)
+        .expect("a canonical definition serializes infallibly to JSON");
+    sha2::Sha256::digest(&bytes).into()
+}
+
+/// Hash of a gateway app's operation catalog, derived from the operation ids
+/// it declares: lowercase hex SHA-256 over the sorted ids joined by newlines.
+///
+/// A local stand-in, not a protocol: the gateway's catalog read carries no
+/// document hash today, so the ids it declares are the only stable
+/// description of the catalog available to pin. Sorting makes the digest
+/// independent of the order the gateway happens to list them in. When the
+/// gateway serves a catalog-document hash, this derivation is replaced by it
+/// — which moves every gateway fingerprint, so that change must bump the
+/// canonical form's `v`.
+pub(crate) fn catalog_sha256_from_operation_ids(operation_ids: &[String]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+
+    let mut sorted: Vec<&str> = operation_ids.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let digest = sha2::Sha256::digest(sorted.join("\n").as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// One gateway connected app's display name and current fingerprint — the
+/// gateway-side twin of [`AppFingerprint`], keyed by the gateway's app id
+/// rather than a local record id.
+pub(crate) struct GatewayAppFingerprint {
+    pub(crate) name: String,
+    pub(crate) fingerprint: [u8; 32],
+}
+
 /// The current fingerprint of every configured connected app, across kinds.
 ///
 /// `mcp_server` entries come from the live MCP runtime; `rest_api` entries
@@ -198,12 +289,18 @@ pub(crate) struct CurrentFingerprints {
     /// this embedding has no host-folder seam, so every folder binding fails
     /// closed to "not connected".
     pub(crate) folders: BTreeMap<HostRootId, String>,
+    /// Gateway connected apps this profile can currently read, by the
+    /// gateway's app id. Empty when nothing readable answers — no gateway, no
+    /// session, or no catalog — so every gateway binding fails closed to
+    /// re-consent rather than matching a fingerprint over a catalog nobody
+    /// read.
+    pub(crate) gateway_apps: BTreeMap<String, GatewayAppFingerprint>,
 }
 
 impl CurrentFingerprints {
     /// Whether one granted binding still pins what its target carries right
-    /// now. A missing record or a disconnected folder is a mismatch, never a
-    /// match.
+    /// now. A missing record, a disconnected folder, or a gateway app that
+    /// does not currently read back is a mismatch, never a match.
     pub(crate) fn grant_binding_current(&self, binding: &AppGrantBinding) -> bool {
         match binding {
             AppGrantBinding::Operations(binding) => self
@@ -214,6 +311,10 @@ impl CurrentFingerprints {
                 self.folders.contains_key(&binding.folder)
                     && folder_fingerprint(binding.folder, binding.access) == binding.fingerprint
             }
+            AppGrantBinding::GatewayOperations(binding) => self
+                .gateway_apps
+                .get(&binding.gateway_app)
+                .is_some_and(|app| app.fingerprint == binding.fingerprint),
         }
     }
 }
@@ -229,7 +330,61 @@ pub(crate) async fn current_fingerprints(
             folders.insert(folder.root_id, folder.display_name);
         }
     }
-    Ok(CurrentFingerprints { apps, folders })
+    let gateway_apps = current_gateway_app_fingerprints(state).await?;
+    Ok(CurrentFingerprints {
+        apps,
+        folders,
+        gateway_apps,
+    })
+}
+
+/// One gateway connected app as a live read describes it: the origin that
+/// served it, the gateway's id for it, its display name, and the operation
+/// ids its catalog declares — exactly the fingerprint inputs.
+// Nothing constructs this yet: [`current_gateway_app_catalogs`] deliberately
+// reads nothing until the gateway serves per-app operation catalogs, and the
+// empty read is what keeps gateway grants failing closed. The shape is here
+// because it is the contract that read must answer in.
+#[allow(dead_code)]
+pub(crate) struct GatewayAppCatalog {
+    pub(crate) gateway_base_url: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) operation_ids: Vec<String>,
+}
+
+/// The gateway connected apps this profile could bind, read live.
+///
+/// Answers empty: the gateway's entitled-apps listing carries no operation
+/// catalogs, and fingerprinting an app over a catalog nobody read would pin
+/// consent to a fiction. Reading nothing is the fail-closed direction —
+/// [`CurrentFingerprints::grant_binding_current`] treats a missing entry as
+/// stale, so a gateway grant re-prompts instead of matching.
+async fn current_gateway_app_catalogs(
+    state: &AppState,
+) -> openwave_core::Result<Vec<GatewayAppCatalog>> {
+    let _ = state;
+    Ok(Vec::new())
+}
+
+/// The current fingerprint of every readable gateway connected app, by the
+/// gateway's app id.
+async fn current_gateway_app_fingerprints(
+    state: &AppState,
+) -> openwave_core::Result<BTreeMap<String, GatewayAppFingerprint>> {
+    let mut current = BTreeMap::new();
+    for app in current_gateway_app_catalogs(state).await? {
+        let catalog_sha256 = catalog_sha256_from_operation_ids(&app.operation_ids);
+        let fingerprint = gateway_app_fingerprint(&app.gateway_base_url, &app.id, &catalog_sha256);
+        current.insert(
+            app.id,
+            GatewayAppFingerprint {
+                name: app.name,
+                fingerprint,
+            },
+        );
+    }
+    Ok(current)
 }
 
 /// Every stored `rest_api` record whose definition parses, read live.
@@ -394,6 +549,89 @@ mod tests {
             },
         );
         assert_eq!(rest_api_fingerprint(&with_operations), baseline);
+    }
+
+    /// The gateway canonical form pins exactly the three inputs the record
+    /// names: the gateway origin, the app id, and the catalog hash. Moving
+    /// any one moves the digest, and the catalog hash follows the declared
+    /// operation ids as a set rather than the order they arrive in.
+    #[test]
+    fn gateway_fingerprints_derive_from_origin_app_and_catalog_only() {
+        let ids = |ids: &[&str]| -> Vec<String> { ids.iter().map(|id| (*id).to_owned()).collect() };
+        let catalog = catalog_sha256_from_operation_ids(&ids(&["listIssues", "getIssue"]));
+        let baseline = gateway_app_fingerprint("https://gw.example.com", "app-1", &catalog);
+
+        // The same three inputs always fingerprint the same, and the catalog
+        // hash is order-independent: the gateway may list operations in any
+        // order without re-prompting the user.
+        assert_eq!(
+            gateway_app_fingerprint(
+                "https://gw.example.com",
+                "app-1",
+                &catalog_sha256_from_operation_ids(&ids(&["getIssue", "listIssues"])),
+            ),
+            baseline
+        );
+
+        // Re-pairing to another gateway, naming another app, or a catalog
+        // that gained, lost, or renamed an operation each change what the
+        // user consented to.
+        for changed in [
+            gateway_app_fingerprint("https://other.example.com", "app-1", &catalog),
+            gateway_app_fingerprint("https://gw.example.com", "app-2", &catalog),
+            gateway_app_fingerprint(
+                "https://gw.example.com",
+                "app-1",
+                &catalog_sha256_from_operation_ids(&ids(&["listIssues"])),
+            ),
+            gateway_app_fingerprint(
+                "https://gw.example.com",
+                "app-1",
+                &catalog_sha256_from_operation_ids(&ids(&[
+                    "listIssues",
+                    "getIssue",
+                    "createIssue",
+                ])),
+            ),
+        ] {
+            assert_ne!(changed, baseline);
+        }
+
+        // No form collides across kinds even when the inputs coincide: the
+        // `kind` key roots each canonical form in its own vocabulary.
+        assert_ne!(
+            baseline,
+            rest_api_fingerprint(&definition("https://gw.example.com", &catalog, None))
+        );
+    }
+
+    /// A gateway grant reads stale against the surface this build can see:
+    /// nothing populates the gateway map yet, and a missing entry is a
+    /// mismatch — so a gateway binding re-prompts rather than matching.
+    #[test]
+    fn gateway_grants_read_stale_against_an_unread_gateway_surface() {
+        let current = CurrentFingerprints {
+            apps: BTreeMap::new(),
+            folders: BTreeMap::new(),
+            gateway_apps: BTreeMap::new(),
+        };
+        let granted = |fingerprint: [u8; 32]| {
+            AppGrantBinding::GatewayOperations(
+                openwave_core::local_app::AppGatewayOperationsGrantBinding {
+                    gateway_app: "app-1".into(),
+                    operation_ids: vec!["listIssues".into()],
+                    fingerprint,
+                },
+            )
+        };
+        assert!(
+            !current.grant_binding_current(&granted(gateway_app_fingerprint(
+                "https://gw.example.com",
+                "app-1",
+                &catalog_sha256_from_operation_ids(&["listIssues".to_owned()]),
+            )))
+        );
+        assert!(!current.grant_binding_current(&granted([0; 32])));
     }
 
     /// The definition fails closed: unknown fields, missing fields, and a

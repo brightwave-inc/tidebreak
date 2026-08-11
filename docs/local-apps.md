@@ -34,9 +34,16 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
 - The manifest is small, structural JSON: a display name and
   `bindings: [{ app, operation_ids[] }]` naming declared operations under the
   connected-app records ([connected-apps.md](connected-apps.md)) that
-  contribute them, or `{ folder, access }` naming a connected folder. The
-  manifest — not the bundle — is what the user consents to and what the host
-  enforces per call.
+  contribute them, `{ folder, access }` naming a connected folder, or
+  `{ gateway_app, operation_ids[] }` naming a connected app the model gateway
+  holds (record 7). The manifest — not the bundle — is what the user consents
+  to and what the host enforces per call.
+
+  The gateway shape is vocabulary today: the type, its grant twin, and its
+  fingerprint exist, but nothing reads the gateway's app catalogs yet, so no
+  gateway app resolves, the authoring door refuses the shape, and any gateway
+  grant reads stale — fail-closed in every direction until the roster,
+  consent, and relay surfaces land.
 
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,
@@ -182,13 +189,14 @@ where a team-scoped copy is stored, served, and brokered by the gateway under
 each viewer's own entitlements. Three properties keep that door open without
 building anything now:
 
-- **The binding vocabulary maps.** An operation binding against a
-  gateway-hosted API translates mechanically to the gateway's manifest
-  vocabulary (endpoint slug, proxied operation set). Promotion walks the
-  bindings and refuses with a precise list when any binding is not
-  gateway-resolvable — an app bound to a purely local API cannot promote, by
-  construction. (Retiring tool bindings, above, removed the widest class of
-  unpromotable bindings outright.)
+- **The binding vocabulary maps.** A gateway binding already names what the
+  gateway's own shared-app manifests name, so promotion is a copy rather than
+  a translation — record 7 rejected the translate-at-publish design that this
+  bullet originally assumed, because a manifest that has to be rewritten at
+  share time was never run the way its viewers will run it. An app bound to a
+  purely local API still cannot promote, by construction. (Retiring tool
+  bindings, above, removed the widest class of unpromotable bindings
+  outright.)
 - **Revision identity carries.** Digests, ordinals, and producer provenance
   become the published revision's provenance.
 - **Attestation flips from limitation to benefit.** Once the gateway brokers

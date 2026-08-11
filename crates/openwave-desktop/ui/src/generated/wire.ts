@@ -272,11 +272,15 @@ revisions: Array<AppRevisionSummary>, };
 /**
  * One current-manifest binding, projected for the consent sheet.
  *
- * Exactly one of `app` and `folder` is present, matching what the binding
- * names. An app-keyed row carries `operation_ids`; a folder row carries
- * `access`. The sheet derives the combined-consent exfiltration warning
+ * Exactly one of `app` and `folder` is present for the two locally resolved
+ * vocabularies, matching what the binding names. An app-keyed row carries
+ * `operation_ids`; a folder row carries `access`. A gateway binding carries
+ * its operation ids and, once one reads back, the gateway app's display
+ * name — it names neither a local record nor a root, so both id fields stay
+ * absent until this projection carries the gateway's own id. The sheet
+ * derives the combined-consent exfiltration warning
  * (docs/folder-bindings.md) from the rows themselves: a manifest with both a
- * folder row and an operations row can read files and reach the network.
+ * folder row and a network row can read files and reach the network.
  */
 export type AppGrantBindingState = { 
 /**
