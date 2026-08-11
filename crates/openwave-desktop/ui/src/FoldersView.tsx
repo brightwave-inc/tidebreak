@@ -288,10 +288,12 @@ export function FoldersView({ chat }: { chat: Chat }) {
                   const reach = folderReach(statements);
                   // What the folder does not yet allow is offered next to what
                   // it does, so the recovery for a read-only folder is visible
-                  // before a refused write, not after it. Read is not offered:
-                  // a folder without read consent is not listed here at all.
+                  // before a refused write, not after it. Read is offered on
+                  // the same terms: a folder can be attached with its read
+                  // consent revoked, and asking for it back is how that folder
+                  // becomes usable again short of disconnecting it.
                   const missing = (
-                    ["write_files", "execute_commands"] as const
+                    ["read_files", "write_files", "execute_commands"] as const
                   ).filter((capability) => !reach.includes(capability));
                   return (
                     <FolderCard

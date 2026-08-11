@@ -605,6 +605,89 @@ fn granting_write_to_an_attached_root_requires_fresh_dialog_consent() {
     );
 }
 
+/// Read is the capability whose revocation had no way back. It takes exec
+/// with it and it hides the folder from the listing the panels read, so once
+/// it was gone there was nothing left on screen to widen. The permission-
+/// dialog widening covers it like any other capability: it restores exactly
+/// read, leaves the exec reach that was cascaded away withdrawn, and a retry
+/// mints nothing.
+#[test]
+fn granting_read_back_restores_an_attached_folder_without_its_exec_reach() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(&controller, subject, conversation, path, OperationId::new())
+        .root
+        .root_id;
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let listed = || {
+        let OperationResult::ListRoots { roots } =
+            operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap()
+        else {
+            panic!("unexpected operation result")
+        };
+        roots
+    };
+    let grant_read = || {
+        unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::GrantRootCapability(GrantRootCapabilityRequest {
+                subject,
+                conversation_id: conversation,
+                root_id,
+                capability: Capability::ReadFiles,
+                consent_method: ConsentMethod::PermissionDialog,
+            }),
+        }))
+    };
+
+    let read_id = grant_statements(&controller)
+        .into_iter()
+        .find(|grant| grant.capability == Capability::ReadFiles)
+        .unwrap()
+        .grant_id;
+    assert!(revoke_grant(&controller, subject, read_id));
+    // Gone from the agent listing entirely, exec included: the folder is still
+    // attached, it just allows nothing the agent can act on.
+    assert!(listed().is_empty());
+
+    assert_eq!(
+        grant_read().unwrap(),
+        ControlResult::GrantRootCapability(GrantRootCapabilityResult { granted: true })
+    );
+    let restored = listed();
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0].capabilities.contains(&Capability::ReadFiles));
+    assert!(
+        !restored[0]
+            .capabilities
+            .contains(&Capability::ExecuteCommands),
+        "restoring read must not resurrect the exec reach revoking it withdrew"
+    );
+
+    // Idempotent, and it disturbs nothing else the subject holds here.
+    assert_eq!(
+        grant_read().unwrap(),
+        ControlResult::GrantRootCapability(GrantRootCapabilityResult { granted: false })
+    );
+    let mut held = grant_statements(&controller)
+        .into_iter()
+        .filter(|grant| {
+            grant.subject == subject
+                && matches!(grant.scope, Scope::Root { root_id: granted } if granted == root_id)
+        })
+        .map(|grant| grant.capability)
+        .collect::<Vec<_>>();
+    held.sort_by_key(|capability| format!("{capability:?}"));
+    assert_eq!(
+        held,
+        vec![Capability::ReadFiles, Capability::WriteFiles],
+        "the write grant the user never touched has to survive untouched"
+    );
+}
+
 #[test]
 fn an_empty_conversation_lists_no_roots_without_needing_a_grant() {
     let (_temp, broker, _path) = setup();

@@ -286,8 +286,19 @@ statement over that root: attaching or re-picking a folder says where it may be
 used, not what may be done in it, so a subject that already has a standing
 position keeps exactly that position — including one narrowed by revoking a
 statement, and including one narrowed to nothing — and widening it needs the
-permission-dialog capability grant. A read-only
-attachment receipt lets a
+permission-dialog capability grant.
+
+That grant covers reading as well as writing and commands. Revoking read
+narrows a folder to nothing an agent can act on — it takes the folder's command
+reach with it — but the folder stays attached, so the surfaces that list it are
+what has to offer the way back. They list an attached folder by its approval
+rather than by what it currently allows, precisely so a folder narrowed to
+nothing keeps both the control that disconnects it and the one that asks for
+read again. Asking is always an explicit action answered in the host's own
+dialog; nothing restores a revoked capability as a side effect of attaching,
+re-picking, or listing.
+
+A read-only attachment receipt lets a
 recovering native client distinguish unknown, completed, and failed work
 without starting or replaying the mutation. Attachment changes are computed and
 published in one durable state replacement, so they do not expose a recoverable

@@ -189,6 +189,41 @@ describe("FoldersView", () => {
     expect(screen.getAllByRole("button", { name: "Grant" })).toHaveLength(1);
   });
 
+  it("keeps a folder whose access was revoked listed, with read to grant back", async () => {
+    // Revoking read leaves the folder attached and allowing nothing. It used
+    // to disappear from this panel at that point, taking Disconnect and every
+    // way back with it.
+    vi.mocked(host.listConnectedFolders).mockResolvedValue([
+      folder("locked-out", "Archive"),
+    ]);
+    vi.mocked(host.listCapabilityConsents)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([statement("locked-out", "read_files")]);
+    vi.mocked(host.grantFolderCapability).mockResolvedValue(true);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    await screen.findByText("Archive");
+    expect(screen.getByText("No access")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Disconnect" }),
+    ).toBeInTheDocument();
+
+    // Read is the first thing offered back, and granting it is an explicit
+    // action answered natively — nothing here restores it on its own.
+    const grants = screen.getAllByRole("button", { name: "Grant" });
+    expect(grants).toHaveLength(3);
+    await user.click(grants[0]);
+    expect(host.grantFolderCapability).toHaveBeenCalledWith(
+      chat,
+      "locked-out",
+      "read_files",
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Read only")).toBeInTheDocument(),
+    );
+  });
+
   it("distinguishes an unavailable folder and lets it be forgotten for good", async () => {
     vi.mocked(host.listConnectedFolders)
       .mockResolvedValueOnce([

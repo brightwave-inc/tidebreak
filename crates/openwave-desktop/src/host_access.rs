@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use openwave_core::{ChatId, Store};
 use openwave_host_broker::{
     AppFolderPathRequest, AppFolderWriteRequest, Capability, ControlRequest, ControlResult,
-    ExecutionContext, GrantSubject, OperationEnvelope, OperationRequest, OperationResult,
-    RelativePath, ResolveExecRootsRequest, RootId, RootSummary, WriteFileMode,
+    ExecutionContext, GrantSubject, RelativePath, ResolveExecRootsRequest, RootId, RootSummary,
+    WriteFileMode,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -566,12 +566,28 @@ pub(crate) async fn connect_folder(
     .map(Some)
 }
 
+/// The folders attached to one conversation, by their safe identities.
+///
+/// Identity comes from the trusted management listing of approved roots, not
+/// from the agent's `ListRoots` operation, which answers only for folders the
+/// conversation may currently read. Sourcing it from there made a folder whose
+/// read consent had been revoked vanish from the panel that owns disconnecting
+/// it and granting access back — the one state in which the reader most needs
+/// both. What the folder *allows* is still not part of this answer: the
+/// renderer reads that from the consent statements, so a listed folder can
+/// legitimately allow nothing.
 #[tauri::command]
 pub(crate) async fn list_connected_folders(
     state: State<'_, HostAccess>,
     chat_id: Uuid,
 ) -> Result<Vec<ConnectedFolder>, String> {
-    let context = state.context(chat_id).await?;
+    connected_folders(&state, chat_id).await
+}
+
+async fn connected_folders(
+    state: &HostAccess,
+    chat_id: Uuid,
+) -> Result<Vec<ConnectedFolder>, String> {
     let store = state
         .store()
         .ok_or_else(|| "OpenWave is still starting".to_owned())?;
@@ -583,29 +599,12 @@ pub(crate) async fn list_connected_folders(
     if chat.root_attachments.is_empty() {
         return Ok(Vec::new());
     }
-    let request_id = openwave_host_broker::RequestId::new();
-    let result = state
-        .broker
-        .operation(OperationEnvelope {
-            protocol_version: openwave_host_broker::PROTOCOL_VERSION,
-            request_id,
-            context: context.execution,
-            request: OperationRequest::ListRoots,
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    let OperationResult::ListRoots { roots } = result else {
-        return Err("host broker returned an unexpected response".to_owned());
-    };
+    let roots = approved_roots(state).await?;
     let product_roots = chat
         .root_attachments
         .iter()
         .map(|attachment| *attachment.root_id.as_uuid())
         .collect::<std::collections::HashSet<_>>();
-    // What each folder allows is no longer projected here: the renderer reads
-    // it from the same consent statements the Permissions surface shows
-    // (`list_capability_consents`), so both panels are groupings of one model
-    // and the desktop keeps no folder-capability vocabulary of its own.
     let mut folders = roots
         .into_iter()
         .filter(|root| product_roots.contains(&root.root_id.as_uuid()))
@@ -833,14 +832,18 @@ pub(crate) async fn connect_approved_folder(
     .map(Some)
 }
 
-/// The capabilities the folders panel may ask to add to an attached folder.
+/// The capabilities the folders and permissions surfaces may ask to add to an
+/// attached folder.
 ///
-/// Read is deliberately absent: a folder whose read consent was revoked no
-/// longer appears in the panel at all, so the recovery for that is the
-/// ordinary re-attach ceremony, not a widening of something still visible.
+/// Read is here because it can be taken away: revoking it leaves the folder
+/// attached and allowing nothing, and without a way to ask for it back that is
+/// a one-way door. Granting it is a widening like any other — an explicit
+/// action answered in the native dialog — never something an attachment does
+/// on the user's behalf.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WidenedFolderCapability {
+    ReadFiles,
     WriteFiles,
     ExecuteCommands,
 }
@@ -857,34 +860,23 @@ pub(crate) struct GrantFolderCapabilityRequest {
 ///
 /// The same shape as attach-time consent: a native dialog names the chat, the
 /// folder, and exactly what is being allowed, and the broker records the
-/// approval as a fresh permission-dialog grant. The folder identity comes
-/// from the broker's own listing for this conversation, never from renderer
-/// strings, and the broker independently re-checks that the root is live and
-/// attached before minting anything.
+/// approval as a fresh permission-dialog grant. The folder identity comes from
+/// the broker's own approved-root listing intersected with this chat's
+/// attachments, never from renderer strings, and the broker independently
+/// re-checks that the root is live and attached before minting anything.
 #[tauri::command]
 pub(crate) async fn grant_folder_capability(
     app: AppHandle,
     state: State<'_, HostAccess>,
     request: GrantFolderCapabilityRequest,
 ) -> Result<Option<bool>, String> {
-    let context = state.context(request.chat_id).await?;
     let chat_label = conversation_label(&state, request.chat_id).await?;
-    let result = state
-        .broker
-        .operation(OperationEnvelope {
-            protocol_version: openwave_host_broker::PROTOCOL_VERSION,
-            request_id: openwave_host_broker::RequestId::new(),
-            context: context.execution,
-            request: OperationRequest::ListRoots,
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    let OperationResult::ListRoots { roots } = result else {
-        return Err("host broker returned an unexpected response".to_owned());
-    };
-    let root = roots
+    let root = connected_folders(&state, request.chat_id)
+        .await?
         .into_iter()
-        .find(|root| root.root_id == request.root_id)
+        .find(|root| {
+            root.root_id == request.root_id && matches!(root.status, FolderStatus::Connected)
+        })
         .ok_or_else(|| "the folder is no longer connected".to_owned())?;
 
     let _consent = state
@@ -900,6 +892,7 @@ pub(crate) async fn grant_folder_capability(
     let _root_change = state.root_changes.lock().await;
     let context = state.context(request.chat_id).await?;
     let capability = match request.capability {
+        WidenedFolderCapability::ReadFiles => Capability::ReadFiles,
         WidenedFolderCapability::WriteFiles => Capability::WriteFiles,
         WidenedFolderCapability::ExecuteCommands => Capability::ExecuteCommands,
     };
@@ -1131,6 +1124,7 @@ async fn confirm_folder_widening(
 ) -> Result<bool, String> {
     let folder_label = safe_dialog_label(display_name);
     let allowed = match capability {
+        WidenedFolderCapability::ReadFiles => "read files in",
         WidenedFolderCapability::WriteFiles => "write files in",
         WidenedFolderCapability::ExecuteCommands => "run commands in",
     };
