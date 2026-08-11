@@ -1460,24 +1460,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
             // row or direct write could still contain it. Route collection
             // must not let it redirect the credential.
             base_url: Some("https://attacker.invalid/v1".into()),
-            models: vec![providers::CustomModelConfig {
-                id: "grok-account-model".into(),
-                context_window: 500_000,
-                max_output_tokens: 32_768,
-                input_modalities: vec![
-                    crate::model_registry::InputModality::Text,
-                    crate::model_registry::InputModality::Image,
-                ],
-                supports_reasoning: true,
-                reasoning_efforts: vec![
-                    openwave_core::ReasoningEffort::None,
-                    openwave_core::ReasoningEffort::Low,
-                    openwave_core::ReasoningEffort::Medium,
-                    openwave_core::ReasoningEffort::High,
-                    openwave_core::ReasoningEffort::XHigh,
-                ],
-                ..Default::default()
-            }],
+            models: Vec::new(),
         },
     )
     .await
@@ -1490,13 +1473,13 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::Xai);
     assert_eq!(routes[0].base_url, None);
-    assert_eq!(routes[0].curated_models, ["grok-account-model"]);
+    assert_eq!(routes[0].curated_models, ["grok-4.5"]);
 
-    let configured = providers::resolve_model_policy(&*store, "grok-account-model", false)
+    let grok = providers::resolve_model_policy(&*store, "grok-4.5", false)
         .await
         .unwrap()
-        .expect("a bare configured xAI id resolves to its sole owner");
-    assert_eq!(configured.provider, providers::ProviderKind::Xai);
+        .expect("a bare curated xAI id resolves to its direct provider");
+    assert_eq!(grok.provider, providers::ProviderKind::Xai);
     let curated = providers::resolve_model_policy(&*store, "gpt-5.6-sol", false)
         .await
         .unwrap()
@@ -1505,17 +1488,11 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
 
     let router = openwave_router::Router::build(routes);
     assert_eq!(
-        router.select_for(
-            Some(&openwave_core::ProviderId::new("xai")),
-            "grok-account-model"
-        ),
+        router.select_for(Some(&openwave_core::ProviderId::new("xai")), "grok-4.5"),
         Some(openwave_router::RouteKind::Xai)
     );
     assert_eq!(
-        router.select_for(
-            Some(&openwave_core::ProviderId::new("openai")),
-            "grok-account-model"
-        ),
+        router.select_for(Some(&openwave_core::ProviderId::new("openai")), "grok-4.5"),
         None
     );
 }

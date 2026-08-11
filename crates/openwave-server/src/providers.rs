@@ -270,8 +270,8 @@ pub enum ProviderKind {
 impl ProviderKind {
     /// All kinds the server knows about, in display order.
     pub const ALL: &'static [ProviderKind] = &[
-        ProviderKind::Anthropic,
         ProviderKind::Openai,
+        ProviderKind::Anthropic,
         ProviderKind::Xai,
         ProviderKind::Gemini,
         ProviderKind::Fireworks,
@@ -431,10 +431,10 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     /// Explicit model rows served by a configurable endpoint.
     ///
-    /// OpenAI-compatible and xAI catalogs can change independently of an
-    /// OpenWave release, so their configured rows live beside the
-    /// endpoint. Other curated providers ignore this field and obtain their
-    /// models from the host registry.
+    /// OpenAI-compatible endpoints and extra xAI account models can change
+    /// independently of an OpenWave release, so their configured rows live
+    /// beside the endpoint. Other curated providers ignore this field and
+    /// obtain their models from the host registry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<CustomModelConfig>,
 }
@@ -1139,12 +1139,6 @@ pub async fn update_provider(
             "openai_compatible requires a base_url when enabled",
         ));
     }
-    if kind == ProviderKind::Xai && config.enabled && config.models.is_empty() {
-        return Err(ServerError::bad_request(
-            "xai requires at least one configured model when enabled",
-        ));
-    }
-
     if let Some(credential) = update.credential {
         write_credential(secrets, kind, &credential).await?;
     }
@@ -1503,9 +1497,6 @@ pub async fn collect_routes(
         if kind == ProviderKind::OpenaiCompatible && base_url.is_none() {
             continue;
         }
-        if kind == ProviderKind::Xai && config.models.is_empty() {
-            continue;
-        }
         if kind.uses_openai_compatible_transport() {
             let base = base_url.as_deref().unwrap_or("");
             if !(base.starts_with("https://") || base.starts_with("http://")) {
@@ -1664,9 +1655,6 @@ pub async fn provider_is_usable(
         if !(base.starts_with("https://") || base.starts_with("http://")) {
             return Ok(false);
         }
-    }
-    if kind == ProviderKind::Xai && config.models.is_empty() {
-        return Ok(false);
     }
     Ok(true)
 }

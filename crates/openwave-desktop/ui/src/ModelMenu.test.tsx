@@ -247,11 +247,11 @@ describe("notConnectedProviders", () => {
 
 describe("firstAvailableModel", () => {
   it("lands in render order, not catalog order", () => {
-    // OpenAI first in the catalog, but Anthropic renders first — the toggle
+    // Anthropic first in the catalog, but OpenAI renders first — the toggle
     // must land where the reader sees the check appear.
     const [sonnet, gpt] = MODELS;
     expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe(
-      "anthropic::claude-sonnet-4",
+      "openai::gpt-4o",
     );
   });
 

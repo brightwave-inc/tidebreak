@@ -485,7 +485,7 @@ function ProviderRow({
                 {models.length === 0 && (
                   <p className="text-xs text-muted-foreground">
                     {info.kind === "xai"
-                      ? "Add each xAI model available to this API key, including its limits and supported capabilities."
+                      ? "Grok 4.5 is ready when you connect xAI. Add any additional account models here, including their limits and supported capabilities."
                       : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
                   </p>
                 )}
@@ -720,8 +720,7 @@ function ProviderRow({
                       info.kind !== "openai_compatible" &&
                       !key.trim()) ||
                     (hasConfigurableModels &&
-                      models.some((model) => !model.id.trim())) ||
-                    (info.kind === "xai" && models.length === 0)
+                      models.some((model) => !model.id.trim()))
                   }
                   onClick={() => void save(true)}
                 >
