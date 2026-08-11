@@ -143,6 +143,13 @@ pub struct AppState {
     /// substitute a fake so the whole refusal ladder is drivable without a
     /// deployment.
     pub(crate) gateway_dispatch: Arc<dyn crate::connected_apps::GatewayInvokeDispatcher>,
+    /// Establishes and advances the gateway-side registration a local app's
+    /// gateway bindings are relayed through, and relays the author's consent
+    /// for it. The production assembly is the store-backed registry over the
+    /// one gateway runtime ([`crate::gateway_drafts::GatewayDraftRegistry`]);
+    /// tests substitute a fake so the grant path's best-effort posture is
+    /// drivable without a deployment.
+    pub(crate) gateway_drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
     /// Outstanding single-use tokens redeemed by the sandboxed view frames —
     /// prefetched MCP views and stored local-app revisions alike.
     pub(crate) view_frames: Arc<ViewFrameTokens>,
@@ -352,7 +359,18 @@ impl AppState {
         ));
         let rest_dispatch = crate::connected_apps::governed_rest_dispatcher(secrets.clone());
         let gateway_catalogs = gateway.clone();
-        let gateway_dispatch = crate::gateway_runtime::gateway_relay_dispatcher(gateway.clone());
+        let gateway_drafts: Arc<dyn crate::connected_apps::GatewayDraftSource> =
+            Arc::new(crate::gateway_drafts::GatewayDraftRegistry::new(
+                store.clone(),
+                config.data_dir.clone(),
+                Arc::new(crate::gateway_drafts::GatewayConnectorDraftClient::new(
+                    gateway.clone(),
+                )),
+            ));
+        let gateway_dispatch = crate::gateway_runtime::gateway_relay_dispatcher(
+            gateway.clone(),
+            gateway_drafts.clone(),
+        );
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),
@@ -364,6 +382,7 @@ impl AppState {
             rest_dispatch,
             gateway_catalogs,
             gateway_dispatch,
+            gateway_drafts,
             view_frames: Arc::default(),
             gateway,
             chatgpt,

@@ -558,101 +558,72 @@ pub(crate) trait GatewayInvokeDispatcher: Send + Sync {
     ) -> Result<crate::connectors::GatewayInvokeOutcome, GatewayDispatchError>;
 }
 
-/// Resolves the gateway-side draft a local app was registered as, at the
-/// deployment `gateway_base_url` names.
+/// The registration lifecycle of one local app at one gateway deployment.
 ///
-/// The seam exists so the registration lifecycle is the only thing a later
-/// slice has to build: invoke already asks the right question, and answering
-/// it differently is an implementation swap rather than a reshaping of the
-/// ladder. Keyed by the gateway's base URL as well as the app, because a
-/// registration belongs to one deployment — a re-paired profile has no draft
-/// there, exactly as it has no current gateway grant.
+/// A local app's gateway bindings are relayed to a shared app the gateway
+/// holds, so the app has to exist there before anything can be relayed. This
+/// seam is what establishes and advances that, keyed by the deployment as
+/// well as the app: a registration belongs to one gateway, so a re-paired
+/// profile has no registration there, exactly as it has no current gateway
+/// grant. Production is the store-backed
+/// [`crate::gateway_drafts::GatewayDraftRegistry`]; tests drive the whole
+/// ladder against a fake without an OAuth session.
 #[async_trait]
 pub(crate) trait GatewayDraftSource: Send + Sync {
-    async fn draft_shared_app_id(
+    /// Ensure `app` is registered at `gateway_base_url` and that the revision
+    /// the gateway serves is the app's current local one, registering or
+    /// appending as needed.
+    async fn ensure_registered(
         &self,
         app: openwave_core::id::AppId,
         gateway_base_url: &str,
-    ) -> openwave_core::Result<Option<String>>;
-}
+    ) -> openwave_core::Result<GatewayRegistration>;
 
-/// The v1 draft source: nothing is registered, ever.
-///
-/// Draft registration is its own slice. Until it lands, a gateway binding
-/// walks the whole local ladder — pin, grant, fingerprint currency — and then
-/// refuses with a typed, teachable "not registered at the gateway" rather than
-/// relaying somewhere that could not answer. Replacing this implementation is
-/// all that slice has to do on the invoke path.
-pub(crate) struct NoRegisteredDrafts;
-
-#[async_trait]
-impl GatewayDraftSource for NoRegisteredDrafts {
-    async fn draft_shared_app_id(
-        &self,
-        _app: openwave_core::id::AppId,
-        _gateway_base_url: &str,
-    ) -> openwave_core::Result<Option<String>> {
-        Ok(None)
-    }
-}
-
-/// A development stand-in for draft registration, fed by
-/// `OPENWAVE_GATEWAY_DRAFT_APPS` (`<local app id>=<shared app id>`,
-/// comma-separated).
-///
-/// Registration is a coming slice; until it lands there is no way to exercise
-/// the relay against a real gateway. This source lets a developer pin the
-/// mapping by hand after registering the draft out of band. It deliberately
-/// ignores the deployment key — a hand-maintained map is already scoped to
-/// the one gateway the developer is driving — and it is only consulted when
-/// the variable is set, so production behavior is byte-identical without it.
-///
-/// Debug builds only: a release daemon's process environment must never be
-/// able to redirect a consented invoke.
-#[cfg(debug_assertions)]
-pub(crate) struct EnvPinnedDrafts {
-    map: std::collections::BTreeMap<String, String>,
-}
-
-#[cfg(debug_assertions)]
-impl EnvPinnedDrafts {
-    /// The env-pinned map, or `None` when the variable is unset or empty.
-    pub(crate) fn from_env() -> Option<Self> {
-        let raw = std::env::var("OPENWAVE_GATEWAY_DRAFT_APPS").ok()?;
-        let map: std::collections::BTreeMap<String, String> = raw
-            .split(',')
-            .filter_map(|pair| {
-                let (app, draft) = pair.split_once('=')?;
-                let (app, draft) = (app.trim(), draft.trim());
-                (!app.is_empty() && !draft.is_empty()).then(|| (app.to_string(), draft.to_string()))
-            })
-            .collect();
-        if map.is_empty() {
-            tracing::warn!(
-                "OPENWAVE_GATEWAY_DRAFT_APPS is set but holds no `<app id>=<shared app id>` \
-                 pairs; gateway draft pinning is off"
-            );
-            return None;
-        }
-        tracing::info!(
-            "gateway draft pins loaded for {} local app(s): {:?}",
-            map.len(),
-            map.keys().collect::<Vec<_>>(),
-        );
-        Some(Self { map })
-    }
-}
-
-#[cfg(debug_assertions)]
-#[async_trait]
-impl GatewayDraftSource for EnvPinnedDrafts {
-    async fn draft_shared_app_id(
+    /// Relay the author's consent for `app`'s registration, pinned to the
+    /// revision the gateway is serving.
+    ///
+    /// Safe to relay without asking again because the local grant ladder has
+    /// already run: the consent sheet displayed exactly the binding set this
+    /// names, and the gateway computes the consented bindings server-side
+    /// from the live revision, accepting only a revision pin from here.
+    async fn relay_consent(
         &self,
         app: openwave_core::id::AppId,
-        _gateway_base_url: &str,
-    ) -> openwave_core::Result<Option<String>> {
-        Ok(self.map.get(&app.to_string()).cloned())
-    }
+        gateway_base_url: &str,
+    ) -> openwave_core::Result<GatewayConsentRelay>;
+}
+
+/// Where a local app stands at one gateway deployment.
+///
+/// Closed on purpose, and deliberately not a `Result`: "this deployment does
+/// not hold shared apps" and "the gateway said no" are both answers, and the
+/// invoke ladder turns each into a different refusal. A gateway that could
+/// not be reached at all is the `Err` half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatewayRegistration {
+    /// The gateway holds the app, serving `revision_id`.
+    Registered {
+        shared_app_id: String,
+        revision_id: String,
+    },
+    /// Nothing at this deployment holds the app and nothing there can: the
+    /// gateway predates shared-app registration, or it holds no app for this
+    /// user to append to.
+    NotRegistered,
+    /// The gateway refused to register or advance the app, in its own words.
+    Refused { message: String },
+}
+
+/// What relaying the author's consent came back as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatewayConsentRelay {
+    /// The gateway recorded consent for the registered revision.
+    Consented,
+    /// Nothing at this deployment holds the app — see
+    /// [`GatewayRegistration::NotRegistered`].
+    NotRegistered,
+    /// The gateway refused the consent, in its own words.
+    Refused { message: String },
 }
 
 #[cfg(test)]

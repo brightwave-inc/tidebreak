@@ -28,7 +28,9 @@ use crate::id::{
     OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
-use crate::local_app::{AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision};
+use crate::local_app::{
+    AppGatewayDraft, AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision,
+};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
@@ -871,6 +873,18 @@ impl Store for DbStore {
 
     async fn get_app_grant(&self, app_id: AppId) -> Result<Option<AppGrant>> {
         ops::app::get_app_grant(self, app_id).await
+    }
+
+    async fn put_app_gateway_draft(&self, draft: &AppGatewayDraft) -> Result<()> {
+        ops::app::put_app_gateway_draft(self, draft).await
+    }
+
+    async fn get_app_gateway_draft(
+        &self,
+        app_id: AppId,
+        gateway_base_url: &str,
+    ) -> Result<Option<AppGatewayDraft>> {
+        ops::app::get_app_gateway_draft(self, app_id, gateway_base_url).await
     }
 
     async fn delete_app_grant(&self, app_id: AppId) -> Result<bool> {

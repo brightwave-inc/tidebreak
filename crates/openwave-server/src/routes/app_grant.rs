@@ -243,6 +243,7 @@ pub async fn post_app_grant(
         created_at: Utc::now(),
     };
     state.store.put_app_grant(&grant).await?;
+    register_at_the_gateway(&state, app.id, &revision.manifest).await;
     Ok(Json(grant_state(
         &revision.manifest,
         Some(&grant),
@@ -264,6 +265,40 @@ pub async fn delete_app_grant(
     }
     state.store.delete_app_grant(app_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Register a just-granted app at the gateway and relay the author's consent
+/// for it — best effort, after the grant is already durable.
+///
+/// Consent to a gateway binding is consent to relay through a shared app the
+/// gateway holds, so the registration is part of making the grant usable
+/// rather than something to ask about separately. It is deliberately not part
+/// of the transaction: the grant is a local decision, and a gateway that is
+/// down, unreachable, or too old must never fail it. Everything here is
+/// re-attempted on the first invoke, which registers and consents on the spot
+/// if this could not, so the only cost of a failure is that the first call
+/// pays for it.
+///
+/// Nothing is attempted for a manifest that binds no gateway app: there is
+/// nothing at the gateway for it to be.
+async fn register_at_the_gateway(state: &AppState, app_id: AppId, manifest: &AppManifest) {
+    if crate::connected_apps::gateway_apps_bound_by(&manifest.bindings).is_empty() {
+        return;
+    }
+    let Some(base_url) = crate::gateway_drafts::registration_base_url(&state.gateway).await else {
+        return;
+    };
+    match state.gateway_drafts.relay_consent(app_id, &base_url).await {
+        Ok(crate::connected_apps::GatewayConsentRelay::Consented) => {}
+        Ok(outcome) => tracing::info!(
+            %app_id,
+            "this app is not registered at the gateway yet: {outcome:?}"
+        ),
+        Err(error) => tracing::warn!(
+            %app_id,
+            "could not register this app at the gateway: {error}"
+        ),
+    }
 }
 
 /// Resolve a live app and its current revision, or 404.

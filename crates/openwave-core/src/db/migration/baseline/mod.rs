@@ -144,6 +144,10 @@ pub(super) fn tables() -> Vec<BaselineTable> {
         ),
         entry(content::app_grant_table(), content::app_grant_indexes()),
         entry(
+            content::app_gateway_draft_table(),
+            content::app_gateway_draft_indexes(),
+        ),
+        entry(
             content::connected_app_table(),
             content::connected_app_indexes(),
         ),

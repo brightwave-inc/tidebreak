@@ -226,9 +226,53 @@ pub enum GatewayInvokeOutcome {
     /// app — its typed `authorization_required`. The viewer must connect the
     /// app at the gateway; no local action can supply it.
     AuthorizationRequired { message: String },
+    /// The gateway holds no consent for this shared app — its typed
+    /// `consent_required`. Unlike the two above, the *host* can resolve this
+    /// without the viewer: the local grant ladder has already run, so the
+    /// relay re-states the author's consent to the gateway and calls again.
+    ConsentRequired { message: String },
     /// The gateway refused the call for any other typed reason (an
     /// unconsented shared app, a manifest the operation is not in, a
     /// credential resolution failure). The message is the gateway's own.
+    Refused { message: String },
+}
+
+/// What one shared-app registration call — a create or a revision append —
+/// came back as.
+///
+/// Closed on purpose: the registry turns each of these into a durable
+/// decision (persist the mapping, retry once under a suffixed slug, or give
+/// up honestly), and a fourth reading would need its own decision rather than
+/// a free-form message. A `404` is the `Ok(None)` half, as everywhere else on
+/// this client: a deployment that does not serve registration yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayRegistrationOutcome {
+    /// The gateway holds the shared app at `shared_app_id`, currently serving
+    /// revision `revision_id`.
+    Registered {
+        shared_app_id: String,
+        revision_id: String,
+    },
+    /// The requested slug is already taken at this deployment — the one
+    /// failure the caller can resolve by asking again differently.
+    SlugTaken,
+    /// The gateway refused for any other typed reason (a disabled app, a
+    /// manifest it will not accept). The message is the gateway's own.
+    Refused { message: String },
+}
+
+/// What one shared-app consent relay came back as.
+///
+/// `RevisionMoved` is the only outcome the caller acts on beyond success: the
+/// pinned revision is no longer the one the gateway serves, so the pin has to
+/// be re-established before consent can name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayConsentOutcome {
+    /// The gateway recorded consent for the named revision.
+    Consented,
+    /// The pinned revision is stale; the gateway serves another one.
+    RevisionMoved,
+    /// The gateway refused for any other typed reason, in its own words.
     Refused { message: String },
 }
 
@@ -624,6 +668,119 @@ impl GatewayAuth {
         let status = response.status();
         let body = read_bounded(response, "shared app invoke").await?;
         decode_shared_app_invoke(status, &body).map(Some)
+    }
+
+    /// Register one local app at the gateway as a shared app draft — the
+    /// control-plane half of a local app's gateway bindings.
+    ///
+    /// `request` is the registration body verbatim (`name`, optional `slug`,
+    /// `manifest`, optional `bundle_base64`, `client_name`); the caller owns
+    /// its assembly, including the projection of the local manifest into the
+    /// gateway's own manifest vocabulary.
+    ///
+    /// `Ok(None)` is the route answering `404`: a deployment that does not
+    /// serve shared-app registration yet. That reads as "nothing there can
+    /// hold this app", the same degradation [`apps`](Self::apps) and
+    /// [`invoke_shared_app`](Self::invoke_shared_app) use, rather than a
+    /// fault.
+    pub async fn create_shared_app(
+        &self,
+        access_token: &str,
+        request: &serde_json::Value,
+    ) -> Result<Option<GatewayRegistrationOutcome>> {
+        const OPERATION: &str = "shared app registration";
+
+        let response = self
+            .http
+            .post(self.endpoint("/api/v1/cli/shared-apps")?)
+            .bearer_auth(access_token)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| gateway_error(OPERATION, error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let body = read_bounded(response, OPERATION).await?;
+        decode_shared_app_registration(OPERATION, status, &body, None).map(Some)
+    }
+
+    /// Append a revision to an already-registered shared app.
+    ///
+    /// `Ok(None)` covers both `404` readings — a deployment without the route
+    /// and an app this user does not own — because neither leaves anything
+    /// here to append to.
+    pub async fn create_shared_app_revision(
+        &self,
+        access_token: &str,
+        shared_app_id: &str,
+        request: &serde_json::Value,
+    ) -> Result<Option<GatewayRegistrationOutcome>> {
+        const OPERATION: &str = "shared app revision";
+
+        validate_gateway_app_id(shared_app_id)?;
+        let mut url = self.endpoint("/api/v1/cli/shared-apps")?;
+        url.path_segments_mut()
+            .map_err(|()| gateway_error("configuration", "could not build endpoint URL"))?
+            .push(shared_app_id)
+            .push("revision");
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| gateway_error(OPERATION, error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let body = read_bounded(response, OPERATION).await?;
+        decode_shared_app_registration(OPERATION, status, &body, Some(shared_app_id)).map(Some)
+    }
+
+    /// Record the author's consent for one shared app, optionally pinned to
+    /// the revision the caller believes is current.
+    ///
+    /// `Ok(None)` is the route answering `404`: nothing at this deployment
+    /// holds the app.
+    pub async fn consent_shared_app(
+        &self,
+        access_token: &str,
+        shared_app_id: &str,
+        revision_id: Option<&str>,
+    ) -> Result<Option<GatewayConsentOutcome>> {
+        const OPERATION: &str = "shared app consent";
+
+        validate_gateway_app_id(shared_app_id)?;
+        let mut url = self.endpoint("/api/apps/shared")?;
+        url.path_segments_mut()
+            .map_err(|()| gateway_error("configuration", "could not build endpoint URL"))?
+            .push(shared_app_id)
+            .push("consent");
+        let mut request = serde_json::Map::new();
+        if let Some(revision_id) = revision_id {
+            request.insert(
+                "revision_id".into(),
+                serde_json::Value::String(revision_id.to_owned()),
+            );
+        }
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(&serde_json::Value::Object(request))
+            .send()
+            .await
+            .map_err(|error| gateway_error(OPERATION, error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let body = read_bounded(response, OPERATION).await?;
+        decode_shared_app_consent(OPERATION, status, &body).map(Some)
     }
 
     async fn exchange_code(
@@ -1117,6 +1274,42 @@ impl GatewayConnection {
             .await
     }
 
+    /// Register one local app as a shared app with a `control` token; `None`
+    /// when the gateway does not serve shared-app registration.
+    pub async fn create_shared_app(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<Option<GatewayRegistrationOutcome>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth.create_shared_app(&token, request).await
+    }
+
+    /// Append a revision to a registered shared app with a `control` token;
+    /// `None` when nothing at the gateway answers for the app.
+    pub async fn create_shared_app_revision(
+        &self,
+        shared_app_id: &str,
+        request: &serde_json::Value,
+    ) -> Result<Option<GatewayRegistrationOutcome>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth
+            .create_shared_app_revision(&token, shared_app_id, request)
+            .await
+    }
+
+    /// Relay the author's consent for a registered shared app with a
+    /// `control` token; `None` when nothing at the gateway answers for it.
+    pub async fn consent_shared_app(
+        &self,
+        shared_app_id: &str,
+        revision_id: Option<&str>,
+    ) -> Result<Option<GatewayConsentOutcome>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth
+            .consent_shared_app(&token, shared_app_id, revision_id)
+            .await
+    }
+
     /// The gateway's MCP endpoint URL for `slug`, under the configured base.
     pub fn mcp_endpoint_url(&self, slug: &str) -> Result<String> {
         validate_mcp_endpoint_slug(slug)?;
@@ -1338,9 +1531,11 @@ async fn read_bounded(response: reqwest::Response, operation: &str) -> Result<Ve
 ///   `{"error": "<code>"}` with a sibling `message` or `error_description`,
 ///   or a bare top-level `{"code", "message"}`. The code
 ///   `authorization_required` becomes [`GatewayInvokeOutcome::AuthorizationRequired`]
-///   — the one outcome the frame must branch on — and every other code
-///   (including `consent_required`, which a first-open viewer may hit) becomes
-///   [`GatewayInvokeOutcome::Refused`] carrying the gateway's own message. A
+///   and `consent_required` becomes [`GatewayInvokeOutcome::ConsentRequired`]
+///   — the two outcomes a caller can act on, the first by sending the viewer
+///   to the gateway and the second by re-stating the author's consent — and
+///   every other code becomes [`GatewayInvokeOutcome::Refused`] carrying the
+///   gateway's own message. A
 ///   failure envelope is looked for on any non-2xx answer, and on a 2xx answer
 ///   only when the body has an `error` member and no `status` member, so a
 ///   passthrough response body can never be misread as one.
@@ -1375,10 +1570,10 @@ fn decode_shared_app_invoke(
     if looks_like_failure {
         if let Some((code, message)) = failure_envelope(&payload) {
             let message = message.unwrap_or_else(|| code.clone());
-            return Ok(if code == "authorization_required" {
-                GatewayInvokeOutcome::AuthorizationRequired { message }
-            } else {
-                GatewayInvokeOutcome::Refused { message }
+            return Ok(match code.as_str() {
+                "authorization_required" => GatewayInvokeOutcome::AuthorizationRequired { message },
+                "consent_required" => GatewayInvokeOutcome::ConsentRequired { message },
+                _ => GatewayInvokeOutcome::Refused { message },
             });
         }
         if !status.is_success() {
@@ -1440,6 +1635,84 @@ fn decode_shared_app_invoke(
         status: executed_status,
         content_type,
         body_base64,
+    })
+}
+
+/// Read the gateway's answer to a shared-app create or revision append.
+///
+/// Success must name the revision the gateway now serves; a create must also
+/// name the app it minted, while an append answers about an app the caller
+/// already knows the id of (`known_id`). Failures are read with the same
+/// tolerant envelope reader the invoke route uses, so the one code the caller
+/// branches on — `slug_taken` — is recognized in every shape the gateway may
+/// carry it.
+fn decode_shared_app_registration(
+    operation: &'static str,
+    status: reqwest::StatusCode,
+    body: &[u8],
+    known_id: Option<&str>,
+) -> Result<GatewayRegistrationOutcome> {
+    let payload = serde_json::from_slice::<serde_json::Value>(body).ok();
+    if !status.is_success() {
+        let Some((code, message)) = payload.as_ref().and_then(failure_envelope) else {
+            return Err(gateway_error(
+                operation,
+                format!("HTTP status {}", status.as_u16()),
+            ));
+        };
+        let message = message.unwrap_or_else(|| code.clone());
+        return Ok(if code == "slug_taken" {
+            GatewayRegistrationOutcome::SlugTaken
+        } else {
+            GatewayRegistrationOutcome::Refused { message }
+        });
+    }
+    let invalid = || gateway_error(operation, "invalid response body");
+    let payload = payload.ok_or_else(invalid)?;
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    let shared_app_id = text("id")
+        .or_else(|| known_id.map(ToOwned::to_owned))
+        .ok_or_else(invalid)?;
+    let revision_id = text("revision_id").ok_or_else(invalid)?;
+    Ok(GatewayRegistrationOutcome::Registered {
+        shared_app_id,
+        revision_id,
+    })
+}
+
+/// Read the gateway's answer to a shared-app consent relay. The response body
+/// echoes the bindings consent covers, which nothing here needs: the gateway
+/// computes them server-side from the live revision, and the caller only ever
+/// pins which revision it meant.
+fn decode_shared_app_consent(
+    operation: &'static str,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<GatewayConsentOutcome> {
+    if status.is_success() {
+        return Ok(GatewayConsentOutcome::Consented);
+    }
+    let Some((code, message)) = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(failure_envelope)
+    else {
+        return Err(gateway_error(
+            operation,
+            format!("HTTP status {}", status.as_u16()),
+        ));
+    };
+    Ok(if code == "revision_moved" {
+        GatewayConsentOutcome::RevisionMoved
+    } else {
+        GatewayConsentOutcome::Refused {
+            message: message.unwrap_or(code),
+        }
     })
 }
 
@@ -1573,6 +1846,39 @@ mod tests {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
         assert_ne!(random_token(), random_token());
+    }
+
+    /// The two invoke refusals a caller acts on have to survive the wire as
+    /// themselves: `authorization_required` is the viewer's to resolve at the
+    /// gateway, and `consent_required` is the host's to heal by re-stating
+    /// the author's consent. Anything else is the app's to present.
+    #[test]
+    fn actionable_invoke_refusals_decode_to_their_own_arms() {
+        let decode = |code: &str| {
+            decode_shared_app_invoke(
+                reqwest::StatusCode::FORBIDDEN,
+                format!(r#"{{"error":{{"code":"{code}","message":"nope"}}}}"#).as_bytes(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            decode("consent_required"),
+            GatewayInvokeOutcome::ConsentRequired {
+                message: "nope".into()
+            }
+        );
+        assert_eq!(
+            decode("authorization_required"),
+            GatewayInvokeOutcome::AuthorizationRequired {
+                message: "nope".into()
+            }
+        );
+        assert_eq!(
+            decode("app_disabled"),
+            GatewayInvokeOutcome::Refused {
+                message: "nope".into()
+            }
+        );
     }
 
     #[test]

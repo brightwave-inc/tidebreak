@@ -37,7 +37,7 @@ pub use chatgpt::{
 pub use gateway::{
     has_stored_credentials, has_stored_credentials_for, is_sign_in_required,
     validate_mcp_endpoint_slug, AuthorizedSession, CredentialVault, GatewayApp, GatewayAuth,
-    GatewayAuthConfig, GatewayConnection, GatewayCredentials, GatewayIdentity,
-    GatewayInvokeOutcome, GatewayMeta, GatewayModel, GatewayOperationSummary, PendingSignIn,
-    TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
+    GatewayAuthConfig, GatewayConnection, GatewayConsentOutcome, GatewayCredentials,
+    GatewayIdentity, GatewayInvokeOutcome, GatewayMeta, GatewayModel, GatewayOperationSummary,
+    GatewayRegistrationOutcome, PendingSignIn, TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
 };

@@ -103,6 +103,17 @@ pub(crate) enum AppGrant {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum AppGatewayDraft {
+    Table,
+    AppId,
+    GatewayBaseUrl,
+    SharedAppId,
+    GatewayRevisionId,
+    SyncedRevisionId,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum ConnectedApp {
     Table,
     Id,
