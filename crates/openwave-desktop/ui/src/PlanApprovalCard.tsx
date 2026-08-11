@@ -199,7 +199,7 @@ export function PlanApprovalCard({
   request: PendingPlanApproval;
   working: boolean;
   error: string | undefined;
-  onDecide: (decision: PlanDecision) => void;
+  onDecide: (decision: PlanDecision) => Promise<boolean>;
   onCancel: () => void;
   onFullscreenChange?: (fullscreen: boolean) => void;
 }) {
@@ -237,17 +237,21 @@ export function PlanApprovalCard({
     [callId, working],
   );
 
-  const accept = () => {
-    clear(callId);
-    onDecide({ decision: "accept" });
+  // The comments are the reader's work, and a refused decision leaves the card
+  // on screen to try again — so they are dropped only once the server has
+  // taken them. Clearing first would erase per-block feedback that nothing can
+  // recover: the row is gone from the store and from localStorage, and the
+  // hydrate effect above does not re-run for a card that never unmounted.
+  const accept = async () => {
+    if (await onDecide({ decision: "accept" })) clear(callId);
   };
 
-  const requestChanges = () => {
+  const requestChanges = async () => {
     const feedback = serializePlanComments(comments ?? []);
-    clear(callId);
-    onDecide(
+    const sent = await onDecide(
       feedback ? { decision: "reject", feedback } : { decision: "reject" },
     );
+    if (sent) clear(callId);
   };
 
   const toggleFullscreen = () => {
@@ -321,7 +325,7 @@ export function PlanApprovalCard({
         >
           Cancel edits
         </Button>
-        <Button type="button" disabled={working} onClick={requestChanges}>
+        <Button type="button" disabled={working} onClick={() => void requestChanges()}>
           {working ? "Sending…" : "Update plan"}
           {!working && <CornerDownLeft aria-hidden="true" />}
         </Button>
@@ -331,7 +335,7 @@ export function PlanApprovalCard({
         <span className="text-muted-foreground grow text-sm">
           Hover over plan to edit
         </span>
-        <Button type="button" disabled={working} onClick={accept}>
+        <Button type="button" disabled={working} onClick={() => void accept()}>
           {working ? "Sending…" : "Execute plan"}
           {!working && <CornerDownLeft aria-hidden="true" />}
         </Button>

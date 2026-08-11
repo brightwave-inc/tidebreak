@@ -19,21 +19,28 @@ type DropState = {
  * Native file drops are intercepted by Tauri before the webview sees them.
  * This listener lives inside the composer and sends the claimed paths through
  * the same mixed attachment path as its paperclip button.
+ *
+ * The conversation arrives as a resolver rather than an id because the home
+ * composer has no conversation until something is attached to it. The host
+ * holds a dropped path set briefly, so creating one on the way through is
+ * fine; what is not fine is refusing the drop for want of an id.
  */
 export function DocumentDropTarget({
-  chatId,
+  resolveChatId,
   onAttached,
   onError,
 }: {
-  chatId: string;
+  resolveChatId: () => Promise<string>;
   onAttached: (attached: AttachedFiles) => void;
   onError: (error: unknown) => void;
 }) {
   const [state, setState] = useState<DropState | null>(null);
   const attachedRef = useRef(onAttached);
   const errorRef = useRef(onError);
+  const resolveRef = useRef(resolveChatId);
   attachedRef.current = onAttached;
   errorRef.current = onError;
+  resolveRef.current = resolveChatId;
 
   useEffect(() => {
     if (!hasNativeHost()) return;
@@ -49,13 +56,18 @@ export function DocumentDropTarget({
       if (next.phase === "dropped") {
         setState(null);
         if (next.accepted) {
-          void attachDroppedChatFiles(chatId)
-            .then((attached) => {
-              if (!cancelled && attached) attachedRef.current(attached);
-            })
-            .catch((error) => {
-              if (!cancelled) errorRef.current(error);
-            });
+          void (async () => {
+            // Unmounting during this round trip cannot call the conversation
+            // back: it is already created, and it shows up in the sidebar
+            // unasked. Home writes the id into its draft, so the next send
+            // from home reuses it rather than leaving it stranded.
+            const chatId = await resolveRef.current();
+            if (cancelled) return;
+            const attached = await attachDroppedChatFiles(chatId);
+            if (!cancelled && attached) attachedRef.current(attached);
+          })().catch((error) => {
+            if (!cancelled) errorRef.current(error);
+          });
         }
         return;
       }
@@ -68,7 +80,7 @@ export function DocumentDropTarget({
       cancelled = true;
       unlisten?.();
     };
-  }, [chatId]);
+  }, []);
 
   if (!state) return null;
   return (

@@ -136,6 +136,133 @@ it("replaces the token with the prompt body it fetches", async () => {
   expect(menu.onInvoke).not.toHaveBeenCalled();
 });
 
+it("keeps what was typed while the prompt body was still loading", async () => {
+  // Fetching the body is a round trip, and people carry on typing through it.
+  // The insertion used to be built from the draft as it was when the option
+  // was picked, so everything typed in between was overwritten.
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.keyboard(" for the team");
+  release("Write this week's update covering:");
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      expect.stringContaining("Write this week's update covering:"),
+    ),
+  );
+
+  expect(onDraftChange).toHaveBeenLastCalledWith(
+    expect.stringContaining("for the team"),
+  );
+  // And the token goes, wherever it ended up: leaving it behind would send
+  // "/weekly" to the model as prose.
+  expect(onDraftChange).toHaveBeenLastCalledWith(
+    expect.not.stringContaining("/weekly"),
+  );
+});
+
+it("finds the token again when the typing lands ahead of it", async () => {
+  // Typing before the token moves it, and the body still belongs where the
+  // token is rather than wherever the caret happens to be.
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  const field = screen.getByRole("textbox", { name: "Message" });
+  await user.click(field);
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.type(field, "hey, ", {
+    initialSelectionStart: 0,
+    initialSelectionEnd: 0,
+  });
+  release("Write this week's update covering:");
+
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "hey, draft the Write this week's update covering:",
+    ),
+  );
+});
+
+it("takes the whole word when the token is still being typed", async () => {
+  // The list narrows before the word is finished, so picking at `/week` and
+  // finishing `ly` while the fetch runs is the ordinary case, not an edge one.
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /week");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.keyboard("ly");
+  release("Write this week's update covering:");
+
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "draft the Write this week's update covering:",
+    ),
+  );
+});
+
+it("takes the whole word when the token is being deleted", async () => {
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.keyboard("{Backspace}{Backspace}");
+  release("Write this week's update covering:");
+
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "draft the Write this week's update covering:",
+    ),
+  );
+});
+
 it("invokes a picked skill and shows it as a chip the reader can drop", async () => {
   const user = userEvent.setup();
   const onInvoke = vi.fn();

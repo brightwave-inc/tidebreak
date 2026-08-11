@@ -117,23 +117,33 @@ function setComposerImages(
  * while the reader was looking at another chat. The `File` behind each upload
  * is kept until the attachment leaves the list. That is what makes retry a
  * retry, rather than an invitation to go and find the file again.
+ *
+ * @param draftKey which composer's strip this is — a chat id, or the home
+ *   composer's key.
+ * @param publishTarget the chat the bytes belong to, when that is not the
+ *   draft's own key. Home attaches before its chat exists, so the target is
+ *   resolved at the moment the bytes move rather than at mount, and creating
+ *   the chat is part of resolving it.
  */
 export function useImageAttachments(
   client: ApiClient,
-  chatId: string,
+  draftKey: string,
+  publishTarget?: () => Promise<string>,
 ): ImageAttachmentControls {
   const attachments = useComposerDrafts(
-    (state) => state.attachments[chatId]?.images ?? NO_IMAGES,
+    (state) => state.attachments[draftKey]?.images ?? NO_IMAGES,
   );
   const [error, setError] = useState<string | null>(null);
   const attachmentsRef = useRef<ImageAttachment[]>([]);
+  const publishTargetRef = useRef(publishTarget);
 
   attachmentsRef.current = attachments;
+  publishTargetRef.current = publishTarget;
 
   function update(
     change: (current: readonly ImageAttachment[]) => ImageAttachment[],
   ) {
-    setComposerImages(chatId, change);
+    setComposerImages(draftKey, change);
   }
 
   /**
@@ -146,6 +156,9 @@ export function useImageAttachments(
    * directly is what gives the chip real byte progress.
    */
   async function publish(id: string, file: File, signal: AbortSignal) {
+    const chatId = publishTargetRef.current
+      ? await publishTargetRef.current()
+      : draftKey;
     if (!hasNativeHost()) {
       return uploadImageAttachment(client, chatId, file, {
         onProgress: (uploadedBytes) =>
@@ -163,7 +176,7 @@ export function useImageAttachments(
   }
 
   async function upload(id: string) {
-    const backing = backingFor(chatId);
+    const backing = backingFor(draftKey);
     const file = backing.files.get(id);
     if (!file) return;
     const controller = new AbortController();
@@ -190,7 +203,7 @@ export function useImageAttachments(
       return;
     }
     setError(null);
-    const backing = backingFor(chatId);
+    const backing = backingFor(draftKey);
     const now = new Date();
     const queued = files.map((file) => {
       const id = crypto.randomUUID();
@@ -224,7 +237,7 @@ export function useImageAttachments(
     adopt,
     attachFiles,
     remove: (id) => {
-      forgetBacking(chatId, id);
+      forgetBacking(draftKey, id);
       update((current) => withoutAttachment(current, id));
     },
     retry: (id) => {
@@ -233,7 +246,7 @@ export function useImageAttachments(
     },
     clear: () => {
       for (const attachment of attachmentsRef.current) {
-        forgetBacking(chatId, attachment.id);
+        forgetBacking(draftKey, attachment.id);
       }
       update(() => []);
       setError(null);

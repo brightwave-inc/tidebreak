@@ -45,7 +45,7 @@ export function ComposerPrompt({
   planApprovalRequests: PendingPlanApproval[];
   decidingPlanCalls: Set<string>;
   planApprovalErrors: Record<string, string>;
-  onPlanDecision: (callId: string, decision: PlanDecision) => void;
+  onPlanDecision: (callId: string, decision: PlanDecision) => Promise<boolean>;
   onPlanCancel: (turnId: string) => void;
 }) {
   // A plan card can take the whole pane; the flag lives here because the

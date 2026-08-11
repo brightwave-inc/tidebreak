@@ -36,6 +36,22 @@ export function canonicalModelSelection(
   return modelForSelection(models, value)?.key ?? null;
 }
 
+/**
+ * The label of a selected model when it cannot read images, or `null`.
+ *
+ * A selection the renderer cannot resolve — none made, or one whose provider
+ * is gone — follows the global default, which the renderer does not know; the
+ * server still refuses such a turn, so the composer stays quiet rather than
+ * guessing at a name it would have to print.
+ */
+export function textOnlyModelLabel(
+  models: ModelInfo[],
+  selection: string | null,
+): string | null {
+  const model = modelForSelection(models, selection);
+  return model && !model.multimodal ? model.display_name : null;
+}
+
 /** Provider display label shared by settings and the composer. */
 export function providerLabel(provider: ProviderKind): string {
   switch (provider) {

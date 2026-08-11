@@ -7,7 +7,8 @@ export type PlanApprovals = {
   requests: PendingPlanApproval[];
   deciding: Set<string>;
   errors: Record<string, string>;
-  decide: (callId: string, decision: PlanDecision) => void;
+  /** Resolves to whether the server accepted the decision. */
+  decide: (callId: string, decision: PlanDecision) => Promise<boolean>;
   cancel: (turnId: string) => void;
 };
 
@@ -45,7 +46,7 @@ export function usePlanApprovals(
     startedChatId: string,
     request: () => Promise<unknown>,
     failure: (err: unknown) => string,
-  ) {
+  ): Promise<boolean> {
     decidingRef.current.add(callId);
     setDeciding((calls) => new Set(calls).add(callId));
     setErrors((current) => {
@@ -55,10 +56,12 @@ export function usePlanApprovals(
     });
     try {
       await request();
+      return true;
     } catch (err) {
       if (stillOpen(startedChatId)) {
         setErrors((current) => ({ ...current, [callId]: failure(err) }));
       }
+      return false;
     } finally {
       decidingRef.current.delete(callId);
       setDeciding((calls) => {
@@ -70,10 +73,20 @@ export function usePlanApprovals(
     }
   }
 
-  function decide(callId: string, decision: PlanDecision) {
-    if (!client || !chatId || decidingRef.current.has(callId)) return;
+  /**
+   * Send the reader's verdict on a parked plan.
+   *
+   * The card holds the per-block feedback that produced a revision request and
+   * must not throw it away until the server has it, so the outcome is reported
+   * back rather than swallowed: a refused decision leaves the card, its
+   * comments, and the error notice standing together.
+   */
+  function decide(callId: string, decision: PlanDecision): Promise<boolean> {
+    if (!client || !chatId || decidingRef.current.has(callId)) {
+      return Promise.resolve(false);
+    }
     const startedChatId = chatId;
-    void send(
+    return send(
       callId,
       startedChatId,
       () => client.decidePlan(startedChatId, callId, decision),
