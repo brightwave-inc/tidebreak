@@ -591,6 +591,19 @@ pub(crate) trait GatewayDraftSource: Send + Sync {
         app: openwave_core::id::AppId,
         gateway_base_url: &str,
     ) -> openwave_core::Result<GatewayConsentRelay>;
+
+    /// Publish `app` to the team `team_id` at `gateway_base_url`, making it
+    /// reachable to that team's members through the gateway.
+    ///
+    /// Registration comes first, so what is published is the revision the
+    /// author is looking at rather than whatever the gateway happened to hold
+    /// from an earlier relay.
+    async fn publish(
+        &self,
+        app: openwave_core::id::AppId,
+        gateway_base_url: &str,
+        team_id: &str,
+    ) -> openwave_core::Result<GatewayPublish>;
 }
 
 /// Where a local app stands at one gateway deployment.
@@ -624,6 +637,38 @@ pub(crate) enum GatewayConsentRelay {
     NotRegistered,
     /// The gateway refused the consent, in its own words.
     Refused { message: String },
+}
+
+/// What publishing one local app to a team came back as.
+///
+/// The arms are the ones a surface renders differently. `NotSupported` and
+/// `NotRegistered` are both "the gateway holds nothing to publish", but they
+/// are reached for opposite reasons and lead to opposite advice: the first is
+/// the deployment's to fix, the second resolves itself the moment the app can
+/// be registered. A refusal carries the gateway's own code and message
+/// because only the gateway knows what it objected to — a bundle calling
+/// host-local bridge verbs names those verbs, and no wording assembled here
+/// could.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatewayPublish {
+    /// The gateway published the app's current revision to the team.
+    Published,
+    /// The app could not be registered at this deployment, so there was
+    /// nothing to publish — see [`GatewayRegistration::NotRegistered`].
+    NotRegistered,
+    /// The deployment did not accept the publish call at all: a gateway that
+    /// predates publishing, or an app or team this author no longer has the
+    /// authority to publish — the gateway answers both alike, on purpose.
+    NotSupported,
+    /// The shared app is disabled at the gateway.
+    AppDisabled { message: String },
+    /// The gateway refused for any other reason, in its own words. `code` is
+    /// the gateway's when it named one, and absent when the refusal came from
+    /// the registration half rather than the publish call.
+    Refused {
+        code: Option<String>,
+        message: String,
+    },
 }
 
 #[cfg(test)]

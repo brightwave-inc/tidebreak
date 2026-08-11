@@ -3,9 +3,11 @@ import type {
   AppDetail,
   AppGrantState,
   AppLibrary,
+  AppPublishResult,
   AppFolderInvokeResult,
   AppRestInvokeResult,
   AppViewSessionInfo,
+  GatewayTeams,
 } from "@/api";
 
 /**
@@ -55,6 +57,13 @@ export type AppsApis = {
    * ever crosses from here.
    */
   gatewayBaseUrl(): Promise<string | null>;
+  /**
+   * The teams this app could be published to, and whether publishing means
+   * anything on this profile at all.
+   */
+  publishTeams(): Promise<GatewayTeams>;
+  /** Publish the app's current revision to one team. */
+  publish(appId: string, teamId: string): Promise<AppPublishResult>;
 };
 
 export function appsApisFromClient(client: ApiClient): AppsApis {
@@ -89,5 +98,7 @@ export function appsApisFromClient(client: ApiClient): AppsApis {
       client.invokeAppFolder(appId, folder, op, path, contentBase64, replace),
     gatewayBaseUrl: async () =>
       (await client.getGatewayStatus()).base_url ?? null,
+    publishTeams: () => client.getGatewayTeams(),
+    publish: (appId, teamId) => client.publishApp(appId, teamId),
   };
 }

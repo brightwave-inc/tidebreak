@@ -475,6 +475,7 @@ pub fn app(state: AppState) -> Router {
                 .post(routes::post_app_grant)
                 .delete(routes::delete_app_grant),
         )
+        .route("/apps/{id}/publish", post(routes::post_app_publish))
         .route("/apps", get(routes::get_app_library))
         .route(
             "/apps/{id}",
@@ -483,6 +484,7 @@ pub fn app(state: AppState) -> Router {
         .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))
+        .route("/gateway/teams", get(routes::get_gateway_teams))
         .route(
             "/gateway/pairing/dismiss",
             post(routes::post_gateway_pairing_dismiss),

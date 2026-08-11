@@ -97,6 +97,8 @@ function apisWith(grant: AppGrantState): AppsApis {
       is_error: false,
     }),
     gatewayBaseUrl: vi.fn().mockResolvedValue("https://gateway.example.com"),
+    publishTeams: vi.fn().mockResolvedValue({ supported: false, teams: [] }),
+    publish: vi.fn().mockResolvedValue({ outcome: "published" }),
   };
 }
 
@@ -580,5 +582,148 @@ describe("AppDetailView", () => {
         screen.queryByRole("button", { name: "Connect at gateway" }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  const GATEWAY_BOUND: AppGrantState = {
+    granted: true,
+    bindings: [
+      {
+        app: null,
+        folder: null,
+        gateway_app: "gw-issues",
+        access: null,
+        name: "Issues (gateway)",
+        operation_ids: ["listIssues"],
+        granted: true,
+        definition_changed: false,
+      },
+    ],
+  };
+
+  it("publishes a gateway-bound app to a team, after saying what publishing means", async () => {
+    const apis = apisWith(GATEWAY_BOUND);
+    apis.publishTeams = vi.fn().mockResolvedValue({
+      supported: true,
+      teams: [
+        { id: "team-a", name: "Platform", enabled: true },
+        { id: "team-b", name: "Archived team", enabled: false },
+      ],
+    });
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+
+    // A team switched off at the gateway is shown and refused, never hidden:
+    // an author looking for it deserves to see why it cannot be chosen.
+    const archived = screen.getByRole("radio", { name: /Archived team/ });
+    expect(archived).toBeDisabled();
+    expect(screen.getByText("disabled at your gateway")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    // The preflight is the point of the flow: reach, and the fact that data
+    // baked into the bundle travels with the app where no manifest can list
+    // it.
+    expect(
+      screen.getByText(/will be able to open/, { exact: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Anything built into this app travels with it/),
+    ).toBeInTheDocument();
+    // This app is granted here, so the preflight makes no claim about whether
+    // the author has run it.
+    expect(
+      screen.queryByText(/may never have seen it work/),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Publish to Platform/ }));
+    await waitFor(() =>
+      expect(apis.publish).toHaveBeenCalledWith("app-1", "team-a"),
+    );
+    expect(
+      await screen.findByText(/is now available to Platform/),
+    ).toBeInTheDocument();
+  });
+
+  it("says so in the preflight when the app is not allowed to run here", async () => {
+    // Publishing is not gated on the local grant, so an app can be handed to a
+    // team without ever having been opened on this machine. The preflight says
+    // that plainly rather than letting the copy imply otherwise.
+    const ungranted: AppGrantState = {
+      granted: false,
+      bindings: GATEWAY_BOUND.bindings.map((binding) => ({
+        ...binding,
+        granted: false,
+      })),
+    };
+    const apis = apisWith(ungranted);
+    apis.publishTeams = vi.fn().mockResolvedValue({
+      supported: true,
+      teams: [{ id: "team-a", name: "Platform", enabled: true }],
+    });
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      screen.getByText(/may never have seen it work/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a gateway refusal in the gateway's own words", async () => {
+    const apis = apisWith(GATEWAY_BOUND);
+    apis.publishTeams = vi.fn().mockResolvedValue({
+      supported: true,
+      teams: [{ id: "team-a", name: "Platform", enabled: true }],
+    });
+    apis.publish = vi.fn().mockResolvedValue({
+      outcome: "refused",
+      code: "host_local_bridge_verbs",
+      message: "this bundle calls fs/read, which only the OpenWave host serves",
+    });
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: /Publish to Platform/ }));
+
+    // The gateway names the verbs; nothing here could reconstruct that list,
+    // so the message crosses verbatim rather than being summarized.
+    expect(
+      await screen.findByText(
+        "this bundle calls fs/read, which only the OpenWave host serves",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // Both halves of the predicate, because either one alone would let the
+  // button appear where publishing cannot work: an app that binds nothing at
+  // the gateway has nothing to publish there, and a profile whose gateway
+  // cannot hold shared apps has nowhere to publish to.
+  it.each([
+    [
+      "an app that binds nothing at the gateway",
+      GRANTED,
+      { supported: true, teams: [{ id: "team-a", name: "Platform", enabled: true }] },
+    ],
+    [
+      "a gateway that cannot hold shared apps",
+      GATEWAY_BOUND,
+      { supported: false, teams: [] },
+    ],
+  ])("offers no publish affordance for %s", async (_name, grant, targets) => {
+    const apis = apisWith(grant);
+    apis.publishTeams = vi.fn().mockResolvedValue(targets);
+    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+
+    expect(await screen.findByTitle("App: Fixture app")).toBeInTheDocument();
+    await waitFor(() => expect(apis.publishTeams).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: "Publish" }),
+    ).not.toBeInTheDocument();
   });
 });

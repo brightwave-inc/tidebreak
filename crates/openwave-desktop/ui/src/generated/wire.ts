@@ -382,6 +382,41 @@ export type AppInvokeRefusalKind = "app_not_found" | "not_pinned" | "consent_req
 export type AppLibrary = { apps: Array<AppSummary>, };
 
 /**
+ * What one publish attempt came back as.
+ *
+ * A closed union rather than prose, because the renderer branches on it: only
+ * `refused` and `app_disabled` carry words worth showing verbatim, and only
+ * `published` is a success. `message` is the gateway's own wherever it has
+ * one — a bundle refused for calling host-local bridge verbs names those
+ * verbs, and no wording assembled here could.
+ */
+export type AppPublishOutcome = "published" | "no_gateway" | "not_registered" | "not_supported" | "app_disabled" | "refused" | "unreachable";
+
+/**
+ * The publish body: which team the app is being published to.
+ */
+export type AppPublishRequest = { 
+/**
+ * The gateway's own team id, from `GET /gateway/teams`.
+ */
+team_id: string, };
+
+/**
+ * The publish answer: one outcome, plus whatever words came with it.
+ */
+export type AppPublishResult = { outcome: AppPublishOutcome, 
+/**
+ * The gateway's own message, when the outcome carries one.
+ */
+message?: string, 
+/**
+ * The gateway's own refusal code, when it named one — so a renderer can
+ * tell a bundle it must change from a team it may not publish to without
+ * matching on wording.
+ */
+code?: string, };
+
+/**
  * Identifies one immutable revision of a local app.
  */
 export type AppRevisionId = string;
@@ -1172,6 +1207,27 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
  * its presence).
  */
 export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
+
+/**
+ * One team the signed-in user belongs to.
+ *
+ * The gateway's slug is deliberately not projected: nothing the renderer
+ * does needs it, and a publish names the id. A disabled team is carried
+ * rather than filtered so the picker can show it, greyed, instead of leaving
+ * the author looking for a team that silently vanished.
+ */
+export type GatewayTeamInfo = { id: string, name: string, enabled: boolean, };
+
+/**
+ * Renderer-safe list of the teams the signed-in user may publish a local app
+ * to, fetched live from the gateway.
+ *
+ * `supported` is false for every state where the affordance has no meaning —
+ * an unmanaged profile, a managed one with no gateway URL, or a deployment
+ * that predates the teams read — so the renderer hides publishing rather
+ * than offering an empty picker it cannot explain.
+ */
+export type GatewayTeams = { supported: boolean, teams: Array<GatewayTeamInfo>, };
 
 /**
  * How far a standing grant reaches.

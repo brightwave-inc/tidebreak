@@ -36,9 +36,12 @@ use openwave_core::local_app::{
 use openwave_core::{AgentError, Result, Store};
 
 use crate::connected_apps::{
-    GatewayConsentRelay, GatewayDispatchError, GatewayDraftSource, GatewayRegistration,
+    GatewayConsentRelay, GatewayDispatchError, GatewayDraftSource, GatewayPublish,
+    GatewayRegistration,
 };
-use crate::connectors::{GatewayConsentOutcome, GatewayInvokeOutcome, GatewayRegistrationOutcome};
+use crate::connectors::{
+    GatewayConsentOutcome, GatewayInvokeOutcome, GatewayPublishOutcome, GatewayRegistrationOutcome,
+};
 use crate::gateway_runtime::GatewayRuntime;
 
 /// The client name every registration this host makes is stamped with, so a
@@ -102,6 +105,14 @@ pub(crate) trait GatewayDraftClient: Send + Sync {
         shared_app_id: &str,
         revision_id: &str,
     ) -> Result<Option<GatewayConsentOutcome>>;
+
+    /// Publish a registered shared app to one of the author's teams.
+    async fn publish(
+        &self,
+        gateway_base_url: &str,
+        shared_app_id: &str,
+        team_id: &str,
+    ) -> Result<Option<GatewayPublishOutcome>>;
 }
 
 /// The production client: the three registration calls over the one gateway
@@ -206,6 +217,18 @@ impl GatewayDraftClient for GatewayConnectorDraftClient {
         connection
             .consent_shared_app(shared_app_id, Some(revision_id))
             .await
+    }
+
+    async fn publish(
+        &self,
+        gateway_base_url: &str,
+        shared_app_id: &str,
+        team_id: &str,
+    ) -> Result<Option<GatewayPublishOutcome>> {
+        let Some(connection) = self.connection_at(gateway_base_url).await? else {
+            return Ok(None);
+        };
+        connection.publish_shared_app(shared_app_id, team_id).await
     }
 }
 
@@ -495,6 +518,53 @@ impl GatewayDraftSource for GatewayDraftRegistry {
             }
         }
     }
+
+    /// Publish the app's *current* revision to `team_id`.
+    ///
+    /// Registration runs first and is not an optimization: publishing is the
+    /// author saying "this, the thing on my screen, is what my team should
+    /// get". A mapping left behind by an earlier relay can name an older
+    /// revision, and publishing that would hand the team something the author
+    /// never chose — so the revision is synced before the team ever sees it,
+    /// and a sync that cannot happen refuses the publish rather than
+    /// publishing something else.
+    ///
+    /// Nothing is recorded locally. What a team may reach is the gateway's
+    /// state to hold, and a copy here would be a second answer that goes
+    /// stale the moment an operator revokes the share.
+    async fn publish(
+        &self,
+        app: AppId,
+        gateway_base_url: &str,
+        team_id: &str,
+    ) -> Result<GatewayPublish> {
+        let base_url = normalized_gateway_base_url(gateway_base_url);
+        let shared_app_id = match self.ensure_registered(app, &base_url).await? {
+            GatewayRegistration::Registered { shared_app_id, .. } => shared_app_id,
+            GatewayRegistration::NotRegistered => return Ok(GatewayPublish::NotRegistered),
+            GatewayRegistration::Refused { message } => {
+                return Ok(GatewayPublish::Refused {
+                    code: None,
+                    message,
+                })
+            }
+        };
+        match self
+            .client
+            .publish(&base_url, &shared_app_id, team_id)
+            .await?
+        {
+            None => Ok(GatewayPublish::NotSupported),
+            Some(GatewayPublishOutcome::Published) => Ok(GatewayPublish::Published),
+            Some(GatewayPublishOutcome::AppDisabled { message }) => {
+                Ok(GatewayPublish::AppDisabled { message })
+            }
+            Some(GatewayPublishOutcome::Refused { code, message }) => Ok(GatewayPublish::Refused {
+                code: Some(code),
+                message,
+            }),
+        }
+    }
 }
 
 /// Relay one shared-app call, healing the gateway's own consent gate at most
@@ -661,6 +731,15 @@ mod tests {
         async fn relay_consent(&self, _app: AppId, _base_url: &str) -> Result<GatewayConsentRelay> {
             self.relayed.fetch_add(1, Ordering::SeqCst);
             Ok(GatewayConsentRelay::Consented)
+        }
+
+        async fn publish(
+            &self,
+            _app: AppId,
+            _base_url: &str,
+            _team_id: &str,
+        ) -> Result<GatewayPublish> {
+            unreachable!("the invoke relay never publishes")
         }
     }
 

@@ -16,8 +16,10 @@ use openwave_core::local_app::{
 
 use base64::Engine as _;
 
-use crate::connected_apps::{GatewayConsentRelay, GatewayDraftSource, GatewayRegistration};
-use crate::connectors::{GatewayConsentOutcome, GatewayRegistrationOutcome};
+use crate::connected_apps::{
+    GatewayConsentRelay, GatewayDraftSource, GatewayPublish, GatewayRegistration,
+};
+use crate::connectors::{GatewayConsentOutcome, GatewayPublishOutcome, GatewayRegistrationOutcome};
 use crate::gateway_drafts::{GatewayDraftClient, GatewayDraftRegistry, SharedAppProjection};
 
 use super::*;
@@ -33,6 +35,7 @@ struct FakeGateway {
     creates: StdMutex<VecDeque<Option<GatewayRegistrationOutcome>>>,
     appends: StdMutex<VecDeque<Option<GatewayRegistrationOutcome>>>,
     consents: StdMutex<VecDeque<Option<GatewayConsentOutcome>>>,
+    publishes: StdMutex<VecDeque<Option<GatewayPublishOutcome>>>,
     projections: StdMutex<Vec<SharedAppProjection>>,
 }
 
@@ -62,6 +65,11 @@ impl FakeGateway {
 
     fn consents(self, answers: impl IntoIterator<Item = Option<GatewayConsentOutcome>>) -> Self {
         *self.consents.lock().unwrap() = answers.into_iter().collect();
+        self
+    }
+
+    fn publishes(self, answers: impl IntoIterator<Item = Option<GatewayPublishOutcome>>) -> Self {
+        *self.publishes.lock().unwrap() = answers.into_iter().collect();
         self
     }
 
@@ -125,6 +133,23 @@ impl GatewayDraftClient for FakeGateway {
             .unwrap()
             .pop_front()
             .unwrap_or(Some(GatewayConsentOutcome::Consented)))
+    }
+
+    async fn publish(
+        &self,
+        gateway_base_url: &str,
+        shared_app_id: &str,
+        team_id: &str,
+    ) -> openwave_core::Result<Option<GatewayPublishOutcome>> {
+        self.calls.lock().unwrap().push(format!(
+            "publish {gateway_base_url} {shared_app_id} {team_id}"
+        ));
+        Ok(self
+            .publishes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Some(GatewayPublishOutcome::Published)))
     }
 }
 
@@ -406,6 +431,99 @@ async fn a_moved_revision_pin_is_re_synced_before_consent_is_relayed_again() {
     );
 }
 
+/// Publishing is the author saying "this, the thing on my screen, is what my
+/// team should get", so what crosses has to be the current revision. A mapping
+/// left pointing at an older one from an earlier relay is synced first — a team
+/// that received the stale bundle would be running something the author never
+/// chose, and nothing afterwards would reveal it.
+#[tokio::test]
+async fn a_publish_pushes_the_current_revision_before_the_team_can_reach_it() {
+    let fixture = Fixture::new().await;
+    let gateway = Arc::new(FakeGateway::default());
+    let registry = fixture.registry(gateway.clone());
+    registry
+        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .await
+        .unwrap();
+    fixture.revise(b"<html>published</html>").await;
+
+    let published = registry
+        .publish(fixture.app_id, GATEWAY_A, "team-7")
+        .await
+        .unwrap();
+
+    assert_eq!(published, GatewayPublish::Published);
+    let calls = gateway.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.split(' ').next().unwrap())
+            .collect::<Vec<_>>(),
+        ["create", "append", "publish"],
+        "{calls:?}"
+    );
+    assert!(
+        calls[2].ends_with("shared-1 team-7"),
+        "the publish names the registered app and the chosen team: {calls:?}"
+    );
+    let pushed = gateway.projections.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&pushed.bundle_base64)
+            .unwrap(),
+        b"<html>published</html>",
+        "the team receives the revision the author published"
+    );
+}
+
+/// Three ways a publish does not happen, each of which has to stay
+/// distinguishable: the app could not be registered at all, the deployment
+/// does not answer the publish route, and the gateway refused a shared app it
+/// has switched off. They lead to different advice, and the gateway's own
+/// words are the only ones worth showing for the last.
+#[tokio::test]
+async fn a_publish_the_gateway_will_not_complete_stays_typed() {
+    let fixture = Fixture::new().await;
+    let unregisterable = Arc::new(FakeGateway::default().creates([None]));
+    assert_eq!(
+        fixture
+            .registry(unregisterable)
+            .publish(fixture.app_id, GATEWAY_A, "team-7")
+            .await
+            .unwrap(),
+        GatewayPublish::NotRegistered,
+        "a gateway that cannot hold the app has nothing to publish"
+    );
+
+    let old = Arc::new(FakeGateway::default().publishes([None]));
+    assert_eq!(
+        fixture
+            .registry(old)
+            .publish(fixture.app_id, GATEWAY_B, "team-7")
+            .await
+            .unwrap(),
+        GatewayPublish::NotSupported,
+        "a 404 on the publish route is a deployment that cannot publish, not a fault"
+    );
+
+    let disabled = Arc::new(FakeGateway::default().publishes([Some(
+        GatewayPublishOutcome::AppDisabled {
+            message: "this app is disabled at your gateway".into(),
+        },
+    )]));
+    assert_eq!(
+        fixture
+            .registry(disabled)
+            .publish(fixture.app_id, GATEWAY_B, "team-7")
+            .await
+            .unwrap(),
+        GatewayPublish::AppDisabled {
+            message: "this app is disabled at your gateway".into()
+        },
+        "the gateway's refusal reaches the author in the gateway's own words"
+    );
+}
+
 /// The grant is a local decision, and registration is neither part of the
 /// transaction nor part of the response: a gateway that is down must not cost
 /// the user their consent, and a gateway that is slow must not hold the
@@ -438,6 +556,17 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
         ) -> openwave_core::Result<GatewayConsentRelay> {
             self.relayed
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(openwave_core::AgentError::Store(
+                "the gateway is down".into(),
+            ))
+        }
+
+        async fn publish(
+            &self,
+            _app: AppId,
+            _gateway_base_url: &str,
+            _team_id: &str,
+        ) -> openwave_core::Result<GatewayPublish> {
             Err(openwave_core::AgentError::Store(
                 "the gateway is down".into(),
             ))

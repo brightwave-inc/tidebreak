@@ -278,6 +278,42 @@ pub enum GatewayConsentOutcome {
     Refused { message: String },
 }
 
+/// One team the authenticated user belongs to, from `/api/v1/cli/teams`.
+///
+/// Exactly the set a publish may name: the gateway accepts a publish to a
+/// team the caller is a member of and refuses every other one, so this read
+/// is what a publish affordance offers rather than a broader directory.
+/// `enabled` is carried because a disabled team is still a membership — it is
+/// shown and refused rather than hidden, so the author is never left
+/// wondering where a team went.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayTeam {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub enabled: bool,
+}
+
+/// What one shared-app publish came back as.
+///
+/// `AppDisabled` is separated from the rest because it is the one refusal
+/// that is not about the bundle or the team: the shared app itself is
+/// switched off at the deployment, which an author resolves with an operator
+/// rather than by editing anything. Every other typed refusal — a bundle
+/// naming host-local bridge verbs the gateway cannot serve, a team the
+/// caller does not belong to — carries the gateway's own code and message,
+/// because the gateway is the only thing that knows what it objected to. A
+/// `404` is the `Ok(None)` half, as everywhere else on this client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayPublishOutcome {
+    /// The gateway published the app's current revision to the named team.
+    Published,
+    /// The shared app is disabled at this deployment.
+    AppDisabled { message: String },
+    /// The gateway refused for any other typed reason, in its own words.
+    Refused { code: String, message: String },
+}
+
 /// One minted access/refresh pair, resource-bound.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenSet {
@@ -597,6 +633,23 @@ impl GatewayAuth {
         Ok(Some(list.apps))
     }
 
+    /// The teams the authenticated user belongs to, or `None` against a
+    /// gateway that predates the teams read.
+    pub async fn teams(&self, access_token: &str) -> Result<Option<Vec<GatewayTeam>>> {
+        let response = self
+            .http
+            .get(self.endpoint("/api/v1/cli/teams")?)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|error| gateway_error("team request", error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let list: TeamListResponse = decode_json(response, "team request").await?;
+        Ok(Some(list.teams))
+    }
+
     /// The operations one entitled connected app declares, or `None` against a
     /// gateway that predates the per-app catalog read.
     ///
@@ -783,6 +836,49 @@ impl GatewayAuth {
         let status = response.status();
         let body = read_bounded(response, OPERATION).await?;
         decode_shared_app_consent(OPERATION, status, &body).map(Some)
+    }
+
+    /// Publish one registered shared app to a team the caller belongs to.
+    ///
+    /// The gateway decides everything that matters here — whether the caller
+    /// may publish this app, whether the team is theirs, and whether the
+    /// bundle is one it can serve at all (a bundle calling host-local bridge
+    /// verbs is refused, because only the OpenWave host answers them). So
+    /// nothing is pre-judged locally: the id and the team cross as given and
+    /// the answer is read back typed.
+    ///
+    /// `Ok(None)` is the route answering `404`, which covers both of its
+    /// readings — a deployment that does not serve publishing yet, and an app
+    /// or team the caller has no authority over, which the gateway collapses
+    /// to the same status on purpose. Neither leaves anything here to publish.
+    pub async fn publish_shared_app(
+        &self,
+        access_token: &str,
+        shared_app_id: &str,
+        team_id: &str,
+    ) -> Result<Option<GatewayPublishOutcome>> {
+        const OPERATION: &str = "shared app publish";
+
+        validate_gateway_app_id(shared_app_id)?;
+        let mut url = self.endpoint("/api/v1/cli/shared-apps")?;
+        url.path_segments_mut()
+            .map_err(|()| gateway_error("configuration", "could not build endpoint URL"))?
+            .push(shared_app_id)
+            .push("publish");
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "team_id": team_id }))
+            .send()
+            .await
+            .map_err(|error| gateway_error(OPERATION, error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        let body = read_bounded(response, OPERATION).await?;
+        decode_shared_app_publish(OPERATION, status, &body).map(Some)
     }
 
     async fn exchange_code(
@@ -1253,6 +1349,27 @@ impl GatewayConnection {
         self.auth.apps(&token).await
     }
 
+    /// The teams the signed-in user belongs to, with a `control` token;
+    /// `None` when the gateway predates the teams read.
+    pub async fn teams(&self) -> Result<Option<Vec<GatewayTeam>>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth.teams(&token).await
+    }
+
+    /// Publish a registered shared app to one of the signed-in user's teams
+    /// with a `control` token; `None` when nothing at the gateway answers for
+    /// the app or the route.
+    pub async fn publish_shared_app(
+        &self,
+        shared_app_id: &str,
+        team_id: &str,
+    ) -> Result<Option<GatewayPublishOutcome>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth
+            .publish_shared_app(&token, shared_app_id, team_id)
+            .await
+    }
+
     /// One entitled app's declared operations with a `control` token; `None`
     /// when the gateway predates the per-app catalog read.
     pub async fn app_operations(
@@ -1425,6 +1542,11 @@ struct ModelListResponse {
 #[derive(Deserialize)]
 struct AppListResponse {
     apps: Vec<GatewayApp>,
+}
+
+#[derive(Deserialize)]
+struct TeamListResponse {
+    teams: Vec<GatewayTeam>,
 }
 
 /// The per-app catalog read's body, in either shape the gateway may serve:
@@ -1718,6 +1840,41 @@ fn decode_shared_app_consent(
     })
 }
 
+/// Read the gateway's answer to a shared-app publish.
+///
+/// A success carries no body worth reading — the gateway answers `204` — so
+/// everything here is about the refusals, read with the same tolerant
+/// envelope reader the rest of this client uses. The gateway's own code
+/// survives rather than being folded into prose: the host branches on
+/// `app_disabled`, and a caller that renders the refusal needs the code to
+/// tell a bundle it must change (`host_local_bridge_verbs`) from a team it
+/// may not publish to (`not_a_team_member`) without matching on wording.
+fn decode_shared_app_publish(
+    operation: &'static str,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<GatewayPublishOutcome> {
+    if status.is_success() {
+        return Ok(GatewayPublishOutcome::Published);
+    }
+    let Some((code, message)) = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(failure_envelope)
+    else {
+        return Err(gateway_error(
+            operation,
+            format!("HTTP status {}", status.as_u16()),
+        ));
+    };
+    let message = message.unwrap_or_else(|| code.clone());
+    Ok(if code == "app_disabled" {
+        GatewayPublishOutcome::AppDisabled { message }
+    } else {
+        GatewayPublishOutcome::Refused { code, message }
+    })
+}
+
 /// The `(code, message)` of a typed gateway failure, in any of the shapes the
 /// route may carry it in — see [`decode_shared_app_invoke`].
 fn failure_envelope(payload: &serde_json::Value) -> Option<(String, Option<String>)> {
@@ -1880,6 +2037,61 @@ mod tests {
             GatewayInvokeOutcome::Refused {
                 message: "nope".into()
             }
+        );
+    }
+
+    /// A publish refusal is the only thing an author sees when publishing
+    /// fails, so the gateway's own words have to survive intact — the
+    /// `host_local_bridge_verbs` message names the verbs the bundle uses, and
+    /// nothing on this side can reconstruct that list. The code survives too,
+    /// because `app_disabled` is the host's to branch on.
+    #[test]
+    fn a_publish_refusal_keeps_the_gateway_code_and_its_message() {
+        let decode = |status: u16, body: &str| {
+            decode_shared_app_publish(
+                "shared app publish",
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                body.as_bytes(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            decode(204, ""),
+            GatewayPublishOutcome::Published,
+            "the gateway answers a publish with no content"
+        );
+        let verbs = "this bundle calls fs/read and fs/write, which only the OpenWave \
+                     host serves";
+        assert_eq!(
+            decode(
+                422,
+                &format!(
+                    "{{\"error\":{{\"code\":\"host_local_bridge_verbs\",\
+                     \"message\":\"{verbs}\"}}}}"
+                ),
+            ),
+            GatewayPublishOutcome::Refused {
+                code: "host_local_bridge_verbs".into(),
+                message: verbs.into(),
+            }
+        );
+        assert_eq!(
+            decode(
+                409,
+                r#"{"error":{"code":"app_disabled","message":"this app is off"}}"#
+            ),
+            GatewayPublishOutcome::AppDisabled {
+                message: "this app is off".into()
+            }
+        );
+        assert!(
+            decode_shared_app_publish(
+                "shared app publish",
+                reqwest::StatusCode::BAD_GATEWAY,
+                b"<html>nope</html>",
+            )
+            .is_err(),
+            "an answer carrying no typed refusal is a fault, not a decision"
         );
     }
 
