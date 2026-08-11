@@ -56,23 +56,6 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "together",
 ];
 
-const UNVERIFIED_TOOLTIP =
-  "OpenWave hasn't verified tool-calling and streaming for this model; issues are likely the model or provider, not the app";
-
-export function ModelVerificationChip({ model }: { model: ModelInfo }) {
-  if (model.verification !== "unverified") return null;
-  return (
-    <WithTooltip label={UNVERIFIED_TOOLTIP} side="top">
-      <span
-        className="text-muted-foreground border-border rounded-full border px-1.5 py-0.5 text-[0.65rem] leading-none"
-        aria-label={`Unverified. ${UNVERIFIED_TOOLTIP}`}
-      >
-        Unverified
-      </span>
-    </WithTooltip>
-  );
-}
-
 /** Honest warning for routes OpenWave must run without host tools. */
 export function ModelToolCapabilityChip({ model }: { model: ModelInfo }) {
   if (model.supports_tools) return null;
@@ -440,6 +423,13 @@ export function ModelMenu({
           {groups.map((group) => (
             <div key={group.provider}>
               <DropdownMenuSeparator />
+              {/* A plain header rather than a menu item: it names the run, and
+                  arrowing through the picker should land on models only. The
+                  same vendor can arrive from two providers (natively and via
+                  the gateway), so the divider alone reads as a duplicate. */}
+              <div className="text-muted-foreground px-2 py-1.5 text-xs font-medium tracking-wide uppercase">
+                {providerLabel(group.provider)}
+              </div>
               {group.models.map((model) => {
                 const selected = !isDefault && canonical === model.key;
                 return (
@@ -466,7 +456,6 @@ export function ModelMenu({
                       className="size-4 shrink-0"
                     />
                     <span className="text-sm">{model.display_name}</span>
-                    <ModelVerificationChip model={model} />
                     <ModelToolCapabilityChip model={model} />
                     {selected && <Check className="ml-auto size-4" />}
                   </DropdownMenuItem>
