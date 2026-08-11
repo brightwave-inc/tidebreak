@@ -175,8 +175,6 @@ const RELAY_LISTEN_ENV: &str = "OPENWAVE_RELAY_LISTEN";
 /// supervisor endpoint on the internal network.
 const RELAY_TARGET_ENV: &str = "OPENWAVE_RELAY_TARGET";
 
-/// The default runtime binary, resolved on `PATH`.
-const DEFAULT_BINARY: &str = "docker";
 /// The published documents-variant agent image: the agent binary plus
 /// LibreOffice and the document skills' pinned Python dependencies, built and
 /// pushed by `.github/workflows/publish-sandbox-image.yml` so background
@@ -290,7 +288,11 @@ pub struct DockerConfig {
 impl Default for DockerConfig {
     fn default() -> Self {
         Self {
-            binary: DEFAULT_BINARY.to_owned(),
+            // Preferred on `PATH`, falling back to the well-known install
+            // locations a Finder-launched process cannot see on its inherited
+            // `PATH`. Resolved here because this default is built once during
+            // server startup and copied into the backend.
+            binary: openwave_code_execution::resolve_container_runtime_binary(),
             image: default_image(),
             listener_port: DEFAULT_LISTENER_PORT,
             command: Vec::new(),

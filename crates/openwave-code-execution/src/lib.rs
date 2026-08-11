@@ -48,7 +48,7 @@ pub use agent_plugins::{
     PLUGIN_DATA_VARIABLE, PLUGIN_ROOT_VARIABLE,
 };
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
-pub use docker::DockerExecutionProvider;
+pub use docker::{resolve_container_runtime_binary, DockerExecutionProvider};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};
 pub use host_paths::{
     resolve_scratch_directory, try_resolve_scratch_directory, FilePrecondition, FileStamp,
