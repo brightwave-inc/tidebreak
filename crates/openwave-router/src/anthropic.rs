@@ -21,22 +21,14 @@ use openwave_core::provider::{
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
-use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
-    classify_provider_error_redacting, frame_data, read_bounded_error_body, SseFramer,
+    classify_in_band_error, classify_provider_error, frame_data, read_bounded_error_body, SseFramer,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const VERTEX_ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-#[derive(Clone)]
-struct VertexEndpoint {
-    project_id: String,
-    location: String,
-}
 /// Description for the synthetic tool that carries a constrained response.
 ///
 /// The model is told what the call is for, because a forced tool with an opaque
@@ -52,8 +44,6 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
-    vertex: Option<VertexEndpoint>,
-    request_auth: Option<std::sync::Arc<dyn crate::http::RequestAuthenticator>>,
     provider_label: &'static str,
     /// Per-request credential supplier for gateways that mint short-lived
     /// tokens. Takes precedence over `api_key` when present.
@@ -71,50 +61,10 @@ impl AnthropicProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            vertex: None,
-            request_auth: None,
             provider_label: "anthropic",
             token_source: None,
             conversation_attribution: false,
         }
-    }
-
-    /// Build the native Anthropic Messages protocol on Vertex AI.
-    ///
-    /// The host is derived from a validated Google Cloud location and cannot
-    /// be supplied by credential material. The bearer source is shared with
-    /// the native Gemini-on-Vertex adapter and refreshes behind its own lock.
-    pub fn vertex(
-        project_id: impl Into<String>,
-        location: impl Into<String>,
-        token_source: std::sync::Arc<dyn crate::BearerTokenSource>,
-    ) -> Result<Self> {
-        let project_id = project_id.into();
-        let location = location.into();
-        if !valid_resource_segment(&project_id) {
-            return Err(AgentError::config("invalid Vertex AI project"));
-        }
-        if !valid_vertex_location(&location) {
-            return Err(AgentError::config("invalid Vertex AI location"));
-        }
-        let base_url = if location == "global" {
-            "https://aiplatform.googleapis.com".to_string()
-        } else {
-            format!("https://{location}-aiplatform.googleapis.com")
-        };
-        Ok(Self {
-            client: crate::http::streaming_client(),
-            api_key: String::new(),
-            base_url,
-            vertex: Some(VertexEndpoint {
-                project_id,
-                location,
-            }),
-            request_auth: None,
-            provider_label: "vertex",
-            token_source: Some(token_source),
-            conversation_attribution: false,
-        })
     }
 
     /// Override the base URL — e.g. to route through a gateway that speaks the
@@ -122,18 +72,6 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
-        self
-    }
-
-    /// Authenticate the exact serialized request through a shared transport.
-    #[must_use]
-    pub(crate) fn with_request_auth(
-        mut self,
-        auth: std::sync::Arc<dyn crate::http::RequestAuthenticator>,
-        provider_label: &'static str,
-    ) -> Self {
-        self.request_auth = Some(auth);
-        self.provider_label = provider_label;
         self
     }
 
@@ -168,35 +106,21 @@ impl ModelProvider for AnthropicProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        if self.vertex.is_some() && req.vendor_web_search.is_some() {
-            return Err(AgentError::config(
-                "Vertex AI Claude does not support Anthropic server-side web search",
-            ));
-        }
         let mut body = build_request_json(&req)?;
-        if self.vertex.is_some() {
-            body.as_object_mut()
-                .expect("the Anthropic request body is an object")
-                .remove("model");
-            body["anthropic_version"] = json!(VERTEX_ANTHROPIC_VERSION);
-        }
         // `build_request_json` has already rejected a format it cannot enforce.
         let output_tool = match &req.response_format {
             Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
             _ => None,
         };
-        let api_key = match (&self.request_auth, &self.token_source) {
-            (Some(_), _) => String::new(),
-            (None, Some(source)) => source.bearer_token_for(req.conversation).await?,
-            (None, None) => self.api_key.clone(),
+        let api_key = match &self.token_source {
+            Some(source) => source.bearer_token_for(req.conversation).await?,
+            None => self.api_key.clone(),
         };
 
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
         // router can classify and fail over; the returned stream only yields
         // normalized events.
-        let response = self
-            .send(&body, &api_key, req.conversation, &req.model)
-            .await?;
+        let response = self.send(&body, &api_key, req.conversation).await?;
 
         // Only a request that can pause needs its raw blocks kept, and only
         // Anthropic's own server tools pause a turn.
@@ -207,9 +131,7 @@ impl ModelProvider for AnthropicProvider {
         };
         let provider = self.clone();
         let conversation = req.conversation;
-        let model = req.model.clone();
         let provider_name = self.provider_name();
-        let vertex_project_id = self.vertex.as_ref().map(|vertex| vertex.project_id.clone());
         let ceiling = crate::http::timeouts().total_stream;
         let stream = async_stream::stream! {
             let mut response = response;
@@ -218,7 +140,6 @@ impl ModelProvider for AnthropicProvider {
                 output_tool,
                 raw_blocks: continuations_allowed.then(RawAssistantBlocks::default),
                 replay_origin: Some(replay_origin),
-                vertex_project_id,
                 ..StreamState::default()
             };
             let mut continuations = 0u32;
@@ -304,7 +225,7 @@ impl ModelProvider for AnthropicProvider {
                         .unwrap_or_default();
                     replace_paused_assistant_message(&mut body, blocks, continuations == 1);
                     state.begin_continuation();
-                    match provider.send(&body, &api_key, conversation, &model).await {
+                    match provider.send(&body, &api_key, conversation).await {
                         Ok(next) => {
                             response = next;
                             continue 'legs;
@@ -343,34 +264,17 @@ impl AnthropicProvider {
         body: &Value,
         api_key: &str,
         conversation: Option<openwave_core::id::ChatId>,
-        model: &str,
     ) -> Result<reqwest::Response> {
         let body = serde_json::to_vec(body)?;
-        let mut request = if let Some(vertex) = &self.vertex {
-            if !valid_anthropic_model_id(model) {
-                return Err(AgentError::config("invalid Vertex AI Claude model id"));
-            }
-            self.client
-                .post(format!(
-                    "{}/v1/projects/{}/locations/{}/publishers/anthropic/models/{}:streamRawPredict",
-                    self.base_url, vertex.project_id, vertex.location, model
-                ))
-                .bearer_auth(api_key)
-                .header("content-type", "application/json")
-        } else {
-            let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-            let url = reqwest::Url::parse(&url)
-                .map_err(|_| AgentError::config("invalid Messages API endpoint"))?;
-            let request = self
-                .client
-                .post(url.clone())
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json");
-            match &self.request_auth {
-                Some(auth) => auth.authenticate(request, &url, &body)?,
-                None => request.header("x-api-key", api_key),
-            }
-        };
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let url = reqwest::Url::parse(&url)
+            .map_err(|_| AgentError::config("invalid Messages API endpoint"))?;
+        let request = self
+            .client
+            .post(url.clone())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json");
+        let mut request = request.header("x-api-key", api_key);
         // A conversation is declared only where one is configured to be read.
         // The id is a UUID, so it satisfies the gateway's bound on the value
         // (1-256 ASCII graphic bytes) by construction.
@@ -396,21 +300,12 @@ impl AnthropicProvider {
         if !status.is_success() {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(match &self.vertex {
-                Some(vertex) => classify_provider_error_redacting(
-                    self.provider_label,
-                    status.as_u16(),
-                    &body,
-                    retry_after,
-                    &[vertex.project_id.as_str()],
-                ),
-                None => classify_provider_error(
-                    self.provider_label,
-                    status.as_u16(),
-                    &body,
-                    retry_after,
-                ),
-            });
+            return Err(classify_provider_error(
+                self.provider_label,
+                status.as_u16(),
+                &body,
+                retry_after,
+            ));
         }
         Ok(response)
     }
@@ -418,14 +313,6 @@ impl AnthropicProvider {
     fn provider_name(&self) -> &'static str {
         self.provider_label
     }
-}
-
-fn valid_anthropic_model_id(model: &str) -> bool {
-    !model.is_empty()
-        && model.len() <= 128
-        && model
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
 }
 
 /// How many times one turn may be resumed after the provider pauses it.
@@ -1044,9 +931,6 @@ struct StreamState {
     /// Route that minted this stream's provider-executed calls, so their
     /// native blocks can be origin-gated on a later request.
     replay_origin: Option<ReasoningOrigin>,
-    /// Sensitive route identity retained only so accepted Vertex streams can
-    /// redact Google resource paths and attribute in-band failures correctly.
-    vertex_project_id: Option<String>,
 }
 
 impl StreamState {
@@ -1198,12 +1082,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
         Some("error") => {
             state.terminal = true;
             let error = data.get("error").unwrap_or(data);
-            let error = match state.vertex_project_id.as_deref() {
-                Some(project_id) => {
-                    classify_in_band_error_redacting("vertex", error, &[project_id])
-                }
-                None => classify_in_band_error(stream_provider_label(state), error),
-            };
+            let error = classify_in_band_error(stream_provider_label(state), error);
             vec![ProviderEvent::Failed {
                 error: ProviderErrorInfo::from_error(&error),
             }]
@@ -2385,12 +2264,13 @@ mod tests {
             ephemeral_cache_control()
         );
 
-        // The same native protocol hosted by Vertex has a distinct route
-        // identity. Its blocks replay on Vertex, but never on direct Anthropic.
-        req.provider = Some(ProviderId::new("vertex"));
+        // The same native protocol served through a gateway has a distinct
+        // route identity. Its blocks replay on the gateway, but never on
+        // direct Anthropic.
+        req.provider = Some(ProviderId::new("model_gateway"));
         req.messages[1].reasoning = MessageReasoning::captured(
             ReasoningOrigin {
-                provider: Some(ProviderId::new("vertex")),
+                provider: Some(ProviderId::new("model_gateway")),
                 model: "claude-opus-5".into(),
             },
             reasoning.clone(),
@@ -2433,7 +2313,7 @@ mod tests {
             // Another provider entirely.
             step(Some("openai"), "claude-opus-5"),
             // The same protocol through a different serving provider.
-            step(Some("vertex"), "claude-opus-5"),
+            step(Some("model_gateway"), "claude-opus-5"),
         ] {
             let mut req = reasoning_request("claude-opus-5", None);
             req.messages = vec![ChatMessage::text(Role::User, "hi"), origin];
@@ -2501,15 +2381,15 @@ mod tests {
             Reason(StopReason::EndTurn)
         );
         assert!(matches!(
-            map_stop_reason("bedrock", "pause_turn"),
-            Interrupted(error) if error.message == "bedrock: the provider paused the turn"
+            map_stop_reason("model_gateway", "pause_turn"),
+            Interrupted(error) if error.message == "model_gateway: the provider paused the turn"
         ));
         assert!(matches!(
-            map_stop_reason("bedrock", "model_context_window_exceeded"),
+            map_stop_reason("model_gateway", "model_context_window_exceeded"),
             Interrupted(error)
                 if error.kind == "prompt_too_long"
                     && error.message
-                        == "bedrock: the model's context window was exceeded mid-response"
+                        == "model_gateway: the model's context window was exceeded mid-response"
         ));
     }
 
@@ -3329,136 +3209,5 @@ mod tests {
             })
             .await;
         assert_eq!(source.0.lock().unwrap().as_slice(), &[Some(conversation)]);
-    }
-
-    #[tokio::test]
-    async fn vertex_error_does_not_expose_the_service_account_project() {
-        use axum::http::StatusCode;
-        use axum::response::IntoResponse;
-        use axum::routing::post;
-        use axum::{Json, Router};
-
-        const PROJECT_ID: &str = "customer-project-123";
-
-        struct StaticToken;
-
-        #[async_trait::async_trait]
-        impl crate::BearerTokenSource for StaticToken {
-            async fn bearer_token(&self) -> openwave_core::Result<String> {
-                Ok("vertex-bearer".into())
-            }
-        }
-
-        async fn deny() -> impl IntoResponse {
-            (
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": {
-                        "code": "permission_denied",
-                        "message": format!(
-                            "Permission denied on projects/{PROJECT_ID}/locations/global"
-                        ),
-                    }
-                })),
-            )
-        }
-
-        let app = Router::new().fallback(post(deny));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let provider =
-            AnthropicProvider::vertex(PROJECT_ID, "global", std::sync::Arc::new(StaticToken))
-                .unwrap()
-                .with_base_url(format!("http://{address}"));
-        let error = match provider
-            .stream(ChatRequest {
-                provider: Some(ProviderId::new("vertex")),
-                model: "claude-opus-4-8".into(),
-                messages: vec![ChatMessage::text(Role::User, "hi")],
-                ..Default::default()
-            })
-            .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("Vertex Claude unexpectedly accepted the denied request"),
-        };
-        server.abort();
-
-        assert!(matches!(error, AgentError::Authentication(_)));
-        let visible = error.to_string();
-        assert!(visible.contains("vertex returned 403"), "{visible}");
-        assert!(visible.contains("permission_denied"), "{visible}");
-        assert!(!visible.contains(PROJECT_ID), "{visible}");
-    }
-
-    #[tokio::test]
-    async fn vertex_in_band_error_redacts_project_and_uses_vertex_attribution() {
-        use axum::http::header;
-        use axum::response::IntoResponse;
-        use axum::routing::post;
-        use axum::Router;
-
-        const PROJECT_ID: &str = "customer-project-123";
-
-        struct StaticToken;
-
-        #[async_trait::async_trait]
-        impl crate::BearerTokenSource for StaticToken {
-            async fn bearer_token(&self) -> openwave_core::Result<String> {
-                Ok("vertex-bearer".into())
-            }
-        }
-
-        async fn deny_after_accepting() -> impl IntoResponse {
-            let frame = json!({
-                "type": "error",
-                "error": {
-                    "code": 403,
-                    "type": "permission_denied",
-                    "message": format!(
-                        "Permission denied on projects/{PROJECT_ID}/locations/global"
-                    ),
-                }
-            });
-            (
-                [(header::CONTENT_TYPE, "text/event-stream")],
-                format!("data: {frame}\n\n"),
-            )
-        }
-
-        let app = Router::new().fallback(post(deny_after_accepting));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let provider =
-            AnthropicProvider::vertex(PROJECT_ID, "global", std::sync::Arc::new(StaticToken))
-                .unwrap()
-                .with_base_url(format!("http://{address}"));
-        let events: Vec<_> = provider
-            .stream(ChatRequest {
-                provider: Some(ProviderId::new("vertex")),
-                model: "claude-opus-4-8".into(),
-                messages: vec![ChatMessage::text(Role::User, "hi")],
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .collect()
-            .await;
-        server.abort();
-
-        assert_eq!(
-            events,
-            vec![ProviderEvent::Failed {
-                error: ProviderErrorInfo {
-                    kind: "authentication".into(),
-                    message: "vertex returned 403 (permission_denied)".into(),
-                },
-            }]
-        );
-        assert!(!format!("{events:?}").contains(PROJECT_ID));
     }
 }

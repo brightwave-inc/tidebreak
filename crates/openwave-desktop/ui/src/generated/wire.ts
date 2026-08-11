@@ -1923,7 +1923,7 @@ export type PromptOrigin = "builtin" | "user";
 /**
  * How a provider's credential was established.
  */
-export type ProviderAuthMode = "api_key" | "chatgpt" | "service_account" | "aws_credentials";
+export type ProviderAuthMode = "api_key" | "chatgpt";
 
 /**
  * Public view of a provider — never includes the credential itself.
@@ -1942,12 +1942,6 @@ enabled: boolean,
  */
 base_url?: string, 
 /**
- * Vertex AI location. The first-class Vertex provider is global-only;
- * legacy Gemini service-account configurations may retain a region. Never
- * includes the project id from the credential.
- */
-vertex_location?: string, 
-/**
  * Whether a credential is stored (never the credential itself).
  */
 has_credential: boolean, 
@@ -1958,13 +1952,13 @@ auth_mode?: ProviderAuthMode,
 /**
  * Explicit configured model entries for this endpoint.
  */
-models: Array<CustomModelConfig>, aws_region?: string, };
+models: Array<CustomModelConfig>, };
 
 /**
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "vertex" | "bedrock" | "fireworks" | "together" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "openai_compatible" | "model_gateway";
 
 /**
  * One message accepted while its chat had a live turn, waiting its turn.

@@ -49,9 +49,9 @@ const models: ModelInfo[] = [
   },
   {
     ...base,
-    key: "vertex::unique",
+    key: "model_gateway::unique",
     id: "unique",
-    provider: "vertex",
+    provider: "model_gateway",
     vendor: "anthropic",
     verification: "unverified",
     input_modalities: ["text"],
@@ -75,8 +75,6 @@ describe("typed model selection", () => {
     expect(providerLabel("openai")).toBe("OpenAI");
     expect(providerLabel("xai")).toBe("xAI");
     expect(providerLabel("gemini")).toBe("Google Gemini");
-    expect(providerLabel("vertex")).toBe("Google Vertex AI");
-    expect(providerLabel("bedrock")).toBe("Amazon Bedrock");
     expect(providerLabel("fireworks")).toBe("Fireworks AI");
     expect(providerLabel("together")).toBe("Together AI");
     expect(providerLabel("openai_compatible")).toBe("OpenAI-compatible");

@@ -264,9 +264,6 @@ export function ProviderIcon({
       return <XaiIcon {...rest} />;
     case "gemini":
       return <GeminiIcon {...rest} />;
-    case "vertex":
-      return <GeminiIcon {...rest} />;
-    case "bedrock":
     case "openai_compatible":
     case "model_gateway":
       return <OpenModelIcon {...rest} />;

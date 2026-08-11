@@ -10,9 +10,9 @@ import type {
  * Resolve a stored selection against the typed catalog.
  *
  * New values match only their provider-qualified key. Old bare ids are
- * accepted only when exactly one direct-vendor row owns it. Hosted mirrors
- * (for example Vertex) carry `vendor` and never steal a legacy selection from
- * the original direct route.
+ * accepted only when exactly one direct-vendor row owns it. A hosted mirror
+ * would carry `vendor` and never steal a legacy selection from the original
+ * direct route.
  */
 export function modelForSelection(
   models: ModelInfo[],
@@ -47,10 +47,6 @@ export function providerLabel(provider: ProviderKind): string {
       return "xAI";
     case "gemini":
       return "Google Gemini";
-    case "vertex":
-      return "Google Vertex AI";
-    case "bedrock":
-      return "Amazon Bedrock";
     case "fireworks":
       return "Fireworks AI";
     case "together":

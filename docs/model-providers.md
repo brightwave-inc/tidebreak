@@ -61,16 +61,16 @@ a provider-coupled artifact:
 | Provider-executed web search native blocks (e.g. Anthropic `encrypted_content`) | Replay verbatim | Flatten to cleartext titles/URLs (or equivalent host-shaped prose) — never invent a simulated native call |
 | Vendor tool-call ids and cache prefixes | Keep as the adapter requires | Do not translate; the neutral journal already has the durable fact |
 
-Sharing a wire protocol does not merge origins. Amazon Bedrock Mantle can reuse
-the Messages and Responses adapters, but Bedrock-native artifacts still replay
-only for the exact Bedrock provider and model that minted them. Anthropic,
-OpenAI, Gemini, and every other route receive the flattened or empty fallback.
+Sharing a wire protocol does not merge origins. A gateway can reuse the
+Messages and Responses adapters, but its native artifacts still replay only for
+the exact provider and model that minted them. Anthropic, OpenAI, Gemini, and
+every other route receive the flattened or empty fallback.
 
 Consequences:
 
-- **No per-pair translation matrix.** Do not build
-  Anthropic↔OpenAI↔Gemini↔Amazon Bedrock Mantle converters for each new feature.
-  Origin-gate native replay; everyone else gets the flattened form.
+- **No per-pair translation matrix.** Do not build Anthropic↔OpenAI↔Gemini
+  converters for each new feature. Origin-gate native replay; everyone else
+  gets the flattened form.
 - **Quality asymmetry is accepted.** A switched-into model may see a slightly
   flatter history. That must not be hidden with fake native shapes, and it
   must never silently break (same refuse-don't-strip posture as unsupported
@@ -92,38 +92,6 @@ Existing machinery that already follows this:
   adapters and the UI always have.
 - Registry flags such as `supports_vendor_web_search` — honest absence beats
   a half-working path.
-
-## Google Vertex AI
-
-Vertex is a first-class serving provider, not a Gemini credential mode. One
-validated Google Cloud service account can route two curated native protocol
-families:
-
-- Gemini models use Vertex GenerateContent under the `google` publisher.
-- Claude models use Anthropic Messages through Vertex `streamRawPredict`.
-
-The provider uses the `global` Vertex location for every curated row;
-credentials cannot supply an endpoint. A regional value written by an older
-build remains unavailable until it is changed to `global`, and new regional
-values are rejected. Uploaded service-account JSON is exchanged only through
-Google's fixed OAuth token endpoint and never appears in the provider API
-response. Custom Vertex hosts, regional and multi-region locations, ambient
-Application Default Credentials, and arbitrary Model Garden entries are not
-promised by this surface.
-
-Legacy Gemini service-account configurations keep their existing validated
-location setting for compatibility with older regional models. Curated Gemini 3
-requests still use the global endpoint. New service-account configurations
-belong under the global-only Vertex provider.
-
-Vertex rows remain provider-qualified (`vertex::<model>`), even when the raw
-model id matches a direct Anthropic or Gemini row. That identity is also the
-native-replay boundary: a Claude reasoning block produced through Vertex may
-replay only to the same Vertex model. Switching to direct Anthropic (or the
-reverse) drops the opaque block and keeps the portable transcript. Gemini
-`thoughtSignature` values follow the same rule between direct Gemini and
-Vertex Gemini, while durable function-call ids remain paired with their
-responses on either route.
 
 ## Checklist for a new provider-coupled feature
 

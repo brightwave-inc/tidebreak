@@ -16,15 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useConfirm } from "../components/ConfirmDialog";
 import {
@@ -57,8 +49,6 @@ function newConfiguredModel(): CustomModelConfig {
     reasoning_efforts: [],
   };
 }
-
-type CredentialType = "api_key" | "service_account" | "aws_credentials";
 
 const EXPANDED_PROVIDERS_KEY = "openwave.settings.providers-expanded";
 
@@ -226,36 +216,14 @@ function ProviderRow({
   deepLinked: boolean;
   deepLinkFocusesCredential: boolean;
 }) {
-  const isFirstClassVertex = info.kind === "vertex";
-  const usesServiceAccount =
-    isFirstClassVertex ||
-    (info.kind === "gemini" && info.auth_mode === "service_account");
   const [key, setKey] = useState("");
-  const [credentialType, setCredentialType] = useState<CredentialType>(
-    info.kind === "bedrock" && info.auth_mode === "aws_credentials"
-      ? "aws_credentials"
-      : usesServiceAccount
-        ? "service_account"
-        : "api_key",
-  );
-  const [serviceAccountJson, setServiceAccountJson] = useState("");
-  const [vertexLocation, setVertexLocation] = useState(
-    info.vertex_location ?? "global",
-  );
   const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
-  const [awsRegion, setAwsRegion] = useState(info.aws_region ?? "");
-  const [awsRegionTouched, setAwsRegionTouched] = useState(false);
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
-  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
-  const [awsSessionToken, setAwsSessionToken] = useState("");
   const [models, setModels] = useState<CustomModelConfig[]>(info.models);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
   const hasConfigurableModels =
-    info.kind === "openai_compatible" ||
-    info.kind === "xai" ||
-    info.kind === "bedrock";
+    info.kind === "openai_compatible" || info.kind === "xai";
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [pendingCredentialFocus, setPendingCredentialFocus] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -352,17 +320,7 @@ function ProviderRow({
       const body: {
         enabled: boolean;
         base_url?: string | null;
-        vertex_location?: string | null;
-        aws_region?: string | null;
-        credential?:
-          | { type: "api_key"; key: string }
-          | { type: "service_account"; json: string }
-          | {
-              type: "aws_credentials";
-              access_key_id: string;
-              secret_access_key: string;
-              session_token?: string;
-            };
+        credential?: { type: "api_key"; key: string };
         models?: CustomModelConfig[];
       } = { enabled };
       if (hasConfigurableModels) {
@@ -384,43 +342,8 @@ function ProviderRow({
       if (key.trim()) {
         body.credential = { type: "api_key", key: key.trim() };
       }
-      if (usesServiceAccount && credentialType === "service_account") {
-        body.vertex_location = isFirstClassVertex
-          ? "global"
-          : vertexLocation.trim() || "global";
-        if (serviceAccountJson.trim()) {
-          body.credential = {
-            type: "service_account",
-            json: serviceAccountJson.trim(),
-          };
-        }
-      }
-      if (info.kind === "bedrock") {
-        if (awsRegionTouched) {
-          body.aws_region = awsRegion.trim() || null;
-        }
-        if (
-          credentialType === "aws_credentials" &&
-          awsAccessKeyId.trim() &&
-          awsSecretAccessKey.trim()
-        ) {
-          body.credential = {
-            type: "aws_credentials",
-            access_key_id: awsAccessKeyId.trim(),
-            secret_access_key: awsSecretAccessKey.trim(),
-            ...(awsSessionToken.trim()
-              ? { session_token: awsSessionToken.trim() }
-              : {}),
-          };
-        }
-      }
       await client.putProvider(info.kind as ProviderKind, body);
       setKey("");
-      setServiceAccountJson("");
-      setAwsAccessKeyId("");
-      setAwsSecretAccessKey("");
-      setAwsSessionToken("");
-      setAwsRegionTouched(false);
       onChanged();
       toast.success(`Saved ${providerLabel(info.kind)} settings`);
     } catch (err) {
@@ -563,8 +486,6 @@ function ProviderRow({
                   <p className="text-xs text-muted-foreground">
                     {info.kind === "xai"
                       ? "Add each xAI model available to this API key, including its limits and supported capabilities."
-                      : info.kind === "bedrock"
-                      ? "Add exact Bedrock Mantle model IDs. Anthropic IDs use Claude Messages; other IDs use OpenAI Responses. Custom rows start with conservative text-only, non-reasoning capabilities."
                       : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
                   </p>
                 )}
@@ -782,163 +703,25 @@ function ProviderRow({
             />
           ) : (
             <>
-              {info.kind === "bedrock" && (
-                <>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    Credential type
-                    <Select
-                      value={credentialType}
-                      disabled={saving}
-                      onValueChange={(value) =>
-                        setCredentialType(value as CredentialType)
-                      }
-                    >
-                      <SelectTrigger
-                        aria-label="Amazon Bedrock credential type"
-                        className="h-9"
-                      >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="api_key">Bedrock API key</SelectItem>
-                        <SelectItem value="aws_credentials">
-                          AWS access keys (SigV4)
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </label>
-                  <Input
-                    type="text"
-                    aria-label="AWS region"
-                    placeholder="AWS region"
-                    value={awsRegion}
-                    onChange={(event) => {
-                      setAwsRegion(event.target.value);
-                      setAwsRegionTouched(true);
-                    }}
-                    autoComplete="off"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    OpenWave derives the Bedrock Mantle endpoint from this region;
-                    credentials cannot redirect requests to another host.
-                  </p>
-                </>
-              )}
-              {credentialType === "api_key" && (
-                <Input
-                  ref={credentialRef}
-                  type="password"
-                  placeholder={
-                    info.kind === "bedrock" ? "Bedrock API key" : "API key"
-                  }
-                  value={key}
-                  onChange={(e) => setKey(e.target.value)}
-                  autoComplete="off"
-                />
-              )}
-              {usesServiceAccount && credentialType === "service_account" && (
-                <>
-                  <p className="text-xs text-muted-foreground">
-                    {isFirstClassVertex
-                      ? "Vertex AI uses this service account for native Gemini and Claude requests. OpenWave derives Google hosts itself and does not accept a custom Vertex endpoint."
-                      : "This existing Gemini service-account configuration is retained for compatibility. New Vertex AI configurations belong in the Google Vertex AI provider row."}
-                  </p>
-                  {isFirstClassVertex ? (
-                    <p className="text-xs text-muted-foreground">
-                      This provider uses the <code>global</code> Vertex location for
-                      every curated model. Regional locations, multi-region aliases,
-                      and ambient application-default credentials are not configured
-                      by this surface.
-                      {info.vertex_location != null &&
-                        info.vertex_location !== "global" && (
-                          <>
-                            {" "}This older configuration is unavailable until it is
-                            saved; saving updates its location to <code>global</code>.
-                          </>
-                        )}
-                    </p>
-                  ) : (
-                    <>
-                      <Input
-                        type="text"
-                        aria-label="Vertex AI location"
-                        placeholder="Vertex AI location"
-                        value={vertexLocation}
-                        onChange={(event) => setVertexLocation(event.target.value)}
-                        autoComplete="off"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        This legacy setting is retained for compatibility with older
-                        regional Gemini models. Curated Gemini 3 requests always use
-                        the <code>global</code> endpoint. Multi-region aliases and
-                        ambient application-default credentials are not configured by
-                        this surface.
-                      </p>
-                    </>
-                  )}
-                  <Textarea
-                    aria-label="Google service account JSON"
-                    className="min-h-28 font-mono text-sm text-foreground"
-                    placeholder="Paste the Google service-account JSON key file"
-                    value={serviceAccountJson}
-                    onChange={(event) => setServiceAccountJson(event.target.value)}
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                </>
-              )}
-              {info.kind === "bedrock" &&
-                credentialType === "aws_credentials" && (
-                  <div className="grid gap-2">
-                    <Input
-                      type="password"
-                      aria-label="AWS access key ID"
-                      placeholder="AWS access key ID"
-                      value={awsAccessKeyId}
-                      onChange={(event) => setAwsAccessKeyId(event.target.value)}
-                      autoComplete="off"
-                    />
-                    <Input
-                      type="password"
-                      aria-label="AWS secret access key"
-                      placeholder="AWS secret access key"
-                      value={awsSecretAccessKey}
-                      onChange={(event) =>
-                        setAwsSecretAccessKey(event.target.value)
-                      }
-                      autoComplete="off"
-                    />
-                    <Input
-                      type="password"
-                      aria-label="AWS session token"
-                      placeholder="AWS session token (optional)"
-                      value={awsSessionToken}
-                      onChange={(event) => setAwsSessionToken(event.target.value)}
-                      autoComplete="off"
-                    />
-                  </div>
-                )}
+              <Input
+                ref={credentialRef}
+                type="password"
+                placeholder="API key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                autoComplete="off"
+              />
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   disabled={
                     saving ||
                     (!info.has_credential &&
-                      credentialType === "api_key" &&
                       info.kind !== "openai_compatible" &&
                       !key.trim()) ||
-                    (!info.has_credential &&
-                      usesServiceAccount &&
-                      credentialType === "service_account" &&
-                      !serviceAccountJson.trim()) ||
-                    (!info.has_credential &&
-                      info.kind === "bedrock" &&
-                      credentialType === "aws_credentials" &&
-                      (!awsAccessKeyId.trim() || !awsSecretAccessKey.trim())) ||
                     (hasConfigurableModels &&
                       models.some((model) => !model.id.trim())) ||
-                    (info.kind === "xai" && models.length === 0) ||
-                    (info.kind === "bedrock" && !awsRegion.trim())
+                    (info.kind === "xai" && models.length === 0)
                   }
                   onClick={() => void save(true)}
                 >
@@ -1014,15 +797,6 @@ function credentialStatusLabel(info: ProviderInfo): string {
   }
   if (info.kind === "openai" && info.auth_mode === "api_key") {
     return "API key set";
-  }
-  if (info.auth_mode === "service_account") {
-    return "Google service account set";
-  }
-  if (info.kind === "bedrock" && info.auth_mode === "aws_credentials") {
-    return "AWS access keys set";
-  }
-  if (info.kind === "bedrock" && info.auth_mode === "api_key") {
-    return "Bedrock API key set";
   }
   return "Credential set";
 }

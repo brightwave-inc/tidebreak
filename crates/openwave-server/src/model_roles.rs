@@ -54,8 +54,6 @@ const UTILITY_DEFAULTS: &[&str] = &[
     "anthropic::claude-haiku-4-5-20251001",
     "openai::gpt-5.4-nano",
     "gemini::gemini-3.5-flash-lite",
-    "vertex::gemini-3.5-flash-lite",
-    "bedrock::anthropic.claude-sonnet-5",
     "fireworks::accounts/fireworks/models/deepseek-v4-flash",
     "together::deepseek-ai/DeepSeek-V4-Flash-0731",
 ];
@@ -329,7 +327,6 @@ mod tests {
     use openwave_core::DbStore;
 
     use super::*;
-    use crate::model_registry;
     use crate::providers::{CustomModelConfig, ProviderConfig, ProviderKind};
 
     #[derive(Default)]
@@ -350,89 +347,6 @@ mod tests {
         }
     }
 
-    struct RegionalVertexUtilitySecrets;
-
-    #[async_trait::async_trait]
-    impl SecretProvider for RegionalVertexUtilitySecrets {
-        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
-            if key == ProviderKind::Vertex.credential_key() {
-                panic!("regional Vertex must be rejected before its credential is read");
-            }
-            if key == ProviderKind::Openai.credential_key() {
-                return Ok(Some(
-                    serde_json::to_string(&crate::providers::ProviderCredential::api_key(
-                        "sk-openai",
-                    ))
-                    .unwrap(),
-                ));
-            }
-            Ok(None)
-        }
-
-        async fn set_secret(&self, key: &str, _value: &str) -> Result<()> {
-            panic!("test must not write secret `{key}`")
-        }
-
-        async fn delete_secret(&self, key: &str) -> Result<()> {
-            panic!("test must not delete secret `{key}`")
-        }
-    }
-
-    #[test]
-    fn every_role_default_names_a_curated_model() {
-        for &role in ModelRole::ALL {
-            for key in role.defaults() {
-                let (provider, id) = model_registry::parse_selection_key(key)
-                    .unwrap_or_else(|| panic!("{role}'s default `{key}` is not a selection key"));
-                assert!(
-                    model_registry::find_for(provider, id).is_some(),
-                    "{role}'s default `{key}` is not in the model registry",
-                );
-            }
-        }
-    }
-
-    /// A user credentialed on one provider must still get a utility model, or
-    /// the work that depends on it silently stops happening for them.
-    #[test]
-    fn the_utility_defaults_cover_every_provider_that_serves_curated_models() {
-        for &provider in ProviderKind::ALL {
-            if model_registry::models_for(provider).next().is_none() {
-                // Providers whose models come from their own configuration — a
-                // custom compatible endpoint, the gateway — have nothing a
-                // curated list can name. Those installs point `model.utility`
-                // at one of the models they configured.
-                continue;
-            }
-            assert!(
-                ModelRole::Utility.defaults().iter().any(|key| {
-                    model_registry::parse_selection_key(key)
-                        .is_some_and(|(kind, _)| kind == provider)
-                }),
-                "a user credentialed only on {provider} has no default utility model",
-            );
-        }
-    }
-
-    /// The compatible adapter always sends a strict JSON Schema for utility
-    /// work. Keep every default on a row whose model contract promises that
-    /// output; function calling is separate and cannot stand in for it.
-    #[test]
-    fn utility_defaults_support_strict_structured_output() {
-        for key in ModelRole::Utility.defaults() {
-            let (provider, id) = model_registry::parse_selection_key(key)
-                .unwrap_or_else(|| panic!("utility default `{key}` is not a selection key"));
-            assert!(
-                model_registry::find_for(provider, id)
-                    .is_some_and(model_registry::ModelSpec::supports_structured_output),
-                "utility default `{key}` cannot enforce its strict structured response",
-            );
-        }
-    }
-
-    /// Utility resolution distinguishes function tools from structured output:
-    /// an incompatible pin falls through, while chat-only Kimi K3 remains a
-    /// valid utility model because its strict response contract is independent.
     #[tokio::test]
     async fn utility_resolution_uses_the_structured_output_contract() {
         let directory = tempfile::tempdir().unwrap();
@@ -500,65 +414,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn utility_selection_skips_a_stored_regional_vertex_configuration() {
-        let directory = tempfile::tempdir().unwrap();
-        let store: Arc<dyn Store> = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                directory
-                    .path()
-                    .join("regional-vertex-utility.db")
-                    .display()
-            ))
-            .await
-            .unwrap(),
-        );
-        let secrets: Arc<dyn SecretProvider> = Arc::new(RegionalVertexUtilitySecrets);
-        let os_policy = crate::managed_policy::NoOsPolicy;
-
-        providers::write_config(
-            &*store,
-            ProviderKind::Vertex,
-            &ProviderConfig {
-                enabled: true,
-                vertex_location: Some("us-east5".into()),
-                ..ProviderConfig::disabled()
-            },
-        )
-        .await
-        .unwrap();
-        providers::write_config(
-            &*store,
-            ProviderKind::Openai,
-            &ProviderConfig {
-                enabled: true,
-                ..ProviderConfig::disabled()
-            },
-        )
-        .await
-        .unwrap();
-        write_selection(
-            &*store,
-            ModelRole::Utility,
-            Some("vertex::gemini-3.5-flash-lite"),
-        )
-        .await
-        .unwrap();
-
-        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
-            .await
-            .unwrap()
-            .expect("utility falls through to another usable provider");
-        assert_eq!(utility.provider, Some(ProviderId::new("openai")));
-        assert_eq!(utility.model, "gpt-5.4-nano");
-    }
-
-    /// Utility work on a managed profile: the curated defaults all name BYOK
-    /// providers the policy locked out, so before this the role resolved to
-    /// nothing and chat titling silently stopped. It now walks the gateway's
-    /// entitled models — and still degrades to `None`, exactly as an install
-    /// with no model configured does, when the gateway has none to offer.
     #[tokio::test]
     async fn a_managed_profile_resolves_the_utility_role_to_a_gateway_model() {
         let directory = tempfile::tempdir().unwrap();

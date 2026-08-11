@@ -227,34 +227,16 @@ pub fn frame_data(frame: &str) -> Option<serde_json::Value> {
 /// credentials or request fragments, so only a short single-line excerpt that
 /// passes conservative secret redaction reaches `TurnFailed`.
 pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
-    safe_http_error_redacting(provider, status, body, &[])
-}
-
-/// Build a client-safe provider error while treating exact caller-supplied
-/// values as secrets.
-///
-/// Vertex adapters use this for the service-account project id: Google may put
-/// the full `projects/{project_id}/...` resource in an otherwise ordinary
-/// permission or not-found message. The status and an unrelated enum-style
-/// code remain useful, but any code or message containing a known value is
-/// omitted whole rather than partially rewritten.
-pub fn safe_http_error_redacting(
-    provider: &str,
-    status: u16,
-    body: &str,
-    sensitive_values: &[&str],
-) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let raw_code = parsed.as_ref().and_then(provider_error_code);
-    let code = raw_code
-        .filter(|code| safe_error_code(code) && !contains_sensitive_value(code, sensitive_values));
+    let code = raw_code.filter(|code| safe_error_code(code));
     let message = raw_code
         .is_none_or(safe_error_code)
         .then(|| {
             parsed
                 .as_ref()
                 .and_then(provider_error_message)
-                .and_then(|message| safe_error_message(message, sensitive_values))
+                .and_then(safe_error_message)
         })
         .flatten();
 
@@ -348,28 +330,13 @@ pub fn classify_in_band_error(
     provider: &str,
     error: &serde_json::Value,
 ) -> openwave_core::error::AgentError {
-    classify_in_band_error_redacting(provider, error, &[])
-}
-
-/// Classify an error delivered inside a 200 stream while preventing known
-/// values from entering the client-visible message.
-///
-/// This is the streaming counterpart of
-/// [`classify_provider_error_redacting`]. Vertex adapters pass the
-/// service-account project id because Google can include the full resource
-/// path in an otherwise ordinary permission error frame.
-pub fn classify_in_band_error_redacting(
-    provider: &str,
-    error: &serde_json::Value,
-    sensitive_values: &[&str],
-) -> openwave_core::error::AgentError {
     let status = error
         .get("code")
         .and_then(serde_json::Value::as_u64)
         .and_then(|code| u16::try_from(code).ok())
         .filter(|code| (100..=599).contains(code))
         .unwrap_or(500);
-    classify_provider_error_redacting(provider, status, &error.to_string(), None, sensitive_values)
+    classify_provider_error(provider, status, &error.to_string(), None)
 }
 
 /// Accept only a compact enum-style token. Error fields come from an
@@ -385,13 +352,10 @@ fn safe_error_code(code: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
-fn safe_error_message(message: &str, sensitive_values: &[&str]) -> Option<String> {
+fn safe_error_message(message: &str) -> Option<String> {
     const MAX_ERROR_MESSAGE_CHARS: usize = 240;
     let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty()
-        || contains_secret_marker(&collapsed)
-        || contains_sensitive_value(&collapsed, sensitive_values)
-    {
+    if collapsed.is_empty() || contains_secret_marker(&collapsed) {
         return None;
     }
     let mut excerpt: String = collapsed.chars().take(MAX_ERROR_MESSAGE_CHARS).collect();
@@ -399,13 +363,6 @@ fn safe_error_message(message: &str, sensitive_values: &[&str]) -> Option<String
         excerpt.push('…');
     }
     Some(excerpt)
-}
-
-fn contains_sensitive_value(text: &str, sensitive_values: &[&str]) -> bool {
-    let lower = text.to_ascii_lowercase();
-    sensitive_values
-        .iter()
-        .any(|value| !value.is_empty() && lower.contains(value.to_ascii_lowercase().as_str()))
 }
 
 fn contains_secret_marker(message: &str) -> bool {
@@ -535,18 +492,6 @@ pub fn classify_provider_error(
     body: &str,
     retry_after: Option<Duration>,
 ) -> openwave_core::error::AgentError {
-    classify_provider_error_redacting(provider, status, body, retry_after, &[])
-}
-
-/// Classify a provider HTTP error while preventing known values from entering
-/// the client-visible message.
-pub fn classify_provider_error_redacting(
-    provider: &str,
-    status: u16,
-    body: &str,
-    retry_after: Option<Duration>,
-    sensitive_values: &[&str],
-) -> openwave_core::error::AgentError {
     use openwave_core::error::{AgentError, ProviderFailure};
 
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
@@ -558,7 +503,7 @@ pub fn classify_provider_error_redacting(
         .as_ref()
         .and_then(provider_error_message)
         .unwrap_or("");
-    let safe = || safe_http_error_redacting(provider, status, body, sensitive_values);
+    let safe = || safe_http_error(provider, status, body);
 
     if status == 400
         && (code == "context_length_exceeded" || message.contains("prompt is too long"))
@@ -915,9 +860,9 @@ mod tests {
     }
 
     #[test]
-    fn bedrock_http_and_in_band_errors_redact_credential_material() {
+    fn cloud_credential_material_is_redacted_from_http_and_in_band_errors() {
         let markers = [
-            "ABSKDISTINCTIVEBEDROCKKEY",
+            "ABSKDISTINCTIVEEXAMPLEKEY",
             "access_key_id=AKIAEXAMPLE",
             "secret_access_key=distinctive-secret",
             "session_token=distinctive-session",
@@ -931,12 +876,12 @@ mod tests {
             "ASIAIOSFODNN7EXAMPLE",
             concat!(
                 "AWS4-HMAC-SHA256 Credential=EXAMPLEKEY/20260807/us-east-1/",
-                "bedrock-mantle/aws4_request, SignedHeaders=host;x-amz-date, ",
+                "service/aws4_request, SignedHeaders=host;x-amz-date, ",
                 "Signature=distinctive-signature"
             ),
             concat!(
                 "X-Amz-Credential=EXAMPLEKEY%2F20260807%2Fus-east-1%2F",
-                "bedrock-mantle%2Faws4_request"
+                "service%2Faws4_request"
             ),
         ];
 
@@ -948,34 +893,20 @@ mod tests {
                 }
             })
             .to_string();
-            let http = safe_http_error("bedrock", 400, &body);
-            assert_eq!(http, "bedrock returned 400 (invalid_request_error)");
+            let http = safe_http_error("openai_compatible", 400, &body);
+            assert_eq!(
+                http,
+                "openai_compatible returned 400 (invalid_request_error)"
+            );
             assert!(!http.contains(marker));
 
             let frame = serde_json::json!({
                 "code": 400,
                 "message": format!("provider echoed {marker}")
             });
-            let in_band = classify_in_band_error("bedrock", &frame).to_string();
+            let in_band = classify_in_band_error("openai_compatible", &frame).to_string();
             assert!(!in_band.contains(marker));
             assert!(!in_band.contains("provider echoed"));
         }
-    }
-
-    #[test]
-    fn known_vertex_project_is_removed_while_status_and_code_remain() {
-        let project_id = "customer-project-123";
-        let body = serde_json::json!({
-            "error": {
-                "code": "permission_denied",
-                "message": format!(
-                    "Permission denied on projects/{project_id}/locations/global"
-                ),
-            }
-        })
-        .to_string();
-        let error = safe_http_error_redacting("vertex", 403, &body, &[project_id]);
-        assert_eq!(error, "vertex returned 403 (permission_denied)");
-        assert!(!error.contains(project_id));
     }
 }

@@ -11,7 +11,7 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["anthropic", "openai", "xai", "openai-compat", "gemini", "bedrock"]
+default = ["anthropic", "openai", "xai", "openai-compat", "gemini"]
 # The Anthropic (Messages API) provider adapter.
 anthropic = ["_http"]
 # Native OpenAI Responses API adapter.
@@ -22,9 +22,7 @@ xai = ["openai"]
 # OpenAI-compatible Chat Completions adapter (OpenRouter, vLLM, …).
 openai-compat = ["_http"]
 # Google Gemini Developer API adapter (native GenerateContent protocol).
-gemini = ["_http", "dep:ring", "dep:uuid"]
-# Amazon Bedrock Mantle Messages + Responses, with API-key or SigV4 auth.
-bedrock = ["anthropic", "openai", "dep:ring"]
+gemini = ["_http", "dep:uuid"]
 # Internal: the shared HTTP transport every adapter is built on. Not meant to
 # be enabled directly.
 _http = ["dep:reqwest", "dep:async-stream", "dep:tokio"]
@@ -36,10 +34,8 @@ base64 = { workspace = true }
 # `Retry-After` in its HTTP-date form is resolved against the current clock.
 chrono = { workspace = true }
 futures = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
-ring = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"], optional = true }
 uuid = { workspace = true, optional = true }

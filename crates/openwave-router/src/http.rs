@@ -39,22 +39,6 @@ use futures::{Stream, StreamExt};
 
 use openwave_core::error::Result;
 
-/// Provider-specific authentication applied to an already-shaped HTTP request.
-///
-/// Most adapters own a fixed header scheme, but Bedrock Mantle exposes existing
-/// Messages and Responses wire contracts behind either a bearer key or AWS
-/// Signature Version 4. Keeping authentication at this boundary lets those
-/// adapters retain their mature request/stream normalization while signing the
-/// exact bytes they send.
-pub(crate) trait RequestAuthenticator: Send + Sync {
-    fn authenticate(
-        &self,
-        request: reqwest::RequestBuilder,
-        url: &reqwest::Url,
-        body: &[u8],
-    ) -> Result<reqwest::RequestBuilder>;
-}
-
 /// Connect-phase budget. Loopback is instant and a reachable hosted provider
 /// completes TCP + TLS well inside this; anything slower is unreachable, not
 /// slow.
@@ -186,8 +170,8 @@ impl<E: std::fmt::Display> StreamFailure<E> {
     /// The client-safe form of the failure: only the deadline text is ours.
     ///
     /// A transport error's `Display` is reqwest's, and reqwest includes the
-    /// request URL — a Vertex URL carries the project id, and any gateway URL
-    /// may carry tenant-identifying parts. These strings reach the client
+    /// request URL, and any gateway URL may carry tenant-identifying parts.
+    /// These strings reach the client
     /// through `ProviderEvent::Failed` and `TurnFailed`, so a transport
     /// failure reports only the fact of an early end.
     #[must_use]
@@ -278,8 +262,8 @@ mod tests {
 
     #[test]
     fn the_client_message_keeps_the_transport_error_and_its_url_out() {
-        // reqwest's error display includes the request URL; a Vertex URL
-        // carries the project id, and these strings reach the client.
+        // reqwest's error display includes the request URL, and these strings
+        // reach the client.
         let transport = StreamFailure::Transport(
             "error sending request for url (https://us-central1-aiplatform.googleapis.com/v1/projects/secret-project/): connection closed".to_string(),
         );
