@@ -318,6 +318,74 @@ test("a graph the checkout cannot back with files fails instead of shrinking", (
   );
 });
 
+test("a curated license applies only while the evidence behind it holds", () => {
+  const root = scratchTree();
+
+  const univer = writePackage(root, "univer-pro", {
+    "package.json": JSON.stringify({
+      name: "@univerjs-pro/engine-formula",
+      repository: { type: "git", url: "git+https://github.com/dream-num/univer.git" },
+    }),
+  });
+
+  const graph = (packageDirectory) => ({
+    Unknown: [
+      {
+        name: JSON.parse(
+          readFileSync(path.join(packageDirectory, "package.json"), "utf8"),
+        ).name,
+        versions: ["0.25.1"],
+        paths: [packageDirectory],
+      },
+    ],
+  });
+
+  const [curated] = collectNodePackages(graph(univer));
+  assert.equal(curated.license, "Apache-2.0");
+  assert.match(curated.licenseNote, /manifest declares no license/);
+  // The asserted terms travel with the entry, deduped against every other
+  // Apache-2.0 text by content like any distributed one.
+  assert.equal(curated.licenseTexts.length, 1);
+  assert.match(curated.licenseTexts[0].text, /^ *Apache License\n/);
+  assert.equal(
+    licenseTextId(curated.licenseTexts[0].text),
+    licenseTextId(
+      normalizeLicenseText(
+        readFileSync(
+          repositoryFile("scripts", "license-texts", "apache-2.0.txt"),
+          "utf8",
+        ),
+      ),
+    ),
+  );
+
+  // The two facts the override rests on. Either changing means the review that
+  // produced it no longer covers what ships, so the run must fail rather than
+  // apply it — in particular an override must never overrule a declaration.
+  const declaring = writePackage(root, "declaring", {
+    "package.json": JSON.stringify({
+      name: "@univerjs-pro/engine-formula",
+      license: "MIT",
+      repository: "https://github.com/dream-num/univer",
+    }),
+  });
+  assert.throws(
+    () => collectNodePackages(graph(declaring)),
+    /now declares `MIT`/,
+  );
+
+  const moved = writePackage(root, "moved", {
+    "package.json": JSON.stringify({
+      name: "@univerjs/telemetry",
+      repository: "https://github.com/someone-else/univer",
+    }),
+  });
+  assert.throws(
+    () => collectNodePackages(graph(moved)),
+    /no longer points at github\.com\/dream-num\/univer/,
+  );
+});
+
 test("the notices ship with the desktop app and are verified against drift", () => {
   const notices = readFileSync(repositoryFile(NOTICES_RELATIVE_PATH), "utf8");
   assert.ok(notices.startsWith("# Third-party notices\n"));

@@ -417,6 +417,15 @@ see exactly what a change to either lockfile adds to the product's obligations.
   at. Those entries are the ones to review: the notices are a compliance
   artifact, and an undeclared license in a distributed dependency is a question
   for a human, not something the generator should paper over.
+- When that review settles a package's terms, the answer is recorded as a
+  curated override in `CURATED_NODE_LICENSES` rather than left implicit. An
+  override states the evidence it rests on, and the generator re-checks that
+  evidence on every run: the package must still declare no license of its own,
+  and its repository must still point where the review looked. Either check
+  failing is a hard error, so a package that starts declaring a license, or
+  whose repository moves, comes back for review instead of inheriting an old
+  answer. Overrides quote license text from `scripts/license-texts/`, never
+  from the network, so the output stays reproducible offline.
 - Both graphs are host-independent today, so regenerating on macOS and checking
   on Linux agree. `cargo metadata` reports every package the lockfile can ship
   regardless of target, and no production UI dependency is platform-specific. If

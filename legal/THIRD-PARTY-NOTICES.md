@@ -18,12 +18,18 @@ of its operands, and every license or notice file the package distributes
 is reproduced under [License texts](#license-texts). Identical texts are
 stored once and referenced by a content-addressed identifier.
 
+A few packages state their terms outside their own manifest. Those carry a
+`License source` line naming the evidence behind the recorded license; the
+generator re-checks that evidence on every run and fails rather than apply
+a stale one.
+
 ## Summary
 
 - Rust crates: 885
 - Desktop UI production packages: 460
 - Distinct license texts: 580
-- Packages with no declared license: 28
+- Packages with no declared license: 0
+- Packages with a curated license: 28
 
 License identifiers named across all declared expressions:
 
@@ -5960,165 +5966,192 @@ License identifiers named across all declared expressions:
 
 ### @univerjs-pro/collaboration 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/collaboration-client 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/collaboration-client-ui 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/docs-exchange-client 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/docs-print 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/edit-history-loader 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/edit-history-viewer 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/engine-chart 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/engine-formula 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/engine-pivot 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/engine-shape 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/exchange-client 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/license 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/print 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-chart 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-chart-ui 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-exchange-client 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-outline 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-outline-ui 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-pivot 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-pivot-ui 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-print 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-shape 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-shape-ui 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-sparkline 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/sheets-sparkline-ui 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs-pro/thread-comment-datasource 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: not distributed with this package
+- License text: `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs/core 0.25.1
 
@@ -6530,9 +6563,10 @@ License identifiers named across all declared expressions:
 
 ### @univerjs/telemetry 0.25.1
 
-- License: `not declared by the package`
+- License: `Apache-2.0`
+- License source: curated — the manifest declares no license; the package's repository is github.com/dream-num/univer, which is Apache-2.0 (maintainer decision, 2026-08-11)
 - Repository: https://github.com/dream-num/univer
-- License text: `LICENSE` ([L-59899c6091b5](#l-59899c6091b5))
+- License text: `LICENSE` ([L-59899c6091b5](#l-59899c6091b5)), `Apache-2.0 (curated, not distributed by the package)` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### @univerjs/themes 0.25.1
 

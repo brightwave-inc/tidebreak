@@ -52,6 +52,45 @@ const MEANINGFUL_TEXT_PATTERN = /[A-Za-z]/;
 
 const UNDECLARED_LICENSE = "not declared by the package";
 
+// Curated license facts, for packages whose terms are established somewhere
+// other than their own manifest.
+//
+// Recording such a package as undeclared understates what the product ships,
+// but asserting a license from a hand-maintained table is only defensible while
+// the evidence behind it still holds. So an override names its evidence, and
+// the generator re-checks that evidence on every run: the package must still
+// declare no license of its own, and its repository must still point where the
+// review looked. Either check failing is a hard error, not a silent fallback —
+// a package that starts declaring its own license, or whose repository moves,
+// needs a human to look again rather than an old assertion applied to new
+// facts. An override can therefore never overrule a declaration.
+//
+// The license text is read from a file in this repository rather than fetched,
+// so the output stays reproducible offline; it is normalized and
+// content-addressed like any other license text, and shares the appendix entry
+// with every package that distributes the same bytes.
+const CURATED_APACHE_2_0_TEXT_FILE = "scripts/license-texts/apache-2.0.txt";
+
+const CURATED_NODE_LICENSES = [
+  {
+    // The Univer project publishes these packages. Their npm manifests carry no
+    // `license` field, and their `repository` field points at
+    // github.com/dream-num/univer, which is Apache-2.0
+    // (https://github.com/dream-num/univer/blob/dev/LICENSE). Recorded as
+    // Apache-2.0 by maintainer decision, 2026-08-11.
+    applies: (name) =>
+      name.startsWith("@univerjs-pro/") || name === "@univerjs/telemetry",
+    repository: "github.com/dream-num/univer",
+    license: "Apache-2.0",
+    licenseTextFile: CURATED_APACHE_2_0_TEXT_FILE,
+    note:
+      "curated — the manifest declares no license; the package's repository is " +
+      "github.com/dream-num/univer, which is Apache-2.0 " +
+      "(maintainer decision, 2026-08-11)",
+    licenseTextLabel: "Apache-2.0 (curated, not distributed by the package)",
+  },
+];
+
 function compareStrings(left, right) {
   // Code-unit ordering. `localeCompare` is locale- and ICU-dependent, which
   // would make the generated ordering vary between machines.
@@ -195,11 +234,88 @@ function manifestRepository(manifest) {
   return null;
 }
 
+// Reduce a repository URL to `host/path` so the same repository written as an
+// HTTPS URL, an `scp`-style remote, or with a `git+` prefix and a `.git` suffix
+// all compare equal.
+function normalizeRepositoryUrl(raw) {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^git\+/, "")
+    .replace(/^(?:https?|ssh|git):\/\//, "")
+    .replace(/^[^@/]+@/, "")
+    .replace(/^([^/]+):/, "$1/")
+    .replace(/\.git$/, "")
+    .replace(/\/+$/, "");
+}
+
+function pointsAtRepository(repository, expected) {
+  if (typeof repository !== "string") return false;
+  const normalized = normalizeRepositoryUrl(repository);
+  return normalized === expected || normalized.startsWith(`${expected}/`);
+}
+
+const curatedLicenseTexts = new Map();
+
+function curatedLicenseText(root, relativeFile) {
+  const file = path.join(root, relativeFile);
+  let text = curatedLicenseTexts.get(file);
+  if (text === undefined) {
+    if (!isFile(file)) {
+      throw new Error(`missing curated license text ${relativeFile}`);
+    }
+    text = readTextFile(file);
+    if (!text) {
+      throw new Error(`curated license text ${relativeFile} carries no terms`);
+    }
+    curatedLicenseTexts.set(file, text);
+  }
+  return text;
+}
+
+// Apply a curated override to one package, after re-checking the evidence it
+// rests on. Returns null when no override covers the package.
+function curatedNodeLicense(
+  { name, declaredLicense, repository },
+  { root = repositoryRoot } = {},
+) {
+  const rule = CURATED_NODE_LICENSES.find((entry) => entry.applies(name));
+  if (!rule) return null;
+  if (declaredLicense) {
+    throw new Error(
+      `${name} now declares \`${declaredLicense}\`, so the curated ` +
+        `${rule.license} override no longer applies; drop or narrow the rule ` +
+        "in CURATED_NODE_LICENSES after re-reviewing the package",
+    );
+  }
+  if (!pointsAtRepository(repository, rule.repository)) {
+    throw new Error(
+      `${name} no longer points at ${rule.repository} (repository: ` +
+        `${repository ?? "none"}), so the evidence behind its curated ` +
+        `${rule.license} override is stale; re-review the package and update ` +
+        "CURATED_NODE_LICENSES",
+    );
+  }
+  return {
+    license: rule.license,
+    note: rule.note,
+    licenseTexts: [
+      {
+        file: rule.licenseTextLabel,
+        text: curatedLicenseText(root, rule.licenseTextFile),
+      },
+    ],
+  };
+}
+
 // `pnpm licenses list --json --prod` is used only to enumerate the production
 // closure and locate each package on disk. Its own license classification is
 // deliberately ignored: it reads the manifest we read ourselves, and its
 // heuristics are free to change between pnpm releases.
-export function collectNodePackages(pnpmLicenses, { excludeNames = [] } = {}) {
+export function collectNodePackages(
+  pnpmLicenses,
+  { excludeNames = [], root = repositoryRoot } = {},
+) {
   const excluded = new Set(excludeNames);
   const packages = new Map();
   for (const entries of Object.values(pnpmLicenses)) {
@@ -222,12 +338,20 @@ export function collectNodePackages(pnpmLicenses, { excludeNames = [] } = {}) {
           );
         }
         const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+        const declaredLicense = manifestLicense(manifest);
+        const repository = manifestRepository(manifest);
+        const distributedTexts = collectLicenseTexts(packageDirectory, null);
+        const curated = curatedNodeLicense(
+          { name: entry.name, declaredLicense, repository },
+          { root },
+        );
         packages.set(`${entry.name}@${version}`, {
           name: entry.name,
           version,
-          license: manifestLicense(manifest) ?? UNDECLARED_LICENSE,
-          repository: manifestRepository(manifest),
-          licenseTexts: collectLicenseTexts(packageDirectory, null),
+          license: curated?.license ?? declaredLicense ?? UNDECLARED_LICENSE,
+          licenseNote: curated?.note ?? null,
+          repository,
+          licenseTexts: [...distributedTexts, ...(curated?.licenseTexts ?? [])],
         });
       });
     }
@@ -254,6 +378,7 @@ function renderSection(heading, packages, texts) {
   for (const pkg of packages) {
     lines.push(`### ${pkg.name} ${pkg.version}`, "");
     lines.push(`- License: \`${pkg.license}\``);
+    if (pkg.licenseNote) lines.push(`- License source: ${pkg.licenseNote}`);
     if (pkg.repository) lines.push(`- Repository: ${pkg.repository}`);
     if (pkg.licenseTexts.length === 0) {
       lines.push("- License text: not distributed with this package");
@@ -296,6 +421,7 @@ export function renderNotices({ rustPackages, nodePackages }) {
   const undeclared = [...sortedRust, ...sortedNode].filter(
     (pkg) => pkg.license === UNDECLARED_LICENSE,
   );
+  const curated = [...sortedRust, ...sortedNode].filter((pkg) => pkg.licenseNote);
 
   const header = [
     "# Third-party notices",
@@ -318,12 +444,18 @@ export function renderNotices({ rustPackages, nodePackages }) {
     "is reproduced under [License texts](#license-texts). Identical texts are",
     "stored once and referenced by a content-addressed identifier.",
     "",
+    "A few packages state their terms outside their own manifest. Those carry a",
+    "`License source` line naming the evidence behind the recorded license; the",
+    "generator re-checks that evidence on every run and fails rather than apply",
+    "a stale one.",
+    "",
     "## Summary",
     "",
     `- Rust crates: ${sortedRust.length}`,
     `- Desktop UI production packages: ${sortedNode.length}`,
     `- Distinct license texts: ${texts.size}`,
     `- Packages with no declared license: ${undeclared.length}`,
+    `- Packages with a curated license: ${curated.length}`,
     "",
     "License identifiers named across all declared expressions:",
     "",
@@ -386,6 +518,7 @@ export function generateNotices({ root = repositoryRoot } = {}) {
   return renderNotices({
     rustPackages: collectRustPackages(runCargoMetadata(root)),
     nodePackages: collectNodePackages(runPnpmLicenses(uiDirectory), {
+      root,
       // The UI project itself is OpenWave, covered by LICENSE and NOTICE.
       excludeNames: [uiManifest.name],
     }),
