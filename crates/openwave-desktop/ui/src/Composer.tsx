@@ -574,12 +574,17 @@ export function Composer({
         // has ended up, and every keystroke since is kept.
         const current = latestDraftRef.current;
         const typed = token === null ? null : draft.slice(token.start, caret);
-        const start =
-          token === null || typed === null
-            ? -1
-            : locateSlashToken(current, typed, token.start, current.length - draft.length);
-        if (start >= 0 && typed !== null) {
-          applySlashReplacement(current, start, start + typed.length, body);
+        const found =
+          typed === null || token === null
+            ? null
+            : locateSlashToken(
+                current,
+                typed,
+                token.start,
+                current.length - draft.length,
+              );
+        if (found) {
+          applySlashReplacement(current, found.start, found.end, body);
         } else {
           insertAtSelection(body, current);
         }

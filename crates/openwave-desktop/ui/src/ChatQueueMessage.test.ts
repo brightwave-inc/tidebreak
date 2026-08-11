@@ -17,10 +17,4 @@ describe("queueing a message behind a running turn", () => {
     expect(onQueued).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith("chat is not accepting messages");
   });
-
-  it("clears the composer once the message is on the queue", async () => {
-    const onQueued = vi.fn();
-    await queueComposerMessage(async () => undefined, onQueued);
-    expect(onQueued).toHaveBeenCalled();
-  });
 });

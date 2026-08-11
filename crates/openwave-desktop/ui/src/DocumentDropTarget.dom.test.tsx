@@ -74,9 +74,10 @@ describe("DocumentDropTarget", () => {
   });
 
   it("cancels its native listener and ignores a stale drop after unmount", async () => {
+    const resolveChatId = vi.fn(async () => "chat-1");
     const view = render(
       <DocumentDropTarget
-        resolveChatId={async () => "chat-1"}
+        resolveChatId={resolveChatId}
         onAttached={vi.fn()}
         onError={vi.fn()}
       />,
@@ -90,6 +91,9 @@ describe("DocumentDropTarget", () => {
         payload: { phase: "dropped", accepted: true, fileCount: 1 },
       });
     });
+    // Resolving the conversation is what creates one on home, so a drop
+    // delivered after teardown must not reach the resolver either.
+    expect(resolveChatId).not.toHaveBeenCalled();
     expect(mocks.attachDropped).not.toHaveBeenCalled();
   });
 

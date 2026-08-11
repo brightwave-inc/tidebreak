@@ -57,10 +57,10 @@ export function DocumentDropTarget({
         setState(null);
         if (next.accepted) {
           void (async () => {
-            // Resolving the conversation can create one, so a drop that
-            // arrived after this listener was torn down must stop here rather
-            // than in the callback.
-            if (cancelled) return;
+            // Unmounting during this round trip cannot call the conversation
+            // back: it is already created, and it shows up in the sidebar
+            // unasked. Home writes the id into its draft, so the next send
+            // from home reuses it rather than leaving it stranded.
             const chatId = await resolveRef.current();
             if (cancelled) return;
             const attached = await attachDroppedChatFiles(chatId);

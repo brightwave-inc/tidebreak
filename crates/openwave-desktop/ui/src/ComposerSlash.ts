@@ -110,36 +110,47 @@ export function filterSlashOptions(
 
 /**
  * Where the `/query` token has ended up in a draft that has been typed into
- * since it was read.
+ * since it was read, as the range the body should replace.
  *
  * Fetching a prompt body is a round trip and people carry on typing through
  * it, so by the time the body lands the token may have moved (text typed
- * before it) or merely stayed put (text typed after). The remembered offset
- * and the offset shifted by the length change cover both of those exactly;
- * the scan behind them catches an edit on both sides at once. `-1` when the
- * token is gone — the reader deleted it, and the body belongs at the caret
- * instead.
+ * before it), stayed put (text typed after it), or changed under the reader's
+ * fingers — the likeliest of the three, because the natural continuation of
+ * picking "Weekly update" at `/week` is to finish typing `ly`. So what is
+ * looked for is the whole whitespace-delimited word rather than the token
+ * string as it was read: replacing only the remembered characters would leave
+ * the rest of the word stranded against the body.
  *
- * Nothing here can tell one identical token from another: type a second `/a`
- * ahead of the first while the body loads and the guesses land on whichever
- * `/a` sits at the expected offset, which may be the new one. Distinguishing
- * them needs an identity the textarea does not give us.
+ * A candidate word has to be a prefix of the token or have the token as its
+ * prefix, which is what tells "the same word, still being typed" from an
+ * unrelated `/` word elsewhere in the draft. Between candidates the one
+ * nearest the remembered offset — or that offset shifted by the draft's
+ * length change, which is where an edit ahead of the token puts it — wins.
+ * `null` when the token is gone, and the body belongs at the caret instead.
+ *
+ * Nothing here can tell one such word from another: type a second `/a` ahead
+ * of the first while the body loads and the nearest guess may land on the new
+ * one. Distinguishing them needs an identity the textarea does not give us.
  */
 export function locateSlashToken(
   draft: string,
   token: string,
   start: number,
   shift: number,
-): number {
-  for (const guess of [start, start + shift]) {
-    if (guess >= 0 && draft.startsWith(token, guess)) return guess;
-  }
-  let best = -1;
-  for (let at = draft.indexOf(token); at !== -1; at = draft.indexOf(token, at + 1)) {
-    const before = at === 0 ? "" : draft[at - 1]!;
-    if (before !== "" && !/\s/.test(before)) continue;
-    if (best === -1 || Math.abs(at - (start + shift)) < Math.abs(best - (start + shift))) {
-      best = at;
+): { start: number; end: number } | null {
+  let best: { start: number; end: number } | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const match of draft.matchAll(/(^|\s)(\/\S*)/g)) {
+    const at = (match.index ?? 0) + match[1]!.length;
+    const word = match[2]!;
+    if (!word.startsWith(token) && !token.startsWith(word)) continue;
+    const distance = Math.min(
+      Math.abs(at - start),
+      Math.abs(at - (start + shift)),
+    );
+    if (distance < bestDistance) {
+      best = { start: at, end: at + word.length };
+      bestDistance = distance;
     }
   }
   return best;

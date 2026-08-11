@@ -207,6 +207,62 @@ it("finds the token again when the typing lands ahead of it", async () => {
   );
 });
 
+it("takes the whole word when the token is still being typed", async () => {
+  // The list narrows before the word is finished, so picking at `/week` and
+  // finishing `ly` while the fetch runs is the ordinary case, not an edge one.
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /week");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.keyboard("ly");
+  release("Write this week's update covering:");
+
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "draft the Write this week's update covering:",
+    ),
+  );
+});
+
+it("takes the whole word when the token is being deleted", async () => {
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  await user.click(screen.getByRole("textbox", { name: "Message" }));
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.keyboard("{Backspace}{Backspace}");
+  release("Write this week's update covering:");
+
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "draft the Write this week's update covering:",
+    ),
+  );
+});
+
 it("invokes a picked skill and shows it as a chip the reader can drop", async () => {
   const user = userEvent.setup();
   const onInvoke = vi.fn();
