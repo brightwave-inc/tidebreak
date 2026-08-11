@@ -122,6 +122,29 @@ sandbox agent over a socket on every run; what is no longer proven is the
 Docker packaging and the container network boundary. Restoring that lane is
 part of picking the tier back up, not a separate task.
 
+## Native Vertex AI and Bedrock routes
+
+The first-class Google Vertex AI and Amazon Bedrock Mantle providers were
+removed, along with the service-account and AWS access-key credential types
+that existed only to serve them. Google service accounts and AWS SigV4 are the
+only credential shapes OpenWave ever carried that are not an API key in the OS
+keychain, and every model those routes served is already reachable — through a
+direct Anthropic or Google API key, or through an OpenAI-compatible base-URL
+override pointed at a gateway that fronts them. The routes added no model
+breadth, and because nothing exercised them they rotted quietly: Vertex Claude
+was returning 404 for unversioned model ids and nobody noticed.
+
+Stored provider configurations of those kinds are not migrated. A config row or
+keychain credential written by an older build simply stops parsing and is
+ignored.
+
+What would bring them back: real demand for marketplace-billed access that a
+gateway base URL cannot serve — an organization that must pay for inference
+through its Google Cloud or AWS commitment and cannot put a compatible endpoint
+in front of it. That case would justify the cloud-credential plumbing again,
+and it would need a verified route and a live check, not a route curated on
+documentation alone.
+
 ## Windows packaging
 
 Windows builds shipped through v0.34.0 as an unsigned x86_64 NSIS installer,

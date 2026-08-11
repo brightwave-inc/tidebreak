@@ -462,15 +462,10 @@ async fn models_catalog_is_served() {
         opus["reasoning_efforts"],
         serde_json::json!(["low", "medium", "high", "xhigh", "max"])
     );
-    // Claude 4.6 accepts `max` but not `xhigh`, on both the direct and Vertex
-    // routes. The public catalog must expose the same narrowed mirror so the UI
-    // cannot offer a request token either route would reject.
-    for key in [
-        "anthropic::claude-opus-4-6",
-        "anthropic::claude-sonnet-4-6",
-        "vertex::claude-opus-4-6",
-        "vertex::claude-sonnet-4-6",
-    ] {
+    // Claude 4.6 accepts `max` but not `xhigh`. The public catalog must expose
+    // that narrowing so the UI cannot offer a request token the route would
+    // reject.
+    for key in ["anthropic::claude-opus-4-6", "anthropic::claude-sonnet-4-6"] {
         let model = models
             .iter()
             .find(|model| model["key"] == key)
@@ -483,19 +478,15 @@ async fn models_catalog_is_served() {
         );
     }
     // Haiku 4.5 needs classic extended-thinking budget requests, which the
-    // shared Anthropic adapter cannot emit yet. Both catalog rows therefore
-    // stay non-reasoning and hide the effort control.
-    for key in [
-        "anthropic::claude-haiku-4-5-20251001",
-        "vertex::claude-haiku-4-5",
-    ] {
-        let haiku = models
-            .iter()
-            .find(|model| model["key"] == key)
-            .unwrap_or_else(|| panic!("catalog omitted {key}"));
-        assert!(!haiku["supports_reasoning"].as_bool().unwrap(), "{key}");
-        assert_eq!(haiku["reasoning_efforts"], serde_json::json!([]), "{key}");
-    }
+    // shared Anthropic adapter cannot emit yet. The catalog row therefore
+    // stays non-reasoning and hides the effort control.
+    let key = "anthropic::claude-haiku-4-5-20251001";
+    let haiku = models
+        .iter()
+        .find(|model| model["key"] == key)
+        .unwrap_or_else(|| panic!("catalog omitted {key}"));
+    assert!(!haiku["supports_reasoning"].as_bool().unwrap(), "{key}");
+    assert_eq!(haiku["reasoning_efforts"], serde_json::json!([]), "{key}");
     // The GPT-5 line adds an off level, and only the 5.6 generation reaches
     // `max`.
     let gpt = models

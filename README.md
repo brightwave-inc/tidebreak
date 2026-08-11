@@ -120,8 +120,7 @@ platform differences below first.
 
 Provider credentials go in the OS keychain, not in the database and not in a
 config file you might commit. OpenWave talks to Anthropic, OpenAI and
-OpenAI-compatible endpoints, Google (Gemini and Vertex AI), Amazon Bedrock, and
-xAI.
+OpenAI-compatible endpoints, Google Gemini, and xAI.
 
 The conversation journal is provider-neutral, so a chat can move from Claude to
 Gemini to GPT and back without starting over — useful when a provider is rate
@@ -294,7 +293,7 @@ end-to-end, less technical tour of the runtime and its state machines, see
 | Crate | What it is |
 | --- | --- |
 | [`openwave-core`](crates/openwave-core) | agent loop, tools, event stream, storage traits |
-| [`openwave-router`](crates/openwave-router) | Anthropic, OpenAI, Google, Vertex AI, Amazon Bedrock, and xAI providers + model routing |
+| [`openwave-router`](crates/openwave-router) | Anthropic, OpenAI, Google, and xAI providers + model routing |
 | [`openwave-host-broker`](crates/openwave-host-broker) | consented access to folders on the host |
 | [`openwave-code-execution`](crates/openwave-code-execution) | provider-neutral command execution + native, Docker, and managed backends |
 | [`openwave-egress`](crates/openwave-egress) | egress policy decisions for outbound network access |

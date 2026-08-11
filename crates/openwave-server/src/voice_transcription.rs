@@ -390,22 +390,10 @@ async fn transcribe_gemini(
         Some(ProviderCredential::ApiKey { key }) if !key.is_empty() => {
             openwave_router::GeminiProvider::new(key)
         }
-        Some(credential) => {
-            let json = credential
-                .as_service_account()
-                .ok_or_else(|| ServerError::conflict("Gemini has no supported saved credential"))?;
-            let account = openwave_router::GoogleServiceAccount::from_json(json)
-                .map_err(|_| ServerError::conflict("Gemini service account is invalid"))?;
-            let project = account.project_id().to_owned();
-            let source = std::sync::Arc::new(
-                openwave_router::GoogleServiceAccountTokenSource::new(account),
-            );
-            openwave_router::GeminiProvider::vertex(
-                project,
-                config.vertex_location.as_deref().unwrap_or("global"),
-                source,
-            )
-            .map_err(ServerError::from)?
+        Some(_) => {
+            return Err(ServerError::conflict(
+                "Gemini has no supported saved credential",
+            ));
         }
         None => {
             let key = providers::resolve_api_key(secrets, ProviderKind::Gemini)

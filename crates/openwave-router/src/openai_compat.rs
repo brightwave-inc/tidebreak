@@ -1665,8 +1665,6 @@ mod tests {
                 std::sync::Arc::new(StaticGatewayTokenSource)
                     as std::sync::Arc<dyn crate::BearerTokenSource>
             }),
-            vertex: None,
-            bedrock: None,
             chatgpt_account_id: None,
         }])
     }
@@ -1836,8 +1834,6 @@ mod tests {
             base_url: Some(format!("http://{address}/compat/openai/v1")),
             curated_models: vec!["gpt-fable-5".to_string()],
             token_source: Some(source.clone()),
-            vertex: None,
-            bedrock: None,
             chatgpt_account_id: None,
         }]);
         let conversation = openwave_core::id::ChatId::new();

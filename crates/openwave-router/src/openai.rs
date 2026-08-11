@@ -90,7 +90,6 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
-    request_auth: Option<Arc<dyn crate::http::RequestAuthenticator>>,
     provider_label: &'static str,
     /// Per-request credential supplier for ChatGPT OAuth (and similar)
     /// short-lived tokens. Takes precedence over `api_key` when present.
@@ -109,7 +108,6 @@ impl OpenAiProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            request_auth: None,
             provider_label: "openai",
             token_source: None,
             chatgpt_account_id: None,
@@ -127,7 +125,6 @@ impl OpenAiProvider {
             client: crate::http::streaming_client(),
             api_key: api_key.into(),
             base_url: base_url.into(),
-            request_auth: None,
             provider_label: profile.provider(),
             token_source: None,
             chatgpt_account_id: None,
@@ -145,18 +142,6 @@ impl OpenAiProvider {
     #[cfg(test)]
     pub(crate) fn base_url_for_test(&self) -> &str {
         &self.base_url
-    }
-
-    /// Authenticate the exact serialized request through a shared transport.
-    #[must_use]
-    pub(crate) fn with_request_auth(
-        mut self,
-        auth: Arc<dyn crate::http::RequestAuthenticator>,
-        provider_label: &'static str,
-    ) -> Self {
-        self.request_auth = Some(auth);
-        self.provider_label = provider_label;
-        self
     }
 
     /// Fetch the credential from `source` at each request instead of using a
@@ -205,19 +190,15 @@ impl ModelProvider for OpenAiProvider {
         let url = reqwest::Url::parse(&url)
             .map_err(|_| AgentError::config("invalid Responses API endpoint"))?;
         let body = serde_json::to_vec(&body)?;
-        let api_key = match (&self.request_auth, &self.token_source) {
-            (Some(_), _) => String::new(),
-            (None, Some(source)) => source.bearer_token_for(req.conversation).await?,
-            (None, None) => self.api_key.clone(),
+        let api_key = match &self.token_source {
+            Some(source) => source.bearer_token_for(req.conversation).await?,
+            None => self.api_key.clone(),
         };
         let mut request = self
             .client
             .post(url.clone())
-            .header("content-type", "application/json");
-        request = match &self.request_auth {
-            Some(auth) => auth.authenticate(request, &url, &body)?,
-            None => request.bearer_auth(&api_key),
-        };
+            .header("content-type", "application/json")
+            .bearer_auth(&api_key);
         if let Some(account_id) = &self.chatgpt_account_id {
             request = request
                 .header("ChatGPT-Account-ID", account_id)

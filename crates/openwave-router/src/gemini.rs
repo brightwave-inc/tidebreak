@@ -9,7 +9,7 @@
 //! fields it does not understand.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -26,15 +26,14 @@ use openwave_core::provider::{
 use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
-use crate::google::{valid_resource_segment, valid_vertex_location};
 use crate::sse::{
-    classify_in_band_error, classify_in_band_error_redacting, classify_provider_error,
-    classify_provider_error_redacting, frame_data_raw, read_bounded_error_body, safe_http_error,
-    safe_http_error_redacting, SseFramer,
+    classify_in_band_error, classify_provider_error, frame_data_raw, read_bounded_error_body,
+    safe_http_error, SseFramer,
 };
-use crate::BearerTokenSource;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
+/// Client-visible identity of this adapter, used in error attribution.
+const PROVIDER_NAME: &str = "gemini";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Gemini accepts this documented value when an application cannot replay an
 /// opaque thought signature. OpenWave stores provider-neutral tool calls, so
@@ -51,46 +50,13 @@ fn thought_signature_bypass() -> &'static str {
     &ENCODED
 }
 
-#[derive(Clone)]
-enum GeminiAuth {
-    ApiKey(String),
-    Bearer(Arc<dyn BearerTokenSource>),
-}
-
-#[derive(Clone)]
-enum EndpointFamily {
-    DeveloperApi,
-    VertexAi {
-        project_id: String,
-        location: String,
-    },
-}
-
-impl EndpointFamily {
-    fn provider_name(&self) -> &'static str {
-        match self {
-            Self::DeveloperApi => "gemini",
-            Self::VertexAi { .. } => "vertex",
-        }
-    }
-
-    fn vertex_project_id(&self) -> Option<&str> {
-        match self {
-            Self::DeveloperApi => None,
-            Self::VertexAi { project_id, .. } => Some(project_id),
-        }
-    }
-}
-
-/// A [`ModelProvider`] for native Gemini GenerateContent over either the
-/// Developer API or Vertex AI.
+/// A [`ModelProvider`] for native Gemini GenerateContent over the Developer
+/// API.
 #[derive(Clone)]
 pub struct GeminiProvider {
     client: reqwest::Client,
-    auth: GeminiAuth,
-    endpoint_family: EndpointFamily,
+    api_key: String,
     base_url: String,
-    base_url_overridden: bool,
 }
 
 impl GeminiProvider {
@@ -98,50 +64,16 @@ impl GeminiProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: crate::http::streaming_client(),
-            auth: GeminiAuth::ApiKey(api_key.into()),
-            endpoint_family: EndpointFamily::DeveloperApi,
+            api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            base_url_overridden: false,
         }
     }
 
-    /// Build a provider using Vertex AI and a short-lived Google OAuth token.
-    pub fn vertex(
-        project_id: impl Into<String>,
-        location: impl Into<String>,
-        token_source: Arc<dyn BearerTokenSource>,
-    ) -> Result<Self> {
-        let project_id = project_id.into();
-        let location = location.into();
-        if !valid_resource_segment(&project_id) {
-            return Err(AgentError::config("invalid Vertex AI project"));
-        }
-        if !valid_vertex_location(&location) {
-            return Err(AgentError::config("invalid Vertex AI location"));
-        }
-        let base_url = if location == "global" {
-            "https://aiplatform.googleapis.com".to_string()
-        } else {
-            format!("https://{location}-aiplatform.googleapis.com")
-        };
-        Ok(Self {
-            client: crate::http::streaming_client(),
-            auth: GeminiAuth::Bearer(token_source),
-            endpoint_family: EndpointFamily::VertexAi {
-                project_id,
-                location,
-            },
-            base_url,
-            base_url_overridden: false,
-        })
-    }
-
-    /// Override the selected endpoint family's base URL. This is primarily
-    /// useful for controlled local test servers.
+    /// Override the base URL. This is primarily useful for controlled local
+    /// test servers.
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
-        self.base_url_overridden = true;
         self
     }
 
@@ -152,46 +84,12 @@ impl GeminiProvider {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
-            return Err(AgentError::config(format!(
-                "{} received an invalid model id",
-                self.endpoint_family.provider_name()
-            )));
+            return Err(AgentError::config("gemini received an invalid model id"));
         }
-        match &self.endpoint_family {
-            EndpointFamily::DeveloperApi => {
-                let base = self.base_url.trim_end_matches('/');
-                Ok(format!(
-                    "{base}/v1beta/models/{model}:streamGenerateContent?alt=sse"
-                ))
-            }
-            EndpointFamily::VertexAi {
-                project_id,
-                location,
-            } => {
-                // Gemini 3 is global-only. Legacy Gemini service-account
-                // configurations retain a regional setting for older/future
-                // regional models without sending a curated 3.x row to an
-                // endpoint Google cannot serve. First-class Vertex is
-                // global-only at the server configuration boundary.
-                let location = if requires_global_vertex(model) {
-                    "global"
-                } else {
-                    location
-                };
-                let default_base;
-                let base = if self.base_url_overridden {
-                    self.base_url.trim_end_matches('/')
-                } else if location == "global" {
-                    "https://aiplatform.googleapis.com"
-                } else {
-                    default_base = format!("https://{location}-aiplatform.googleapis.com");
-                    &default_base
-                };
-                Ok(format!(
-                    "{base}/v1/projects/{project_id}/locations/{location}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
-                ))
-            }
-        }
+        let base = self.base_url.trim_end_matches('/');
+        Ok(format!(
+            "{base}/v1beta/models/{model}:streamGenerateContent?alt=sse"
+        ))
     }
 
     pub async fn transcribe_audio(
@@ -200,7 +98,7 @@ impl GeminiProvider {
         content_type: &str,
         audio_base64: &str,
     ) -> Result<String> {
-        let provider = self.endpoint_family.provider_name();
+        let provider = PROVIDER_NAME;
         let endpoint = self
             .endpoint(model)?
             .replace(":streamGenerateContent?alt=sse", ":generateContent");
@@ -218,16 +116,8 @@ impl GeminiProvider {
             .client
             .post(endpoint)
             .header("content-type", "application/json")
-            .json(&body);
-        let request = match &self.auth {
-            GeminiAuth::ApiKey(api_key) => request.header("x-goog-api-key", api_key),
-            GeminiAuth::Bearer(source) => request.bearer_auth(
-                source
-                    .bearer_token()
-                    .await
-                    .map_err(|error| credential_setup_error(provider, error))?,
-            ),
-        };
+            .json(&body)
+            .header("x-goog-api-key", &self.api_key);
         let response = request.send().await.map_err(|_| {
             AgentError::Provider(format!("{provider} audio transcription request failed"))
         })?;
@@ -249,23 +139,6 @@ impl GeminiProvider {
     }
 }
 
-fn credential_setup_error(provider: &str, error: AgentError) -> AgentError {
-    let message = format!("{provider} credential setup failed");
-    match error {
-        AgentError::Config(_) => AgentError::Config(message),
-        AgentError::MissingCredential(_) => AgentError::MissingCredential(provider.to_string()),
-        AgentError::Authentication(_) => AgentError::Authentication(message),
-        _ => AgentError::Provider(message),
-    }
-}
-
-fn requires_global_vertex(model: &str) -> bool {
-    model
-        .strip_prefix("gemini-")
-        .and_then(|version| version.split(['.', '-']).next())
-        == Some("3")
-}
-
 #[async_trait]
 impl ModelProvider for GeminiProvider {
     fn id(&self) -> ProviderId {
@@ -273,27 +146,19 @@ impl ModelProvider for GeminiProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let provider = self.endpoint_family.provider_name();
+        let provider = PROVIDER_NAME;
         let body = build_request_json(&req)?;
         let request = self
             .client
             .post(self.endpoint(&req.model)?)
             .header("content-type", "application/json")
+            .header("x-goog-api-key", &self.api_key)
             .json(&body);
-        let request = match &self.auth {
-            GeminiAuth::ApiKey(api_key) => request.header("x-goog-api-key", api_key),
-            GeminiAuth::Bearer(source) => request.bearer_auth(
-                source
-                    .bearer_token()
-                    .await
-                    .map_err(|error| credential_setup_error(provider, error))?,
-            ),
-        };
         let response = request
             .send()
             .await
-            // reqwest's display includes the URL; a Vertex URL contains the
-            // project id extracted from the secret key file.
+            // reqwest's display includes the URL, which is not worth echoing
+            // into a client-visible error.
             .map_err(|_| AgentError::Provider(format!("{provider} request failed")))?;
 
         let status = response.status();
@@ -305,30 +170,22 @@ impl ModelProvider for GeminiProvider {
                 status.as_u16(),
                 &body,
                 retry_after,
-                self.endpoint_family.vertex_project_id(),
             ));
         }
 
         let ceiling = crate::http::timeouts().total_stream;
-        let vertex_project_id = match &self.endpoint_family {
-            EndpointFamily::VertexAi { project_id, .. } => Some(project_id.clone()),
-            EndpointFamily::DeveloperApi => None,
-        };
         let stream = async_stream::stream! {
             let bytes = crate::http::with_stream_deadline(response.bytes_stream(), ceiling);
             futures::pin_mut!(bytes);
             let mut framer = SseFramer::default();
-            let mut state = StreamState {
-                vertex_project_id,
-                ..StreamState::default()
-            };
+            let mut state = StreamState::default();
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
-                    // The transport error's own text stays suppressed — reqwest's
-                    // display includes the URL, and a Vertex URL carries the
-                    // project id from the secret key file. Our own deadline text
-                    // carries no such thing and is worth surfacing.
+                    // The transport error's own text stays suppressed —
+                    // reqwest's display includes the request URL. Our own
+                    // deadline text carries no such thing and is worth
+                    // surfacing.
                     Err(error) => {
                         yield ProviderEvent::Failed {
                             error: ProviderErrorInfo::provider(error.client_message(provider)),
@@ -1096,19 +953,6 @@ struct StreamState {
     saw_tool_call: bool,
     terminal: bool,
     reported_grounding: bool,
-    /// Sensitive route identity retained only so accepted Vertex streams can
-    /// redact Google resource paths and attribute in-band failures correctly.
-    vertex_project_id: Option<String>,
-}
-
-impl StreamState {
-    fn provider_name(&self) -> &'static str {
-        if self.vertex_project_id.is_some() {
-            "vertex"
-        } else {
-            "gemini"
-        }
-    }
 }
 
 /// Convert one complete Gemini response frame into provider-neutral events.
@@ -1118,12 +962,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
     }
     if let Some(error) = data.get("error") {
         state.terminal = true;
-        let error = match state.vertex_project_id.as_deref() {
-            Some(project_id) => {
-                classify_in_band_error_redacting(state.provider_name(), error, &[project_id])
-            }
-            None => classify_in_band_error(state.provider_name(), error),
-        };
+        let error = classify_in_band_error(PROVIDER_NAME, error);
         return vec![ProviderEvent::Failed {
             error: ProviderErrorInfo::from_error(&error),
         }];
@@ -1189,7 +1028,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     events.push(ProviderEvent::Failed {
                         error: ProviderErrorInfo::provider(format!(
                             "{} returned a malformed function call",
-                            state.provider_name()
+                            PROVIDER_NAME
                         )),
                     });
                     return events;
@@ -1212,7 +1051,7 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                     events.push(ProviderEvent::Failed {
                         error: ProviderErrorInfo::provider(format!(
                             "{} returned non-object function arguments",
-                            state.provider_name()
+                            PROVIDER_NAME
                         )),
                     });
                     return events;
@@ -1400,7 +1239,7 @@ fn finish_candidate(reason: &str, state: &mut StreamState, events: &mut Vec<Prov
             events.push(ProviderEvent::Failed {
                 error: ProviderErrorInfo::provider(format!(
                     "{} rejected a function call",
-                    state.provider_name()
+                    PROVIDER_NAME
                 )),
             });
         }
@@ -1466,7 +1305,6 @@ fn classify_gemini_error(
     status: u16,
     body: &str,
     retry_after: Option<std::time::Duration>,
-    vertex_project_id: Option<&str>,
 ) -> AgentError {
     let prompt_too_long = serde_json::from_str::<Value>(body)
         .ok()
@@ -1484,18 +1322,9 @@ fn classify_gemini_error(
                 || message.contains("maximum number of tokens")
         });
     if prompt_too_long {
-        let message = match vertex_project_id {
-            Some(project_id) => safe_http_error_redacting(provider, status, body, &[project_id]),
-            None => safe_http_error(provider, status, body),
-        };
-        return AgentError::PromptTooLong(message);
+        return AgentError::PromptTooLong(safe_http_error(provider, status, body));
     }
-    match vertex_project_id {
-        Some(project_id) => {
-            classify_provider_error_redacting(provider, status, body, retry_after, &[project_id])
-        }
-        None => classify_provider_error(provider, status, body, retry_after),
-    }
+    classify_provider_error(provider, status, body, retry_after)
 }
 
 #[cfg(test)]
@@ -1559,8 +1388,8 @@ mod tests {
 
     #[test]
     fn low_reasoning_request_uses_low_not_minimal() {
-        // Direct Gemini and Vertex Gemini share this request builder. The host
-        // policy raises a stored `none` to `low` for Gemini 3.1 Pro Preview;
+        // The host policy raises a stored `none` to `low` for Gemini 3.1 Pro
+        // Preview;
         // keep that reconciled level intact on the native wire.
         let mut req = request(vec![ChatMessage::text(Role::User, "hi")]);
         req.model = "gemini-3.1-pro-preview".into();
@@ -1844,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn vertex_replays_its_signature_and_route_switches_use_the_legacy_bypass() {
+    fn gemini_replays_its_signature_and_route_switches_use_the_legacy_bypass() {
         let tool_message = |origin_provider: &str| ChatMessage {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
@@ -1859,21 +1688,21 @@ mod tests {
                 },
                 vec![json!({
                     "functionCall": {"id": "call_one"},
-                    "thoughtSignature": "dmVydGV4LW9wYXF1ZS1zaWduYXR1cmU=",
+                    "thoughtSignature": "Z2VtaW5pLW9wYXF1ZS1zaWduYXR1cmU=",
                 })],
             ),
         };
 
-        let mut vertex = request(vec![tool_message("vertex")]);
-        vertex.provider = Some(ProviderId::new("vertex"));
-        let body = build_request_json(&vertex).unwrap();
+        let mut same_route = request(vec![tool_message("gemini")]);
+        same_route.provider = Some(ProviderId::new("gemini"));
+        let body = build_request_json(&same_route).unwrap();
         assert_eq!(
             body["contents"][0]["parts"][0]["thoughtSignature"],
-            "dmVydGV4LW9wYXF1ZS1zaWduYXR1cmU="
+            "Z2VtaW5pLW9wYXF1ZS1zaWduYXR1cmU="
         );
 
-        let mut switched = request(vec![tool_message("gemini")]);
-        switched.provider = Some(ProviderId::new("vertex"));
+        let mut switched = request(vec![tool_message("model_gateway")]);
+        switched.provider = Some(ProviderId::new("gemini"));
         let body = build_request_json(&switched).unwrap();
         let signature = body["contents"][0]["parts"][0]["thoughtSignature"]
             .as_str()
@@ -2266,132 +2095,45 @@ mod tests {
         );
     }
 
-    struct StaticToken;
-
-    #[async_trait]
-    impl BearerTokenSource for StaticToken {
-        async fn bearer_token(&self) -> Result<String> {
-            Ok("vertex-bearer".into())
-        }
-    }
-
-    struct FailingToken;
-
-    #[async_trait]
-    impl BearerTokenSource for FailingToken {
-        async fn bearer_token(&self) -> Result<String> {
-            Err(AgentError::Authentication(
-                "token exchange mentioned customer-project-123".into(),
-            ))
-        }
-    }
-
     #[tokio::test]
-    async fn endpoint_family_labels_setup_and_connection_failures() {
-        let providers = [
-            (
-                GeminiProvider::new("developer-key").with_base_url("http://127.0.0.1:1"),
-                "gemini",
-            ),
-            (
-                GeminiProvider::vertex("customer-project-123", "global", Arc::new(StaticToken))
-                    .unwrap()
-                    .with_base_url("http://127.0.0.1:1"),
-                "vertex",
-            ),
-        ];
-        for (provider, expected) in providers {
-            let mut invalid = request(vec![ChatMessage::text(Role::User, "hi")]);
-            invalid.model = "../not-a-model".into();
-            let error = match provider.stream(invalid).await {
-                Err(error) => error,
-                Ok(_) => panic!("{expected} unexpectedly accepted an invalid model id"),
-            };
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("{expected} received an invalid model id")),
-                "{error}"
-            );
-        }
+    async fn setup_and_connection_failures_carry_provider_attribution() {
+        let provider = GeminiProvider::new("developer-key").with_base_url("http://127.0.0.1:1");
+        let mut invalid = request(vec![ChatMessage::text(Role::User, "hi")]);
+        invalid.model = "../not-a-model".into();
+        let error = match provider.stream(invalid).await {
+            Err(error) => error,
+            Ok(_) => panic!("gemini unexpectedly accepted an invalid model id"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("gemini received an invalid model id"),
+            "{error}"
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let base_url = format!("http://{address}");
-        let providers = [
-            (
-                GeminiProvider::new("developer-key").with_base_url(&base_url),
-                "gemini",
-            ),
-            (
-                GeminiProvider::vertex("customer-project-123", "global", Arc::new(StaticToken))
-                    .unwrap()
-                    .with_base_url(&base_url),
-                "vertex",
-            ),
-        ];
-        for (provider, expected) in providers {
-            let error = match provider
-                .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
-                .await
-            {
-                Err(error) => error,
-                Ok(_) => panic!("{expected} unexpectedly connected to a closed fixture port"),
-            };
-            assert_eq!(
-                error.to_string(),
-                format!("provider error: {expected} request failed")
-            );
-        }
-
         let provider =
-            GeminiProvider::vertex("customer-project-123", "global", Arc::new(FailingToken))
-                .unwrap();
+            GeminiProvider::new("developer-key").with_base_url(format!("http://{address}"));
         let error = match provider
             .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
             .await
         {
             Err(error) => error,
-            Ok(_) => panic!("Vertex unexpectedly accepted a failed credential setup"),
+            Ok(_) => panic!("gemini unexpectedly connected to a closed fixture port"),
         };
-        assert!(matches!(error, AgentError::Authentication(_)));
-        assert_eq!(
-            error.to_string(),
-            "provider authentication failed: vertex credential setup failed"
-        );
-        assert!(!error.to_string().contains("customer-project-123"));
-    }
-
-    #[test]
-    fn legacy_vertex_endpoints_distinguish_global_and_regional_hosts() {
-        let global =
-            GeminiProvider::vertex("test-project", "global", Arc::new(StaticToken)).unwrap();
-        assert_eq!(
-            global.endpoint("gemini-3.6-flash").unwrap(),
-            "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
-        );
-
-        let regional =
-            GeminiProvider::vertex("test-project", "us-central1", Arc::new(StaticToken)).unwrap();
-        assert_eq!(
-            regional.endpoint("gemini-2.5-flash").unwrap(),
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-        );
-        assert_eq!(
-            regional.endpoint("gemini-3.6-flash").unwrap(),
-            "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
-        );
+        assert_eq!(error.to_string(), "provider error: gemini request failed");
     }
 
     #[tokio::test]
-    async fn endpoint_families_share_body_semantics_and_use_exclusive_auth_headers() {
+    async fn requests_carry_the_developer_api_key_header_and_the_shared_body() {
         use axum::extract::State;
         use axum::http::{header, HeaderMap};
         use axum::response::IntoResponse;
         use axum::routing::post;
         use axum::{Json, Router};
-        use std::sync::Mutex;
+        use std::sync::{Arc, Mutex};
 
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<(HeaderMap, Value)>>>);
@@ -2426,44 +2168,27 @@ mod tests {
             .unwrap();
         while stream.next().await.is_some() {}
 
-        let vertex = GeminiProvider::vertex("test-project", "global", Arc::new(StaticToken))
-            .unwrap()
-            .with_base_url(&base_url);
-        let mut stream = vertex
-            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
-            .await
-            .unwrap();
-        while stream.next().await.is_some() {}
-
         let requests = capture_state.0.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].0.get("x-goog-api-key").unwrap(),
             "developer-key"
         );
         assert!(requests[0].0.get(header::AUTHORIZATION).is_none());
+        assert_eq!(requests[0].1["generationConfig"]["maxOutputTokens"], 65_536);
         assert_eq!(
-            requests[1].0.get(header::AUTHORIZATION).unwrap(),
-            "Bearer vertex-bearer"
-        );
-        assert!(requests[1].0.get("x-goog-api-key").is_none());
-        assert_eq!(requests[0].1, requests[1].1);
-        assert_eq!(requests[1].1["generationConfig"]["maxOutputTokens"], 65_536);
-        assert_eq!(
-            requests[1].1["tools"][0]["functionDeclarations"][0]["name"],
+            requests[0].1["tools"][0]["functionDeclarations"][0]["name"],
             "read_file"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn http_errors_use_endpoint_family_and_redact_the_vertex_project() {
+    async fn http_errors_carry_provider_attribution() {
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
         use axum::routing::post;
         use axum::{Json, Router};
-
-        const PROJECT_ID: &str = "customer-project-123";
 
         async fn deny() -> impl IntoResponse {
             (
@@ -2471,9 +2196,7 @@ mod tests {
                 Json(json!({
                     "error": {
                         "code": "permission_denied",
-                        "message": format!(
-                            "Permission denied on projects/{PROJECT_ID}/locations/global"
-                        ),
+                        "message": "The caller does not have permission",
                     }
                 })),
             )
@@ -2493,56 +2216,31 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("Gemini unexpectedly accepted the denied request"),
         };
-        assert!(matches!(error, AgentError::Authentication(_)));
-        let visible = error.to_string();
-        assert!(visible.contains("gemini returned 403"), "{visible}");
-        assert!(visible.contains("permission_denied"), "{visible}");
-
-        let provider = GeminiProvider::vertex(PROJECT_ID, "global", Arc::new(StaticToken))
-            .unwrap()
-            .with_base_url(&base_url);
-        let error = match provider
-            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
-            .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("Vertex Gemini unexpectedly accepted the denied request"),
-        };
         server.abort();
 
         assert!(matches!(error, AgentError::Authentication(_)));
         let visible = error.to_string();
-        assert!(visible.contains("vertex returned 403"), "{visible}");
+        assert!(visible.contains("gemini returned 403"), "{visible}");
         assert!(visible.contains("permission_denied"), "{visible}");
-        assert!(!visible.contains(PROJECT_ID), "{visible}");
     }
 
     #[test]
-    fn prompt_too_long_uses_endpoint_family_and_redacts_the_vertex_project() {
-        const PROJECT_ID: &str = "customer-project-123";
+    fn oversized_prompts_classify_as_prompt_too_long() {
         let body = json!({
             "error": {
                 "code": "invalid_argument",
-                "message": format!(
-                    "Input token count for projects/{PROJECT_ID} exceeds the maximum number of tokens"
-                ),
+                "message": "Input token count exceeds the maximum number of tokens",
             }
         })
         .to_string();
 
-        let direct = classify_gemini_error("gemini", 400, &body, None, None);
-        assert!(matches!(direct, AgentError::PromptTooLong(_)));
-        assert!(direct.to_string().contains("gemini returned 400"));
-
-        let vertex = classify_gemini_error("vertex", 400, &body, None, Some(PROJECT_ID));
-        assert!(matches!(vertex, AgentError::PromptTooLong(_)));
-        let visible = vertex.to_string();
-        assert!(visible.contains("vertex returned 400"), "{visible}");
-        assert!(!visible.contains(PROJECT_ID), "{visible}");
+        let error = classify_gemini_error("gemini", 400, &body, None);
+        assert!(matches!(error, AgentError::PromptTooLong(_)));
+        assert!(error.to_string().contains("gemini returned 400"));
     }
 
     #[tokio::test]
-    async fn malformed_frames_use_endpoint_family_attribution() {
+    async fn malformed_frames_carry_provider_attribution() {
         use axum::http::header;
         use axum::response::IntoResponse;
         use axum::routing::post;
@@ -2559,46 +2257,33 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let base_url = format!("http://{address}");
-        let providers = [
-            (
-                GeminiProvider::new("developer-key").with_base_url(&base_url),
-                "gemini",
-            ),
-            (
-                GeminiProvider::vertex("customer-project-123", "global", Arc::new(StaticToken))
-                    .unwrap()
-                    .with_base_url(&base_url),
-                "vertex",
-            ),
-        ];
-        for (provider, expected) in providers {
-            let events: Vec<_> = provider
-                .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
-                .await
-                .unwrap()
-                .collect()
-                .await;
-            assert_eq!(
-                events,
-                vec![ProviderEvent::Failed {
-                    error: ProviderErrorInfo::provider(format!(
-                        "{expected} returned an invalid stream frame"
-                    )),
-                }]
-            );
-        }
+        let provider =
+            GeminiProvider::new("developer-key").with_base_url(format!("http://{address}"));
+        let events: Vec<_> = provider
+            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(
+            events,
+            vec![ProviderEvent::Failed {
+                error: ProviderErrorInfo::provider(
+                    "gemini returned an invalid stream frame".to_string()
+                ),
+            }]
+        );
         server.abort();
     }
 
     #[tokio::test]
-    async fn transport_failures_use_endpoint_family_attribution() {
+    async fn transport_failures_carry_provider_attribution() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
+            {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
                 let _ = socket.read(&mut request).await.unwrap();
@@ -2610,53 +2295,36 @@ mod tests {
                     .unwrap();
             }
         });
-        let base_url = format!("http://{address}");
-        let providers = [
-            (
-                GeminiProvider::new("developer-key").with_base_url(&base_url),
-                "gemini",
-            ),
-            (
-                GeminiProvider::vertex("customer-project-123", "global", Arc::new(StaticToken))
-                    .unwrap()
-                    .with_base_url(&base_url),
-                "vertex",
-            ),
-        ];
-        for (provider, expected) in providers {
-            let events: Vec<_> = provider
-                .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
-                .await
-                .unwrap()
-                .collect()
-                .await;
-            assert_eq!(
-                events,
-                vec![ProviderEvent::Failed {
-                    error: ProviderErrorInfo::provider(format!("{expected} stream ended early")),
-                }]
-            );
-        }
+        let provider =
+            GeminiProvider::new("developer-key").with_base_url(format!("http://{address}"));
+        let events: Vec<_> = provider
+            .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(
+            events,
+            vec![ProviderEvent::Failed {
+                error: ProviderErrorInfo::provider("gemini stream ended early".to_string()),
+            }]
+        );
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn vertex_in_band_error_redacts_project_and_uses_vertex_attribution() {
+    async fn in_band_error_after_accept_fails_the_stream() {
         use axum::http::header;
         use axum::response::IntoResponse;
         use axum::routing::post;
         use axum::Router;
-
-        const PROJECT_ID: &str = "customer-project-123";
 
         async fn deny_after_accepting() -> impl IntoResponse {
             let frame = json!({
                 "error": {
                     "code": 403,
                     "type": "permission_denied",
-                    "message": format!(
-                        "Permission denied on projects/{PROJECT_ID}/locations/global"
-                    ),
+                    "message": "The caller does not have permission",
                 }
             });
             (
@@ -2670,9 +2338,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let provider = GeminiProvider::vertex(PROJECT_ID, "global", Arc::new(StaticToken))
-            .unwrap()
-            .with_base_url(format!("http://{address}"));
+        let provider =
+            GeminiProvider::new("developer-key").with_base_url(format!("http://{address}"));
         let events: Vec<_> = provider
             .stream(request(vec![ChatMessage::text(Role::User, "hi")]))
             .await
@@ -2686,10 +2353,10 @@ mod tests {
             vec![ProviderEvent::Failed {
                 error: ProviderErrorInfo {
                     kind: "authentication".into(),
-                    message: "vertex returned 403 (permission_denied)".into(),
+                    message: "gemini returned 403 (permission_denied): The caller does not have permission"
+                        .into(),
                 },
             }]
         );
-        assert!(!format!("{events:?}").contains(PROJECT_ID));
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! A provider is `{ kind, enabled, base_url? }` plus a credential held in the
 //! [`SecretProvider`](openwave_core::SecretProvider) (never the DB). Credentials
-//! are a typed JSON blob (`api_key`, `oauth`, or `service_account`) so new auth
-//! shapes don't force a schema redesign.
+//! are a typed JSON blob (`api_key` or `oauth`) so new auth shapes don't force
+//! a schema redesign.
 //!
 //! Non-secret config lives in the [`Store`](openwave_core::Store) under
 //! `provider.<kind>`. The legacy `provider.anthropic.api_key` secret and the
@@ -11,7 +11,6 @@
 //! credential in the new blob shape.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use openwave_core::{AgentConfig, ProviderId, ReasoningEffort, Result, SecretProvider, Store};
@@ -256,10 +255,6 @@ pub enum ProviderKind {
     Xai,
     /// Google Gemini Developer API (generativelanguage.googleapis.com).
     Gemini,
-    /// Google Vertex AI with native Gemini and Anthropic Claude protocols.
-    Vertex,
-    /// Direct Amazon Bedrock Mantle.
-    Bedrock,
     /// Fireworks AI's hosted OpenAI-compatible Chat Completions API.
     Fireworks,
     /// Together AI's hosted OpenAI-compatible Chat Completions API.
@@ -279,8 +274,6 @@ impl ProviderKind {
         ProviderKind::Openai,
         ProviderKind::Xai,
         ProviderKind::Gemini,
-        ProviderKind::Vertex,
-        ProviderKind::Bedrock,
         ProviderKind::Fireworks,
         ProviderKind::Together,
         ProviderKind::OpenaiCompatible,
@@ -294,8 +287,6 @@ impl ProviderKind {
             ProviderKind::Openai => "openai",
             ProviderKind::Xai => "xai",
             ProviderKind::Gemini => "gemini",
-            ProviderKind::Vertex => "vertex",
-            ProviderKind::Bedrock => "bedrock",
             ProviderKind::Fireworks => "fireworks",
             ProviderKind::Together => "together",
             ProviderKind::OpenaiCompatible => "openai_compatible",
@@ -310,8 +301,6 @@ impl ProviderKind {
             "openai" => Some(Self::Openai),
             "xai" => Some(Self::Xai),
             "gemini" => Some(Self::Gemini),
-            "vertex" => Some(Self::Vertex),
-            "bedrock" => Some(Self::Bedrock),
             "fireworks" => Some(Self::Fireworks),
             "together" => Some(Self::Together),
             "openai_compatible" => Some(Self::OpenaiCompatible),
@@ -359,16 +348,11 @@ impl ProviderKind {
                     | ProviderKind::Openai
                     | ProviderKind::Xai
                     | ProviderKind::Gemini
-                    | ProviderKind::Bedrock
                     | ProviderKind::Fireworks
                     | ProviderKind::Together
                     | ProviderKind::OpenaiCompatible
             ),
             ProviderCredential::Oauth {} => self == ProviderKind::Openai,
-            ProviderCredential::ServiceAccount { .. } => {
-                matches!(self, ProviderKind::Gemini | ProviderKind::Vertex)
-            }
-            ProviderCredential::AwsCredentials { .. } => self == ProviderKind::Bedrock,
         }
     }
 }
@@ -398,18 +382,6 @@ pub enum ProviderCredential {
     /// in its own keychain entry managed by `crate::connectors`, so the
     /// rotating material never rides the provider settings surface.
     Oauth {},
-    /// A service-account key file, kept verbatim for the future token exchange.
-    ServiceAccount {
-        /// The raw JSON key-file contents.
-        json: String,
-    },
-    /// AWS access credentials for Signature Version 4 requests.
-    AwsCredentials {
-        access_key_id: String,
-        secret_access_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_token: Option<String>,
-    },
 }
 
 impl ProviderCredential {
@@ -423,74 +395,18 @@ impl ProviderCredential {
         match self {
             Self::ApiKey { key } => Some(key.as_str()),
             Self::Oauth {} => None,
-            Self::ServiceAccount { .. } | Self::AwsCredentials { .. } => None,
-        }
-    }
-
-    /// The raw service-account key file, if this credential carries one.
-    pub(crate) fn as_service_account(&self) -> Option<&str> {
-        match self {
-            Self::ServiceAccount { json } => Some(json),
-            Self::ApiKey { .. } | Self::Oauth {} | Self::AwsCredentials { .. } => None,
-        }
-    }
-
-    pub(crate) fn as_aws_credentials(&self) -> Option<openwave_router::AwsCredentials> {
-        match self {
-            Self::AwsCredentials {
-                access_key_id,
-                secret_access_key,
-                session_token,
-            } => Some(openwave_router::AwsCredentials::new(
-                access_key_id.clone(),
-                secret_access_key.clone(),
-                session_token.clone(),
-            )),
-            _ => None,
         }
     }
 
     /// Validate a credential before it is written to the keychain.
     ///
-    /// Error messages name only malformed fields, never their values: a
-    /// service-account file contains its private key.
+    /// Error messages name only malformed fields, never their values.
     pub fn validate(&self) -> std::result::Result<(), ServerError> {
         match self {
             Self::ApiKey { key } if key.is_empty() => {
                 Err(ServerError::bad_request("credential key must not be empty"))
             }
             Self::ApiKey { .. } | Self::Oauth {} => Ok(()),
-            Self::ServiceAccount { json } => validate_service_account(json),
-            Self::AwsCredentials {
-                access_key_id,
-                secret_access_key,
-                session_token,
-            } => {
-                if access_key_id.trim().is_empty() || secret_access_key.trim().is_empty() {
-                    return Err(ServerError::bad_request(
-                        "AWS access key id and secret access key must not be empty",
-                    ));
-                }
-                if access_key_id.trim() != access_key_id
-                    || secret_access_key.trim() != secret_access_key
-                    || session_token
-                        .as_ref()
-                        .is_some_and(|token| token.trim() != token)
-                {
-                    return Err(ServerError::bad_request(
-                        "AWS credentials must not have surrounding whitespace",
-                    ));
-                }
-                if session_token
-                    .as_ref()
-                    .is_some_and(|token| token.trim().is_empty())
-                {
-                    return Err(ServerError::bad_request(
-                        "AWS session token must not be empty when provided",
-                    ));
-                }
-                Ok(())
-            }
         }
     }
 }
@@ -501,57 +417,8 @@ impl std::fmt::Debug for ProviderCredential {
         match self {
             Self::ApiKey { .. } => f.debug_struct("ApiKey").field("key", &"***").finish(),
             Self::Oauth {} => f.debug_struct("Oauth").finish(),
-            Self::ServiceAccount { .. } => f
-                .debug_struct("ServiceAccount")
-                .field("json", &"***")
-                .finish(),
-            Self::AwsCredentials { session_token, .. } => f
-                .debug_struct("AwsCredentials")
-                .field("access_key_id", &"***")
-                .field("secret_access_key", &"***")
-                .field("session_token", &session_token.as_ref().map(|_| "***"))
-                .finish(),
         }
     }
-}
-
-/// The required, non-secret shape of a service-account key file.
-///
-/// This is only a validation view. The original JSON is what is stored, so a
-/// future token exchange can use fields introduced after this version.
-#[derive(Deserialize)]
-struct ServiceAccountKey {
-    #[serde(rename = "type")]
-    key_type: String,
-    client_email: String,
-    private_key: String,
-    project_id: String,
-}
-
-fn validate_service_account(json: &str) -> std::result::Result<(), ServerError> {
-    let key: ServiceAccountKey = serde_json::from_str(json).map_err(|_| {
-        // serde's parse error can quote the input, which includes the private key.
-        ServerError::bad_request(
-            "service account key must be JSON with `type`, `client_email`, `private_key`, and `project_id`",
-        )
-    })?;
-    if key.key_type != "service_account" {
-        return Err(ServerError::bad_request(
-            "service account key `type` must be `service_account`",
-        ));
-    }
-    for (field, value) in [
-        ("client_email", &key.client_email),
-        ("private_key", &key.private_key),
-        ("project_id", &key.project_id),
-    ] {
-        if value.trim().is_empty() {
-            return Err(ServerError::bad_request(format!(
-                "service account key `{field}` must not be empty"
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// Non-secret provider configuration persisted in the store.
@@ -562,18 +429,10 @@ pub struct ProviderConfig {
     /// Optional base URL override (required for `openai_compatible`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Vertex AI location. The first-class Vertex provider accepts only
-    /// `global`; regional values are retained only for legacy Gemini
-    /// service-account configurations. An absent value defaults to `global`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vertex_location: Option<String>,
-    /// AWS region used to derive the direct Bedrock Mantle endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aws_region: Option<String>,
     /// Explicit model rows served by a configurable endpoint.
     ///
-    /// OpenAI-compatible, xAI, and Bedrock catalogs can change independently
-    /// of an OpenWave release, so their configured rows live beside the
+    /// OpenAI-compatible and xAI catalogs can change independently of an
+    /// OpenWave release, so their configured rows live beside the
     /// endpoint. Other curated providers ignore this field and obtain their
     /// models from the host registry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -586,8 +445,6 @@ impl ProviderConfig {
         Self {
             enabled: false,
             base_url: None,
-            vertex_location: None,
-            aws_region: None,
             models: Vec::new(),
         }
     }
@@ -853,8 +710,9 @@ fn curated_id_candidate(upstream_id: &str) -> String {
     strip_version_suffix(candidate).to_owned()
 }
 
-/// Drop a trailing `-v<digits>` or `-v<digits>:<digits>` — Bedrock's revision
-/// marker. Left alone when the tail is not exactly that shape.
+/// Drop a trailing `-v<digits>` or `-v<digits>:<digits>` — the revision marker
+/// some hosted deployments append. Left alone when the tail is not exactly
+/// that shape.
 fn strip_version_suffix(id: &str) -> &str {
     let Some((head, tail)) = id.rsplit_once("-v") else {
         return id;
@@ -957,12 +815,6 @@ pub struct ProviderInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub base_url: Option<String>,
-    /// Vertex AI location. The first-class Vertex provider is global-only;
-    /// legacy Gemini service-account configurations may retain a region. Never
-    /// includes the project id from the credential.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub vertex_location: Option<String>,
     /// Whether a credential is stored (never the credential itself).
     pub has_credential: bool,
     /// How OpenAI (or similarly dual-mode providers) is authenticated.
@@ -971,12 +823,6 @@ pub struct ProviderInfo {
     pub auth_mode: Option<ProviderAuthMode>,
     /// Explicit configured model entries for this endpoint.
     pub models: Vec<CustomModelConfig>,
-    // Effective AWS region from stored config or the AWS environment fallback.
-    // Kept after the documented fields so ts-rs emits it on the declaration's
-    // closing line without adding generated trailing whitespace.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub aws_region: Option<String>,
 }
 
 /// How a provider's credential was established.
@@ -987,10 +833,6 @@ pub enum ProviderAuthMode {
     ApiKey,
     /// ChatGPT subscription OAuth.
     Chatgpt,
-    /// Uploaded Google Cloud service-account key file.
-    ServiceAccount,
-    /// AWS access credentials signed with Signature Version 4.
-    AwsCredentials,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`;
@@ -1012,14 +854,10 @@ pub struct ProviderUpdate {
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "double_option")]
     pub base_url: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
-    pub vertex_location: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
-    pub aws_region: Option<Option<String>>,
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
-    /// Replacement configured-model list. Valid for `openai_compatible`,
-    /// first-party xAI, and `bedrock`.
+    /// Replacement configured-model list. Valid for `openai_compatible` and
+    /// first-party xAI.
     #[serde(default)]
     pub models: Option<Vec<CustomModelConfig>>,
 }
@@ -1135,21 +973,8 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
             if credential.as_api_key().is_some_and(|key| !key.is_empty()) {
                 return true;
             }
-            if matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex)
-                && credential.as_service_account().is_some_and(|json| {
-                    openwave_router::GoogleServiceAccount::from_json(json).is_ok()
-                })
-            {
-                return true;
-            }
             if kind == ProviderKind::Openai && matches!(credential, ProviderCredential::Oauth {}) {
                 return crate::connectors::has_stored_chatgpt_credentials(secrets).await;
-            }
-            if kind == ProviderKind::Bedrock
-                && matches!(credential, ProviderCredential::AwsCredentials { .. })
-                && credential.validate().is_ok()
-            {
-                return true;
             }
             return false;
         }
@@ -1161,7 +986,6 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
         return crate::connectors::has_stored_credentials(secrets).await;
     }
     env_api_key(kind).is_some()
-        || (kind == ProviderKind::Bedrock && env_aws_credentials().is_some())
 }
 
 async fn auth_mode_for(
@@ -1176,28 +1000,12 @@ async fn auth_mode_for(
             Some(ProviderAuthMode::Chatgpt)
         }
         Some(ProviderCredential::ApiKey { key })
-            if matches!(kind, ProviderKind::Openai | ProviderKind::Bedrock) && !key.is_empty() =>
+            if kind == ProviderKind::Openai && !key.is_empty() =>
         {
             Some(ProviderAuthMode::ApiKey)
         }
-        Some(ProviderCredential::ServiceAccount { json })
-            if matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex)
-                && openwave_router::GoogleServiceAccount::from_json(&json).is_ok() =>
-        {
-            Some(ProviderAuthMode::ServiceAccount)
-        }
-        Some(credential @ ProviderCredential::AwsCredentials { .. })
-            if kind == ProviderKind::Bedrock && credential.validate().is_ok() =>
-        {
-            Some(ProviderAuthMode::AwsCredentials)
-        }
-        None if matches!(kind, ProviderKind::Openai | ProviderKind::Bedrock)
-            && env_api_key(kind).is_some() =>
-        {
+        None if kind == ProviderKind::Openai && env_api_key(kind).is_some() => {
             Some(ProviderAuthMode::ApiKey)
-        }
-        None if kind == ProviderKind::Bedrock && env_aws_credentials().is_some() => {
-            Some(ProviderAuthMode::AwsCredentials)
         }
         _ => None,
     }
@@ -1223,8 +1031,6 @@ pub async fn list_providers(
                 kind,
                 enabled: policy.gateway_url.is_some(),
                 base_url: policy.gateway_url.clone(),
-                vertex_location: None,
-                aws_region: None,
                 // Deployment-matched: a session a re-point superseded must
                 // not read as this deployment's credential.
                 has_credential: match policy.gateway_url.as_deref() {
@@ -1239,11 +1045,6 @@ pub async fn list_providers(
             continue;
         }
         let config = read_config(store, kind).await?;
-        let aws_region = if kind == ProviderKind::Bedrock {
-            resolved_aws_region(&config)
-        } else {
-            None
-        };
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
@@ -1251,8 +1052,6 @@ pub async fn list_providers(
                 .default_base_url()
                 .map(str::to_owned)
                 .or_else(|| config.base_url.clone()),
-            vertex_location: config.vertex_location.clone(),
-            aws_region,
             has_credential: has_credential(secrets, kind).await,
             auth_mode: auth_mode_for(secrets, kind).await,
             models: config.models,
@@ -1293,12 +1092,7 @@ pub async fn update_provider(
         ));
     }
     let policy = crate::managed_policy::resolve(store, os_policy).await?;
-    if policy.managed
-        && (update.credential.is_some()
-            || update.base_url.is_some()
-            || update.vertex_location.is_some()
-            || update.aws_region.is_some())
-    {
+    if policy.managed && (update.credential.is_some() || update.base_url.is_some()) {
         return Err(managed_profile_refusal(format!(
             "this profile is managed by a model gateway; {kind} credentials and endpoints are locked"
         )));
@@ -1316,7 +1110,7 @@ pub async fn update_provider(
                 "xai uses its fixed first-party API endpoint",
             ));
         }
-        Some(_) if kind == ProviderKind::Vertex || kind.default_base_url().is_some() => {
+        Some(_) if kind.default_base_url().is_some() => {
             return Err(ServerError::bad_request(format!(
                 "{kind} uses a fixed provider endpoint"
             )));
@@ -1329,60 +1123,10 @@ pub async fn update_provider(
             config.base_url = Some(url);
         }
     }
-    match update.vertex_location {
-        None => {}
-        Some(_) if !matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex) => {
-            return Err(ServerError::bad_request(
-                "vertex_location is only supported by vertex and legacy gemini service accounts",
-            ));
-        }
-        Some(None) => config.vertex_location = None,
-        Some(Some(location)) => {
-            if kind == ProviderKind::Vertex && location != "global" {
-                return Err(ServerError::bad_request(
-                    "the first-class Vertex provider supports only vertex_location `global`",
-                ));
-            }
-            if location.trim() != location || !openwave_router::valid_vertex_location(&location) {
-                return Err(ServerError::bad_request(
-                    "vertex_location must be a valid Google Cloud location",
-                ));
-            }
-            config.vertex_location = Some(location);
-        }
-    }
-    if kind == ProviderKind::Vertex
-        && config.enabled
-        && !configured_vertex_location_is_usable(kind, config.vertex_location.as_deref())
-    {
-        return Err(ServerError::bad_request(
-            "the first-class Vertex provider supports only vertex_location `global`; update the stored location before enabling it",
-        ));
-    }
-    match update.aws_region {
-        None => {}
-        Some(_) if kind != ProviderKind::Bedrock => {
-            return Err(ServerError::bad_request(
-                "aws_region is only supported by bedrock",
-            ));
-        }
-        Some(None) => config.aws_region = None,
-        Some(Some(region)) => {
-            if region.trim() != region || !openwave_router::valid_aws_region(&region) {
-                return Err(ServerError::bad_request(
-                    "aws_region must be a valid AWS region",
-                ));
-            }
-            config.aws_region = Some(region);
-        }
-    }
     if let Some(models) = update.models {
-        if !matches!(
-            kind,
-            ProviderKind::OpenaiCompatible | ProviderKind::Xai | ProviderKind::Bedrock
-        ) {
+        if !matches!(kind, ProviderKind::OpenaiCompatible | ProviderKind::Xai) {
             return Err(ServerError::bad_request(
-                "configured models are only supported by openai_compatible, xai, and bedrock",
+                "configured models are only supported by openai_compatible and xai",
             ));
         }
         validate_configured_models(kind, &models)?;
@@ -1400,28 +1144,13 @@ pub async fn update_provider(
             "xai requires at least one configured model when enabled",
         ));
     }
-    if kind == ProviderKind::Bedrock && config.enabled && resolved_aws_region(&config).is_none() {
-        return Err(ServerError::bad_request(
-            "bedrock requires an aws_region when enabled",
-        ));
-    }
 
     if let Some(credential) = update.credential {
-        if let Some(json) = credential.as_service_account() {
-            openwave_router::GoogleServiceAccount::from_json(json).map_err(|_| {
-                ServerError::bad_request("invalid Google service-account credential")
-            })?;
-        }
         write_credential(secrets, kind, &credential).await?;
     }
 
     write_config(store, kind, &config).await?;
 
-    let aws_region = if kind == ProviderKind::Bedrock {
-        resolved_aws_region(&config)
-    } else {
-        None
-    };
     Ok(ProviderInfo {
         kind,
         enabled: config.enabled,
@@ -1429,8 +1158,6 @@ pub async fn update_provider(
             .default_base_url()
             .map(str::to_owned)
             .or_else(|| config.base_url.clone()),
-        vertex_location: config.vertex_location.clone(),
-        aws_region,
         has_credential: has_credential(secrets, kind).await,
         auth_mode: auth_mode_for(secrets, kind).await,
         models: config.models,
@@ -1449,29 +1176,7 @@ fn validate_configured_models(
 ) -> std::result::Result<(), ServerError> {
     validate_configured_models_against(kind, models, |id| {
         model_registry::find_for(kind, id).is_some()
-    })?;
-    if kind == ProviderKind::Bedrock
-        && models
-            .iter()
-            .any(|model| is_application_inference_profile_arn(&model.id))
-    {
-        return Err(ServerError::bad_request(
-            "Bedrock application-inference-profile ARNs are not supported until their target model can be resolved",
-        ));
-    }
-    Ok(())
-}
-
-fn is_application_inference_profile_arn(id: &str) -> bool {
-    let mut fields = id.splitn(6, ':');
-    fields.next() == Some("arn")
-        && fields.next().is_some()
-        && fields.next() == Some("bedrock")
-        && fields.next().is_some()
-        && fields.next().is_some()
-        && fields
-            .next()
-            .is_some_and(|resource| resource.starts_with("application-inference-profile/"))
+    })
 }
 
 fn validate_configured_models_against(
@@ -1620,12 +1325,6 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         ProviderKind::Gemini => std::env::var("GEMINI_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
-        // Vertex credentials are explicit service-account material in the
-        // keychain. Ambient ADC and API-key modes are not implied.
-        ProviderKind::Vertex => None,
-        ProviderKind::Bedrock => std::env::var("AWS_BEARER_TOKEN_BEDROCK")
-            .ok()
-            .filter(|key| !key.is_empty()),
         ProviderKind::Fireworks => std::env::var("FIREWORKS_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
@@ -1637,36 +1336,6 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         // token source, never resolved into a static key.
         ProviderKind::ModelGateway => None,
     }
-}
-
-fn env_aws_credentials() -> Option<openwave_router::AwsCredentials> {
-    let access_key_id = std::env::var("AWS_ACCESS_KEY_ID")
-        .ok()
-        .filter(|value| !value.is_empty() && value.trim() == value)?;
-    let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .ok()
-        .filter(|value| !value.is_empty() && value.trim() == value)?;
-    let session_token = std::env::var("AWS_SESSION_TOKEN")
-        .ok()
-        .filter(|value| !value.is_empty() && value.trim() == value);
-    Some(openwave_router::AwsCredentials::new(
-        access_key_id,
-        secret_access_key,
-        session_token,
-    ))
-}
-
-fn resolved_aws_region(config: &ProviderConfig) -> Option<String> {
-    config.aws_region.clone().or_else(|| {
-        std::env::var("AWS_REGION")
-            .ok()
-            .filter(|region| openwave_router::valid_aws_region(region))
-            .or_else(|| {
-                std::env::var("AWS_DEFAULT_REGION")
-                    .ok()
-                    .filter(|region| openwave_router::valid_aws_region(region))
-            })
-    })
 }
 
 /// Resolve the Anthropic API key (stored / legacy / env). Thin wrapper kept for
@@ -1682,8 +1351,6 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
         ProviderKind::Openai => openwave_router::RouteKind::Openai,
         ProviderKind::Xai => openwave_router::RouteKind::Xai,
         ProviderKind::Gemini => openwave_router::RouteKind::Gemini,
-        ProviderKind::Vertex => openwave_router::RouteKind::Vertex,
-        ProviderKind::Bedrock => openwave_router::RouteKind::Bedrock,
         ProviderKind::Fireworks => openwave_router::RouteKind::Fireworks,
         ProviderKind::Together => openwave_router::RouteKind::Together,
         ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
@@ -1691,26 +1358,9 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
     }
 }
 
-/// Whether the configured Vertex location belongs to the provider surface.
-///
-/// First-class Vertex is global-only because every curated row on that surface
-/// is global-only today. Legacy Gemini service-account configurations keep
-/// accepting validated regions; their adapter continues to move Gemini 3
-/// requests to the global endpoint while preserving older regional behavior.
-fn configured_vertex_location_is_usable(kind: ProviderKind, vertex_location: Option<&str>) -> bool {
-    match kind {
-        ProviderKind::Vertex => vertex_location.unwrap_or("global") == "global",
-        ProviderKind::Gemini => vertex_location
-            .map(openwave_router::valid_vertex_location)
-            .unwrap_or(true),
-        _ => true,
-    }
-}
-
 /// Collect enabled, credentialed routes for the composite router.
 ///
-/// A kind with no usable credential is skipped. Gemini service accounts become
-/// Vertex routes; API keys remain Developer API routes. OpenAI ChatGPT OAuth
+/// A kind with no usable credential is skipped. OpenAI ChatGPT OAuth
 /// becomes a Codex-backend route via `chatgpt`. Store-read failures for a
 /// single kind skip that kind (fail closed for it) rather than aborting the
 /// whole list.
@@ -1779,8 +1429,6 @@ pub async fn collect_routes(
                     base_url: Some(format!("{base}/compat/anthropic")),
                     curated_models: Vec::new(),
                     token_source: Some(source),
-                    vertex: None,
-                    bedrock: None,
                     chatgpt_account_id: None,
                 });
             } else {
@@ -1791,8 +1439,6 @@ pub async fn collect_routes(
                         base_url: Some(format!("{base}/compat/anthropic")),
                         curated_models: anthropic_models,
                         token_source: Some(source.clone()),
-                        vertex: None,
-                        bedrock: None,
                         chatgpt_account_id: None,
                     });
                 }
@@ -1803,8 +1449,6 @@ pub async fn collect_routes(
                         base_url: Some(format!("{base}/compat/openai/v1")),
                         curated_models: openai_models,
                         token_source: Some(source),
-                        vertex: None,
-                        bedrock: None,
                         chatgpt_account_id: None,
                     });
                 }
@@ -1819,9 +1463,6 @@ pub async fn collect_routes(
             Err(_) => continue,
         };
         if !config.enabled {
-            continue;
-        }
-        if !configured_vertex_location_is_usable(kind, config.vertex_location.as_deref()) {
             continue;
         }
 
@@ -1843,97 +1484,9 @@ pub async fn collect_routes(
                     .map(|spec| spec.id.to_string())
                     .collect(),
                 token_source: Some(source),
-                vertex: None,
-                bedrock: None,
                 chatgpt_account_id: Some(account_id),
             });
             continue;
-        }
-        if kind == ProviderKind::Bedrock {
-            let Some(region) = resolved_aws_region(&config) else {
-                continue;
-            };
-            let (api_key, credentials) = match stored_credential {
-                Some(ProviderCredential::ApiKey { key }) if !key.is_empty() => (key, None),
-                Some(credential @ ProviderCredential::AwsCredentials { .. })
-                    if credential.validate().is_ok() =>
-                {
-                    let Some(credentials) = credential.as_aws_credentials() else {
-                        continue;
-                    };
-                    (String::new(), Some(credentials))
-                }
-                Some(_) => continue,
-                None => match env_api_key(kind) {
-                    Some(key) => (key, None),
-                    None => {
-                        let Some(credentials) = env_aws_credentials() else {
-                            continue;
-                        };
-                        (String::new(), Some(credentials))
-                    }
-                },
-            };
-            routes.push(openwave_router::Route {
-                kind: route_kind(kind),
-                api_key,
-                base_url: None,
-                curated_models: model_registry::models_for(kind)
-                    .map(|spec| spec.id.to_string())
-                    .chain(config.models.into_iter().map(|model| model.id))
-                    .collect(),
-                token_source: None,
-                vertex: None,
-                bedrock: Some(openwave_router::BedrockRoute::new(region, credentials)),
-                chatgpt_account_id: None,
-            });
-            continue;
-        }
-        if matches!(kind, ProviderKind::Gemini | ProviderKind::Vertex) {
-            if let Some(ProviderCredential::ServiceAccount { json }) = stored_credential.as_ref() {
-                let Ok(account) = openwave_router::GoogleServiceAccount::from_json(json) else {
-                    continue;
-                };
-                let location = config.vertex_location.as_deref().unwrap_or("global");
-                let project_id = account.project_id().to_owned();
-                let credential_fingerprint: [u8; 32] = Sha256::digest(json.as_bytes()).into();
-                let source = std::sync::Arc::new(
-                    openwave_router::GoogleServiceAccountTokenSource::new(account),
-                );
-                let curated_models = model_registry::models_for(kind).collect::<Vec<_>>();
-                let vertex =
-                    openwave_router::VertexRoute::new(project_id, location, credential_fingerprint);
-                let vertex = if kind == ProviderKind::Vertex {
-                    vertex.with_model_families(curated_models.iter().filter_map(|spec| {
-                        let family = match spec.vendor()? {
-                            ProviderKind::Gemini => openwave_router::VertexModelFamily::Gemini,
-                            ProviderKind::Anthropic => {
-                                openwave_router::VertexModelFamily::Anthropic
-                            }
-                            _ => return None,
-                        };
-                        Some((spec.id.to_string(), family))
-                    }))
-                } else {
-                    vertex
-                };
-                routes.push(openwave_router::Route {
-                    kind: route_kind(kind),
-                    api_key: String::new(),
-                    // Production Vertex hosts are derived by the adapter.
-                    // Never let stored config redirect a bearer token.
-                    base_url: None,
-                    curated_models: curated_models
-                        .into_iter()
-                        .map(|spec| spec.id.to_string())
-                        .collect(),
-                    token_source: Some(source),
-                    vertex: Some(vertex),
-                    bedrock: None,
-                    chatgpt_account_id: None,
-                });
-                continue;
-            }
         }
         let api_key = match stored_credential {
             Some(ProviderCredential::ApiKey { key }) if !key.is_empty() => Some(key),
@@ -1962,21 +1515,16 @@ pub async fn collect_routes(
         routes.push(openwave_router::Route {
             kind: route_kind(kind),
             api_key,
-            // Gemini, xAI, and Vertex use fixed first-party endpoints in production.
+            // Gemini and xAI use fixed first-party endpoints in production.
             // Never let a stale/directly written setting redirect their keys.
-            base_url: (!matches!(
-                kind,
-                ProviderKind::Gemini | ProviderKind::Xai | ProviderKind::Vertex
-            ))
-            .then_some(base_url)
-            .flatten(),
+            base_url: (!matches!(kind, ProviderKind::Gemini | ProviderKind::Xai))
+                .then_some(base_url)
+                .flatten(),
             curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
                 .chain(config.models.into_iter().map(|model| model.id))
                 .collect(),
             token_source: None,
-            vertex: None,
-            bedrock: None,
             chatgpt_account_id: None,
         });
     }
@@ -2007,8 +1555,6 @@ pub async fn migrate_legacy_anthropic(
             &ProviderConfig {
                 enabled: true,
                 base_url: None,
-                vertex_location: None,
-                aws_region: None,
                 models: Vec::new(),
             },
         )
@@ -2033,7 +1579,7 @@ pub async fn resolve_model_policy(
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
         let models = match provider {
-            ProviderKind::OpenaiCompatible | ProviderKind::Xai | ProviderKind::Bedrock => {
+            ProviderKind::OpenaiCompatible | ProviderKind::Xai => {
                 read_config(store, provider).await?.models
             }
             // Resolution is not an offer: usability and routing gate the
@@ -2058,11 +1604,7 @@ pub async fn resolve_model_policy(
         .map(ResolvedModelPolicy::curated)
         .into_iter()
         .collect::<Vec<_>>();
-    for provider in [
-        ProviderKind::Xai,
-        ProviderKind::Bedrock,
-        ProviderKind::OpenaiCompatible,
-    ] {
+    for provider in [ProviderKind::Xai, ProviderKind::OpenaiCompatible] {
         let config = read_config(store, provider).await?;
         owners.extend(
             config
@@ -2108,9 +1650,7 @@ pub async fn provider_is_usable(
         return Ok(false);
     }
     let config = read_config(store, kind).await?;
-    if !config.enabled
-        || !configured_vertex_location_is_usable(kind, config.vertex_location.as_deref())
-    {
+    if !config.enabled {
         return Ok(false);
     }
     if !has_credential(secrets, kind).await {
@@ -2126,9 +1666,6 @@ pub async fn provider_is_usable(
         }
     }
     if kind == ProviderKind::Xai && config.models.is_empty() {
-        return Ok(false);
-    }
-    if kind == ProviderKind::Bedrock && resolved_aws_region(&config).is_none() {
         return Ok(false);
     }
     Ok(true)
@@ -2163,7 +1700,7 @@ pub async fn catalog_models(
         // and the managed gateway's entitled snapshot — which is empty on an
         // unmanaged profile, so no gateway row ever reaches the catalog there.
         let configured = match kind {
-            ProviderKind::OpenaiCompatible | ProviderKind::Xai | ProviderKind::Bedrock => {
+            ProviderKind::OpenaiCompatible | ProviderKind::Xai => {
                 read_config(store, kind).await?.models
             }
             ProviderKind::ModelGateway => gateway_models(store, policy).await?,
@@ -2230,76 +1767,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn service_account_credential_validates_roundtrips_and_redacts_debug() {
-        let key_file = r#"{
-            "type": "service_account",
-            "project_id": "test-project",
-            "private_key": "test-private-key",
-            "client_email": "service-account@example.test"
-        }"#;
-        let cred = ProviderCredential::ServiceAccount {
-            json: key_file.to_owned(),
-        };
-
-        cred.validate().expect("a complete key file is valid");
-        let stored = serde_json::to_string(&cred).unwrap();
-        let roundtrip: ProviderCredential = serde_json::from_str(&stored).unwrap();
-        assert_eq!(roundtrip, cred);
-
-        let debug = format!("{cred:?}");
-        assert!(!debug.contains("test-private-key"));
-        assert!(!debug.contains("service-account@example.test"));
-    }
-
-    #[test]
-    fn service_account_validation_never_echoes_key_material() {
-        let key_file = r#"{
-            "type": "service_account",
-            "client_email": "service-account@example.test",
-            "private_key": "test-private-key"
-        }"#;
-        let error = ProviderCredential::ServiceAccount {
-            json: key_file.to_owned(),
-        }
-        .validate()
-        .expect_err("a key file missing project_id is invalid");
-
-        assert!(!format!("{error:?}").contains("test-private-key"));
-        assert!(!format!("{error:?}").contains("service-account@example.test"));
-    }
-
-    #[test]
-    fn aws_credentials_validate_roundtrip_and_redact_debug() {
-        let credential = ProviderCredential::AwsCredentials {
-            access_key_id: "AKIAEXAMPLE".into(),
-            secret_access_key: "secret-access-key".into(),
-            session_token: Some("session-token".into()),
-        };
-        credential.validate().unwrap();
-        let stored = serde_json::to_string(&credential).unwrap();
-        let roundtrip: ProviderCredential = serde_json::from_str(&stored).unwrap();
-        assert_eq!(roundtrip, credential);
-        let debug = format!("{credential:?}");
-        assert!(!debug.contains("AKIAEXAMPLE"));
-        assert!(!debug.contains("secret-access-key"));
-        assert!(!debug.contains("session-token"));
-
-        let empty = ProviderCredential::AwsCredentials {
-            access_key_id: String::new(),
-            secret_access_key: "secret".into(),
-            session_token: None,
-        };
-        assert!(empty.validate().is_err());
-
-        let padded = ProviderCredential::AwsCredentials {
-            access_key_id: " AKIAEXAMPLE".into(),
-            secret_access_key: "secret".into(),
-            session_token: None,
-        };
-        assert!(padded.validate().is_err());
-    }
-
     #[tokio::test]
     async fn credentials_roundtrip_through_secret_storage() {
         let secrets = TestSecrets::default();
@@ -2315,15 +1782,7 @@ mod tests {
             (ProviderKind::Openai, ProviderCredential::Oauth {}),
             (
                 ProviderKind::Gemini,
-                ProviderCredential::ServiceAccount {
-                    json: r#"{"type":"service_account","client_email":"service-account@example.test","private_key":"test-private-key","project_id":"test-project"}"#.to_owned(),
-                },
-            ),
-            (
-                ProviderKind::Vertex,
-                ProviderCredential::ServiceAccount {
-                    json: r#"{"type":"service_account","client_email":"service-account@example.test","private_key":"test-private-key","project_id":"test-project"}"#.to_owned(),
-                },
+                ProviderCredential::api_key("existing-gemini-api-key"),
             ),
         ];
 
@@ -2369,42 +1828,45 @@ mod tests {
         let secrets = TestSecrets::default();
         secrets
             .set_secret(
-                &ProviderKind::Bedrock.credential_key(),
-                "ABSKLEGACYBEDROCKKEY",
+                &ProviderKind::Fireworks.credential_key(),
+                "legacy-fireworks-key",
             )
             .await
             .unwrap();
 
         assert_eq!(
-            read_credential(&secrets, ProviderKind::Bedrock)
+            read_credential(&secrets, ProviderKind::Fireworks)
                 .await
                 .unwrap()
                 .and_then(|credential| credential.as_api_key().map(str::to_owned)),
-            Some("ABSKLEGACYBEDROCKKEY".to_owned())
+            Some("legacy-fireworks-key".to_owned())
         );
     }
 
     #[tokio::test]
     async fn unreadable_structured_credentials_fail_closed_without_echoing_secrets() {
         let secrets = TestSecrets::default();
-        let secret = "distinctive-bedrock-secret";
+        let secret = "distinctive-provider-secret";
         let blobs = [
-            format!(r#"{{"type":"future_aws_credentials","secret_access_key":"{secret}"}}"#),
-            format!(r#"{{"type":"aws_credentials","secret_access_key":"{secret}""#),
+            format!(r#"{{"type":"future_credential","key":"{secret}"}}"#),
+            format!(r#"{{"type":"api_key","key":"{secret}""#),
         ];
 
         for raw in blobs {
             secrets
-                .set_secret(&ProviderKind::Bedrock.credential_key(), &raw)
+                .set_secret(&ProviderKind::Fireworks.credential_key(), &raw)
                 .await
                 .unwrap();
 
-            let error = read_credential(&secrets, ProviderKind::Bedrock)
+            let error = read_credential(&secrets, ProviderKind::Fireworks)
                 .await
                 .expect_err("structured credential material must not become an API key");
             assert!(!error.to_string().contains(secret));
-            assert!(!has_credential(&secrets, ProviderKind::Bedrock).await);
-            assert_eq!(resolve_api_key(&secrets, ProviderKind::Bedrock).await, None);
+            assert!(!has_credential(&secrets, ProviderKind::Fireworks).await);
+            assert_eq!(
+                resolve_api_key(&secrets, ProviderKind::Fireworks).await,
+                None
+            );
         }
     }
 
@@ -2414,7 +1876,6 @@ mod tests {
             ProviderKind::parse("openai_compatible"),
             Some(ProviderKind::OpenaiCompatible)
         );
-        assert_eq!(ProviderKind::parse("vertex"), Some(ProviderKind::Vertex));
         assert_eq!(
             ProviderKind::Anthropic.credential_key(),
             "provider.anthropic.credential"
@@ -2436,10 +1897,6 @@ mod tests {
         assert_eq!(
             ProviderKind::Together.default_base_url(),
             Some("https://api.together.ai/v1")
-        );
-        assert_eq!(
-            ProviderKind::Bedrock.credential_key(),
-            "provider.bedrock.credential"
         );
     }
 
@@ -2620,14 +2077,6 @@ mod tests {
         assert_eq!(config.temperature, None);
         assert!(config.image_input);
 
-        let vertex = ResolvedModelPolicy::curated(
-            model_registry::find_for(ProviderKind::Vertex, "claude-opus-5").unwrap(),
-        );
-        assert_eq!(vertex.provider, ProviderKind::Vertex);
-        assert_eq!(vertex.vendor, Some(ProviderKind::Anthropic));
-        assert_eq!(vertex.verification, VerificationTier::Unverified);
-        assert!(!vertex.supports_vendor_web_search);
-
         // Haiku 4.5 needs a classic token-budget thinking request that the
         // adapter cannot send yet, so policy keeps both reasoning and effort
         // off rather than promising reasoning that disappears on the wire.
@@ -2682,30 +2131,6 @@ mod tests {
     }
 
     #[test]
-    fn first_class_vertex_is_global_only_while_legacy_gemini_keeps_regions() {
-        assert!(configured_vertex_location_is_usable(
-            ProviderKind::Vertex,
-            None
-        ));
-        assert!(configured_vertex_location_is_usable(
-            ProviderKind::Vertex,
-            Some("global")
-        ));
-        assert!(!configured_vertex_location_is_usable(
-            ProviderKind::Vertex,
-            Some("us-east5")
-        ));
-        assert!(configured_vertex_location_is_usable(
-            ProviderKind::Gemini,
-            Some("us-east5")
-        ));
-        assert!(!configured_vertex_location_is_usable(
-            ProviderKind::Gemini,
-            Some("../global")
-        ));
-    }
-
-    #[test]
     fn a_level_a_model_does_not_accept_never_survives_policy_application() {
         let apply = |id: &str, provider: ProviderKind, effort: ReasoningEffort| {
             let mut config = AgentConfig::default();
@@ -2746,7 +2171,7 @@ mod tests {
 
     #[test]
     fn claude_policy_clamps_4_6_xhigh_and_disables_haiku_4_5_before_requests() {
-        for provider in [ProviderKind::Anthropic, ProviderKind::Vertex] {
+        for provider in [ProviderKind::Anthropic] {
             for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
                 let policy =
                     ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
@@ -2772,10 +2197,7 @@ mod tests {
             }
         }
 
-        for (provider, id) in [
-            (ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
-            (ProviderKind::Vertex, "claude-haiku-4-5"),
-        ] {
+        for (provider, id) in [(ProviderKind::Anthropic, "claude-haiku-4-5-20251001")] {
             let policy =
                 ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
             for effort in ReasoningEffort::ALL {
@@ -2792,18 +2214,16 @@ mod tests {
     }
 
     #[test]
-    fn gemini_3_1_pro_none_clamps_to_low_for_direct_and_vertex() {
-        for provider in [ProviderKind::Gemini, ProviderKind::Vertex] {
-            let mut config = AgentConfig::default();
-            let policy = ResolvedModelPolicy::curated(
-                model_registry::find_for(provider, "gemini-3.1-pro-preview").unwrap(),
-            );
+    fn gemini_3_1_pro_none_clamps_to_low() {
+        let mut config = AgentConfig::default();
+        let policy = ResolvedModelPolicy::curated(
+            model_registry::find_for(ProviderKind::Gemini, "gemini-3.1-pro-preview").unwrap(),
+        );
 
-            apply_model_policy(&mut config, &policy, Some(ReasoningEffort::None)).unwrap();
+        apply_model_policy(&mut config, &policy, Some(ReasoningEffort::None)).unwrap();
 
-            assert_eq!(config.provider, Some(ProviderId::new(provider.as_str())));
-            assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
-        }
+        assert_eq!(config.provider, Some(ProviderId::new("gemini")));
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
     }
 
     /// Repro: a chat pinned to `openai::gpt-5.6-sol` reached the

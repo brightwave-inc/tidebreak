@@ -50,8 +50,6 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "openai",
   "xai",
   "gemini",
-  "vertex",
-  "bedrock",
   "fireworks",
   "together",
 ];

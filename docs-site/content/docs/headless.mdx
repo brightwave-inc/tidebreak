@@ -408,15 +408,6 @@ the app is running, that directory is claimed.
 | `OPENWAVE_CONTAINER_EXECUTION_ENABLED` | Enables the container execution backend. Default `false`. |
 | `OPENWAVE_CONTAINER_IMAGE` | Overrides the container image. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | Used as a credential for that provider when nothing is stored in the credential store. |
-| `AWS_BEARER_TOKEN_BEDROCK` | Bedrock API-key fallback when no Bedrock credential is stored. |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Paired AWS access-key fallback for Bedrock SigV4 when no Bedrock credential is stored and no Bedrock API-key fallback is set. Both are required. |
-| `AWS_SESSION_TOKEN` | Optional session token used with the AWS access-key fallback. |
-| `AWS_REGION`, `AWS_DEFAULT_REGION` | Bedrock region fallbacks. A region saved in provider settings wins; otherwise `AWS_REGION` is checked before `AWS_DEFAULT_REGION`. |
-
-The Bedrock environment path is intentionally static. OpenWave does not load
-AWS profiles or SSO, read ECS or EC2 metadata credentials, assume roles, or
-refresh credentials. Configure the exact Mantle model IDs in provider settings;
-the server does not discover models or verify entitlement before a request.
 
 <Callout>
 `openwave serve` defaults to `./.openwave` in your current directory, which is

@@ -25,21 +25,8 @@ use crate::GeminiProvider;
 use crate::OpenAiCompatProvider;
 #[cfg(feature = "openai")]
 use crate::OpenAiProvider;
-#[cfg(all(feature = "anthropic", feature = "gemini"))]
-use crate::VertexProvider;
 #[cfg(feature = "xai")]
 use crate::XaiProvider;
-#[cfg(feature = "bedrock")]
-use crate::{BedrockAuth, BedrockProvider};
-
-/// Native request protocol used by one curated Vertex model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum VertexModelFamily {
-    /// Google Gemini GenerateContent.
-    Gemini,
-    /// Anthropic Claude Messages over `streamRawPredict`.
-    Anthropic,
-}
 
 /// Header a model-gateway deployment reads to group inference into one
 /// conversation. Gateway adapters opt in explicitly; direct providers never
@@ -71,143 +58,6 @@ pub trait BearerTokenSource: Send + Sync {
     }
 }
 
-/// Vertex-specific route data. The credential fingerprint is already an
-/// irreversible digest and exists only to invalidate a cached router after a
-/// service-account key rotates.
-#[derive(Clone)]
-pub struct VertexRoute {
-    project_id: String,
-    location: String,
-    credential_fingerprint: [u8; 32],
-    model_families: Vec<(String, VertexModelFamily)>,
-}
-
-/// Long-lived AWS credentials used to sign Bedrock requests.
-///
-/// This carrier remains available without the `bedrock` transport feature so
-/// the public route configuration types keep compiling in narrower feature
-/// builds. Every field is secret material, and `Debug` never renders values.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AwsCredentials {
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: Option<String>,
-}
-
-impl AwsCredentials {
-    pub fn new(
-        access_key_id: impl Into<String>,
-        secret_access_key: impl Into<String>,
-        session_token: Option<String>,
-    ) -> Self {
-        Self {
-            access_key_id: access_key_id.into(),
-            secret_access_key: secret_access_key.into(),
-            session_token,
-        }
-    }
-
-    pub fn access_key_id(&self) -> &str {
-        &self.access_key_id
-    }
-
-    pub fn secret_access_key(&self) -> &str {
-        &self.secret_access_key
-    }
-
-    pub fn session_token(&self) -> Option<&str> {
-        self.session_token.as_deref()
-    }
-}
-
-impl std::fmt::Debug for AwsCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsCredentials")
-            .field("access_key_id", &"***")
-            .field("secret_access_key", &"***")
-            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
-            .finish()
-    }
-}
-
-/// Bedrock-specific endpoint and SigV4 metadata.
-///
-/// The region is non-secret. AWS credentials stay redacted through their own
-/// `Debug` implementation and are hashed, never copied, into router cache
-/// fingerprints.
-#[derive(Clone)]
-pub struct BedrockRoute {
-    region: String,
-    credentials: Option<AwsCredentials>,
-}
-
-impl BedrockRoute {
-    pub fn new(region: impl Into<String>, credentials: Option<AwsCredentials>) -> Self {
-        Self {
-            region: region.into(),
-            credentials,
-        }
-    }
-
-    pub fn region(&self) -> &str {
-        &self.region
-    }
-}
-
-impl std::fmt::Debug for BedrockRoute {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BedrockRoute")
-            .field("region", &self.region)
-            .field("credentials", &self.credentials)
-            .finish()
-    }
-}
-
-impl VertexRoute {
-    /// Build Vertex routing metadata.
-    pub fn new(
-        project_id: impl Into<String>,
-        location: impl Into<String>,
-        credential_fingerprint: [u8; 32],
-    ) -> Self {
-        Self {
-            project_id: project_id.into(),
-            location: location.into(),
-            credential_fingerprint,
-            model_families: Vec::new(),
-        }
-    }
-
-    /// Attach the explicit protocol family for every model curated under the
-    /// first-class Vertex provider. Legacy Gemini service-account routes leave
-    /// this empty because their route kind already determines the protocol.
-    pub fn with_model_families(
-        mut self,
-        model_families: impl IntoIterator<Item = (String, VertexModelFamily)>,
-    ) -> Self {
-        self.model_families = model_families.into_iter().collect();
-        self
-    }
-
-    pub fn project_id(&self) -> &str {
-        &self.project_id
-    }
-    pub fn location(&self) -> &str {
-        &self.location
-    }
-}
-
-impl std::fmt::Debug for VertexRoute {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VertexRoute")
-            .field("project_id", &"***")
-            .field("location", &self.location)
-            .field("credential_fingerprint", &"***")
-            .field("model_families", &self.model_families)
-            .finish()
-    }
-}
-
 /// Which concrete adapter a [`Route`] builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -226,10 +76,6 @@ pub enum RouteKind {
     OpenaiCompatible,
     /// Google Gemini Developer API (native GenerateContent protocol).
     Gemini,
-    /// Google Vertex AI with native Gemini and Anthropic Claude protocols.
-    Vertex,
-    /// Amazon Bedrock Mantle (Claude Messages or OpenAI Responses).
-    Bedrock,
     /// A model-gateway deployment's Anthropic-compatible surface, authenticated
     /// with short-lived resource-scoped tokens instead of a static key.
     ModelGateway,
@@ -252,8 +98,6 @@ impl RouteKind {
             RouteKind::Together => "together",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
-            RouteKind::Vertex => "vertex",
-            RouteKind::Bedrock => "bedrock",
             RouteKind::ModelGateway => "model_gateway",
             RouteKind::ModelGatewayOpenai => "model_gateway_openai",
         }
@@ -277,8 +121,6 @@ impl RouteKind {
             "together" => Some(Self::Together),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
-            "vertex" => Some(Self::Vertex),
-            "bedrock" => Some(Self::Bedrock),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
@@ -300,12 +142,6 @@ pub struct Route {
     /// Per-request credential supplier for short-lived tokens. Takes
     /// precedence over `api_key` when present.
     pub token_source: Option<Arc<dyn BearerTokenSource>>,
-    /// Vertex resource/auth metadata. Present for the first-class Vertex route
-    /// and for a legacy Gemini route backed by a Google service account.
-    pub vertex: Option<VertexRoute>,
-    /// Bedrock region and optional SigV4 credentials. An absent credential
-    /// means `api_key` supplies a Bedrock API key.
-    pub bedrock: Option<BedrockRoute>,
     /// ChatGPT account id for OpenAI routes authenticated via ChatGPT OAuth.
     /// Baked into the adapter (only the bearer rotates).
     pub chatgpt_account_id: Option<String>,
@@ -319,8 +155,6 @@ impl std::fmt::Debug for Route {
             .field("base_url", &self.base_url)
             .field("curated_models", &self.curated_models)
             .field("token_source", &self.token_source.is_some())
-            .field("vertex", &self.vertex)
-            .field("bedrock", &self.bedrock)
             .field("chatgpt_account_id", &self.chatgpt_account_id)
             .finish()
     }
@@ -385,8 +219,6 @@ impl Router {
             RouteKind::Openai,
             RouteKind::Xai,
             RouteKind::Gemini,
-            RouteKind::Vertex,
-            RouteKind::Bedrock,
             RouteKind::Fireworks,
             RouteKind::Together,
             RouteKind::ModelGateway,
@@ -465,14 +297,7 @@ impl ModelProvider for Router {
 }
 
 fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
-    if route.api_key.is_empty()
-        && route.token_source.is_none()
-        && route
-            .bedrock
-            .as_ref()
-            .and_then(|bedrock| bedrock.credentials.as_ref())
-            .is_none()
-    {
+    if route.api_key.is_empty() && route.token_source.is_none() {
         return None;
     }
     match route.kind {
@@ -569,59 +394,17 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         }
         #[cfg(feature = "gemini")]
         RouteKind::Gemini => {
-            let mut p = match &route.vertex {
-                Some(vertex) => GeminiProvider::vertex(
-                    vertex.project_id.clone(),
-                    vertex.location.clone(),
-                    route.token_source.clone()?,
-                )
-                .ok()?,
-                None => {
-                    if route.api_key.is_empty() || route.token_source.is_some() {
-                        return None;
-                    }
-                    GeminiProvider::new(route.api_key.clone())
-                }
-            };
+            if route.api_key.is_empty() || route.token_source.is_some() {
+                return None;
+            }
+            let mut p = GeminiProvider::new(route.api_key.clone());
             if let Some(base) = &route.base_url {
                 p = p.with_base_url(base.clone());
             }
             Some(Arc::new(p))
         }
-        #[cfg(all(feature = "anthropic", feature = "gemini"))]
-        RouteKind::Vertex => {
-            let vertex = route.vertex.as_ref()?;
-            let source = route.token_source.clone()?;
-            let mut provider = VertexProvider::new(
-                vertex.project_id.clone(),
-                vertex.location.clone(),
-                source,
-                vertex.model_families.clone(),
-            )
-            .ok()?;
-            if let Some(base) = &route.base_url {
-                provider = provider.with_base_url(base.clone());
-            }
-            Some(Arc::new(provider))
-        }
-        #[cfg(not(all(feature = "anthropic", feature = "gemini")))]
-        RouteKind::Vertex => None,
         #[cfg(not(feature = "gemini"))]
         RouteKind::Gemini => None,
-        #[cfg(feature = "bedrock")]
-        RouteKind::Bedrock => {
-            let bedrock = route.bedrock.as_ref()?;
-            let auth = match &bedrock.credentials {
-                Some(credentials) => BedrockAuth::AwsCredentials(credentials.clone()),
-                None if !route.api_key.is_empty() => BedrockAuth::ApiKey(route.api_key.clone()),
-                None => return None,
-            };
-            Some(Arc::new(
-                BedrockProvider::new(bedrock.region.clone(), auth).ok()?,
-            ))
-        }
-        #[cfg(not(feature = "bedrock"))]
-        RouteKind::Bedrock => None,
         #[cfg(not(feature = "openai"))]
         RouteKind::Openai => None,
         #[cfg(not(feature = "xai"))]
@@ -638,7 +421,7 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}",
                 r.kind.as_str(),
                 // A rotating token must not thrash the cached router; the
                 // fingerprint tracks *whether* a live source exists, and the
@@ -654,36 +437,6 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                     models.sort();
                     models.join(",")
                 },
-                r.vertex.as_ref().map_or_else(String::new, |vertex| {
-                    let credential = vertex
-                        .credential_fingerprint
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>();
-                    let mut families = vertex.model_families.clone();
-                    families.sort_by(|left, right| left.0.cmp(&right.0));
-                    let families = families
-                        .into_iter()
-                        .map(|(model, family)| format!("{model}:{family:?}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("{}:{credential}:{families}", vertex.location)
-                }),
-                r.bedrock.as_ref().map_or_else(String::new, |bedrock| {
-                    let credential =
-                        bedrock
-                            .credentials
-                            .as_ref()
-                            .map_or_else(String::new, |credentials| {
-                                format!(
-                                    "{:x}:{:x}:{:x}",
-                                    fnv1a64(credentials.access_key_id()),
-                                    fnv1a64(credentials.secret_access_key()),
-                                    credentials.session_token().map_or(0, fnv1a64),
-                                )
-                            });
-                    format!("{}:{credential}", bedrock.region)
-                }),
                 r.chatgpt_account_id.as_deref().unwrap_or("")
             )
         })
@@ -719,8 +472,6 @@ mod tests {
             base_url: base.map(str::to_owned),
             curated_models: models.iter().map(|m| (*m).to_string()).collect(),
             token_source: None,
-            vertex: None,
-            bedrock: None,
             chatgpt_account_id: None,
         }
     }
@@ -929,85 +680,6 @@ mod tests {
         let a = Router::build(vec![route(RouteKind::Anthropic, "sk-1", &[], None)]);
         let b = Router::build(vec![route(RouteKind::Anthropic, "sk-2", &[], None)]);
         assert_ne!(a.fingerprint(), b.fingerprint());
-    }
-
-    #[test]
-    fn vertex_fingerprint_changes_with_location_or_service_account() {
-        let build = |location: &str, credential: u8| {
-            let mut route = route(RouteKind::Gemini, "", &["gemini-3.6-flash"], None);
-            route.token_source = Some(Arc::new(StaticSource("vertex-token")));
-            route.vertex = Some(VertexRoute::new("test-project", location, [credential; 32]));
-            Router::build(vec![route])
-        };
-
-        assert_ne!(
-            build("global", 1).fingerprint(),
-            build("us-central1", 1).fingerprint()
-        );
-        assert_ne!(
-            build("global", 1).fingerprint(),
-            build("global", 2).fingerprint()
-        );
-    }
-
-    #[test]
-    fn first_class_vertex_routes_both_curated_protocol_families() {
-        let mut route = route(
-            RouteKind::Vertex,
-            "",
-            &["gemini-3.6-flash", "claude-opus-5"],
-            None,
-        );
-        route.token_source = Some(Arc::new(StaticSource("vertex-token")));
-        route.vertex = Some(
-            VertexRoute::new("test-project", "global", [1; 32]).with_model_families([
-                ("gemini-3.6-flash".to_string(), VertexModelFamily::Gemini),
-                ("claude-opus-5".to_string(), VertexModelFamily::Anthropic),
-            ]),
-        );
-        let router = Router::build(vec![route]);
-        assert_eq!(
-            router.select_for(Some(&ProviderId::new("vertex")), "gemini-3.6-flash"),
-            Some(RouteKind::Vertex)
-        );
-        assert_eq!(
-            router.select_for(Some(&ProviderId::new("vertex")), "claude-opus-5"),
-            Some(RouteKind::Vertex)
-        );
-        assert_eq!(
-            router.select_for(Some(&ProviderId::new("vertex")), "unknown"),
-            None
-        );
-        assert_eq!(
-            router.select_for(Some(&ProviderId::new("anthropic")), "claude-opus-5"),
-            None
-        );
-    }
-
-    #[test]
-    fn first_class_vertex_rejects_regional_route_claims() {
-        let mut route = route(
-            RouteKind::Vertex,
-            "",
-            &["gemini-3.6-flash", "claude-opus-5"],
-            None,
-        );
-        route.token_source = Some(Arc::new(StaticSource("vertex-token")));
-        route.vertex = Some(
-            VertexRoute::new("test-project", "us-east5", [1; 32]).with_model_families([
-                ("gemini-3.6-flash".to_string(), VertexModelFamily::Gemini),
-                ("claude-opus-5".to_string(), VertexModelFamily::Anthropic),
-            ]),
-        );
-        let router = Router::build(vec![route]);
-        assert_eq!(
-            router.select_for(Some(&ProviderId::new("vertex")), "gemini-3.6-flash"),
-            None
-        );
-        assert_eq!(
-            router.select_for(Some(&ProviderId::new("vertex")), "claude-opus-5"),
-            None
-        );
     }
 
     #[test]

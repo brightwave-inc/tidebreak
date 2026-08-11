@@ -17,81 +17,37 @@ Open **Settings → Providers**. Each provider is its own section: turn on
 | Anthropic | API key |
 | OpenAI | A ChatGPT subscription (**Sign in with ChatGPT**) or a platform API key |
 | Google Gemini | Gemini Developer API key |
-| Google Vertex AI | Google Cloud service-account JSON containing its project ID; curated routes use the `global` location |
-| Amazon Bedrock Mantle | An AWS region, plus either a Bedrock API key or AWS access keys for SigV4 |
 | xAI | API key, plus the model IDs you want to use |
 | Fireworks AI | API key; OpenWave uses `https://api.fireworks.ai/inference/v1` |
 | Together AI | API key; OpenWave uses `https://api.together.ai/v1` |
 | OpenAI-compatible | Base URL, optional key, plus the model IDs you want to use |
 
-For new Google Cloud service-account setups, use the **Google Vertex AI**
-provider row. Paste the JSON key file; OpenWave reads the project ID from that
-credential and uses the `global` Vertex location for its curated native Gemini
-and Claude models. It derives the Google hosts itself: this setup does not
-accept a custom endpoint, a regional or multi-region location, or ambient
-Application Default Credentials.
-
 **Google Gemini** is the direct Gemini Developer API path and accepts a Gemini
-API key. If an older OpenWave installation already stored a service account
-under Gemini, the panel keeps that credential and its validated location
-available for compatibility with older regional models. New service-account
-configurations belong under Google Vertex AI, and curated Gemini 3 requests use
-the global endpoint in either case.
+API key.
 
 The panel never shows a saved key back to you. It shows a status —
 **API key set**, **Signed in with ChatGPT**, **Credential set**, or
 **No credential**. **Clear** removes the stored credential after a
 confirmation.
 
-API keys, service-account JSON, and AWS access keys go to your operating
-system's credential store, not to the database and not to a config file. A
-Bedrock region and configured model rows are non-secret settings.
+API keys go to your operating system's credential store, not to the database
+and not to a config file. Base URLs and configured model rows are non-secret
+settings.
 
 <Callout>
 If you would rather not store anything, the server also reads
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`,
-`FIREWORKS_API_KEY`, `TOGETHER_API_KEY`, and
-the [documented Bedrock AWS variables](/headless#environment) from the
-environment as fallbacks when no credential is saved.
+`FIREWORKS_API_KEY`, and `TOGETHER_API_KEY` from the environment as fallbacks
+when no credential is saved.
 </Callout>
-
-## Amazon Bedrock Mantle
-
-The Bedrock section offers two credential modes:
-
-- **Bedrock API key** — paste the key issued for Bedrock Mantle.
-- **AWS access keys (SigV4)** — enter an access-key ID and secret access key,
-  plus a session token when the credentials are temporary.
-
-Both modes require an AWS region. OpenWave derives the production endpoint as
-`https://bedrock-mantle.<region>.api.aws`; there is no configurable Bedrock
-base URL, so a credential cannot redirect a request to another host. Bedrock
-API keys use `x-api-key` on Claude Messages requests and bearer authentication
-on OpenAI Responses requests; AWS access keys sign each request for the
-`bedrock-mantle` service with SigV4. Anthropic model IDs use the Mantle Claude
-Messages route. Other explicitly configured model IDs use the Mantle OpenAI
-Responses route.
-
-OpenWave's Bedrock integration is deliberately limited to these direct Mantle
-routes. It does not use Bedrock Runtime `InvokeModel` or `Converse`, discover
-models, resolve application-inference-profile ARNs, load AWS profiles or SSO,
-read ECS or EC2 metadata credentials, assume roles, refresh credentials, expose
-provider-executed web search, or verify account entitlement before a request.
-Enter the exact model ID your account can call.
 
 ## Curated models
 
-Anthropic, OpenAI, Gemini, Google Vertex AI, Bedrock, Fireworks, and Together
-ship with a curated list of models. Vertex includes provider-qualified native
-Gemini and Claude rows; Fireworks and Together keep their host-specific model
-IDs and capabilities. Nothing to configure — once the provider has a
-credential (and, for Bedrock, a region), its models appear in the picker. The
-list is versioned with the app and refreshed as providers ship new models.
-
-Bedrock currently includes `anthropic.claude-fable-5` and
-`anthropic.claude-sonnet-5`. These use the native Claude Messages shape over
-Mantle and are marked unverified until that exact provider/model pair has been
-exercised end to end.
+Anthropic, OpenAI, Gemini, Fireworks, and Together ship with a curated list of
+models. Fireworks and Together keep their host-specific model IDs and
+capabilities. Nothing to configure — once the provider has a credential, its
+models appear in the picker. The list is versioned with the app and refreshed
+as providers ship new models.
 
 Each entry carries what the app actually knows about it: context window,
 maximum output, whether it accepts images, whether it produces a reasoning
@@ -111,18 +67,11 @@ been confirmed on that exact provider/model pair.
 
 ## Custom models
 
-**xAI** and **OpenAI-compatible** do not come with a curated list. **Bedrock**
-has the two curated Claude rows above and also accepts additional exact Mantle
-model IDs. Add rows under the provider's **Models** section: a model ID, an
-optional display name, and context and max-output token counts. For xAI, you
-also declare whether the model takes image input, whether it is a reasoning
-model, and which reasoning-effort levels it accepts.
-
-Custom Bedrock rows start conservatively as text-only, non-reasoning,
-unverified models. IDs beginning with `anthropic.` — including regional forms
-such as `us.anthropic.` — use Claude Messages; other IDs use OpenAI Responses.
-Application-inference-profile ARNs are rejected because OpenWave cannot yet
-resolve them to the underlying model needed for safe routing and replay.
+**xAI** and **OpenAI-compatible** do not come with a curated list. Add rows
+under the provider's **Models** section: a model ID, an optional display name,
+and context and max-output token counts. For xAI, you also declare whether the
+model takes image input, whether it is a reasoning model, and which
+reasoning-effort levels it accepts.
 
 The OpenAI-compatible slot points at any endpoint that speaks the OpenAI
 chat-completions API, including a local one:
