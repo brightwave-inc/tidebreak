@@ -7,7 +7,7 @@
 //! operations that were already in flight.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -176,6 +176,11 @@ struct State {
     grants: Vec<Grant>,
     attachments: Vec<RootAttachment>,
     mutations: HashMap<OperationId, MutationRecord>,
+    /// Completed attachment and write records in the order they finished,
+    /// oldest first. This is what makes the mutation table bounded: it names
+    /// which records may be dropped, and which of them is the least useful one
+    /// to drop next. See [`prune_mutation_receipts`].
+    receipt_order: VecDeque<OperationId>,
     active_mutations: HashSet<OperationId>,
     /// Persisted roots whose directory could not be reopened at load. They are
     /// held out of the live tables so the rest of the registry still works, and
@@ -874,7 +879,7 @@ impl Controller {
             Ok(prepared) => {
                 let existing = preferred_root_alias(&next, &prepared.root);
                 if let Some((root_id, display_name)) = existing {
-                    ensure_subject_grants(
+                    ensure_default_subject_grants(
                         &mut next,
                         prepared.root.owner,
                         root_id,
@@ -1903,6 +1908,71 @@ fn registration_is_connected(
         })
 }
 
+/// How many completed attachment and write records the broker keeps.
+///
+/// A record earns its place for exactly two readers: a client retrying the
+/// same operation identity with the same content, and a client asking for that
+/// operation's receipt after a crash or a dropped connection. Both are
+/// recovery paths that run within one attempt of the request — the desktop
+/// reconciler and the CLI look the receipt up immediately, or on the next
+/// launch — so nothing consults a record after thousands of later mutations
+/// have gone through. Kept unbounded, the same records are the one part of the
+/// state file that grows with use rather than with what the user has approved,
+/// until it crosses [`state_file::MAX_STATE_FILE_BYTES`] and the broker can
+/// neither save consent nor start.
+///
+/// The bound is a count rather than an age because nothing in a record says
+/// when it was written, and inventing a clock for it would put the retention
+/// of consent receipts at the mercy of the host's wall clock. Two thousand
+/// records is far more than any recovery window needs and roughly two megabytes
+/// at the largest record shape, which leaves the 16 MiB ceiling to the state it
+/// exists for: approved folders, their grants, and their attachments.
+const MAX_RETAINED_MUTATION_RECEIPTS: usize = 2048;
+
+/// Records that may be dropped once they are old enough.
+///
+/// Registration and revocation records stay: the loader reads them against
+/// each other — a registration receipt for a folder that is gone has to find
+/// the revocation that removed it — so dropping one could make the state file
+/// unloadable. They also accrue at the pace of a person choosing folders,
+/// which is not the growth this bound exists for. Attachment and write records
+/// are each validated on their own terms and are the two that a working
+/// session produces continuously.
+fn is_prunable_receipt(record: &MutationRecord) -> bool {
+    matches!(
+        record,
+        MutationRecord::Attachment {
+            outcome: MutationOutcome::Complete(_),
+            ..
+        } | MutationRecord::Write {
+            outcome: MutationOutcome::Complete(_),
+            ..
+        }
+    )
+}
+
+/// Drop the oldest completed receipts until the retained set is within bounds.
+fn prune_mutation_receipts(
+    mutations: &mut HashMap<OperationId, MutationRecord>,
+    order: &mut VecDeque<OperationId>,
+) {
+    while order.len() > MAX_RETAINED_MUTATION_RECEIPTS {
+        let Some(operation_id) = order.pop_front() else {
+            break;
+        };
+        mutations.remove(&operation_id);
+    }
+}
+
+/// Enrol a just-completed record in the bounded retention set.
+///
+/// Only ever called once per operation identity, from the `Pending` to
+/// `Complete` transition, so an identity cannot appear twice in the queue.
+fn retain_mutation_receipt(state: &mut State, operation_id: OperationId) {
+    state.receipt_order.push_back(operation_id);
+    prune_mutation_receipts(&mut state.mutations, &mut state.receipt_order);
+}
+
 fn claim_register(
     state: &mut State,
     operation_id: OperationId,
@@ -2063,6 +2133,7 @@ fn complete_attachment(
         {
             *outcome = MutationOutcome::Complete(result);
             state.active_mutations.remove(&operation_id);
+            retain_mutation_receipt(state, operation_id);
             Ok(())
         }
         _ => Err(BrokerError::OperationIdConflict),
@@ -2122,6 +2193,7 @@ fn complete_write(
         }) if existing == request && matches!(outcome, MutationOutcome::Pending) => {
             *outcome = MutationOutcome::Complete(result);
             state.active_mutations.remove(&operation_id);
+            retain_mutation_receipt(state, operation_id);
             Ok(())
         }
         _ => Err(BrokerError::OperationIdConflict),
@@ -2299,17 +2371,22 @@ fn apply_root_attachment(
             if matches!(method, ConsentMethod::CarriedForward) {
                 return Err(BrokerError::InvalidConsentMethod);
             }
-            let consent = ConsentRecord::new(method, Utc::now());
-            ensure_subject_grants(
-                state,
-                request.subject,
-                request.root_id,
-                consent,
-                execute_commands,
-            )?;
+            // An attachment that already stands is not a consent interaction:
+            // re-running it — a retry, a reconciler pass, a second dialog for a
+            // folder this chat already has — must leave authority exactly as it
+            // is. Minting here is what let a redundant attach undo a
+            // revocation.
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
             } else {
+                let consent = ConsentRecord::new(method, Utc::now());
+                ensure_default_subject_grants(
+                    state,
+                    request.subject,
+                    request.root_id,
+                    consent,
+                    execute_commands,
+                )?;
                 state.attachments.push(RootAttachment::new(
                     request.conversation_id,
                     request.root_id,
@@ -2448,6 +2525,47 @@ fn remove_grant_statement(
         }
     }
     true
+}
+
+/// Does this subject already hold any standing authority over this folder?
+///
+/// Any statement scoped to the root counts, whatever the capability. The
+/// question this answers is not "can it read" but "has the user already
+/// settled what this subject may do here" — and the answer has to be
+/// conservative, because a withdrawn grant leaves no trace: `revoke_grant`
+/// removes the row, so "revoked write" and "never had write" are the same
+/// state. Treating any surviving statement as a settled position is the only
+/// reading that cannot silently restore what the user took away.
+fn subject_has_any_root_grant(state: &State, subject: GrantSubject, root_id: RootId) -> bool {
+    state
+        .grants
+        .iter()
+        .any(|grant| grant.subject() == subject && scope_targets_root(grant.scope(), root_id))
+}
+
+/// Give a subject the folder's default access, but only if it has none.
+///
+/// Registration mints read, write and exec together because choosing a folder
+/// in the picker is how the user says the agent may work in it. The same set
+/// is right the first time a folder reaches a subject through an attachment or
+/// a re-pick, so a chat that connects a folder can use it the way the product
+/// says it can.
+///
+/// It is not right afterwards. Once the subject holds any statement over the
+/// root, that set is the user's position — possibly narrowed on the folders
+/// panel — and widening it is a consent decision, which belongs to
+/// [`Controller::grant_root_capability`] and its permission dialog.
+fn ensure_default_subject_grants(
+    state: &mut State,
+    subject: GrantSubject,
+    root_id: RootId,
+    consent: ConsentRecord,
+    execute_commands: bool,
+) -> Result<(), BrokerError> {
+    if subject_has_any_root_grant(state, subject, root_id) {
+        return Ok(());
+    }
+    ensure_subject_grants(state, subject, root_id, consent, execute_commands)
 }
 
 fn ensure_subject_grants(

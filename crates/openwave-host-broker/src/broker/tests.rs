@@ -3868,3 +3868,194 @@ fn purge_conversation_subject_forgets_deleted_chat_authority() {
         ControlResult::PurgeConversationSubject(PurgeConversationSubjectResult { changed: false })
     );
 }
+
+/// Attaching a folder says where it may be used, not what may be done in it.
+/// A capability withdrawn on the folders panel has to survive every route back
+/// to the same folder — a redundant attach, a detach and re-attach, and
+/// choosing the same folder in the picker again — because none of those asks
+/// the user the question the revocation answered. A conversation that has
+/// never held the folder still gets what a fresh pick grants.
+#[test]
+fn attaching_a_folder_never_restores_a_revoked_capability() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(
+        &controller,
+        subject,
+        conversation,
+        path.clone(),
+        OperationId::new(),
+    )
+    .root
+    .root_id;
+    let capabilities = |held_by: GrantSubject| {
+        let mut capabilities = grant_statements(&controller)
+            .into_iter()
+            .filter(|grant| {
+                grant.subject == held_by
+                    && matches!(grant.scope, Scope::Root { root_id: granted } if granted == root_id)
+            })
+            .map(|grant| grant.capability)
+            .collect::<Vec<_>>();
+        capabilities.sort_by_key(|capability| format!("{capability:?}"));
+        capabilities
+    };
+    let attach = |operation_id| {
+        mutate_attachment(
+            &controller,
+            operation_id,
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap()
+    };
+
+    let write_id = grant_statements(&controller)
+        .into_iter()
+        .find(|grant| grant.capability == Capability::WriteFiles)
+        .unwrap()
+        .grant_id;
+    assert!(revoke_grant(&controller, subject, write_id));
+    let narrowed = capabilities(subject);
+    assert!(!narrowed.contains(&Capability::WriteFiles));
+
+    // A redundant attach reports no change and changes no authority.
+    assert!(!attach(OperationId::new()).changed);
+    assert_eq!(capabilities(subject), narrowed);
+
+    // Nor does taking the folder out of the chat and putting it back.
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap()
+        .changed
+    );
+    assert!(attach(OperationId::new()).changed);
+    assert_eq!(capabilities(subject), narrowed);
+
+    // Nor does choosing the same folder in the picker again, which lands on
+    // the existing registration.
+    assert_eq!(
+        register(&controller, subject, conversation, path, OperationId::new())
+            .root
+            .root_id,
+        root_id
+    );
+    assert_eq!(capabilities(subject), narrowed);
+
+    // A conversation with no standing position on this folder is a first
+    // grant, not a widening, and still gets the access a pick describes.
+    let newcomer = Uuid::new_v4();
+    let newcomer_subject = GrantSubject::conversation(newcomer).unwrap();
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            newcomer_subject,
+            newcomer,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap()
+        .changed
+    );
+    assert!(capabilities(newcomer_subject).contains(&Capability::WriteFiles));
+}
+
+/// Retry and receipt records are recovery state, not history: the broker keeps
+/// a bounded window of the completed ones so a long-lived install cannot grow
+/// its state file past the size that would stop it saving consent. Records the
+/// loader reads against each other — registration and revocation — are never
+/// dropped, and a record still inside the window answers a retry exactly as it
+/// did before.
+#[test]
+fn completed_receipts_are_bounded_without_breaking_retry_or_receipt_lookup() {
+    let (_temp, broker, path) = setup();
+    let controller = broker.controller();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registration = OperationId::new();
+    let root_id = register(&controller, subject, conversation, path, registration)
+        .root
+        .root_id;
+    let cycle = |operation_id, mutation| {
+        mutate_attachment(
+            &controller,
+            operation_id,
+            subject,
+            conversation,
+            root_id,
+            mutation,
+        )
+        .unwrap()
+    };
+
+    let oldest = OperationId::new();
+    cycle(oldest, RootAttachmentMutationKind::Detach);
+    let mut newest = oldest;
+    for index in 0..MAX_RETAINED_MUTATION_RECEIPTS {
+        newest = OperationId::new();
+        cycle(
+            newest,
+            if index % 2 == 0 {
+                RootAttachmentMutationKind::Detach
+            } else {
+                RootAttachmentMutationKind::Attach
+            },
+        );
+    }
+
+    let retained = broker.shared.state.lock().unwrap().mutations.len();
+    assert!(
+        retained <= MAX_RETAINED_MUTATION_RECEIPTS + 1,
+        "mutation records must stay bounded, kept {retained}"
+    );
+
+    // The oldest attachment record is gone, and its receipt says so rather
+    // than claiming an outcome the broker no longer holds.
+    let receipt = |operation_id, mutation| {
+        lookup_attachment_receipt(
+            &controller,
+            LookupRootAttachmentReceiptRequest {
+                operation_id,
+                subject,
+                conversation_id: conversation,
+                root_id,
+                mutation,
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        receipt(oldest, RootAttachmentMutationKind::Detach),
+        RootAttachmentMutationReceipt::Unknown
+    );
+
+    // The newest is still answerable, and retrying it replays the recorded
+    // outcome instead of running a second mutation. The run ends attached, so
+    // the last mutation is the attach half of the cycle.
+    let mutation = RootAttachmentMutationKind::Attach;
+    assert!(matches!(
+        receipt(newest, mutation),
+        RootAttachmentMutationReceipt::Completed { .. }
+    ));
+    assert!(cycle(newest, mutation).changed);
+
+    // Registration receipts outlive any amount of later traffic.
+    assert!(matches!(
+        lookup_register_receipt(&controller, registration, subject, conversation)
+            .unwrap()
+            .receipt,
+        RegisterRootReceipt::Completed { .. }
+    ));
+}

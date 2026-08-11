@@ -1,7 +1,7 @@
 //! Durable broker registry and mutation receipts.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -172,11 +172,22 @@ impl StateFile {
         }
 
         let mut mutations = HashMap::new();
+        let mut receipt_order = VecDeque::new();
         for item in persisted.mutations {
+            // Completed attachment and write records are written after
+            // everything else, oldest first, so file order is the retention
+            // order this rebuilds. See `prune_mutation_receipts`.
+            if super::is_prunable_receipt(&item.record) {
+                receipt_order.push_back(item.operation_id);
+            }
             if mutations.insert(item.operation_id, item.record).is_some() {
                 return Err(invalid_data("duplicate persisted operation identity").into());
             }
         }
+        // A state file written before the bound existed can carry more history
+        // than the bound allows. Trimming it here is what lets such an install
+        // shrink back under the ceiling instead of climbing towards it.
+        super::prune_mutation_receipts(&mut mutations, &mut receipt_order);
         // Version 2 predates write grants. Its read grants migrate as they
         // stand: widening them would hand out authority the user never
         // approved, and the only consent record available to attach to such a
@@ -187,6 +198,7 @@ impl StateFile {
             grants,
             attachments,
             mutations,
+            receipt_order,
             active_mutations: Default::default(),
             unavailable,
         };
@@ -228,15 +240,29 @@ impl StateFile {
             identity: root.identity,
         }));
         roots.sort_by_key(|root| root.id.to_string());
+        // Records the retention bound may drop are written last, oldest first,
+        // so a reload recovers which of them is next to go. Everything else
+        // keeps the deterministic identity order it has always had.
+        let retained = state.receipt_order.iter().copied().collect::<HashSet<_>>();
         let mut mutations = state
             .mutations
             .iter()
+            .filter(|(operation_id, _)| !retained.contains(operation_id))
             .map(|(operation_id, record)| PersistedMutation {
                 operation_id: *operation_id,
                 record: record.clone(),
             })
             .collect::<Vec<_>>();
         mutations.sort_by_key(|item| item.operation_id.to_string());
+        mutations.extend(state.receipt_order.iter().filter_map(|operation_id| {
+            state
+                .mutations
+                .get(operation_id)
+                .map(|record| PersistedMutation {
+                    operation_id: *operation_id,
+                    record: record.clone(),
+                })
+        }));
         let mut grants = state.grants.clone();
         grants.extend(
             state

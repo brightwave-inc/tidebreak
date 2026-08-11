@@ -280,7 +280,12 @@ kinds bind a stable operation identity to their original request, including the
 trusted consent method for an attach, so an exact retry is idempotent and
 identity reuse with different inputs is rejected. The broker stamps new
 subject grants with that current attachment consent instead of copying another
-subject's earlier consent record. A read-only attachment receipt lets a
+subject's earlier consent record. It mints those grants only for a subject that
+holds none for that root: an attachment says where a folder may be used, not
+what may be done in it, so a subject that already has a standing position keeps
+exactly that position — including one narrowed by revoking a statement — and
+widening it needs the permission-dialog capability grant. A read-only
+attachment receipt lets a
 recovering native client distinguish unknown, completed, and failed work
 without starting or replaying the mutation. Attachment changes are computed and
 published in one durable state replacement, so they do not expose a recoverable
@@ -521,7 +526,11 @@ This will land in independently reviewable pieces:
    under a broker-private, exclusively owned state directory. Restart must
    validate the bounded state file and revalidate and descriptor-pin every
    persisted root before advertising it. A mutation with ambiguous publication
-   fails the broker closed until restart.
+   fails the broker closed until restart. Completed attachment and write
+   receipts are retained in a bounded window rather than forever, so ordinary
+   use cannot grow the state file past the size the broker will save or load;
+   registration and revocation records are kept, because the loader reads them
+   against each other.
 4. Add bounded audit records for every machine-touching operation, including
    the exact grant that authorized an operation, de-sensitized targets, and
    local two-generation retention.
