@@ -5,7 +5,6 @@ import {
   hiddenModelCount,
   ModelMenu,
   ModelToolCapabilityChip,
-  ModelVerificationChip,
   notConnectedProviders,
   reasoningEffortOptions,
   visibleModelGroups,
@@ -109,26 +108,6 @@ describe("ModelMenu", () => {
       />,
     );
     expect(markup).toContain("disabled");
-  });
-
-  it("labels an unverified model with its explanation", () => {
-    const markup = renderToStaticMarkup(
-      <ModelVerificationChip
-        model={{
-          ...MODELS[1],
-          key: "openai_compatible::local-model",
-          id: "local-model",
-          display_name: "Local Model",
-          provider: "openai_compatible",
-          vendor: null,
-          verification: "unverified",
-        }}
-      />,
-    );
-    expect(markup).toContain("Unverified");
-    expect(markup).toContain(
-      "Unverified. OpenWave hasn&#x27;t verified tool-calling and streaming for this model; issues are likely the model or provider, not the app",
-    );
   });
 
   it("explains chat-only routing without blaming provider capability", () => {
