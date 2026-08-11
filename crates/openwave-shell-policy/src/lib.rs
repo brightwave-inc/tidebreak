@@ -244,50 +244,54 @@ enum Expansion {
 /// `$HOME/.ssh/authorized_keys` and `/et[c]/shadow` both miss every marker
 /// while naming a file the floor exists to protect.
 ///
-/// The shape rules keep it narrow. An expansion matters in something already
-/// shaped like a path, or in an operand of a program whose operands *are*
-/// paths — so `cat $F` is caught while `echo $USER` and `make -j$(nproc)` are
-/// untouched. A glob matters when the token is rooted outside the working tree
-/// (`/…`, `~…`), climbs (`..`), hides a character inside a directory name
-/// (`[`, `?` with a separator), or spells a literal with a one-character
-/// bracket group — which leaves the everyday relative globs (`*.py`, `src/*`,
-/// `src/**/*.rs`) and ordinary regex operands exactly as they were.
+/// Three rules, narrowest first:
+///
+/// - A **command substitution** counts in any operand of any program. Its text
+///   is computed by a command that has already run, so nothing about the path
+///   is visible here — and unlike a variable it needs no cooperating
+///   environment: `awk '{print}' $(cat p)` is a complete exfiltration written
+///   in one line. Enumerating the programs it matters for is hopeless, since
+///   any program that opens a file will do.
+/// - A **parameter expansion** counts in something already shaped like a path,
+///   or in an operand of a program whose operands *are* paths — so `cat $F` is
+///   caught and `echo $USER` is not.
+/// - A **glob** counts when the token is rooted outside the working tree
+///   (`/…`, `~…`), climbs (`..`), or puts a metacharacter in a hidden path
+///   segment. That last one is where the disguises live: the marker list is
+///   almost entirely dotfiles and absolute paths, so `.en?` and `.bashr[c]`
+///   name one specific credential file while matching nothing, and no ordinary
+///   pattern spells a hidden name that way. Everything else — `*.py`, `src/*`,
+///   `report[1].pdf`, `grep '[n]ginx'` — is left alone.
+///
+/// The glob rule is about what a *spelling* can hide, not about where a glob
+/// can reach: a relative glob expands under the working directory, but a `cd`
+/// earlier in the line can move that directory somewhere the grant never
+/// meant to cover. That is a separate gap and not one this predicate closes.
 fn unvettable_path_argument(token: &str, program_takes_paths: bool) -> bool {
-    let expansion = token.contains('$') || token.contains('`');
+    if token.contains("$(") || token.contains('`') {
+        return true;
+    }
     let path_shaped = token.contains('/') || token.starts_with('~');
-    if expansion && (path_shaped || program_takes_paths) {
+    if token.contains('$') && (path_shaped || program_takes_paths) {
         return true;
     }
-    if spells_a_literal(token) {
-        return true;
-    }
-    if !token.contains(['*', '?', '[']) {
+    if !token.contains(GLOB_METACHARACTERS) {
         return false;
     }
     token.starts_with('/')
         || token.starts_with('~')
         || token.contains("..")
-        || (path_shaped && token.contains(['[', '?']))
+        || token
+            .split('/')
+            .any(|segment| segment.starts_with('.') && segment.contains(GLOB_METACHARACTERS))
 }
 
-/// A bracket group that can match exactly one character, as in `~/.bashr[c]`.
-///
-/// That is not globbing, it is spelling a literal out of reach of a substring
-/// check: the token names one specific file while matching no marker. Real
-/// patterns quantify over more than one character (`[a-z]`, `[abc]`, `[^x]`),
-/// so this catches the disguise without touching them.
-fn spells_a_literal(token: &str) -> bool {
-    let bytes = token.as_bytes();
-    bytes
-        .iter()
-        .enumerate()
-        .any(|(i, &b)| b == b'[' && bytes.get(i + 2) == Some(&b']'))
-}
+const GLOB_METACHARACTERS: [char; 3] = ['*', '?', '['];
 
 /// A redirect target the analyzer cannot resolve to a path.
 ///
-/// Stricter than [`unvettable_path_argument`] because it needs no shape test:
-/// a redirect operand *is* a path, so a bare `$F` names a file just as much as
+/// Broader than [`unvettable_path_argument`] because it needs no shape test: a
+/// redirect operand *is* a path, so a bare `$F` names a file just as much as
 /// `$HOME/x` does — and `F=~/.ssh/authorized_keys` followed by `>> $F` is the
 /// whole reason this exists.
 fn unvettable_redirect_target(token: &str) -> bool {
@@ -301,7 +305,8 @@ fn unvettable_redirect_target(token: &str) -> bool {
 /// literal `$F` matches no sensitive marker. Programs whose operands are
 /// patterns, expressions, or numbers are deliberately absent — `grep`'s first
 /// operand is a regex and `find`'s are predicates, so refusing an unresolved
-/// operand there would cost far more than it buys.
+/// operand there would cost far more than it buys. The list only governs bare
+/// parameter expansions; a command substitution is refused whoever runs it.
 const PATH_OPERAND_PROGRAMS: &[&str] = &[
     "cat",
     "gcat",
@@ -323,6 +328,20 @@ const PATH_OPERAND_PROGRAMS: &[&str] = &[
     "sha1sum",
     "sha256sum",
     "cksum",
+    "sort",
+    "gsort",
+    "cut",
+    "gcut",
+    "sed",
+    "gsed",
+    "awk",
+    "gawk",
+    "mawk",
+    "nawk",
+    "patch",
+    "tar",
+    "gtar",
+    "bsdtar",
     "cp",
     "gcp",
     "mv",
@@ -370,8 +389,34 @@ const PATH_OPERAND_PROGRAMS: &[&str] = &[
     "unzip",
 ];
 
-fn takes_path_operands(program: &str) -> bool {
-    PATH_OPERAND_PROGRAMS.contains(&basename(program))
+/// Programs from [`PATH_OPERAND_PROGRAMS`] whose *first* operand is a script,
+/// not a path.
+///
+/// `awk '{print $1}' data.txt` is the case that matters: the `$1` is a field
+/// reference in the program text, and treating it as an unresolved path would
+/// refuse one of the most ordinary commands there is. Everything after the
+/// script is still a path.
+const SCRIPT_FIRST_OPERAND_PROGRAMS: &[&str] = &["awk", "gawk", "mawk", "nawk", "sed", "gsed"];
+
+/// Which of `args` are operands this program will open as paths.
+///
+/// Flags are not paths, and a leading script operand is not either — the rest
+/// are, for the programs on the list.
+fn path_operand_flags(program: &str, args: &[String]) -> Vec<bool> {
+    let base = basename(program);
+    let takes_paths = PATH_OPERAND_PROGRAMS.contains(&base);
+    let skip_first = SCRIPT_FIRST_OPERAND_PROGRAMS.contains(&base);
+    let mut seen_operand = false;
+    args.iter()
+        .map(|arg| {
+            if arg.starts_with('-') {
+                return false;
+            }
+            let first_operand = !seen_operand;
+            seen_operand = true;
+            takes_paths && !(skip_first && first_operand)
+        })
+        .collect()
 }
 
 /// The three tiers, applied to whatever leaves were collected.
@@ -397,13 +442,6 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                     &sc.display(),
                 );
             }
-            if unvettable_target(target) {
-                return ShellAnalysis::with_offender(
-                    ShellVerdict::Deny,
-                    format!("write to a path that cannot be vetted: {target}"),
-                    &sc.display(),
-                );
-            }
         }
         for rule in &ruleset.deny {
             if rule.matches(&sc.argv) {
@@ -423,13 +461,6 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                 target,
             );
         }
-        if unvettable_target(target) {
-            return ShellAnalysis::with_offender(
-                ShellVerdict::Deny,
-                format!("write to a path that cannot be vetted: {target}"),
-                target,
-            );
-        }
     }
 
     // (2) Escalation — forces `Ask` over any allow match, including `All`.
@@ -437,6 +468,11 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
     // An assignment runs nothing, so it is never a leaf and its value is never an argument. But
     // naming a sensitive path in one is the first half of `F=…; cat $F`, and the value is the only
     // place that path is ever visible in plain text.
+    //
+    // These are the same two checks an argument gets, so `PREFIX=../out make` asks for the same
+    // reason `make ../out` would. `CFLAGS=-I../include make` does not: `climbs_out` normalizes a
+    // path, and `-I../include` is a flag with a path glued to it, not a path. That asymmetry is
+    // deliberate — the value that gets expanded back out as a word later is the one worth checking.
     for value in &acc.assignment_values {
         if hits_sensitive(value) {
             return ShellAnalysis::with_offender(
@@ -469,7 +505,8 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                 &sc.display(),
             );
         }
-        for token in args {
+        let path_operands = path_operand_flags(&sc.program, args);
+        for (token, is_path_operand) in args.iter().zip(path_operands) {
             if hits_sensitive(token) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
@@ -484,7 +521,7 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                     &sc.display(),
                 );
             }
-            if unvettable_argument(token, takes_path_operands(&sc.program)) {
+            if unvettable_argument(token, is_path_operand) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
                     format!("unresolved path in arguments: {}", sc.display()),
@@ -513,6 +550,16 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
                     format!("redirect target escapes folder: {target}"),
+                    &sc.display(),
+                );
+            }
+            // "I cannot resolve this" is a weaker signal than "this is a known-sensitive path",
+            // so it earns the tier a human can answer rather than the unappealable one: a
+            // timestamped log file is not `> ~/.ssh/authorized_keys`.
+            if unvettable_target(target) {
+                return ShellAnalysis::with_offender(
+                    ShellVerdict::Ask,
+                    format!("redirect target cannot be vetted: {target}"),
                     &sc.display(),
                 );
             }

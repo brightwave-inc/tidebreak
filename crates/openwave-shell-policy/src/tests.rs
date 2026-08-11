@@ -421,6 +421,25 @@ const NEVER_ALLOW: &[&str] = &[
     "cat $SECRET_FILE",
     "cp payload $DEST",
     "cp payload .bashr[c]",
+    // a glob standing in for one character of a hidden name: `.en?` names the
+    // credential file `.env` while matching no marker at all
+    "cat .en?",
+    "cat .e?v",
+    "cat .npmr?",
+    "cat .netr?",
+    "cp payload .bashr?",
+    "cp payload .bashr*",
+    "cp .en? /tmp/loot",
+    // a command substitution needs no cooperating environment: the agent writes
+    // the path into a scratch file and reads it back as an operand
+    "awk '{print}' $(cat p)",
+    "sort $(cat p)",
+    "sed -n 1,99p $(cat p)",
+    "cut -c1- $(cat p)",
+    "sed -i s/x/y/ $(cat p)",
+    "sort -o $(cat p) data",
+    "tar -cf out.tar $(cat p)",
+    "cat `cat p`",
 ];
 
 #[test]
@@ -573,17 +592,23 @@ fn covered_commands_auto_approve() {
             allow(vec![prefix(&["go", "build"])]),
         ),
         // A glob that can only expand inside the granted folder is ordinary work
-        // and stays covered, as does an expansion that names no path and a
-        // pattern operand that merely looks like one.
+        // and stays covered, as do an expansion that names no path, a pattern
+        // operand that merely looks like a path, and a bracket group in a
+        // perfectly ordinary filename.
         ("ls *.rs", allow(vec![prefix(&["ls"])])),
         ("grep -r foo src/*", readonly()),
         ("grep -r foo src/**/*.rs", readonly()),
+        ("ls src/[abc]*.rs", allow(vec![prefix(&["ls"])])),
+        ("ls src/[a-z]*.rs", allow(vec![prefix(&["ls"])])),
+        ("ls report[1].pdf", allow(vec![prefix(&["ls"])])),
+        ("cat file-[1].txt", readonly()),
         ("echo $USER", readonly()),
-        (
-            "make -j$(nproc)",
-            allow(vec![prefix(&["make"]), prefix(&["nproc"])]),
-        ),
         ("grep 'a?b' file.txt", readonly()),
+        ("grep -E 'a[b]c' file", readonly()),
+        ("grep '[n]ginx' access.log", readonly()),
+        // `$1` is a field reference in the script, not a path
+        ("awk '{print $1}' data.txt", allow(vec![prefix(&["awk"])])),
+        ("sed -n '1,5p' file.txt", allow(vec![prefix(&["sed"])])),
         ("cat README.md", readonly()),
         ("CFLAGS=-I../include make", allow(vec![prefix(&["make"])])),
     ];
@@ -674,15 +699,22 @@ fn structural_unsafe_returns_deny() {
         "eval rm",
         "echo x > ~/.ssh/authorized_keys",
         "cat secrets > .env",
-        // The redirect operand is a path by definition, so one the analyzer
-        // cannot resolve reaches the same floor as a named sensitive path.
-        "echo added >> $F",
-        "cat report > ~/out.*",
     ] {
         assert_eq!(
             verdict(command, &all),
             ShellVerdict::Deny,
             "should deny: {command:?}"
+        );
+    }
+
+    // A path the analyzer cannot resolve is a weaker signal than a named
+    // sensitive path, so it earns the tier a human can answer. `Deny` cannot be
+    // granted around at all, and a timestamped log file is not an SSH key.
+    for command in ["echo done > $LOGFILE", "make > build-$(date +%s).log"] {
+        assert_eq!(
+            verdict(command, &all),
+            ShellVerdict::Ask,
+            "should ask, not deny: {command:?}"
         );
     }
 }
