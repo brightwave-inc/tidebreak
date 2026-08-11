@@ -114,17 +114,41 @@ impl GatewayConnectorDraftClient {
     pub(crate) fn new(runtime: Arc<GatewayRuntime>) -> Self {
         Self { runtime }
     }
+
+    /// The connection for `gateway_base_url`, and only for it.
+    ///
+    /// The runtime resolves its connection from policy, which can move
+    /// between the moment a caller read the deployment and the moment the
+    /// call goes out — a re-pairing is exactly that. Registering against a
+    /// deployment other than the one the mapping is keyed to would mint a
+    /// shared app nothing ever reads again, so a mismatch refuses instead:
+    /// the caller's ladder reports it as unreachable, and the next attempt
+    /// resolves the new deployment from the start.
+    async fn connection_at(
+        &self,
+        gateway_base_url: &str,
+    ) -> Result<Option<Arc<crate::connectors::GatewayConnection>>> {
+        let Some(resolved) = registration_base_url(&self.runtime).await else {
+            return Ok(None);
+        };
+        if normalized_gateway_base_url(&resolved) != gateway_base_url {
+            return Err(AgentError::Store(
+                "this profile's gateway moved while the app was being registered".into(),
+            ));
+        }
+        self.runtime.connection().await
+    }
 }
 
 #[async_trait]
 impl GatewayDraftClient for GatewayConnectorDraftClient {
     async fn create(
         &self,
-        _gateway_base_url: &str,
+        gateway_base_url: &str,
         slug: Option<&str>,
         projection: &SharedAppProjection,
     ) -> Result<Option<GatewayRegistrationOutcome>> {
-        let Some(connection) = self.runtime.connection().await? else {
+        let Some(connection) = self.connection_at(gateway_base_url).await? else {
             return Ok(None);
         };
         let mut body = serde_json::Map::new();
@@ -151,11 +175,11 @@ impl GatewayDraftClient for GatewayConnectorDraftClient {
 
     async fn append(
         &self,
-        _gateway_base_url: &str,
+        gateway_base_url: &str,
         shared_app_id: &str,
         projection: &SharedAppProjection,
     ) -> Result<Option<GatewayRegistrationOutcome>> {
-        let Some(connection) = self.runtime.connection().await? else {
+        let Some(connection) = self.connection_at(gateway_base_url).await? else {
             return Ok(None);
         };
         let body = serde_json::json!({
@@ -169,11 +193,11 @@ impl GatewayDraftClient for GatewayConnectorDraftClient {
 
     async fn consent(
         &self,
-        _gateway_base_url: &str,
+        gateway_base_url: &str,
         shared_app_id: &str,
         revision_id: &str,
     ) -> Result<Option<GatewayConsentOutcome>> {
-        let Some(connection) = self.runtime.connection().await? else {
+        let Some(connection) = self.connection_at(gateway_base_url).await? else {
             return Ok(None);
         };
         connection
@@ -189,6 +213,16 @@ pub(crate) struct GatewayDraftRegistry {
     /// Profile data directory the write-once bundle bytes live under.
     data_dir: PathBuf,
     client: Arc<dyn GatewayDraftClient>,
+    /// One lock per app, so the read-then-register decision is serialized.
+    ///
+    /// Without it two concurrent invokes of an unregistered app both read no
+    /// mapping and both create: the loser retries under a suffixed slug and
+    /// succeeds, so the gateway mints two shared apps and one of them is a
+    /// permanent orphan nothing will ever read again. Holding the lock across
+    /// the whole decision means the second caller reads the mapping the first
+    /// persisted. The map is keyed by app and bounded by the library, so it
+    /// is not swept.
+    app_locks: tokio::sync::Mutex<std::collections::HashMap<AppId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl GatewayDraftRegistry {
@@ -201,7 +235,13 @@ impl GatewayDraftRegistry {
             store,
             data_dir,
             client,
+            app_locks: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// The registration lock for one app.
+    async fn app_lock(&self, app: AppId) -> Arc<tokio::sync::Mutex<()>> {
+        self.app_locks.lock().await.entry(app).or_default().clone()
     }
 
     /// Register `app` at `base_url` for the first time.
@@ -221,7 +261,7 @@ impl GatewayDraftRegistry {
         let projection = self.project(record, revision).await?;
         let outcome = self.client.create(base_url, None, &projection).await?;
         let outcome = match outcome {
-            Some(GatewayRegistrationOutcome::SlugTaken) => {
+            Some(GatewayRegistrationOutcome::SlugTaken { .. }) => {
                 let slug = suffixed_slug(&projection.name, record.id);
                 self.client
                     .create(base_url, Some(&slug), &projection)
@@ -242,9 +282,13 @@ impl GatewayDraftRegistry {
                     revision_id,
                 })
             }
-            Some(GatewayRegistrationOutcome::SlugTaken) => Ok(GatewayRegistration::Refused {
-                message: "this app's name is already taken at your model gateway".to_owned(),
-            }),
+            // The host knows something the gateway's message cannot: this was
+            // the second attempt, under a slug the host chose to be unique.
+            Some(GatewayRegistrationOutcome::SlugTaken { .. }) => {
+                Ok(GatewayRegistration::Refused {
+                    message: "this app's name is already taken at your model gateway".to_owned(),
+                })
+            }
             Some(GatewayRegistrationOutcome::Refused { message }) => {
                 Ok(GatewayRegistration::Refused { message })
             }
@@ -281,11 +325,12 @@ impl GatewayDraftRegistry {
                     revision_id,
                 })
             }
-            // A slug is not part of a revision append; a gateway answering
-            // this way is refusing in a shape this client cannot act on.
-            Some(GatewayRegistrationOutcome::SlugTaken) => Ok(GatewayRegistration::Refused {
-                message: "your model gateway refused this app's new revision".to_owned(),
-            }),
+            // A slug is not part of a revision append, so this arm should be
+            // unreachable — which is exactly why it carries the gateway's own
+            // words rather than a guess at what it meant.
+            Some(GatewayRegistrationOutcome::SlugTaken { message }) => {
+                Ok(GatewayRegistration::Refused { message })
+            }
             Some(GatewayRegistrationOutcome::Refused { message }) => {
                 Ok(GatewayRegistration::Refused { message })
             }
@@ -314,9 +359,18 @@ impl GatewayDraftRegistry {
     }
 
     /// The app and the revision it currently presents.
+    ///
+    /// A soft-deleted app answers as missing, exactly as it does on the
+    /// consent and invoke surfaces. An invoke racing a deletion must not mint
+    /// a shared app at the gateway for something the library no longer holds:
+    /// the store refuses the mapping write for the same reason, and refusing
+    /// here means the network call never happens in the first place.
     async fn current(&self, app: AppId) -> Result<(AppRecord, AppRevision)> {
         let missing = || AgentError::Store(format!("app {app} not found"));
         let record = self.store.get_app(app).await?.ok_or_else(missing)?;
+        if record.deleted_at.is_some() {
+            return Err(missing());
+        }
         let revision = self
             .store
             .get_app_revision(record.current_revision)
@@ -353,6 +407,9 @@ impl GatewayDraftSource for GatewayDraftRegistry {
         gateway_base_url: &str,
     ) -> Result<GatewayRegistration> {
         let base_url = normalized_gateway_base_url(gateway_base_url);
+        // Serialize the read-then-register decision per app; see `app_locks`.
+        let lock = self.app_lock(app).await;
+        let _guard = lock.lock().await;
         let (record, revision) = self.current(app).await?;
         match self.store.get_app_gateway_draft(app, &base_url).await? {
             // The gateway is already serving this exact local revision.

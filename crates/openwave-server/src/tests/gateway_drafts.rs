@@ -233,7 +233,9 @@ fn shared_app_id(registration: &GatewayRegistration) -> &str {
 async fn a_first_registration_persists_and_retries_a_taken_slug_once() {
     let fixture = Fixture::new().await;
     let gateway = Arc::new(FakeGateway::default().creates([
-        Some(GatewayRegistrationOutcome::SlugTaken),
+        Some(GatewayRegistrationOutcome::SlugTaken {
+            message: "that slug is taken".into(),
+        }),
         FakeGateway::registered("shared-1", "gw-rev-1"),
     ]));
     let registry = fixture.registry(gateway.clone());
@@ -404,12 +406,18 @@ async fn a_moved_revision_pin_is_re_synced_before_consent_is_relayed_again() {
     );
 }
 
-/// The grant is a local decision. Registration runs after it is durable and
-/// is allowed to fail: a gateway that is down, unreachable, or too old must
-/// never cost the user their consent — the first invoke registers instead.
+/// The grant is a local decision, and registration is neither part of the
+/// transaction nor part of the response: a gateway that is down must not cost
+/// the user their consent, and a gateway that is slow must not hold the
+/// consent sheet open. The registration seam is still reached — that is what
+/// makes this a failure that was survived rather than a path never taken.
 #[tokio::test]
 async fn a_grant_survives_a_registration_the_gateway_refuses() {
-    struct UnreachableGateway;
+    /// A registration seam that fails every call, counting what reached it.
+    #[derive(Default)]
+    struct UnreachableGateway {
+        relayed: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl GatewayDraftSource for UnreachableGateway {
@@ -428,6 +436,8 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
             _app: AppId,
             _gateway_base_url: &str,
         ) -> openwave_core::Result<GatewayConsentRelay> {
+            self.relayed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(openwave_core::AgentError::Store(
                 "the gateway is down".into(),
             ))
@@ -436,6 +446,11 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
 
     let (dir, store) = temp_db_store("gateway-drafts-grant.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
+    // Registration only runs where a deployment is resolvable, so the profile
+    // has to be provisioned or the seam is never reached at all.
+    crate::managed_policy::provision(&*store, "https://gateway.internal.example.com")
+        .await
+        .unwrap();
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -451,7 +466,8 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
         "https://gateway.internal.example.com",
         &[("gw-issues", "Issues (gateway)", &["listIssues"])],
     ));
-    state.gateway_drafts = Arc::new(UnreachableGateway);
+    let drafts = Arc::new(UnreachableGateway::default());
+    state.gateway_drafts = drafts.clone();
     let bearer = format!("Bearer {}", state.token);
     let router = app(state);
 
@@ -477,8 +493,21 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
         .await
         .unwrap();
     assert_eq!(consented.status(), StatusCode::OK);
+
+    // The registration runs off the response, so it is awaited here rather
+    // than assumed to have already happened.
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while drafts.relayed.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "consenting to a gateway binding must reach the registration seam"
+    );
     assert!(
         store.get_app_grant(app_id).await.unwrap().is_some(),
-        "the grant is durable even though nothing could be registered"
+        "a registration the gateway refused never retracts the grant"
     );
 }

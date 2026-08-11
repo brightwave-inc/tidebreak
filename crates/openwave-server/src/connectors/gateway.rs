@@ -254,8 +254,10 @@ pub enum GatewayRegistrationOutcome {
         revision_id: String,
     },
     /// The requested slug is already taken at this deployment — the one
-    /// failure the caller can resolve by asking again differently.
-    SlugTaken,
+    /// failure the caller can resolve by asking again differently. The
+    /// message is the gateway's own, so a caller that cannot resolve it can
+    /// still report it in the gateway's words.
+    SlugTaken { message: String },
     /// The gateway refused for any other typed reason (a disabled app, a
     /// manifest it will not accept). The message is the gateway's own.
     Refused { message: String },
@@ -1662,7 +1664,7 @@ fn decode_shared_app_registration(
         };
         let message = message.unwrap_or_else(|| code.clone());
         return Ok(if code == "slug_taken" {
-            GatewayRegistrationOutcome::SlugTaken
+            GatewayRegistrationOutcome::SlugTaken { message }
         } else {
             GatewayRegistrationOutcome::Refused { message }
         });
