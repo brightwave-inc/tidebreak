@@ -5,6 +5,10 @@
 # are always skipped, so a running Cargo, Tauri, or Vite process is not
 # disturbed.
 #
+# Cleans both in-tree `target/` (default Cargo layout) and the per-worktree
+# cache at ~/.cache/cargo-targets/<repo>/<worktree> used by the local cargo
+# shim. The repo's `primary` cache (main checkout seed) is never removed.
+#
 #   scripts/clean-worktree-artifacts.sh
 #   scripts/clean-worktree-artifacts.sh --worktree ../finished-task --yes
 #   scripts/clean-worktree-artifacts.sh --worktree . --include-current --yes
@@ -14,6 +18,7 @@ set -euo pipefail
 assume_yes=false
 include_current=false
 selected_worktrees=()
+cargo_target_cache="${CARGO_TARGET_CACHE:-$HOME/.cache/cargo-targets}"
 
 usage() {
   cat <<'EOF'
@@ -22,8 +27,35 @@ Usage: scripts/clean-worktree-artifacts.sh [--yes] [--worktree PATH] [--include-
 Report generated Rust and desktop-UI artifacts in registered Git worktrees.
 The current worktree is excluded unless --include-current is passed. --yes
 requires at least one --worktree PATH and deletes only its generated directories
-that have no open files.
+that have no open files. Never deletes the shared primary Cargo target cache.
 EOF
+}
+
+# Map a worktree path to its external Cargo target dir, if the local shim
+# layout applies. Prints nothing for the primary checkout (seed — keep it).
+cargo_cache_target_for_worktree() {
+  local worktree="$1" base rest repo wt
+  base="$worktree"
+
+  case "$base" in
+  */orca/workspaces/*/*)
+    rest="${base#*/orca/workspaces/}"
+    repo="${rest%%/*}"
+    wt="${rest#*/}"
+    wt="${wt%%/*}"
+    if [[ -n "$repo" && -n "$wt" && "$wt" != "$rest" && "$wt" != "primary" ]]; then
+      printf '%s\n' "$cargo_target_cache/$repo/$wt"
+      return 0
+    fi
+    ;;
+  */.claude/worktrees/*)
+    wt="$(basename "$base")"
+    repo="$(basename "$(dirname "$(dirname "$(dirname "$base")")")")"
+    printf '%s\n' "$cargo_target_cache/$repo/$wt"
+    return 0
+    ;;
+  esac
+  return 1
 }
 
 while (($#)); do
@@ -108,6 +140,9 @@ while IFS= read -r worktree; do
     "$worktree/crates/openwave-desktop/ui/node_modules"
     "$worktree/crates/openwave-desktop/ui/dist"
   )
+  if cache_target="$(cargo_cache_target_for_worktree "$worktree")"; then
+    artifacts+=("$cache_target")
+  fi
 
   for artifact in "${artifacts[@]}"; do
     [[ -d "$artifact" && ! -L "$artifact" ]] || continue
