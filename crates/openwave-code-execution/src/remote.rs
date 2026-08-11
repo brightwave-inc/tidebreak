@@ -30,6 +30,15 @@ const ABANDONED_RUNNING_AFTER: Duration = Duration::from_secs(30 * 60);
 
 /// How long a settled receipt stays available to replay its outcome. Past it
 /// the entry is dropped, which is the same state a restarted process is in.
+///
+/// Losing a settled receipt — to this window or to the ceiling below — narrows
+/// two guarantees, and a reader should not treat a receipt as authoritative
+/// forever. A replayed tool call whose receipt is gone runs the command again
+/// instead of returning the recorded response, and the fingerprint check that
+/// answers `IdentityConflict` when the same execution id comes back with
+/// different arguments has nothing left to compare against. Both are already
+/// true across a restart, and six hours is well past the length of a session,
+/// so the window is chosen to make this rare rather than to make it impossible.
 const SETTLED_RECEIPT_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Soft ceiling on retained receipts. Settled receipts hold their whole
@@ -107,8 +116,12 @@ impl PoolState {
             self.receipts.remove(&key);
         }
         // If every remaining receipt is inside its running window the map is
-        // allowed past the ceiling: that count is bounded by the executions
-        // actually in flight, and none of them may lose its fail-safe.
+        // allowed past the ceiling, because none of them may lose its fail-safe.
+        // That is not a bound on concurrency: a receipt is inserted before any
+        // per-workspace serialization is taken, and an abandoned one stays until
+        // it ages out, so a host issuing distinct execution ids and dropping each
+        // future can accumulate entries for the length of that window. They are
+        // small and the window ends, which is why nothing here caps them harder.
     }
 
     /// Drop pooled session slots nobody holds and that carry no live sandbox,
@@ -373,8 +386,11 @@ impl RemoteSessionPool {
     ///
     /// The slot is only removed when this caller is its last holder besides the
     /// map: another task already waiting on the same slot must keep working
-    /// against the entry it took, or the workspace would end up with two.
-    /// Anything left behind is reclaimed by [`PoolState::prune_sessions`].
+    /// against the entry it took, or the workspace would end up with two. Such
+    /// a slot is empty by the time this runs, so [`PoolState::prune_sessions`]
+    /// reclaims it once the other holder is done. That reasoning covers only
+    /// slots this function leaves behind — a slot still carrying a sandbox is
+    /// never swept.
     async fn forget_session(&self, key: &SessionKey) {
         let mut state = self.state.lock().await;
         state.staged.remove(key);
@@ -653,6 +669,12 @@ where
             Ok(())
         }
         Err(error) => {
+            // The handle goes back because the destroy is retryable and the
+            // retry needs it. That keeps the map entry too: a slot carrying a
+            // sandbox is never swept, so a teardown that fails and is never
+            // retried holds its entry for the life of the process. One small
+            // entry per abandoned workspace is the accepted cost of not
+            // stranding a live sandbox nothing can address any more.
             *slot = Some(pooled);
             pool.clear_staged(&key).await;
             Err(error)

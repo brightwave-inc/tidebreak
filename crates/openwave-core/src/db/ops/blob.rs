@@ -75,12 +75,18 @@ where
 
 /// Whether any tool call's stored result preview still shows `blob_id`.
 ///
-/// Only previews whose stored text carries the blob's id are read back: a
-/// preview that references a blob necessarily serializes that id, and a UUID
-/// has one serialized form, so a row that does not mention it cannot be
-/// evidence for it. That keeps the work this does proportional to the rows
-/// that might match rather than to the whole call history, which the
-/// retirement lock is held across.
+/// Only previews whose stored text carries the blob's id are read back, which
+/// keeps the work proportional to the rows that might match rather than to the
+/// whole call history — a walk the retirement lock is held across.
+///
+/// What makes that pre-filter safe is not a property of UUIDs: `uuid`'s
+/// deserializer accepts unhyphenated, uppercase, braced, and `urn:uuid:`
+/// spellings, any of which would slip past a `LIKE` on the canonical form. The
+/// invariant is that every preview is written by serializing a
+/// [`ToolResultPreview`], which emits the hyphenated lowercase form and nothing
+/// else, including for previews a client posts — those are deserialized into
+/// the typed enum and re-serialized before they are stored. A future writer
+/// that hand-builds preview JSON breaks this and must not.
 ///
 /// A candidate row that will not parse counts as a reference. The two failure
 /// directions here are not symmetric: treating an unreadable preview as

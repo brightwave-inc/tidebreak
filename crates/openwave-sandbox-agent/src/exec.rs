@@ -88,6 +88,19 @@ const PROXY_VARS: [&str; 8] = [
     "no_proxy",
 ];
 
+/// The proxy variables this process was actually given, in the spellings
+/// [`PROXY_VARS`] names.
+///
+/// Read once, on the caller's side, so the child's environment is data handed
+/// to [`run_bounded`] rather than ambient state it reaches for while building
+/// the command.
+fn proxy_env() -> Vec<(&'static str, String)> {
+    PROXY_VARS
+        .iter()
+        .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+        .collect()
+}
+
 /// Arguments for [`ExecTool`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -165,7 +178,7 @@ impl Tool for ExecTool {
                 )));
             }
         }
-        let outcome = run_bounded(&args.command, &self.workspace, self.timeout).await;
+        let outcome = run_bounded(&args.command, &self.workspace, self.timeout, &proxy_env()).await;
         Ok(ToolOutput::text(outcome.render()))
     }
 }
@@ -246,7 +259,12 @@ mod capture {
 }
 
 #[cfg(unix)]
-async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> ExecOutcome {
+async fn run_bounded(
+    command: &str,
+    workspace: &Path,
+    timeout: Duration,
+    proxy: &[(&'static str, String)],
+) -> ExecOutcome {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::sync::{Arc, Mutex};
@@ -276,10 +294,8 @@ async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> Exec
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    for name in PROXY_VARS {
-        if let Ok(value) = std::env::var(name) {
-            cmd.env(name, value);
-        }
+    for (name, value) in proxy {
+        cmd.env(name, value);
     }
     // SAFETY: `pre_exec` runs after fork and before exec. The closure performs
     // only async-signal-safe `setrlimit` calls with copied scalar values.
@@ -375,7 +391,12 @@ async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> Exec
 }
 
 #[cfg(not(unix))]
-async fn run_bounded(_command: &str, _workspace: &Path, _timeout: Duration) -> ExecOutcome {
+async fn run_bounded(
+    _command: &str,
+    _workspace: &Path,
+    _timeout: Duration,
+    _proxy: &[(&'static str, String)],
+) -> ExecOutcome {
     ExecOutcome {
         stderr: "in-container exec is only supported on unix".to_owned(),
         ..ExecOutcome::default()
@@ -508,23 +529,21 @@ mod tests {
     #[tokio::test]
     async fn the_egress_proxy_survives_the_cleared_environment() {
         let dir = workspace();
-        let tool = ExecTool::new(dir.path(), DEFAULT_EXEC_TIMEOUT);
-        std::env::set_var("HTTPS_PROXY", "http://openwave-egress:8118");
-        let out = tokio::time::timeout(
+        let outcome = tokio::time::timeout(
             Duration::from_secs(10),
-            tool.execute(
-                &ctx(),
-                serde_json::json!({ "command": "printf '%s' \"$HTTPS_PROXY\"" }),
+            run_bounded(
+                "printf '%s' \"$HTTPS_PROXY\"",
+                dir.path(),
+                DEFAULT_EXEC_TIMEOUT,
+                &[("HTTPS_PROXY", "http://openwave-egress:8118".to_owned())],
             ),
         )
         .await
-        .expect("exec returned within the outer bound")
-        .unwrap();
-        std::env::remove_var("HTTPS_PROXY");
+        .expect("exec returned within the outer bound");
         assert!(
-            out.content.contains("http://openwave-egress:8118"),
+            outcome.stdout.contains("http://openwave-egress:8118"),
             "{}",
-            out.content
+            outcome.render()
         );
     }
 
