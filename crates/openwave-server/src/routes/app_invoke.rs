@@ -819,7 +819,12 @@ async fn dispatch_gateway_operation(
                 format!("connect {display_name} at your model gateway to continue: {message}"),
             ))
         }
-        Ok(GatewayInvokeOutcome::Refused { message }) => Ok(failure(message)),
+        // Consent the relay could not heal: it re-states the author's consent
+        // and calls again exactly once, so reaching here means the gateway
+        // refused twice. That is the app's to present, in the gateway's own
+        // words, like any other refusal.
+        Ok(GatewayInvokeOutcome::ConsentRequired { message })
+        | Ok(GatewayInvokeOutcome::Refused { message }) => Ok(failure(message)),
         Err(GatewayDispatchError::NoSession) => Err(AppInvokeError::refused(
             AppInvokeRefusalKind::GatewayUnavailable,
             format!(

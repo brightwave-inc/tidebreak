@@ -391,6 +391,75 @@ pub fn validate_app_grant(grant: &AppGrant) -> Result<serde_json::Value, String>
     serde_json::to_value(&grant.bindings).map_err(|error| format!("unencodable app grant: {error}"))
 }
 
+/// The gateway-side registration one local app holds at one deployment.
+///
+/// Registration is per deployment, not per profile: the gateway a profile is
+/// paired to owns the shared app, so the base URL is half the identity. A
+/// profile re-paired elsewhere holds no registration there and registers
+/// afresh — exactly as it holds no gateway grant there.
+///
+/// `gateway_revision_id` is the gateway's own id for the revision the shared
+/// app currently serves, and `synced_revision_id` is the local revision that
+/// revision was projected from. The pair is what makes the sync lazy and
+/// idempotent: a local revision the gateway has never seen is recognized by
+/// `synced_revision_id` no longer matching the app's current revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppGatewayDraft {
+    /// Local app the registration belongs to.
+    pub app_id: AppId,
+    /// Gateway deployment the registration lives at, normalized by the
+    /// caller to the same form the session's base URL is compared in.
+    pub gateway_base_url: String,
+    /// The gateway's id for the shared app this local app was registered as.
+    /// Opaque here, and held to the same grammar a manifest binding's gateway
+    /// app id is: bounded, printable, and never interpreted.
+    pub shared_app_id: String,
+    /// The gateway's id for the revision the shared app currently serves.
+    pub gateway_revision_id: String,
+    /// The local revision `gateway_revision_id` was projected from.
+    pub synced_revision_id: AppRevisionId,
+    /// Host-stamped time of the last create or revision append.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Largest gateway deployment URL a registration row may record.
+pub const MAX_GATEWAY_BASE_URL_BYTES: usize = 2048;
+
+/// Validate a gateway registration structurally, at the storage door.
+///
+/// The three opaque halves are the gateway's own identifiers, so they are
+/// bounded and kept printable rather than parsed — the same posture a
+/// manifest's gateway app id is held to, and the same reason: OpenWave never
+/// interprets them, but it does put them in URLs and logs.
+pub fn validate_app_gateway_draft(draft: &AppGatewayDraft) -> Result<(), String> {
+    if draft.gateway_base_url.is_empty()
+        || draft.gateway_base_url.len() > MAX_GATEWAY_BASE_URL_BYTES
+    {
+        return Err(format!(
+            "gateway base URL must be 1 to {MAX_GATEWAY_BASE_URL_BYTES} bytes"
+        ));
+    }
+    validate_gateway_identifier("shared app id", &draft.shared_app_id)?;
+    validate_gateway_identifier("gateway revision id", &draft.gateway_revision_id)
+}
+
+/// The bound and charset every opaque gateway identifier is held to.
+fn validate_gateway_identifier(what: &str, value: &str) -> Result<(), String> {
+    // Pure-dot values pass the printable-ASCII check but read as path
+    // navigation to any origin that normalizes dot segments.
+    if value.is_empty()
+        || value.len() > MAX_GATEWAY_APP_ID_BYTES
+        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        || value.bytes().all(|byte| byte == b'.')
+    {
+        return Err(format!(
+            "{what} {value:?} must be 1 to {MAX_GATEWAY_APP_ID_BYTES} bytes of printable, \
+             non-whitespace ASCII"
+        ));
+    }
+    Ok(())
+}
+
 /// The trusted half of an app revision: a display name and the exact
 /// capabilities the app may call.
 ///

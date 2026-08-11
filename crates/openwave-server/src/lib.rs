@@ -42,6 +42,7 @@ mod event_projection;
 mod exec_write_snapshot;
 mod extract;
 mod foreground_prompt;
+mod gateway_drafts;
 mod gateway_runtime;
 pub mod host_folders;
 pub mod logging;

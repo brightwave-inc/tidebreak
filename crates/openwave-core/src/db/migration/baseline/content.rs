@@ -653,6 +653,65 @@ pub(super) fn app_grant_indexes() -> Vec<IndexCreateStatement> {
     Vec::new()
 }
 
+/// The gateway-side registration one local app holds at one deployment: the
+/// shared app it was registered as, the gateway revision that registration is
+/// currently serving, and the local revision that revision was projected from.
+///
+/// The key is `(app_id, gateway_base_url)` because a registration belongs to
+/// one deployment. A profile re-paired to a different gateway finds no row
+/// there and registers afresh; the rows the previous pairing left are orphaned
+/// rather than misread, and nothing sweeps them — they die with the app row.
+pub(super) fn app_gateway_draft_table() -> TableCreateStatement {
+    Table::create()
+        .table(AppGatewayDraft::Table)
+        .col(ColumnDef::new(AppGatewayDraft::AppId).uuid().not_null())
+        .col(
+            ColumnDef::new(AppGatewayDraft::GatewayBaseUrl)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AppGatewayDraft::SharedAppId)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AppGatewayDraft::GatewayRevisionId)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AppGatewayDraft::SyncedRevisionId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(AppGatewayDraft::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .col(AppGatewayDraft::AppId)
+                .col(AppGatewayDraft::GatewayBaseUrl),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_app_gateway_draft_app")
+                .from(AppGatewayDraft::Table, AppGatewayDraft::AppId)
+                .to(App::Table, App::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(Expr::col(AppGatewayDraft::GatewayBaseUrl).ne(""))
+        .check(Expr::col(AppGatewayDraft::SharedAppId).ne(""))
+        .check(Expr::col(AppGatewayDraft::GatewayRevisionId).ne(""))
+        .to_owned()
+}
+
+pub(super) fn app_gateway_draft_indexes() -> Vec<IndexCreateStatement> {
+    Vec::new()
+}
+
 /// The profile-scoped connected-app record (docs/connected-apps.md), including
 /// the persisted MCP server configuration: one `mcp_server`-kind row per
 /// server.

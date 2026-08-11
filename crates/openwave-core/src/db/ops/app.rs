@@ -16,8 +16,9 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{AppId, AppRevisionId};
 use crate::local_app::{
-    validate_app_grant, validate_app_manifest, AppGrant, AppGrantBinding, AppManifest, AppRecord,
-    AppRevision, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
+    validate_app_gateway_draft, validate_app_grant, validate_app_manifest, AppGatewayDraft,
+    AppGrant, AppGrantBinding, AppManifest, AppRecord, AppRevision, CreateApp, NewAppRevision,
+    MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -306,6 +307,73 @@ pub(in crate::db) async fn list_live_app_grants(store: &DbStore) -> Result<Vec<A
         .into_iter()
         .map(grant_from_model)
         .collect()
+}
+
+pub(in crate::db) async fn put_app_gateway_draft(
+    store: &DbStore,
+    draft: &AppGatewayDraft,
+) -> Result<()> {
+    validate_app_gateway_draft(draft)
+        .map_err(|message| AgentError::Store(format!("invalid gateway registration: {message}")))?;
+    let updated_at = canonical_db_timestamp(draft.updated_at)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    // The app row's write lock serializes replacement of the registration the
+    // same way it serializes revision appends: two invokes racing a first
+    // registration must not both insert.
+    if !acquire_app_write_lock(&transaction, draft.app_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!("app {} not found", draft.app_id)));
+    }
+    let existing = require_app_on(&transaction, draft.app_id).await?;
+    if existing.deleted_at.is_some() {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "app {} is deleted",
+            draft.app_id
+        )));
+    }
+    entities::app_gateway_draft::Entity::delete_many()
+        .filter(entities::app_gateway_draft::Column::AppId.eq(draft.app_id.0))
+        .filter(
+            entities::app_gateway_draft::Column::GatewayBaseUrl.eq(draft.gateway_base_url.clone()),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::app_gateway_draft::ActiveModel {
+        app_id: Set(draft.app_id.0),
+        gateway_base_url: Set(draft.gateway_base_url.clone()),
+        shared_app_id: Set(draft.shared_app_id.clone()),
+        gateway_revision_id: Set(draft.gateway_revision_id.clone()),
+        synced_revision_id: Set(draft.synced_revision_id.0),
+        updated_at: Set(updated_at),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
+pub(in crate::db) async fn get_app_gateway_draft(
+    store: &DbStore,
+    app_id: AppId,
+    gateway_base_url: &str,
+) -> Result<Option<AppGatewayDraft>> {
+    Ok(
+        entities::app_gateway_draft::Entity::find_by_id((app_id.0, gateway_base_url.to_owned()))
+            .one(&store.conn)
+            .await
+            .map_err(store_err)?
+            .map(|model| AppGatewayDraft {
+                app_id: AppId(model.app_id),
+                gateway_base_url: model.gateway_base_url,
+                shared_app_id: model.shared_app_id,
+                gateway_revision_id: model.gateway_revision_id,
+                synced_revision_id: AppRevisionId(model.synced_revision_id),
+                updated_at: model.updated_at,
+            }),
+    )
 }
 
 fn grant_from_model(model: entities::app_grant::Model) -> Result<AppGrant> {

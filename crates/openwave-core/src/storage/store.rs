@@ -11,7 +11,9 @@ use crate::id::{
     OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
-use crate::local_app::{AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision};
+use crate::local_app::{
+    AppGatewayDraft, AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision,
+};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunProgressEntry, AgentRunResult, AgentRunTier,
     AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
@@ -841,6 +843,29 @@ pub trait Store: Send + Sync {
     /// excluded: it can no longer be exercised, so surfaces built on this
     /// must not count it.
     async fn list_live_app_grants(&self) -> Result<Vec<AppGrant>> {
+        app_storage_unavailable()
+    }
+
+    /// Record the gateway-side registration one app holds at one deployment,
+    /// replacing any registration it already held there.
+    ///
+    /// Keyed by `(app_id, gateway_base_url)`: registering the same app at a
+    /// second gateway adds a row rather than moving one, so a re-paired
+    /// profile never reads another deployment's shared app. Implementations
+    /// validate the opaque gateway identifiers and refuse a missing or
+    /// deleted app.
+    async fn put_app_gateway_draft(&self, _draft: &AppGatewayDraft) -> Result<()> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch one app's gateway registration at `gateway_base_url`, when it
+    /// holds one there. A registration made against a different deployment is
+    /// simply absent, never a near match.
+    async fn get_app_gateway_draft(
+        &self,
+        _app_id: AppId,
+        _gateway_base_url: &str,
+    ) -> Result<Option<AppGatewayDraft>> {
         app_storage_unavailable()
     }
 

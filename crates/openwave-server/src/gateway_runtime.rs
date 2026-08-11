@@ -942,37 +942,55 @@ impl crate::connected_apps::GatewayCatalogSource for GatewayRuntime {
     }
 }
 
-/// The production gateway relay: the one gateway runtime plus the draft-id
-/// seam, wired behind [`GatewayInvokeDispatcher`].
+/// The production gateway relay: the one gateway runtime plus the
+/// registration seam, wired behind [`GatewayInvokeDispatcher`].
 ///
-/// Two lookups before any network call, both fail-closed: the profile must
-/// hold a session at the deployment policy names, and the local app must have
-/// a registered draft there. Only then is the invoke body assembled and
-/// relayed on a `control` bearer.
+/// Two gates before any operation is relayed, both fail-closed: the profile
+/// must hold a session at the deployment policy names, and the app must be
+/// registered there — which the registration seam establishes on the spot
+/// when it is not, so a granted app self-heals into a servable one on its
+/// first call.
 pub(crate) struct GatewayRelayDispatcher {
     runtime: Arc<GatewayRuntime>,
     drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
 }
 
 /// The relay as production assembles it: over the process's one gateway
-/// runtime, with no draft registration yet (see
-/// [`crate::connected_apps::NoRegisteredDrafts`]). Debug builds alone may
-/// pin a mapping via `OPENWAVE_GATEWAY_DRAFT_APPS` (see
-/// [`crate::connected_apps::EnvPinnedDrafts`]) — a release daemon must not
-/// let its process environment redirect consented invokes.
+/// runtime and the store-backed registration registry.
 pub(crate) fn gateway_relay_dispatcher(
     runtime: Arc<GatewayRuntime>,
+    drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
 ) -> Arc<dyn crate::connected_apps::GatewayInvokeDispatcher> {
-    #[cfg(debug_assertions)]
-    let drafts: Arc<dyn crate::connected_apps::GatewayDraftSource> =
-        match crate::connected_apps::EnvPinnedDrafts::from_env() {
-            Some(pinned) => Arc::new(pinned),
-            None => Arc::new(crate::connected_apps::NoRegisteredDrafts),
-        };
-    #[cfg(not(debug_assertions))]
-    let drafts: Arc<dyn crate::connected_apps::GatewayDraftSource> =
-        Arc::new(crate::connected_apps::NoRegisteredDrafts);
     Arc::new(GatewayRelayDispatcher { runtime, drafts })
+}
+
+impl GatewayRelayDispatcher {
+    /// One relay attempt against an already-resolved shared app.
+    async fn relay(
+        &self,
+        connection: &crate::connectors::GatewayConnection,
+        shared_app_id: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<
+        crate::connectors::GatewayInvokeOutcome,
+        crate::connected_apps::GatewayDispatchError,
+    > {
+        use crate::connected_apps::GatewayDispatchError;
+
+        match connection.invoke_shared_app(shared_app_id, body).await {
+            Ok(Some(outcome)) => Ok(outcome),
+            Ok(None) => Err(GatewayDispatchError::NotRegistered),
+            // A session the gateway no longer honors is "no session" here, the
+            // same reading every other gateway read gives it.
+            Err(error) if is_sign_in_required(&error) => Err(GatewayDispatchError::NoSession),
+            Err(error) => {
+                tracing::warn!("gateway shared-app invoke failed: {error}");
+                Err(GatewayDispatchError::Unreachable(
+                    "the gateway could not complete this call".to_owned(),
+                ))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1022,28 +1040,27 @@ impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
         {
             return Err(GatewayDispatchError::NoSession);
         }
-        let Some(shared_app_id) = self
+        let shared_app_id = match self
             .drafts
-            .draft_shared_app_id(app, &base_url)
+            .ensure_registered(app, &base_url)
             .await
-            .map_err(unreachable("resolve this app's gateway draft"))?
-        else {
-            return Err(GatewayDispatchError::NotRegistered);
+            .map_err(unreachable("register this app at the gateway"))?
+        {
+            crate::connected_apps::GatewayRegistration::Registered { shared_app_id, .. } => {
+                shared_app_id
+            }
+            crate::connected_apps::GatewayRegistration::NotRegistered => {
+                return Err(GatewayDispatchError::NotRegistered)
+            }
+            crate::connected_apps::GatewayRegistration::Refused { message } => {
+                return Err(GatewayDispatchError::Unreachable(message))
+            }
         };
         let body = shared_app_invoke_body(request);
-        match connection.invoke_shared_app(&shared_app_id, &body).await {
-            Ok(Some(outcome)) => Ok(outcome),
-            Ok(None) => Err(GatewayDispatchError::NotRegistered),
-            // A session the gateway no longer honors is "no session" here, the
-            // same reading every other gateway read gives it.
-            Err(error) if is_sign_in_required(&error) => Err(GatewayDispatchError::NoSession),
-            Err(error) => {
-                tracing::warn!("gateway shared-app invoke failed: {error}");
-                Err(GatewayDispatchError::Unreachable(
-                    "the gateway could not complete this call".to_owned(),
-                ))
-            }
-        }
+        crate::gateway_drafts::relay_with_consent_self_heal(&*self.drafts, app, &base_url, || {
+            self.relay(&connection, &shared_app_id, &body)
+        })
+        .await
     }
 }
 

@@ -55,6 +55,24 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
   gateway session, deployment, or draft registration cannot answer gets
   `gateway_unavailable`, with the message naming which.
 
+  A relay needs a shared app at the gateway to relay *to*, and the host
+  establishes that itself rather than asking the author to. Consenting to a
+  manifest that binds a gateway app registers the app at the deployment
+  policy names and relays the author's consent for it; both are best effort
+  after the grant is already durable, because a gateway that is down must
+  never cost the user their consent. The first invoke does the same work if
+  that could not, so a granted app heals into a servable one on its own. The
+  mapping is stored per `(app, deployment)`, so a profile re-paired to a
+  different gateway holds no registration there and registers afresh —
+  exactly as it holds no gateway grant there. Revision sync is lazy: the local
+  revision about to be served is pushed on the next relay, and revisions
+  nobody ever invoked are never pushed, so the gateway's history is what was
+  servable when it was used. The gateway's own `consent_required` refusal is
+  healed once — the consent sheet already displayed exactly the binding set
+  the gateway consent names, and the gateway recomputes that set server-side
+  from the live revision — and a second refusal is reported as the gateway's
+  answer rather than retried.
+
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,
 `connect-src 'none'`), sandboxed `allow-scripts` only, opaque origin. The

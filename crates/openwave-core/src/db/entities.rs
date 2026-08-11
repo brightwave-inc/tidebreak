@@ -1501,6 +1501,52 @@ pub mod app_grant {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod app_gateway_draft {
+    use sea_orm::entity::prelude::*;
+
+    // One row per (local app, gateway deployment): the shared app the local
+    // app is registered as there, the gateway revision that registration
+    // currently serves, and the local revision it was projected from. The
+    // deployment is part of the key, so a re-paired profile reads no
+    // registration rather than a stale one.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "app_gateway_draft")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub app_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub gateway_base_url: String,
+        pub shared_app_id: String,
+        pub gateway_revision_id: String,
+        pub synced_revision_id: Uuid,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter)]
+    pub enum Relation {
+        App,
+    }
+
+    impl RelationTrait for Relation {
+        fn def(&self) -> RelationDef {
+            match self {
+                Self::App => Entity::belongs_to(super::app::Entity)
+                    .from(Column::AppId)
+                    .to(super::app::Column::Id)
+                    .into(),
+            }
+        }
+    }
+
+    impl Related<super::app::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::App.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod event {
     use sea_orm::entity::prelude::*;
 

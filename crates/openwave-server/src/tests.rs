@@ -45,6 +45,7 @@ mod conformance;
 mod connected_apps;
 mod conversations;
 mod documents;
+mod gateway_drafts;
 mod image_attachment;
 mod lifecycle;
 mod outputs;
