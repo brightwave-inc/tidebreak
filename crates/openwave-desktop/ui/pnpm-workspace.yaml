@@ -1,5 +1,7 @@
 # Build-script approvals in both formats: `allowBuilds` for pnpm >= 11,
 # `onlyBuiltDependencies` for pnpm 10 (what CI pins). Keep the lists in sync.
+overrides:
+  nanoid@5.1.11: 5.1.16
 allowBuilds:
   canvas: true
   esbuild: true
