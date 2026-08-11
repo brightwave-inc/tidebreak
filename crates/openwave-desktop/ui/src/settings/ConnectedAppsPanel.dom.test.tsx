@@ -109,6 +109,7 @@ function signedInOverrides() {
           app_kind: "mcp_server",
           enabled: true,
           mcp_endpoint_slugs: ["primary"],
+          used_by_app_count: 0,
         },
       ],
     }),

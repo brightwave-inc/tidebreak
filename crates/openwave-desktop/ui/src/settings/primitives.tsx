@@ -120,3 +120,12 @@ export function SettingsError({ children }: { children: ReactNode }) {
     </p>
   );
 }
+
+/**
+ * The one line naming how many local mini-apps bind a capability — a
+ * connected-app record or a gateway app alike. Shared so the two pages that
+ * carry the count cannot drift into two spellings of the same sentence.
+ */
+export function usedByLabel(count: number): string {
+  return `Used by ${count} local app${count === 1 ? "" : "s"}`;
+}

@@ -38,5 +38,5 @@ pub use gateway::{
     has_stored_credentials, has_stored_credentials_for, is_sign_in_required,
     validate_mcp_endpoint_slug, AuthorizedSession, CredentialVault, GatewayApp, GatewayAuth,
     GatewayAuthConfig, GatewayConnection, GatewayCredentials, GatewayIdentity, GatewayMeta,
-    GatewayModel, PendingSignIn, TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
+    GatewayModel, GatewayOperationSummary, PendingSignIn, TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
 };

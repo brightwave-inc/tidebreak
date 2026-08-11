@@ -186,6 +186,25 @@ pub struct GatewayApp {
     pub mcp_endpoint_slugs: Vec<String>,
 }
 
+/// One operation a gateway connected app declares, from
+/// `/api/v1/cli/apps/{app_id}/operations`.
+///
+/// Deliberately open (no `deny_unknown_fields`): the gateway's catalog read is
+/// additive and still growing — a catalog-document hash is the field most
+/// likely to arrive next — and a client that refused an enriched payload would
+/// break on the deployment's next release rather than ignoring what it does not
+/// yet use.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayOperationSummary {
+    /// The operation id a manifest binding pins.
+    pub operation_id: String,
+    /// The HTTP method the gateway executes it with, for display.
+    pub method: String,
+    /// The gateway's own one-line description, when it has one.
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
 /// One minted access/refresh pair, resource-bound.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenSet {
@@ -503,6 +522,37 @@ impl GatewayAuth {
         }
         let list: AppListResponse = decode_json(response, "app request").await?;
         Ok(Some(list.apps))
+    }
+
+    /// The operations one entitled connected app declares, or `None` against a
+    /// gateway that predates the per-app catalog read.
+    ///
+    /// The id is the gateway's own and opaque here, so it is validated against
+    /// the binding grammar and appended as one percent-encoded path segment: a
+    /// value carrying `/` or `..` can never rewrite the request path.
+    pub async fn app_operations(
+        &self,
+        access_token: &str,
+        app_id: &str,
+    ) -> Result<Option<Vec<GatewayOperationSummary>>> {
+        validate_gateway_app_id(app_id)?;
+        let mut url = self.endpoint("/api/v1/cli/apps")?;
+        url.path_segments_mut()
+            .map_err(|()| gateway_error("configuration", "could not build endpoint URL"))?
+            .push(app_id)
+            .push("operations");
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|error| gateway_error("app catalog request", error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let list: OperationListResponse = decode_json(response, "app catalog request").await?;
+        Ok(Some(list.into_operations()))
     }
 
     async fn exchange_code(
@@ -973,6 +1023,16 @@ impl GatewayConnection {
         self.auth.apps(&token).await
     }
 
+    /// One entitled app's declared operations with a `control` token; `None`
+    /// when the gateway predates the per-app catalog read.
+    pub async fn app_operations(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<Vec<GatewayOperationSummary>>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth.app_operations(&token, app_id).await
+    }
+
     /// The gateway's MCP endpoint URL for `slug`, under the configured base.
     pub fn mcp_endpoint_url(&self, slug: &str) -> Result<String> {
         validate_mcp_endpoint_slug(slug)?;
@@ -1086,6 +1146,49 @@ struct ModelListResponse {
 #[derive(Deserialize)]
 struct AppListResponse {
     apps: Vec<GatewayApp>,
+}
+
+/// The per-app catalog read's body, in either shape the gateway may serve:
+/// an object keyed by `operations`, or the bare array. Both are accepted
+/// because the surface is being built against this client — pinning one shape
+/// here would make the two repositories' merge order load-bearing — and the
+/// object form leaves room for the catalog-document hash the record expects
+/// to arrive later.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OperationListResponse {
+    Wrapped {
+        #[serde(default)]
+        operations: Vec<GatewayOperationSummary>,
+    },
+    Bare(Vec<GatewayOperationSummary>),
+}
+
+impl OperationListResponse {
+    fn into_operations(self) -> Vec<GatewayOperationSummary> {
+        match self {
+            Self::Wrapped { operations } | Self::Bare(operations) => operations,
+        }
+    }
+}
+
+/// The gateway app-id contract a request path may carry, mirroring the
+/// manifest binding grammar
+/// ([`openwave_core::local_app::MAX_GATEWAY_APP_ID_BYTES`]): 1–128 bytes of
+/// printable, non-whitespace ASCII. The id is the gateway's and OpenWave never
+/// interprets it; this only bounds what may be appended to a URL.
+fn validate_gateway_app_id(app_id: &str) -> Result<()> {
+    // Pure-dot segments pass the printable-ASCII check but would read as
+    // path navigation to any origin that normalizes dot-segments, routing a
+    // control bearer at a different route.
+    if app_id.is_empty()
+        || app_id.len() > openwave_core::local_app::MAX_GATEWAY_APP_ID_BYTES
+        || !app_id.bytes().all(|byte| byte.is_ascii_graphic())
+        || app_id.bytes().all(|byte| byte == b'.')
+    {
+        return Err(gateway_error("configuration", "invalid gateway app id"));
+    }
+    Ok(())
 }
 
 /// The gateway's endpoint-slug contract: 1–127 bytes of ASCII alphanumerics,

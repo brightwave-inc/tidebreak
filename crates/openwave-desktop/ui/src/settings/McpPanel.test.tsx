@@ -84,6 +84,7 @@ const incidentApps = {
       app_kind: "rest_api",
       enabled: true,
       mcp_endpoint_slugs: ["example-security-tools"],
+      used_by_app_count: 0,
     },
   ],
 };

@@ -39,11 +39,15 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
   holds (record 7). The manifest — not the bundle — is what the user consents
   to and what the host enforces per call.
 
-  The gateway shape is vocabulary today: the type, its grant twin, and its
-  fingerprint exist, but nothing reads the gateway's app catalogs yet, so no
-  gateway app resolves, the authoring door refuses the shape, and any gateway
-  grant reads stale — fail-closed in every direction until the roster,
-  consent, and relay surfaces land.
+  The gateway shape resolves against the signed-in gateway session: the
+  `create_app` roster lists each entitled app with the operation ids the
+  gateway declares for it, the door refuses an unknown id or an undeclared
+  operation, and consent pins the gateway origin, the app id, and a hash of
+  that catalog. Every input is read live per request — nothing about a gateway
+  app is cached locally — so a profile with no session, an app that loses its
+  entitlement, or a re-ingested catalog all fail closed to re-consent. Invoke
+  still has no relay: a gateway binding can be authored and granted, but
+  calling it is the next slice.
 
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,

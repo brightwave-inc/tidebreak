@@ -571,6 +571,31 @@ pub trait ApprovedFolderSource: Send + Sync {
     async fn approved_folders(&self) -> Vec<(HostRootId, String)>;
 }
 
+/// One connected app of the model gateway, as the authoring door sees it.
+pub struct GatewayAuthoringApp {
+    /// The gateway's connected-app id — what a manifest binding names.
+    pub id: String,
+    /// Display name, for the refusal that lists what is bindable.
+    pub name: String,
+    /// The operation ids the gateway's catalog declares for the app.
+    pub operation_ids: Vec<String>,
+}
+
+/// Best-effort authoring-time lookup of the gateway connected apps this
+/// profile could bind, for the `create_app` door and its roster.
+///
+/// Legibility, not the gate: the consent and invoke surfaces resolve live
+/// against the gateway. The core crate cannot see the gateway session, so the
+/// server injects this.
+#[async_trait::async_trait]
+pub trait GatewayAppSource: Send + Sync {
+    /// Every bindable gateway app, or `None` when this profile has no gateway
+    /// session to answer with — which is a different statement from
+    /// `Some(vec![])`, a session that answered with nothing entitled. The door
+    /// refuses either way, but only the first can be fixed by signing in.
+    async fn entitled_apps(&self) -> Option<Vec<GatewayAuthoringApp>>;
+}
+
 /// Validate an app manifest structurally and return the JSON to store.
 ///
 /// Checks the display name, the grammar of every binding, and the serialized

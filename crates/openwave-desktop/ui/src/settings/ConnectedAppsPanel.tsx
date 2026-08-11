@@ -25,6 +25,7 @@ import {
   SettingsField,
   SettingsPanel,
   SettingsSection,
+  usedByLabel,
 } from "./primitives";
 
 type RestEntry = Extract<ConnectedAppInfo, { kind: "rest_api" }>;
@@ -126,11 +127,6 @@ function mcpTitle(entry: McpEntry): string {
   return entry.gateway_endpoint !== null && entry.gateway_apps.length > 0
     ? entry.gateway_apps.join(", ")
     : entry.name;
-}
-
-/** The one line naming how many local mini-apps bind an entry. */
-function usedByLabel(count: number): string {
-  return `Used by ${count} local app${count === 1 ? "" : "s"}`;
 }
 
 /**

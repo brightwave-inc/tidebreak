@@ -91,7 +91,11 @@ pub async fn get_app_grant_state(
 ) -> Result<Json<AppGrantState>, ServerError> {
     let (app, revision) = current_live_app(&state, app_id).await?;
     let grant = state.store.get_app_grant(app.id).await?;
-    let current = current_fingerprints(&state).await?;
+    let current = current_fingerprints(
+        &state,
+        &crate::connected_apps::gateway_apps_bound_by(&revision.manifest.bindings),
+    )
+    .await?;
     Ok(Json(grant_state(
         &revision.manifest,
         grant.as_ref(),
@@ -110,7 +114,11 @@ pub async fn post_app_grant(
     Path(app_id): Path<AppId>,
 ) -> Result<Json<AppGrantState>, ServerError> {
     let (app, revision) = current_live_app(&state, app_id).await?;
-    let current = current_fingerprints(&state).await?;
+    let current = current_fingerprints(
+        &state,
+        &crate::connected_apps::gateway_apps_bound_by(&revision.manifest.bindings),
+    )
+    .await?;
     let rest_definitions = current_rest_definitions(&state).await?;
     let mut bindings = Vec::with_capacity(revision.manifest.bindings.len());
     for binding in &revision.manifest.bindings {

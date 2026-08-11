@@ -212,6 +212,10 @@ pub async fn post_gateway_sign_out(
     State(state): State<AppState>,
 ) -> Result<Json<crate::gateway_runtime::GatewayStatus>, ServerError> {
     state.gateway.sign_out().await?;
+    // The `create_app` roster's gateway section is read through the session
+    // that just ended; republish so the door stops offering bindings nothing
+    // can resolve any more.
+    state.mcp.refresh_connected_app_roster().await;
     Ok(Json(state.gateway.status().await?))
 }
 

@@ -1137,7 +1137,13 @@ export type FolderAccess = "read" | "read_write";
  * One entitled connected app, with the slugs of the MCP endpoints that
  * aggregate it — the `mcp:<slug>` resources a mount would request.
  */
-export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabled: boolean, mcp_endpoint_slugs: Array<string>, };
+export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabled: boolean, mcp_endpoint_slugs: Array<string>, 
+/**
+ * How many live local-app grants bind this gateway app — the same
+ * "Used by N local apps" line the connected-apps page carries per record,
+ * so a user can see what a revocation here would break.
+ */
+used_by_app_count: number, };
 
 /**
  * Renderer-safe list of the connected apps the signed-in user is entitled

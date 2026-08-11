@@ -517,7 +517,11 @@ async fn require_app_grant(
             pinned.description()
         )));
     }
-    let current = current_fingerprints(state).await?;
+    let current = current_fingerprints(
+        state,
+        &crate::connected_apps::gateway_apps_granted_by(&grant.bindings),
+    )
+    .await?;
     for binding in &grant.bindings {
         // Every granted binding must still pin what its target carries now:
         // a reconfigured connected app or a disconnected folder invalidates
