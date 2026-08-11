@@ -956,14 +956,23 @@ pub(crate) struct GatewayRelayDispatcher {
 
 /// The relay as production assembles it: over the process's one gateway
 /// runtime, with no draft registration yet (see
-/// [`crate::connected_apps::NoRegisteredDrafts`]).
+/// [`crate::connected_apps::NoRegisteredDrafts`]). Debug builds alone may
+/// pin a mapping via `OPENWAVE_GATEWAY_DRAFT_APPS` (see
+/// [`crate::connected_apps::EnvPinnedDrafts`]) — a release daemon must not
+/// let its process environment redirect consented invokes.
 pub(crate) fn gateway_relay_dispatcher(
     runtime: Arc<GatewayRuntime>,
 ) -> Arc<dyn crate::connected_apps::GatewayInvokeDispatcher> {
-    Arc::new(GatewayRelayDispatcher {
-        runtime,
-        drafts: Arc::new(crate::connected_apps::NoRegisteredDrafts),
-    })
+    #[cfg(debug_assertions)]
+    let drafts: Arc<dyn crate::connected_apps::GatewayDraftSource> =
+        match crate::connected_apps::EnvPinnedDrafts::from_env() {
+            Some(pinned) => Arc::new(pinned),
+            None => Arc::new(crate::connected_apps::NoRegisteredDrafts),
+        };
+    #[cfg(not(debug_assertions))]
+    let drafts: Arc<dyn crate::connected_apps::GatewayDraftSource> =
+        Arc::new(crate::connected_apps::NoRegisteredDrafts);
+    Arc::new(GatewayRelayDispatcher { runtime, drafts })
 }
 
 #[async_trait]

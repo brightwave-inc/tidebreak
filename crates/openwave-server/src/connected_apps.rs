@@ -596,6 +596,65 @@ impl GatewayDraftSource for NoRegisteredDrafts {
     }
 }
 
+/// A development stand-in for draft registration, fed by
+/// `OPENWAVE_GATEWAY_DRAFT_APPS` (`<local app id>=<shared app id>`,
+/// comma-separated).
+///
+/// Registration is a coming slice; until it lands there is no way to exercise
+/// the relay against a real gateway. This source lets a developer pin the
+/// mapping by hand after registering the draft out of band. It deliberately
+/// ignores the deployment key — a hand-maintained map is already scoped to
+/// the one gateway the developer is driving — and it is only consulted when
+/// the variable is set, so production behavior is byte-identical without it.
+///
+/// Debug builds only: a release daemon's process environment must never be
+/// able to redirect a consented invoke.
+#[cfg(debug_assertions)]
+pub(crate) struct EnvPinnedDrafts {
+    map: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(debug_assertions)]
+impl EnvPinnedDrafts {
+    /// The env-pinned map, or `None` when the variable is unset or empty.
+    pub(crate) fn from_env() -> Option<Self> {
+        let raw = std::env::var("OPENWAVE_GATEWAY_DRAFT_APPS").ok()?;
+        let map: std::collections::BTreeMap<String, String> = raw
+            .split(',')
+            .filter_map(|pair| {
+                let (app, draft) = pair.split_once('=')?;
+                let (app, draft) = (app.trim(), draft.trim());
+                (!app.is_empty() && !draft.is_empty()).then(|| (app.to_string(), draft.to_string()))
+            })
+            .collect();
+        if map.is_empty() {
+            tracing::warn!(
+                "OPENWAVE_GATEWAY_DRAFT_APPS is set but holds no `<app id>=<shared app id>` \
+                 pairs; gateway draft pinning is off"
+            );
+            return None;
+        }
+        tracing::info!(
+            "gateway draft pins loaded for {} local app(s): {:?}",
+            map.len(),
+            map.keys().collect::<Vec<_>>(),
+        );
+        Some(Self { map })
+    }
+}
+
+#[cfg(debug_assertions)]
+#[async_trait]
+impl GatewayDraftSource for EnvPinnedDrafts {
+    async fn draft_shared_app_id(
+        &self,
+        app: openwave_core::id::AppId,
+        _gateway_base_url: &str,
+    ) -> openwave_core::Result<Option<String>> {
+        Ok(self.map.get(&app.to_string()).cloned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
