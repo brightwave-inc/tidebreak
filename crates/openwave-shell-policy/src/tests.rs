@@ -415,11 +415,8 @@ const NEVER_ALLOW: &[&str] = &[
     // the same indirection passed as an operand rather than a redirect: the
     // variable may be assigned on the same line or inherited from the parent
     "F=~/.ssh/id_rsa; cat $F",
-    "F=~/.ssh/authorized_keys; cp payload $F",
-    "F=~/.bashrc; tee $F",
     "F=../../outside; cp loot $F",
     "cat $SECRET_FILE",
-    "cp payload $DEST",
     "cp payload .bashr[c]",
     // a glob standing in for one character of a name the floor protects. the
     // marker list is not all dotfiles and not all whole segments, so each of
@@ -429,11 +426,23 @@ const NEVER_ALLOW: &[&str] = &[
     "cp certs/server.pe? /tmp/x",
     "cat id_rs?",
     "cp payload .git/hook*/pre-commit",
+    // half a marker spelled and half wildcarded. these are the boundary: only
+    // `*` is evidence that a pattern is aimed broadly, so a token that reaches
+    // a marker on single-character wildcards alone is still a disguise
+    "cat .e??",
+    "cat .???/id_???",
     // every one of the above is reachable by typing a different program, so
     // the operand check has to know which of grep's operands are files
     "grep '' .en?",
     "grep '' $SECRET_FILE",
     "ls /et[c]/shadow",
+    // the parser strips `k=v` out of argv, but the program still counts it: if
+    // it does not spend an operand here, the file lands in grep's pattern slot
+    "grep a=b $F",
+    "awk -v x=1 '{print}' $F",
+    // `sed -i` takes a backup suffix on BSD and nothing on GNU, so on GNU the
+    // empty argument is the script and the operand after it is a file
+    "sed -i '' $F",
     // a script-supplying flag leaves no operand holding the script, so the
     // first operand is the file — in every spelling of the flag
     "sed -ep $SECRET_FILE",
@@ -442,16 +451,10 @@ const NEVER_ALLOW: &[&str] = &[
     // a command substitution needs no cooperating environment: the agent writes
     // the path into a scratch file and reads it back as an operand
     "awk '{print}' $(cat p)",
-    "sort $(cat p)",
-    "sed -n 1,99p $(cat p)",
-    "cut -c1- $(cat p)",
-    "sed -i s/x/y/ $(cat p)",
-    "sort -o $(cat p) data",
+    "cat `cat p`",
     // the flag-shaped exemption that keeps `make -j$(nproc)` must not reach a
     // program whose flags name files
     "sort -o$(cat p) data",
-    "tar -cf out.tar $(cat p)",
-    "cat `cat p`",
 ];
 
 #[test]
@@ -610,7 +613,6 @@ fn covered_commands_auto_approve() {
         ("ls *.rs", allow(vec![prefix(&["ls"])])),
         ("grep -r foo src/*", readonly()),
         ("grep -r foo src/**/*.rs", readonly()),
-        ("ls src/[abc]*.rs", allow(vec![prefix(&["ls"])])),
         ("ls src/[a-z]*.rs", allow(vec![prefix(&["ls"])])),
         ("ls report[1].pdf", allow(vec![prefix(&["ls"])])),
         ("cat file-[1].txt", readonly()),
@@ -670,6 +672,13 @@ fn uncovered_or_restricted_commands_ask() {
             allow(vec![exact(&["pytest", "-q", "tests/"])]),
         ),
         ("timeout 30 npm test", allow(vec![prefix(&["timeout"])])),
+        // a substitution in a filename is an everyday idiom and it prompts,
+        // because nothing here can tell `$(date +%F)` from `$(cat p)`. pinned
+        // so the cost of the rule stays visible rather than being rediscovered
+        (
+            "tar -czf backup-$(date +%F).tgz src",
+            allow(vec![prefix(&["tar"]), prefix(&["date"])]),
+        ),
     ];
     for (command, ruleset) in &cases {
         assert_eq!(

@@ -209,6 +209,8 @@ pub fn analyze_argv(argv: &[String], ruleset: &ShellRuleSet) -> ShellAnalysis {
         simples: vec![SimpleCmd {
             program: program.clone(),
             argv: argv.to_vec(),
+            // Nothing stripped anything here: every argument is its own slot.
+            arg_slots: argv[1..].iter().cloned().map(ArgSlot::Word).collect(),
             // An argv carries no redirections; there is no shell to write them.
             write_targets: Vec::new(),
             read_targets: Vec::new(),
@@ -330,17 +332,21 @@ fn substitution_is_a_count(token: &str) -> bool {
 /// could this token match a marker? A new marker is covered the day it is
 /// added, and nothing has to be guessed.
 ///
-/// The one judgement call is how much of a marker a wildcard may supply. A
-/// wildcard that supplies most of the marker is not a disguise, it is an
-/// ordinary pattern that happens to be able to match a lot: `src/*` can expand
-/// onto `src/etc/passwd` and `*.rs` onto `id_rsa.rs`, and refusing those would
-/// refuse most globs ever written while catching nobody, since anyone who
-/// wanted that file would just write it. So a marker counts as reachable only
-/// when the token **spells more of it than it globs** — `.git/hook*/pre-commit`
-/// pins nine characters of `.git/hooks/` to reach it, `*.pe?` pins `.pe` to
-/// reach `.pem`, and `id_rs?` pins all but one character of `id_rsa`. What that
-/// leaves uncovered is the pattern that matches everything, which is the
-/// working-directory question this predicate cannot answer anyway.
+/// The one judgement call is which wildcards count as evidence that the token
+/// is aimed broadly rather than at one file, and only `*` is: it swallows a run
+/// of unknown length, so `src/*` can expand onto `src/etc/passwd` and `*.rs`
+/// onto `id_rsa.rs`. Refusing those would refuse most globs ever written while
+/// catching nobody, since anyone who wanted that file would just write it. A
+/// `?` or a bracket class is the opposite — a precise one-character disguise,
+/// standing in for a character the author already knows. So a marker counts as
+/// reachable when the token spells it out with any number of single-character
+/// wildcards but **more literal characters than `*` covers**: `.e??` and
+/// `.???/id_???` are refused, `*.pe?` is refused for pinning `.pe`, and
+/// `src/*` is not.
+///
+/// What that leaves uncovered is a `*` covering most of a marker, which is the
+/// working-directory question this predicate cannot answer anyway — and the
+/// `cd`-then-glob gap below, which it also cannot.
 fn could_reach_sensitive(token: &str) -> bool {
     let raw = token.to_lowercase();
     let norm = normpath(token).to_lowercase();
@@ -398,13 +404,14 @@ fn glob_atoms(token: &str) -> Vec<GlobAtom> {
 }
 
 /// Whether some expansion of `atoms` contains `marker`, spelling out more of it
-/// than it fills in with wildcards.
+/// than a `*` covers.
 ///
 /// The marker has to appear contiguously — that is what `hits_sensitive` looks
 /// for — but it may start and end anywhere in the token, since anything outside
-/// it is text the floor does not care about. Scoring a spelled character `+1`
-/// and a wildcard-supplied one `-1` and asking for a positive total is the
-/// "spells more than it globs" test.
+/// it is text the floor does not care about. Scoring a spelled character `+1`,
+/// a `*`-supplied one `-1` and a single-character wildcard `0`, then asking for
+/// a positive total, is the test the doc comment on [`could_reach_sensitive`]
+/// describes.
 fn spelled_more_than_globbed(atoms: &[GlobAtom], marker: &[char]) -> bool {
     // `best[j]`: the highest score with which the first `j` characters of the
     // marker have been consumed, over every alignment considered so far.
@@ -424,7 +431,7 @@ fn spelled_more_than_globbed(atoms: &[GlobAtom], marker: &[char]) -> bool {
             match atom {
                 GlobAtom::Spelled(c) if *c == marker[j] => relax(&mut next[j + 1], score + 1),
                 GlobAtom::Spelled(_) => {}
-                GlobAtom::AnyOne => relax(&mut next[j + 1], score - 1),
+                GlobAtom::AnyOne => relax(&mut next[j + 1], score),
                 GlobAtom::AnyRun => {
                     for taken in 0..=(marker.len() - j) {
                         relax(&mut next[j + taken], score - taken as i32);
@@ -612,10 +619,11 @@ fn supplies_script(arg: &str) -> bool {
 /// not to mistake for a filename.
 ///
 /// `sed -i` is deliberately absent. BSD `sed` takes a backup suffix there and
-/// GNU `sed` does not, and guessing wrong in the direction of consuming an
-/// argument would push a real path into the slot that gets skipped. The empty
-/// argument BSD callers pass (`sed -i '' 's/x/y/' f`) occupies no slot on its
-/// own account, so both spellings land correctly without the guess.
+/// GNU `sed` does not, and there is no way to tell which one will run. Both
+/// readings are covered without the guess: the empty argument BSD callers pass
+/// (`sed -i '' 's/x/y/' f`) spends the script slot, which leaves the real
+/// script and the file in path-checked slots on BSD, and on GNU — where that
+/// empty argument *is* the script — leaves the file in one too.
 fn separated_value_flags(base: &str) -> &'static [&'static str] {
     match base {
         "awk" | "gawk" | "mawk" | "nawk" => &["-F", "-v", "-f", "--field-separator", "--assign"],
@@ -635,19 +643,45 @@ fn separated_value_flags(base: &str) -> &'static [&'static str] {
     }
 }
 
-/// What each of `args` is to this program.
-fn operand_roles(program: &str, args: &[String]) -> Vec<OperandRole> {
+/// One post-program word of a simple command.
+///
+/// An assignment is not an argument — the parser strips `k=v` out of `argv`,
+/// and rules match against `argv` — but in a suffix it still occupies a
+/// position the program counts: `grep a=b file` searches for `a=b`, and `awk -v
+/// x=1` spends `-v`. Dropping it from the sequence would shift every operand
+/// after it by one and hand the checks below the wrong word.
+#[derive(Debug, Clone)]
+enum ArgSlot {
+    Word(String),
+    Assignment,
+}
+
+/// What each word slot is to this program. Only [`ArgSlot::Word`] slots get a
+/// role, in order, so the result lines up with `argv[1..]`.
+fn operand_roles(program: &str, slots: &[ArgSlot]) -> Vec<OperandRole> {
     let base = basename(program);
     let takes_paths = PATH_OPERAND_PROGRAMS.contains(&base);
     let script_first = SCRIPT_FIRST_OPERAND_PROGRAMS.contains(&base)
-        && !args.iter().any(|arg| supplies_script(arg));
+        && !slots.iter().any(|slot| match slot {
+            ArgSlot::Word(word) => supplies_script(word),
+            ArgSlot::Assignment => false,
+        });
     let value_flags = separated_value_flags(base);
-    let bsd_in_place = matches!(base, "sed" | "gsed");
-    let mut roles = Vec::with_capacity(args.len());
+    let mut roles = Vec::with_capacity(slots.len());
     let mut seen_operand = false;
     let mut flag_value = false;
-    let mut after_in_place = false;
-    for arg in args {
+    for slot in slots {
+        let arg = match slot {
+            ArgSlot::Word(word) => word,
+            // Spends a flag's value slot or an operand slot, but has no role of
+            // its own: it is not in `argv` and nothing will open it.
+            ArgSlot::Assignment => {
+                if !std::mem::take(&mut flag_value) {
+                    seen_operand = true;
+                }
+                continue;
+            }
+        };
         // The value of a flag is whatever that flag means — a separator, a
         // count, a script — and never the program's next positional operand.
         // A path-valued flag (`-f`) is checked as a path all the same.
@@ -659,19 +693,8 @@ fn operand_roles(program: &str, args: &[String]) -> Vec<OperandRole> {
             });
             continue;
         }
-        // BSD `sed -i ''` passes an empty backup suffix where GNU `sed -i`
-        // passes nothing, so the empty argument there spends no operand slot.
-        // Only there: `grep '' file` is an empty *pattern*, and letting it go
-        // slotless would push the file into the slot a script would occupy and
-        // out of every check.
-        let in_place_suffix = std::mem::take(&mut after_in_place) && arg.is_empty();
-        if in_place_suffix {
-            roles.push(OperandRole::Other);
-            continue;
-        }
         if arg.starts_with('-') && arg.len() > 1 {
             flag_value = value_flags.contains(&arg.as_str());
-            after_in_place = bsd_in_place && arg == "-i";
             roles.push(OperandRole::Other);
             continue;
         }
@@ -774,7 +797,7 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                 &sc.display(),
             );
         }
-        let roles = operand_roles(&sc.program, args);
+        let roles = operand_roles(&sc.program, &sc.arg_slots);
         for (token, role) in args.iter().zip(roles) {
             if hits_sensitive(token) {
                 return ShellAnalysis::with_offender(
@@ -901,6 +924,9 @@ fn parse_program(command: &str) -> Result<ast::Program, String> {
 struct SimpleCmd {
     program: String,
     argv: Vec<String>,
+    // Every post-program word in source order, assignments included. `argv`
+    // alone cannot say where an operand sits; see [`ArgSlot`].
+    arg_slots: Vec<ArgSlot>,
     // File targets of output (`>`/`>>`) and input (`<`) redirects.
     write_targets: Vec<String>,
     read_targets: Vec<String>,
@@ -1008,10 +1034,13 @@ fn collect_simple_command(simple: &ast::SimpleCommand, acc: &mut Collected) -> C
     let mut argv: Vec<String> = Vec::new();
     let mut writes: Vec<String> = Vec::new();
     let mut reads: Vec<String> = Vec::new();
+    let mut slots: Vec<ArgSlot> = Vec::new();
 
     if let Some(prefix) = &simple.prefix {
         for item in &prefix.0 {
-            collect_prefix_or_suffix_item(item, acc, &mut argv, &mut writes, &mut reads)?;
+            // A prefix assignment runs before the program and spends no
+            // operand of it, so it is collected but not slotted.
+            collect_prefix_or_suffix_item(item, acc, &mut argv, &mut writes, &mut reads, None)?;
         }
     }
 
@@ -1029,7 +1058,14 @@ fn collect_simple_command(simple: &ast::SimpleCommand, acc: &mut Collected) -> C
 
     if let Some(suffix) = &simple.suffix {
         for item in &suffix.0 {
-            collect_prefix_or_suffix_item(item, acc, &mut argv, &mut writes, &mut reads)?;
+            collect_prefix_or_suffix_item(
+                item,
+                acc,
+                &mut argv,
+                &mut writes,
+                &mut reads,
+                Some(&mut slots),
+            )?;
         }
     }
 
@@ -1047,6 +1083,7 @@ fn collect_simple_command(simple: &ast::SimpleCommand, acc: &mut Collected) -> C
     acc.simples.push(SimpleCmd {
         program,
         argv,
+        arg_slots: slots,
         write_targets: writes,
         read_targets: reads,
     });
@@ -1059,10 +1096,14 @@ fn collect_prefix_or_suffix_item(
     argv: &mut Vec<String>,
     writes: &mut Vec<String>,
     reads: &mut Vec<String>,
+    mut slots: Option<&mut Vec<ArgSlot>>,
 ) -> CollectResult {
     match item {
         ast::CommandPrefixOrSuffixItem::Word(word) => {
             let literal = process_word(word, acc, false)?;
+            if let Some(slots) = slots {
+                slots.push(ArgSlot::Word(literal.clone()));
+            }
             argv.push(literal);
             Ok(())
         }
@@ -1070,6 +1111,9 @@ fn collect_prefix_or_suffix_item(
             collect_redirect(redirect, acc, writes, reads)
         }
         ast::CommandPrefixOrSuffixItem::AssignmentWord(assignment, _word) => {
+            if let Some(slots) = slots.as_mut() {
+                slots.push(ArgSlot::Assignment);
+            }
             let name = match &assignment.name {
                 ast::AssignmentName::VariableName(name) => name.as_str(),
                 ast::AssignmentName::ArrayElementName(name, _index) => name.as_str(),
