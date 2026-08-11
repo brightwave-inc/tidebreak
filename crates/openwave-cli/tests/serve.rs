@@ -8,6 +8,9 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// A turn boots the engine and runs the tool loop, so it is given more room
+/// than a process that only has to refuse and exit.
+const TURN_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Kills the daemon on drop — including on an assertion panic, since
 /// `std::process::Child` does not reap on its own.
@@ -313,6 +316,81 @@ fn print_mode_fails_with_clean_stdout_when_no_model_provider_is_configured() {
     assert!(
         stderr.contains("provider") && stderr.contains("credential"),
         "stderr: {stderr}"
+    );
+}
+
+/// The headless run record 5 exists for: one unattended `-p` turn, in `allow`
+/// mode, on a data directory that has never been used, that calls a tool for
+/// real and finishes. The model is scripted (`OPENWAVE_SCRIPTED_PROVIDER`, see
+/// `openwave-server`'s `scripted_provider` module) so the turn is deterministic
+/// without egressing; everything under it — the embedded engine, the turn
+/// worker, the tool registry, the journal, and the event stream the CLI reads
+/// back — is the production path. Under `--output-format json` stdout *is* the
+/// journal of this turn, so what the run printed is what was recorded.
+#[test]
+fn a_scripted_tool_using_turn_completes_in_allow_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = serde_json::json!([
+        {
+            "tool": "update_task_plan",
+            "input": {"steps": [{"content": "Record the plan", "status": "in_progress"}]}
+        },
+        {"text": "plan recorded"}
+    ]);
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args([
+            "-p",
+            "make a plan",
+            "--permission-mode",
+            "allow",
+            "--output-format",
+            "json",
+        ])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env("OPENWAVE_SCRIPTED_PROVIDER", script.to_string())
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn a scripted openwave -p");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(TURN_EXIT_TIMEOUT);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Each line is one journal frame: `seq` plus the event itself.
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("every printed line is one JSON frame")["event"]
+                .clone()
+        })
+        .collect();
+    assert!(
+        events.iter().any(
+            |event| event["type"] == "tool_call_started" && event["name"] == "update_task_plan"
+        ),
+        "stdout: {stdout}"
+    );
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "tool_call_completed")
+        .unwrap_or_else(|| panic!("the scripted tool call never completed\nstdout: {stdout}"));
+    assert_eq!(completed["status"], "completed", "stdout: {stdout}");
+    assert!(
+        events.iter().any(|event| event["type"] == "turn_completed"),
+        "stdout: {stdout}"
     );
 }
 

@@ -52,4 +52,8 @@ unicode-width = "=0.2.2"
 uuid = { workspace = true }
 
 [dev-dependencies]
+# The scripted model provider the end-to-end print-mode test drives the turn
+# with. Enabling it here compiles it into the `openwave` binary the test spawns,
+# and only when the tests are built.
+openwave-server = { path = "../openwave-server", features = ["scripted-provider"] }
 tempfile = { workspace = true }

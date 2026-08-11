@@ -86,6 +86,8 @@ mod sandbox_task_plan_worker;
 mod sandbox_web_search_worker;
 mod scoped_model_token;
 mod scoped_store;
+#[cfg(feature = "scripted-provider")]
+mod scripted_provider;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
 mod source_tools;
@@ -1057,6 +1059,12 @@ async fn bind_inner(
         chatgpt.clone(),
         os_policy.clone(),
     ));
+    // Under the `scripted-provider` feature only — absent from every released
+    // binary — a scripted provider stands in for configured routing so a test
+    // in another crate can drive a real turn. See [`scripted_provider`].
+    let resolver: Arc<dyn resolver::ProviderResolver> = resolver;
+    #[cfg(feature = "scripted-provider")]
+    let resolver = scripted_provider::resolver_from_env()?.unwrap_or(resolver);
     let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
     // The same lock root `AppState` uses. `BlobWriteGuard` rendezvouses through
     // permanent lock files, so a second handle over the directory excludes
