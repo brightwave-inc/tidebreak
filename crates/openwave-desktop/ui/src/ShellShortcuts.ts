@@ -86,7 +86,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     keys: ["arrowleft"],
     mod: false,
     alt: true,
-    description: "Go back",
+    description: "Go back (outside text fields)",
     group: "Navigation",
     // Option+Arrow is word-by-word caret movement in every macOS text field,
     // and Alt+Arrow is the same habit elsewhere. Taking it from the composer
@@ -100,7 +100,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     keys: ["arrowright"],
     mod: false,
     alt: true,
-    description: "Go forward",
+    description: "Go forward (outside text fields)",
     group: "Navigation",
     allowInEditable: false,
   },

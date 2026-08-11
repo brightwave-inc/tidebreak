@@ -109,6 +109,43 @@ export function filterSlashOptions(
 }
 
 /**
+ * Where the `/query` token has ended up in a draft that has been typed into
+ * since it was read.
+ *
+ * Fetching a prompt body is a round trip and people carry on typing through
+ * it, so by the time the body lands the token may have moved (text typed
+ * before it) or merely stayed put (text typed after). The remembered offset
+ * and the offset shifted by the length change cover both of those exactly;
+ * the scan behind them catches an edit on both sides at once. `-1` when the
+ * token is gone — the reader deleted it, and the body belongs at the caret
+ * instead.
+ *
+ * Nothing here can tell one identical token from another: type a second `/a`
+ * ahead of the first while the body loads and the guesses land on whichever
+ * `/a` sits at the expected offset, which may be the new one. Distinguishing
+ * them needs an identity the textarea does not give us.
+ */
+export function locateSlashToken(
+  draft: string,
+  token: string,
+  start: number,
+  shift: number,
+): number {
+  for (const guess of [start, start + shift]) {
+    if (guess >= 0 && draft.startsWith(token, guess)) return guess;
+  }
+  let best = -1;
+  for (let at = draft.indexOf(token); at !== -1; at = draft.indexOf(token, at + 1)) {
+    const before = at === 0 ? "" : draft[at - 1]!;
+    if (before !== "" && !/\s/.test(before)) continue;
+    if (best === -1 || Math.abs(at - (start + shift)) < Math.abs(best - (start + shift))) {
+      best = at;
+    }
+  }
+  return best;
+}
+
+/**
  * The draft with the `/query` token taken out and `replacement` put in its
  * place, and where the caret lands after it.
  */

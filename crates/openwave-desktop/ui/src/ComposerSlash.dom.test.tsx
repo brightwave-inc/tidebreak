@@ -167,6 +167,44 @@ it("keeps what was typed while the prompt body was still loading", async () => {
   expect(onDraftChange).toHaveBeenLastCalledWith(
     expect.stringContaining("for the team"),
   );
+  // And the token goes, wherever it ended up: leaving it behind would send
+  // "/weekly" to the model as prose.
+  expect(onDraftChange).toHaveBeenLastCalledWith(
+    expect.not.stringContaining("/weekly"),
+  );
+});
+
+it("finds the token again when the typing lands ahead of it", async () => {
+  // Typing before the token moves it, and the body still belongs where the
+  // token is rather than wherever the caret happens to be.
+  const user = userEvent.setup();
+  let release: (body: string) => void = () => {};
+  const loadPromptBody = vi.fn(
+    () => new Promise<string>((resolve) => (release = resolve)),
+  );
+  const onDraftChange = vi.fn();
+  render(
+    <ComposerHarness
+      slash={slash({ loadPromptBody })}
+      onDraftChange={onDraftChange}
+    />,
+  );
+
+  const field = screen.getByRole("textbox", { name: "Message" });
+  await user.click(field);
+  await user.keyboard("draft the /weekly");
+  await user.click(screen.getByRole("option", { name: /Weekly update/ }));
+  await user.type(field, "hey, ", {
+    initialSelectionStart: 0,
+    initialSelectionEnd: 0,
+  });
+  release("Write this week's update covering:");
+
+  await vi.waitFor(() =>
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "hey, draft the Write this week's update covering:",
+    ),
+  );
 });
 
 it("invokes a picked skill and shows it as a chip the reader can drop", async () => {

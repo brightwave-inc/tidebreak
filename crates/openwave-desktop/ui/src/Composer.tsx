@@ -24,6 +24,7 @@ import {
   activeSlashQuery,
   availableSlashOptions,
   filterSlashOptions,
+  locateSlashToken,
   nextOptionHighlight,
   replaceSlashToken,
   skillsToInvoke,
@@ -569,14 +570,16 @@ export function Composer({
         }
         // The body arrives whenever the fetch settles, and the reader goes on
         // typing meanwhile. Write into the draft as it stands now rather than
-        // the one this pick started from: the token is replaced only where it
-        // still is, and every keystroke since is kept either way.
+        // the one this pick started from: the token is replaced wherever it
+        // has ended up, and every keystroke since is kept.
         const current = latestDraftRef.current;
-        const tokenIntact =
-          token !== null &&
-          current.slice(token.start, caret) === draft.slice(token.start, caret);
-        if (token && tokenIntact) {
-          applySlashReplacement(current, token.start, caret, body);
+        const typed = token === null ? null : draft.slice(token.start, caret);
+        const start =
+          token === null || typed === null
+            ? -1
+            : locateSlashToken(current, typed, token.start, current.length - draft.length);
+        if (start >= 0 && typed !== null) {
+          applySlashReplacement(current, start, start + typed.length, body);
         } else {
           insertAtSelection(body, current);
         }
@@ -607,7 +610,7 @@ export function Composer({
   }
 
   /** Text put in where the reader last had the caret, without running words together. */
-  function insertAtSelection(text: string, source: string = draft) {
+  function insertAtSelection(text: string, source: string) {
     const remembered = selectionRef.current;
     const start = Math.min(remembered?.start ?? source.length, source.length);
     const end = Math.min(remembered?.end ?? source.length, source.length);
@@ -736,9 +739,12 @@ export function Composer({
 
   function onDrop(event: DragEvent<HTMLFormElement>) {
     endDrag();
-    // The webview, not the host, receives file drops (`dragDropEnabled: false`),
-    // and its own handling of one is to navigate away from the app and display
-    // the file — so a drop must be claimed here whether or not it is taken.
+    // The packaged app runs with `dragDropEnabled: true`, so the host claims
+    // file drops before the webview sees them and `DocumentDropTarget` is the
+    // path that runs there. This handler is what a dev-server webview does
+    // with a drop, and its own handling of one is to navigate away from the
+    // app and display the file — so a drop must be claimed here whether or not
+    // it is taken.
     event.preventDefault();
     acceptTransfer(event.dataTransfer);
   }

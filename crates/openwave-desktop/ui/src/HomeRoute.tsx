@@ -46,6 +46,11 @@ const firstMessageActions = useFirstMessage.getState();
  * whatever was selected when the attachment opened it, and a reader who picks
  * a different model before sending expects the turn to run on the one they can
  * see in the composer.
+ *
+ * A null model is not sent, and the reasoning level rides with it. It means
+ * the home picker never resolved one — loading the defaults is allowed to fail
+ * quietly — and the chat the server seeded from the sticky default is a better
+ * answer than the global default that clearing it would fall back to.
  */
 export async function applyPendingChatSettings(
   client: Pick<
@@ -63,18 +68,42 @@ export async function applyPendingChatSettings(
     networkPolicy: import("./api").NetworkPolicy;
   },
 ): Promise<void> {
-  chatListActions.replaceChat(
-    await client.patchChatModel(chatId, settings.model),
-  );
-  chatListActions.replaceChat(
-    await client.patchChatReasoningEffort(chatId, settings.reasoningEffort),
-  );
+  if (settings.model) {
+    chatListActions.replaceChat(
+      await client.patchChatModel(chatId, settings.model),
+    );
+    chatListActions.replaceChat(
+      await client.patchChatReasoningEffort(chatId, settings.reasoningEffort),
+    );
+  }
   chatListActions.replaceChat(
     await client.patchChatPermissionMode(chatId, settings.permissionMode),
   );
   chatListActions.replaceChat(
     await client.patchChatNetworkPolicy(chatId, settings.networkPolicy),
   );
+}
+
+/**
+ * One in-flight run shared by everyone who asks for it while it is running.
+ *
+ * Home creates its pending chat lazily, and the callers race: a dropped batch
+ * of three images asks for the chat three times in the same tick, and the
+ * paperclip can be mid-flight when a paste lands. Without this each caller
+ * creates its own chat and the reader is left with orphans in the sidebar.
+ * The run is forgotten as soon as it settles, so a failed creation is retried
+ * rather than remembered.
+ */
+export function singleFlight<T>(): (run: () => Promise<T>) => Promise<T> {
+  let inFlight: Promise<T> | null = null;
+  return (run) => {
+    if (!inFlight) {
+      inFlight = run().finally(() => {
+        inFlight = null;
+      });
+    }
+    return inFlight;
+  };
 }
 
 function isImportedDocument(
@@ -137,7 +166,7 @@ export function HomeRoute() {
   const [attachError, setAttachError] = useState<string | null>(null);
   // One chat creation shared by every route into it — the picker, and each file
   // of a dropped or pasted batch.
-  const creatingPendingChat = useRef<Promise<string> | null>(null);
+  const creatingPendingChat = useRef(singleFlight<string>());
   // The same strip a conversation's composer has. Home's bytes are published
   // into the chat the attachment silently creates, which is why the target is
   // resolved per upload rather than being the draft's own key.
@@ -173,12 +202,7 @@ export function HomeRoute() {
     // and each upload asks for the chat to publish into. One in-flight creation
     // is shared between them so a three-image drop does not leave two orphan
     // chats behind it.
-    if (!creatingPendingChat.current) {
-      creatingPendingChat.current = createPendingChat().finally(() => {
-        creatingPendingChat.current = null;
-      });
-    }
-    return creatingPendingChat.current;
+    return creatingPendingChat.current(createPendingChat);
   }
 
   async function createPendingChat(): Promise<string> {
@@ -401,18 +425,16 @@ export function HomeRoute() {
                 ),
             }}
             nativeDropTarget={
-              pendingChatId ? (
-                <DocumentDropTarget
-                  chatId={pendingChatId}
-                  onAttached={adoptAttached}
-                  onError={(caught) =>
-                    setAttachError(
-                      String(caught).replace(/^Error:\s*/, "").trim() ||
-                        "Could not attach that file.",
-                    )
-                  }
-                />
-              ) : undefined
+              <DocumentDropTarget
+                resolveChatId={ensurePendingChat}
+                onAttached={adoptAttached}
+                onError={(caught) =>
+                  setAttachError(
+                    String(caught).replace(/^Error:\s*/, "").trim() ||
+                      "Could not attach that file.",
+                  )
+                }
+              />
             }
             attachError={attachError}
             resetKey="home"

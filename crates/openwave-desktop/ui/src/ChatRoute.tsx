@@ -704,7 +704,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           onVoiceInputAccepted={voice.resetInputUsed}
           nativeDropTarget={
             <DocumentDropTarget
-              chatId={chatId}
+              resolveChatId={async () => chatId}
               onAttached={adoptAttached}
               onError={(error) => setAttachError(friendlyAttachError(error))}
             />
