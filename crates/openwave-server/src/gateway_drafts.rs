@@ -182,9 +182,12 @@ impl GatewayDraftClient for GatewayConnectorDraftClient {
         let Some(connection) = self.connection_at(gateway_base_url).await? else {
             return Ok(None);
         };
+        // Stamped per revision, not once per app: provenance that only the
+        // first revision carries says nothing about the ones after it.
         let body = serde_json::json!({
             "manifest": projection.manifest,
             "bundle_base64": projection.bundle_base64,
+            "client_name": CLIENT_NAME,
         });
         connection
             .create_shared_app_revision(shared_app_id, &body)
