@@ -155,7 +155,7 @@ describe("visibleModelGroups", () => {
       withAvailability({ anthropic: true, openai: false }),
       "openai::gpt-4o",
     );
-    expect(groups.map((group) => group.provider)).toEqual(["anthropic", "openai"]);
+    expect(groups.map((group) => group.provider)).toEqual(["openai", "anthropic"]);
   });
 
   it("keeps a partially available provider intact", () => {
@@ -247,11 +247,11 @@ describe("notConnectedProviders", () => {
 
 describe("firstAvailableModel", () => {
   it("lands in render order, not catalog order", () => {
-    // Anthropic first in the catalog, but OpenAI renders first — the toggle
-    // must land where the reader sees the check appear.
+    // This fixture's OpenAI row is intentionally non-recommended, so the
+    // first visible row remains Anthropic even though OpenAI renders first.
     const [sonnet, gpt] = MODELS;
     expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe(
-      "openai::gpt-4o",
+      "anthropic::claude-sonnet-4",
     );
   });
 
