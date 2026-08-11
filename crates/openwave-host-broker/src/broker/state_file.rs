@@ -176,7 +176,12 @@ impl StateFile {
         for item in persisted.mutations {
             // Completed attachment and write records are written after
             // everything else, oldest first, so file order is the retention
-            // order this rebuilds. See `prune_mutation_receipts`.
+            // order this rebuilds. A file written before the bound existed
+            // sorted every record by operation identity instead, so the order
+            // recovered from it is arbitrary and the first trim after an
+            // upgrade evicts an arbitrary record rather than the oldest one.
+            // Every save from then on writes the real order.
+            // See `prune_mutation_receipts`.
             if super::is_prunable_receipt(&item.record) {
                 receipt_order.push_back(item.operation_id);
             }
@@ -185,8 +190,10 @@ impl StateFile {
             }
         }
         // A state file written before the bound existed can carry more history
-        // than the bound allows. Trimming it here is what lets such an install
-        // shrink back under the ceiling instead of climbing towards it.
+        // than the bound allows. Trimming it here brings such an install back
+        // down instead of letting it climb towards the ceiling — but only while
+        // it is still under it: the size check above runs before parsing, so a
+        // file that already crossed the cap is refused before this can help.
         super::prune_mutation_receipts(&mut mutations, &mut receipt_order);
         // Version 2 predates write grants. Its read grants migrate as they
         // stand: widening them would hand out authority the user never

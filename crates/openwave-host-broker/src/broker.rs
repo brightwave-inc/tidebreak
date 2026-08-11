@@ -879,18 +879,22 @@ impl Controller {
             Ok(prepared) => {
                 let existing = preferred_root_alias(&next, &prepared.root);
                 if let Some((root_id, display_name)) = existing {
-                    ensure_default_subject_grants(
-                        &mut next,
-                        prepared.root.owner,
-                        root_id,
-                        prepared.grants[0].consent().clone(),
-                        self.shared.execute_commands,
-                    )
-                    .map_err(error_response)?;
-                    if !next.attachments.iter().any(|attachment| {
-                        attachment.conversation_id() == prepared.conversation_id
-                            && attachment.root_id() == root_id
-                    }) {
+                    // Picking a folder this conversation already has is the
+                    // same non-event as attaching one it already has: it says
+                    // where the folder may be used, and the chat is already
+                    // there. Only the pick that actually brings the folder into
+                    // a conversation carries the access a pick describes — and
+                    // then only for a subject that holds nothing over the root,
+                    // which is what keeps a narrowed position narrowed.
+                    if !has_root_attachment(&next, prepared.conversation_id, root_id) {
+                        ensure_default_subject_grants(
+                            &mut next,
+                            prepared.root.owner,
+                            root_id,
+                            prepared.grants[0].consent().clone(),
+                            self.shared.execute_commands,
+                        )
+                        .map_err(error_response)?;
                         next.attachments.push(
                             RootAttachment::new(prepared.conversation_id, root_id)
                                 .map_err(BrokerError::from)
@@ -1938,6 +1942,11 @@ const MAX_RETAINED_MUTATION_RECEIPTS: usize = 2048;
 /// which is not the growth this bound exists for. Attachment and write records
 /// are each validated on their own terms and are the two that a working
 /// session produces continuously.
+///
+/// Only completed records qualify. A pending one is still owed an outcome, so
+/// it is never enrolled and never evicted — which means a write whose dispatch
+/// was abandoned leaves a record behind for good. That leak is one record per
+/// abandoned in-flight write and is not what this bound is for.
 fn is_prunable_receipt(record: &MutationRecord) -> bool {
     matches!(
         record,
@@ -2555,6 +2564,11 @@ fn subject_has_any_root_grant(state: &State, subject: GrantSubject, root_id: Roo
 /// root, that set is the user's position — possibly narrowed on the folders
 /// panel — and widening it is a consent decision, which belongs to
 /// [`Controller::grant_root_capability`] and its permission dialog.
+///
+/// Both callers gate this on the folder actually arriving in the conversation,
+/// so an emptied position cannot be refilled by repeating an action against a
+/// folder the chat already has. This check is the second half of that rule, for
+/// the position a subject carries across its other conversations.
 fn ensure_default_subject_grants(
     state: &mut State,
     subject: GrantSubject,

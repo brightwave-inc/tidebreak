@@ -3946,12 +3946,49 @@ fn attaching_a_folder_never_restores_a_revoked_capability() {
     // Nor does choosing the same folder in the picker again, which lands on
     // the existing registration.
     assert_eq!(
-        register(&controller, subject, conversation, path, OperationId::new())
-            .root
-            .root_id,
+        register(
+            &controller,
+            subject,
+            conversation,
+            path.clone(),
+            OperationId::new()
+        )
+        .root
+        .root_id,
         root_id
     );
     assert_eq!(capabilities(subject), narrowed);
+
+    // Revoking the rest leaves no statement behind — a withdrawn grant is
+    // indistinguishable from one that never existed — so the folder still
+    // being in this chat is what has to carry the decision. Picking it again
+    // lands on the same registration and mints nothing, exec least of all.
+    let read_id = grant_statements(&controller)
+        .into_iter()
+        .find(|grant| grant.subject == subject && grant.capability == Capability::ReadFiles)
+        .unwrap()
+        .grant_id;
+    assert!(revoke_grant(&controller, subject, read_id));
+    assert!(capabilities(subject).is_empty());
+    assert_eq!(
+        register(
+            &controller,
+            subject,
+            conversation,
+            path.clone(),
+            OperationId::new()
+        )
+        .root
+        .root_id,
+        root_id
+    );
+    assert!(
+        capabilities(subject).is_empty(),
+        "re-picking an attached folder must not refill an emptied position: {:?}",
+        capabilities(subject)
+    );
+    assert!(!attach(OperationId::new()).changed);
+    assert!(capabilities(subject).is_empty());
 
     // A conversation with no standing position on this folder is a first
     // grant, not a widening, and still gets the access a pick describes.
