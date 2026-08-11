@@ -3128,6 +3128,87 @@ fn version_three_read_grants_carry_their_exec_reach_forward() {
     );
 }
 
+/// Every install on disk today wrote a version 4 file, and none of them
+/// mentions a settled position. Refusing that file is a broker that will not
+/// start and a user with no folders at all, so the accepted set has to widen
+/// rather than shift — and the record has to be recovered from what such a file
+/// does carry, including for the folder narrowed to nothing that this whole
+/// change exists for. That folder has no grant left to recover from; its
+/// attachment and its registration are the evidence, and they are the same
+/// evidence the loader's own validation accepts.
+#[test]
+fn version_four_files_load_and_recover_their_settled_positions() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    )
+    .root
+    .root_id;
+    drop(broker);
+
+    // Reshape the persisted file into what a version 4 install left behind.
+    let state_path = state_dir.join("host-broker-state.json");
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    persisted["version"] = serde_json::json!(4);
+    persisted.as_object_mut().unwrap().remove("settled");
+    std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    // An ordinary version 4 file — the one every install has — still loads and
+    // still reaches its folder.
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    assert!(operate(
+        &broker.operator(),
+        ExecutionContext::standalone(conversation).unwrap(),
+        OperationRequest::ReadFile(PathRequest {
+            root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }),
+    )
+    .is_ok());
+    drop(broker);
+
+    // Now the folder a version 4 install had revoked down to nothing: the
+    // attachment and the registration stand, every grant naming the folder is
+    // gone, and no position was ever recorded because the field did not exist.
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    persisted["version"] = serde_json::json!(4);
+    persisted.as_object_mut().unwrap().remove("settled");
+    persisted["grants"] = serde_json::json!([]);
+    std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let controller = broker.controller();
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .is_ok(),
+        "the folder is still approved, so attaching it is not an error"
+    );
+    assert!(
+        grant_statements(&controller)
+            .into_iter()
+            .all(|grant| !matches!(
+                grant.scope,
+                Scope::Root { root_id: granted } if granted == root_id
+            )),
+        "an upgraded install must not treat an emptied position as a first arrival"
+    );
+}
+
 #[test]
 fn binary_reads_return_bytes_that_text_reads_refuse() {
     let (_temp, broker, path, audit) = audited_setup();

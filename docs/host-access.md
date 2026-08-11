@@ -317,6 +317,20 @@ without starting or replaying the mutation. Attachment changes are computed and
 published in one durable state replacement, so they do not expose a recoverable
 intermediate phase.
 
+The state file carries a version, and the set of versions the loader accepts
+only ever widens: adding a version never drops an older one, because refusing a
+file is a broker that will not start and an install whose folders are all gone.
+Version 5 adds the record of settled positions. Files written by versions 2
+through 4 have no such record, so the loader reconstructs it from the evidence
+those files do carry — a surviving grant over the folder, a surviving attachment
+(which can only settle its own conversation's subject), and the subject that
+registered the folder. That last one is what recovers a project chat, whose
+position is held by the registration owner rather than by any one conversation.
+Reconstruction accepts exactly the evidence the loaded-state validation accepts,
+so a file that was consistent under the old rules stays loadable under the new
+ones — including the case the record exists to serve, a folder the user narrowed
+to nothing.
+
 Legacy version-2 state may contain multiple product root IDs for one pinned
 filesystem object. Those IDs remain valid so existing product projections and
 receipts do not break. Registration selects among them deterministically, and

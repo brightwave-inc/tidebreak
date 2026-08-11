@@ -129,7 +129,11 @@ impl StateFile {
             return Err(BrokerError::StateTooLarge);
         }
         let persisted: PersistedState = serde_json::from_slice(&bytes).map_err(invalid_data)?;
-        if !matches!(persisted.version, 2 | 3 | STATE_VERSION) {
+        // Accepted versions widen; they never shift. Dropping the version an
+        // install actually has on disk refuses its file, and a refused file is
+        // a broker that will not start — every folder gone, for everyone, on
+        // upgrade. Add the new version, keep the old ones, and migrate below.
+        if !matches!(persisted.version, 2 | 3 | 4 | STATE_VERSION) {
             return Err(invalid_data(format!(
                 "unsupported broker state version {}",
                 persisted.version
@@ -174,13 +178,20 @@ impl StateFile {
             grants.retain(|grant| grant.capability() != Capability::ExecuteCommands);
         }
         let mut attachments = persisted.attachments;
-        // A folder a subject can still reach is a folder that subject has
-        // already been granted, so a file written before this record existed
-        // recovers everything except the positions already narrowed to
-        // nothing. Those few re-mint once on the next arrival and are settled
-        // from then on; inventing a settled position for a subject that never
-        // had one would be the worse error, because it leaves a folder that
-        // can only be opened through the permission dialog.
+        // A file written before this record existed has to have it
+        // reconstructed, and the reconstruction has to accept the same
+        // evidence the validation rules accept — otherwise the loader refuses a
+        // file it wrote itself. Three sources say a position existed and was
+        // answered: a grant the subject still holds, a folder still attached to
+        // a conversation, and a registration still owned by its subject. The
+        // grants alone are not enough, because the install this record exists
+        // for is exactly the one whose grants are gone.
+        //
+        // An attachment names a conversation rather than a subject, so it can
+        // only settle that conversation's own subject; a project chat's
+        // position is recovered from the registration owner instead. A position
+        // none of the three reaches re-mints once on its next arrival and is
+        // settled from then on.
         let mut settled: HashSet<(GrantSubject, RootId)> = grants
             .iter()
             .filter_map(|grant| match grant.scope() {
@@ -190,6 +201,17 @@ impl StateFile {
                 Scope::Subject => None,
             })
             .collect();
+        for attachment in &attachments {
+            if let Ok(subject) = GrantSubject::conversation(attachment.conversation_id()) {
+                settled.insert((subject, attachment.root_id()));
+            }
+        }
+        for (root_id, root) in &roots {
+            settled.insert((root.owner, *root_id));
+        }
+        for root in &unavailable {
+            settled.insert((root.owner, root.id));
+        }
         settled.extend(
             persisted
                 .settled
