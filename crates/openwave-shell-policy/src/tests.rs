@@ -412,6 +412,15 @@ const NEVER_ALLOW: &[&str] = &[
     "cat /et[c]/shadow",
     "tee .g[i]t/hooks/pre-commit",
     "cat < $SECRET_FILE",
+    // the same indirection passed as an operand rather than a redirect: the
+    // variable may be assigned on the same line or inherited from the parent
+    "F=~/.ssh/id_rsa; cat $F",
+    "F=~/.ssh/authorized_keys; cp payload $F",
+    "F=~/.bashrc; tee $F",
+    "F=../../outside; cp loot $F",
+    "cat $SECRET_FILE",
+    "cp payload $DEST",
+    "cp payload .bashr[c]",
 ];
 
 #[test]
@@ -564,11 +573,19 @@ fn covered_commands_auto_approve() {
             allow(vec![prefix(&["go", "build"])]),
         ),
         // A glob that can only expand inside the granted folder is ordinary work
-        // and stays covered, as does an expansion that names no path.
+        // and stays covered, as does an expansion that names no path and a
+        // pattern operand that merely looks like one.
         ("ls *.rs", allow(vec![prefix(&["ls"])])),
         ("grep -r foo src/*", readonly()),
         ("grep -r foo src/**/*.rs", readonly()),
         ("echo $USER", readonly()),
+        (
+            "make -j$(nproc)",
+            allow(vec![prefix(&["make"]), prefix(&["nproc"])]),
+        ),
+        ("grep 'a?b' file.txt", readonly()),
+        ("cat README.md", readonly()),
+        ("CFLAGS=-I../include make", allow(vec![prefix(&["make"])])),
     ];
     for (command, ruleset) in &cases {
         assert_eq!(

@@ -244,17 +244,21 @@ enum Expansion {
 /// `$HOME/.ssh/authorized_keys` and `/et[c]/shadow` both miss every marker
 /// while naming a file the floor exists to protect.
 ///
-/// The shape rules keep it narrow. An expansion only matters in something
-/// already shaped like a path, so `echo $USER` is untouched. A glob matters
-/// when the token is rooted outside the working tree (`/…`, `~…`), climbs
-/// (`..`), or hides a character inside a directory name (`[`, `?` with a
-/// separator) — which leaves the everyday relative globs (`*.py`, `src/*`,
-/// `src/**/*.rs`) exactly as they were, since they can only expand to
-/// non-hidden entries under a directory the grant already covers.
-fn unvettable_path_argument(token: &str) -> bool {
+/// The shape rules keep it narrow. An expansion matters in something already
+/// shaped like a path, or in an operand of a program whose operands *are*
+/// paths — so `cat $F` is caught while `echo $USER` and `make -j$(nproc)` are
+/// untouched. A glob matters when the token is rooted outside the working tree
+/// (`/…`, `~…`), climbs (`..`), hides a character inside a directory name
+/// (`[`, `?` with a separator), or spells a literal with a one-character
+/// bracket group — which leaves the everyday relative globs (`*.py`, `src/*`,
+/// `src/**/*.rs`) and ordinary regex operands exactly as they were.
+fn unvettable_path_argument(token: &str, program_takes_paths: bool) -> bool {
     let expansion = token.contains('$') || token.contains('`');
     let path_shaped = token.contains('/') || token.starts_with('~');
-    if expansion && path_shaped {
+    if expansion && (path_shaped || program_takes_paths) {
+        return true;
+    }
+    if spells_a_literal(token) {
         return true;
     }
     if !token.contains(['*', '?', '[']) {
@@ -264,6 +268,20 @@ fn unvettable_path_argument(token: &str) -> bool {
         || token.starts_with('~')
         || token.contains("..")
         || (path_shaped && token.contains(['[', '?']))
+}
+
+/// A bracket group that can match exactly one character, as in `~/.bashr[c]`.
+///
+/// That is not globbing, it is spelling a literal out of reach of a substring
+/// check: the token names one specific file while matching no marker. Real
+/// patterns quantify over more than one character (`[a-z]`, `[abc]`, `[^x]`),
+/// so this catches the disguise without touching them.
+fn spells_a_literal(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'[' && bytes.get(i + 2) == Some(&b']'))
 }
 
 /// A redirect target the analyzer cannot resolve to a path.
@@ -276,10 +294,91 @@ fn unvettable_redirect_target(token: &str) -> bool {
     token.contains(['$', '`', '*', '?', '['])
 }
 
+/// Programs whose non-flag operands are filesystem paths.
+///
+/// For these, an operand the shell has yet to resolve is as uncheckable as an
+/// unresolved redirect target: `cat $F` opens whatever `$F` names, and the
+/// literal `$F` matches no sensitive marker. Programs whose operands are
+/// patterns, expressions, or numbers are deliberately absent — `grep`'s first
+/// operand is a regex and `find`'s are predicates, so refusing an unresolved
+/// operand there would cost far more than it buys.
+const PATH_OPERAND_PROGRAMS: &[&str] = &[
+    "cat",
+    "gcat",
+    "tac",
+    "head",
+    "ghead",
+    "tail",
+    "gtail",
+    "nl",
+    "od",
+    "xxd",
+    "hexdump",
+    "strings",
+    "base64",
+    "gbase64",
+    "md5sum",
+    "gmd5sum",
+    "shasum",
+    "sha1sum",
+    "sha256sum",
+    "cksum",
+    "cp",
+    "gcp",
+    "mv",
+    "gmv",
+    "rm",
+    "grm",
+    "rmdir",
+    "ln",
+    "gln",
+    "install",
+    "ginstall",
+    "tee",
+    "gtee",
+    "touch",
+    "gtouch",
+    "truncate",
+    "gtruncate",
+    "shred",
+    "gshred",
+    "dd",
+    "gdd",
+    "chmod",
+    "gchmod",
+    "chown",
+    "gchown",
+    "chgrp",
+    "gchgrp",
+    "stat",
+    "gstat",
+    "file",
+    "readlink",
+    "greadlink",
+    "realpath",
+    "grealpath",
+    "less",
+    "more",
+    "open",
+    "xdg-open",
+    "gzip",
+    "gunzip",
+    "bzip2",
+    "xz",
+    "zstd",
+    "zip",
+    "unzip",
+];
+
+fn takes_path_operands(program: &str) -> bool {
+    PATH_OPERAND_PROGRAMS.contains(&basename(program))
+}
+
 /// The three tiers, applied to whatever leaves were collected.
 fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> ShellAnalysis {
     let pending = expansion == Expansion::Pending;
-    let unvettable_argument = |token: &str| pending && unvettable_path_argument(token);
+    let unvettable_argument =
+        |token: &str, takes_paths: bool| pending && unvettable_path_argument(token, takes_paths);
     let unvettable_target = |token: &str| pending && unvettable_redirect_target(token);
     // (1) Deny floor — wins over every allow rule, including `All`.
     for sc in &acc.simples {
@@ -334,6 +433,26 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
     }
 
     // (2) Escalation — forces `Ask` over any allow match, including `All`.
+    //
+    // An assignment runs nothing, so it is never a leaf and its value is never an argument. But
+    // naming a sensitive path in one is the first half of `F=…; cat $F`, and the value is the only
+    // place that path is ever visible in plain text.
+    for value in &acc.assignment_values {
+        if hits_sensitive(value) {
+            return ShellAnalysis::with_offender(
+                ShellVerdict::Ask,
+                format!("assignment names a sensitive path: {value}"),
+                value,
+            );
+        }
+        if climbs_out(value) {
+            return ShellAnalysis::with_offender(
+                ShellVerdict::Ask,
+                format!("assignment escapes folder: {value}"),
+                value,
+            );
+        }
+    }
     for sc in &acc.simples {
         let args = &sc.argv[1..];
         if is_execution_enabling(&sc.program, args) {
@@ -365,7 +484,7 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                     &sc.display(),
                 );
             }
-            if unvettable_argument(token) {
+            if unvettable_argument(token, takes_path_operands(&sc.program)) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
                     format!("unresolved path in arguments: {}", sc.display()),
@@ -485,6 +604,9 @@ struct Collected {
     // Redirects attached to a compound (`{ ...; } > file`) rather than a single command.
     group_write_targets: Vec<String>,
     group_read_targets: Vec<String>,
+    // Every assignment value seen, whether or not a program followed it. A pure assignment runs
+    // nothing, so it is not a leaf — but the path it names is what a later word expands to.
+    assignment_values: Vec<String>,
     // Recursion guard for nested command substitutions (fail closed if exceeded).
     depth: usize,
 }
@@ -648,6 +770,7 @@ fn collect_prefix_or_suffix_item(
             if assignment_is_dangerous(name, &value) {
                 return Err(format!("dangerous environment assignment: {name}={value}"));
             }
+            acc.assignment_values.push(value.clone());
             // `FOO=$(evil) cmd` — a substitution in the value is a sub-command.
             match &assignment.value {
                 ast::AssignmentValue::Scalar(word) => {
