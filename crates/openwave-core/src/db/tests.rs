@@ -1603,6 +1603,89 @@ async fn orphan_blob_retirement_only_queues_missing_or_completed_episodes() {
     );
 }
 
+/// An exec card's preview images are a live reference like any other. The
+/// auditor reads them back out of the stored preview, and a row it cannot
+/// parse — written by a build that knew a shape this one does not — has to
+/// count as a reference: guessing "no reference" deletes the only copy of an
+/// image the card still renders, while guessing "reference" only keeps bytes
+/// around longer than they were needed.
+#[tokio::test]
+async fn an_unreadable_tool_preview_keeps_its_blob_alive() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let blob_id = uuid::Uuid::new_v4();
+
+    let created = DateTime::<Utc>::from_timestamp(1_700_000_020, 0).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "tu_preview".into(),
+        name: "exec".into(),
+        arguments: serde_json::json!({"command": "python3 plot.py"}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: created,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let preview = crate::ToolResultPreview::Exec {
+        exit_code: Some(0),
+        timed_out: false,
+        output_truncated: false,
+        stdout: "wrote preview/overview.png".into(),
+        stderr: String::new(),
+        images: vec![crate::ImageRef {
+            blob_id,
+            media_type: crate::ImageMediaType::Png,
+            width: 800,
+            height: 600,
+            byte_len: 4_096,
+        }],
+        outputs: Vec::new(),
+        degraded: None,
+        backend: None,
+    };
+    store
+        .resolve_server_tool_call_with_artifacts(
+            call.id,
+            &ToolCallResolution::Completed {
+                result: "ran".into(),
+            },
+            created + chrono::Duration::seconds(1),
+            Some(&preview),
+        )
+        .await
+        .unwrap();
+    assert!(!store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    assert_eq!(store.get_blob_retirement(blob_id).await.unwrap(), None);
+
+    // The same row, now in a shape this build cannot read.
+    entities::tool_call::Entity::update_many()
+        .col_expr(
+            entities::tool_call::Column::ResultPreview,
+            sea_orm::sea_query::Expr::value(serde_json::json!({
+                "tool": "exec",
+                "attachments": [{ "blob_id": blob_id }],
+            })),
+        )
+        .filter(entities::tool_call::Column::Id.eq(call.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(!store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    assert_eq!(store.get_blob_retirement(blob_id).await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn stale_orphan_snapshot_cannot_reset_a_new_worker_lease() {
     let (_dir, store) = temp_store().await;

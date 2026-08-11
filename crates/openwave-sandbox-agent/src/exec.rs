@@ -9,7 +9,8 @@
 //! try to re-sandbox inside the container — that boundary already holds. What it
 //! does is bound the invocation exactly the way the shipped foreground exec
 //! adapter bounds its confined child (`openwave-code-execution`'s local
-//! provider): a cleared environment with a fixed `HOME`/`TMPDIR`/`PATH`, stdin
+//! provider): a cleared environment with a fixed `HOME`/`TMPDIR`/`PATH` plus
+//! whatever proxy variables the backend set, stdin
 //! wired to `/dev/null`, its own process group, a wall-time timeout that kills
 //! that whole group, a captured-output cap, and rlimit ceilings — so a
 //! runaway or wedged command is contained by resource bounds, not left to run.
@@ -24,8 +25,9 @@
 //! dual-homed egress proxy (this binary's `egress-proxy` mode, see the
 //! [`egress`](crate::egress) module) enforces the chat's compiled network
 //! policy — deny by default — with `HTTP(S)_PROXY` in this environment
-//! pointing compliant tools at it. A command that ignores the proxy has no
-//! route anywhere.
+//! pointing compliant tools at it. Because a command runs with a cleared
+//! environment, those variables are carried across explicitly (see
+//! [`PROXY_VARS`]); a command that ignores the proxy has no route anywhere.
 //!
 //! That guarantee belongs to the provisioning backend, not to this crate: an
 //! operator who runs the agent image by hand, on a network of their own
@@ -64,6 +66,40 @@ const FIXED_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbi
 
 /// Stable location of the document helper scripts baked into the sandbox image.
 const DOCUMENT_SCRIPTS_DIR: &str = "/opt/openwave/exec-scripts";
+
+/// Proxy variables carried across the cleared environment, in every spelling
+/// the provisioning backend sets and compliant tools read.
+///
+/// The container's only network is the internal bridge, so the proxy is the
+/// sole route out: a command that runs without these reaches nothing at all,
+/// which reads as a broken network rather than as the policy decision it is
+/// meant to be. Clearing the environment and then re-adding them is what the
+/// foreground local adapter does with its own broker. Only what the backend
+/// actually set is carried, so an operator running the image by hand on a
+/// network of their own choosing gets no invented proxy.
+const PROXY_VARS: [&str; 8] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+/// The proxy variables this process was actually given, in the spellings
+/// [`PROXY_VARS`] names.
+///
+/// Read once, on the caller's side, so the child's environment is data handed
+/// to [`run_bounded`] rather than ambient state it reaches for while building
+/// the command.
+fn proxy_env() -> Vec<(&'static str, String)> {
+    PROXY_VARS
+        .iter()
+        .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+        .collect()
+}
 
 /// Arguments for [`ExecTool`].
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -142,7 +178,7 @@ impl Tool for ExecTool {
                 )));
             }
         }
-        let outcome = run_bounded(&args.command, &self.workspace, self.timeout).await;
+        let outcome = run_bounded(&args.command, &self.workspace, self.timeout, &proxy_env()).await;
         Ok(ToolOutput::text(outcome.render()))
     }
 }
@@ -223,7 +259,12 @@ mod capture {
 }
 
 #[cfg(unix)]
-async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> ExecOutcome {
+async fn run_bounded(
+    command: &str,
+    workspace: &Path,
+    timeout: Duration,
+    proxy: &[(&'static str, String)],
+) -> ExecOutcome {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::sync::{Arc, Mutex};
@@ -253,6 +294,9 @@ async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> Exec
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for (name, value) in proxy {
+        cmd.env(name, value);
+    }
     // SAFETY: `pre_exec` runs after fork and before exec. The closure performs
     // only async-signal-safe `setrlimit` calls with copied scalar values.
     unsafe {
@@ -347,7 +391,12 @@ async fn run_bounded(command: &str, workspace: &Path, timeout: Duration) -> Exec
 }
 
 #[cfg(not(unix))]
-async fn run_bounded(_command: &str, _workspace: &Path, _timeout: Duration) -> ExecOutcome {
+async fn run_bounded(
+    _command: &str,
+    _workspace: &Path,
+    _timeout: Duration,
+    _proxy: &[(&'static str, String)],
+) -> ExecOutcome {
     ExecOutcome {
         stderr: "in-container exec is only supported on unix".to_owned(),
         ..ExecOutcome::default()
@@ -471,6 +520,31 @@ mod tests {
         .unwrap();
         assert!(out.content.contains("truncated"), "{}", &out.content[..200]);
         assert!(out.content.len() < MAX_CAPTURE_BYTES * 2);
+    }
+
+    /// The container's only route out is the egress proxy the backend names in
+    /// this process's environment. Clearing the child's environment without
+    /// carrying those variables leaves every fetch failing as if the network
+    /// were broken, instead of being filtered by the chat's policy.
+    #[tokio::test]
+    async fn the_egress_proxy_survives_the_cleared_environment() {
+        let dir = workspace();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_bounded(
+                "printf '%s' \"$HTTPS_PROXY\"",
+                dir.path(),
+                DEFAULT_EXEC_TIMEOUT,
+                &[("HTTPS_PROXY", "http://openwave-egress:8118".to_owned())],
+            ),
+        )
+        .await
+        .expect("exec returned within the outer bound");
+        assert!(
+            outcome.stdout.contains("http://openwave-egress:8118"),
+            "{}",
+            outcome.render()
+        );
     }
 
     #[tokio::test]
