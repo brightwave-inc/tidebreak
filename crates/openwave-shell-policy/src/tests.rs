@@ -421,23 +421,18 @@ const NEVER_ALLOW: &[&str] = &[
     "cat $SECRET_FILE",
     "cp payload $DEST",
     "cp payload .bashr[c]",
-    // a glob standing in for one character of a hidden name: `.en?` names the
-    // credential file `.env` while matching no marker at all
+    // a glob standing in for one character of a name the floor protects. the
+    // marker list is not all dotfiles and not all whole segments, so each of
+    // these reaches a different kind of marker: a hidden file, an extension, a
+    // bare filename, and a directory two segments up from the glob
     "cat .en?",
-    "cat .e?v",
-    "cat .npmr?",
-    "cat .netr?",
-    "cp payload .bashr?",
-    "cp payload .bashr*",
-    "cp .en? /tmp/loot",
-    // spelling the hidden segment out and globbing a later one reaches the same
-    // file: `.git/hook*/pre-commit` is arbitrary code on the next commit
+    "cp certs/server.pe? /tmp/x",
+    "cat id_rs?",
     "cp payload .git/hook*/pre-commit",
-    "tee .git/hook?/pre-commit",
-    "cat .docker/confi*",
-    "cat .kube/confi?",
-    "cat .config/fis?/config.fish",
-    "cp payload .local/bi?/tool",
+    // every one of the above is reachable by typing a different program, so
+    // the operand check has to know which of grep's operands are files
+    "grep '' .en?",
+    "grep '' $SECRET_FILE",
     "ls /et[c]/shadow",
     // a script-supplying flag leaves no operand holding the script, so the
     // first operand is the file — in every spelling of the flag
@@ -631,6 +626,14 @@ fn covered_commands_auto_approve() {
         // `$1` is a field reference in the script, not a path
         ("awk '{print $1}' data.txt", allow(vec![prefix(&["awk"])])),
         ("sed -n '1,5p' file.txt", allow(vec![prefix(&["sed"])])),
+        // a flag that takes its value separately must not shift which operand
+        // is read as the script
+        ("sed -e 's/.*//' file.txt", allow(vec![prefix(&["sed"])])),
+        ("sed -i '' 's/.*//' file.txt", allow(vec![prefix(&["sed"])])),
+        (
+            "awk -F , '{print $1}' data.txt",
+            allow(vec![prefix(&["awk"])]),
+        ),
         // a substitution in a flag of a program that opens no path operands —
         // the substituted command is still a leaf and needs its own coverage
         (

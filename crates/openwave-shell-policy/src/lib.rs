@@ -256,22 +256,14 @@ enum Expansion {
 ///   is visible here — and unlike a variable it needs no cooperating
 ///   environment: `awk '{print}' $(cat p)` is a complete exfiltration written
 ///   in one line. Enumerating the programs it matters for is hopeless, since
-///   any program that opens a file will do. The one exemption is a flag-shaped
-///   token on a program that takes no path operands, which is `make -j$(nproc)`
-///   and its relatives; `sort -o$(cat p)` is a flag too, but `sort` opens paths,
-///   so it stays refused.
+///   any program that opens a file will do. The one exemption is
+///   [`COUNT_FLAGS`], stated over the flag rather than over the program.
 /// - A **parameter expansion** counts in something already shaped like a path,
 ///   or in an operand the program will open — so `cat $F` is caught and
 ///   `echo $USER` is not.
 /// - A **glob** counts in an operand the program will open, when the token is
-///   rooted outside the working tree (`/…`, `~…`), names a hidden directory or
-///   file anywhere along its path, or puts a metacharacter in a segment that
-///   is not the last. The hidden-segment part is where the disguises live: the
-///   marker list is almost entirely dotfiles, so `.en?` names one specific
-///   credential file while matching no marker, and `.git/hook*/pre-commit`
-///   reaches a hook — arbitrary code on the next commit — with every character
-///   of `.git` spelled out. Ordinary patterns do not glob through hidden
-///   directories, so `*.py`, `src/*`, `report[1].pdf` are left alone.
+///   rooted outside the working tree (`/…`, `~…`) or when it
+///   [could expand onto a sensitive marker](could_reach_sensitive).
 ///
 ///   Outside a path operand only the rooted test survives, because everything
 ///   else it could say about a token is something a regex says too: `grep
@@ -282,12 +274,9 @@ enum Expansion {
 /// can reach: a relative glob expands under the working directory, but a `cd`
 /// earlier in the line can move that directory somewhere the grant never
 /// meant to cover. That is a separate gap and not one this predicate closes.
-fn unvettable_path_argument(token: &str, role: OperandRole, program_takes_paths: bool) -> bool {
-    if token.contains("$(") || token.contains('`') {
-        let exempt_flag = token.starts_with('-') && !program_takes_paths;
-        if !exempt_flag {
-            return true;
-        }
+fn unvettable_path_argument(token: &str, role: OperandRole) -> bool {
+    if (token.contains("$(") || token.contains('`')) && !substitution_is_a_count(token) {
+        return true;
     }
     // Program text is never opened as a path: `$1` is a field reference and
     // `s/.*//` is a substitution. Only the substitution rule above applies.
@@ -306,17 +295,155 @@ fn unvettable_path_argument(token: &str, role: OperandRole, program_takes_paths:
     if !opens_path {
         return rooted;
     }
-    let segments: Vec<&str> = token.split('/').collect();
-    let hides_a_segment = segments
-        .iter()
-        .any(|segment| segment.starts_with('.') && *segment != "." && *segment != "..");
-    let globs_a_parent = segments[..segments.len().saturating_sub(1)]
-        .iter()
-        .any(|segment| segment.contains(GLOB_METACHARACTERS));
-    rooted || hides_a_segment || globs_a_parent
+    rooted || could_reach_sensitive(token)
 }
 
 const GLOB_METACHARACTERS: [char; 3] = ['*', '?', '['];
+
+/// Flags whose value is a count, where a substitution is ordinary work.
+///
+/// Stated over the flag rather than over the program: `make -j$(nproc)` and
+/// `cargo build -j$(nproc)` are the same command shape, and a list of programs
+/// that happen not to open files would have to be complete forever to be worth
+/// anything. A flag that names a file — `sort -o$(cat p)`, `jq -f$(cat p)`,
+/// `git -C$(cat p)` — is not on this list and is refused.
+const COUNT_FLAGS: &[&str] = &["-j", "--jobs", "-P", "--parallel", "--max-procs"];
+
+/// Whether a substitution sits in a count-valued flag and nowhere else.
+fn substitution_is_a_count(token: &str) -> bool {
+    let Some(cut) = token.find("$(").into_iter().chain(token.find('`')).min() else {
+        return false;
+    };
+    let flag = token[..cut].trim_end_matches('=');
+    COUNT_FLAGS.contains(&flag)
+}
+
+/// Whether a glob could expand onto something the sensitive-path floor
+/// protects.
+///
+/// Four rounds of this predicate guessed at the *shape* of a disguise — a
+/// bracket in a suspicious position, a leading dot, a metacharacter in a
+/// non-final segment — and each guess was defeated by someone spelling the
+/// same path a different way, because the shapes were invented alongside the
+/// marker list rather than derived from it. This asks the question the deny
+/// floor actually cares about: with its metacharacters read as wildcards,
+/// could this token match a marker? A new marker is covered the day it is
+/// added, and nothing has to be guessed.
+///
+/// The one judgement call is how much of a marker a wildcard may supply. A
+/// wildcard that supplies most of the marker is not a disguise, it is an
+/// ordinary pattern that happens to be able to match a lot: `src/*` can expand
+/// onto `src/etc/passwd` and `*.rs` onto `id_rsa.rs`, and refusing those would
+/// refuse most globs ever written while catching nobody, since anyone who
+/// wanted that file would just write it. So a marker counts as reachable only
+/// when the token **spells more of it than it globs** — `.git/hook*/pre-commit`
+/// pins nine characters of `.git/hooks/` to reach it, `*.pe?` pins `.pe` to
+/// reach `.pem`, and `id_rs?` pins all but one character of `id_rsa`. What that
+/// leaves uncovered is the pattern that matches everything, which is the
+/// working-directory question this predicate cannot answer anyway.
+fn could_reach_sensitive(token: &str) -> bool {
+    let raw = token.to_lowercase();
+    let norm = normpath(token).to_lowercase();
+    let template = ENV_TEMPLATE_SUFFIXES.iter().any(|suf| raw.ends_with(*suf));
+    let spellings = if raw == norm {
+        vec![glob_atoms(&raw)]
+    } else {
+        vec![glob_atoms(&raw), glob_atoms(&norm)]
+    };
+    SENSITIVE_TARGET_MARKERS.iter().any(|marker| {
+        if template && *marker == ".env" {
+            return false;
+        }
+        let marker: Vec<char> = marker.chars().collect();
+        spellings
+            .iter()
+            .any(|atoms| spelled_more_than_globbed(atoms, &marker))
+    })
+}
+
+/// One element of a pathname-expansion pattern.
+enum GlobAtom {
+    /// A character the token spells out.
+    Spelled(char),
+    /// `?`, or a bracket class: exactly one character, unknown here. Treating
+    /// a class as "any character" over-approximates, which is the safe
+    /// direction — and POSIX already refuses to expand `[.]env` onto `.env`,
+    /// so the bracket route to a dotfile is closed by the shell itself.
+    AnyOne,
+    /// `*`: any run of characters, including none.
+    AnyRun,
+}
+
+fn glob_atoms(token: &str) -> Vec<GlobAtom> {
+    let chars: Vec<char> = token.chars().collect();
+    let mut atoms = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => atoms.push(GlobAtom::AnyRun),
+            '?' => atoms.push(GlobAtom::AnyOne),
+            '[' => match chars[i + 1..].iter().position(|c| *c == ']') {
+                Some(end) => {
+                    atoms.push(GlobAtom::AnyOne);
+                    i += end + 1;
+                }
+                // An unterminated `[` is a literal bracket, not a class.
+                None => atoms.push(GlobAtom::Spelled('[')),
+            },
+            other => atoms.push(GlobAtom::Spelled(other)),
+        }
+        i += 1;
+    }
+    atoms
+}
+
+/// Whether some expansion of `atoms` contains `marker`, spelling out more of it
+/// than it fills in with wildcards.
+///
+/// The marker has to appear contiguously — that is what `hits_sensitive` looks
+/// for — but it may start and end anywhere in the token, since anything outside
+/// it is text the floor does not care about. Scoring a spelled character `+1`
+/// and a wildcard-supplied one `-1` and asking for a positive total is the
+/// "spells more than it globs" test.
+fn spelled_more_than_globbed(atoms: &[GlobAtom], marker: &[char]) -> bool {
+    // `best[j]`: the highest score with which the first `j` characters of the
+    // marker have been consumed, over every alignment considered so far.
+    // `None` means unreached. A run of the marker may begin at any atom, so
+    // every step re-seeds `best[0]` with a score of zero.
+    let mut best: Vec<Option<i32>> = vec![None; marker.len() + 1];
+    for atom in atoms {
+        best[0] = Some(0);
+        let mut next: Vec<Option<i32>> = vec![None; marker.len() + 1];
+        let relax = |slot: &mut Option<i32>, score: i32| {
+            if slot.is_none_or(|current| score > current) {
+                *slot = Some(score);
+            }
+        };
+        for j in 0..marker.len() {
+            let Some(score) = best[j] else { continue };
+            match atom {
+                GlobAtom::Spelled(c) if *c == marker[j] => relax(&mut next[j + 1], score + 1),
+                GlobAtom::Spelled(_) => {}
+                GlobAtom::AnyOne => relax(&mut next[j + 1], score - 1),
+                GlobAtom::AnyRun => {
+                    for taken in 0..=(marker.len() - j) {
+                        relax(&mut next[j + taken], score - taken as i32);
+                    }
+                }
+            }
+        }
+        // A completed marker stays completed: whatever the rest of the pattern
+        // expands to is text on either side of it.
+        if let Some(score) = best[marker.len()] {
+            relax(&mut next[marker.len()], score);
+        }
+        best = next;
+        if matches!(best[marker.len()], Some(score) if score > 0) {
+            return true;
+        }
+    }
+    matches!(best[marker.len()], Some(score) if score > 0)
+}
 
 /// What a program will do with one of its arguments.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -344,11 +471,12 @@ fn unvettable_redirect_target(token: &str) -> bool {
 ///
 /// For these, an operand the shell has yet to resolve is as uncheckable as an
 /// unresolved redirect target: `cat $F` opens whatever `$F` names, and the
-/// literal `$F` matches no sensitive marker. Programs whose operands are
-/// patterns, expressions, or numbers are deliberately absent — `grep`'s first
-/// operand is a regex and `find`'s are predicates, so refusing an unresolved
-/// operand there would cost far more than it buys. The list only governs bare
-/// parameter expansions; a command substitution is refused whoever runs it.
+/// literal `$F` matches no sensitive marker. Which *positions* are paths is
+/// [`operand_roles`]'s question — `grep` and `rg` are here because their later
+/// operands are files, even though their first is a regex. `find` is absent:
+/// its operands are predicates, and its `-name` pattern is matched against
+/// basenames rather than opened. The list only governs bare parameter
+/// expansions and globs; a command substitution is refused whoever runs it.
 const PATH_OPERAND_PROGRAMS: &[&str] = &[
     "cat",
     "gcat",
@@ -357,6 +485,13 @@ const PATH_OPERAND_PROGRAMS: &[&str] = &[
     "ghead",
     "tail",
     "gtail",
+    "wc",
+    "gwc",
+    "grep",
+    "ggrep",
+    "egrep",
+    "fgrep",
+    "rg",
     "nl",
     "od",
     "xxd",
@@ -431,14 +566,21 @@ const PATH_OPERAND_PROGRAMS: &[&str] = &[
     "unzip",
 ];
 
-/// Programs from [`PATH_OPERAND_PROGRAMS`] whose *first* operand is a script,
-/// not a path.
+/// Programs from [`PATH_OPERAND_PROGRAMS`] whose *first* operand is program
+/// text, not a path.
 ///
 /// `awk '{print $1}' data.txt` is the case that matters: the `$1` is a field
 /// reference in the program text, and treating it as an unresolved path would
 /// refuse one of the most ordinary commands there is. Everything after the
-/// script is still a path.
-const SCRIPT_FIRST_OPERAND_PROGRAMS: &[&str] = &["awk", "gawk", "mawk", "nawk", "sed", "gsed"];
+/// script is still a path — which is the whole reason `grep` and `rg` belong
+/// here rather than being left off the path-operand list entirely. Their first
+/// operand is a regex, but every operand after it is a file, and a program
+/// with no path operands at all is a program every one of these rules can be
+/// walked around by typing its name instead: `grep '' .en?` reads exactly what
+/// `cat .en?` reads.
+const SCRIPT_FIRST_OPERAND_PROGRAMS: &[&str] = &[
+    "awk", "gawk", "mawk", "nawk", "sed", "gsed", "grep", "ggrep", "egrep", "fgrep", "rg",
+];
 
 /// Whether a flag already supplies the script, so no operand slot holds one.
 ///
@@ -452,11 +594,44 @@ const SCRIPT_FIRST_OPERAND_PROGRAMS: &[&str] = &["awk", "gawk", "mawk", "nawk", 
 fn supplies_script(arg: &str) -> bool {
     if let Some(long) = arg.strip_prefix("--") {
         let name = long.split('=').next().unwrap_or(long);
-        return matches!(name, "expression" | "file");
+        return matches!(name, "expression" | "file" | "regexp");
     }
     match arg.strip_prefix('-') {
         Some(cluster) => cluster.contains(['e', 'f']),
         None => false,
+    }
+}
+
+/// Flags that take their value as the *next* argument, per script-taking
+/// program.
+///
+/// Without this the value is read as an operand and every operand after it is
+/// off by one: `awk -F , '{print $1}' data.txt` reads the separator as the
+/// script and the script as a path, and `sed -e 's/.*//' file.txt` reads the
+/// script as a path — the exact regex the rest of this module goes to lengths
+/// not to mistake for a filename.
+///
+/// `sed -i` is deliberately absent. BSD `sed` takes a backup suffix there and
+/// GNU `sed` does not, and guessing wrong in the direction of consuming an
+/// argument would push a real path into the slot that gets skipped. The empty
+/// argument BSD callers pass (`sed -i '' 's/x/y/' f`) occupies no slot on its
+/// own account, so both spellings land correctly without the guess.
+fn separated_value_flags(base: &str) -> &'static [&'static str] {
+    match base {
+        "awk" | "gawk" | "mawk" | "nawk" => &["-F", "-v", "-f", "--field-separator", "--assign"],
+        "sed" | "gsed" => &["-e", "-f", "--expression", "--file"],
+        "grep" | "egrep" | "fgrep" | "rg" => &[
+            "-e",
+            "-f",
+            "-m",
+            "-A",
+            "-B",
+            "-C",
+            "--regexp",
+            "--file",
+            "--max-count",
+        ],
+        _ => &[],
     }
 }
 
@@ -466,31 +641,58 @@ fn operand_roles(program: &str, args: &[String]) -> Vec<OperandRole> {
     let takes_paths = PATH_OPERAND_PROGRAMS.contains(&base);
     let script_first = SCRIPT_FIRST_OPERAND_PROGRAMS.contains(&base)
         && !args.iter().any(|arg| supplies_script(arg));
+    let value_flags = separated_value_flags(base);
+    let bsd_in_place = matches!(base, "sed" | "gsed");
+    let mut roles = Vec::with_capacity(args.len());
     let mut seen_operand = false;
-    args.iter()
-        .map(|arg| {
-            if arg.starts_with('-') {
-                return OperandRole::Other;
-            }
-            let first_operand = !seen_operand;
-            seen_operand = true;
-            if script_first && first_operand {
-                OperandRole::Script
-            } else if takes_paths {
+    let mut flag_value = false;
+    let mut after_in_place = false;
+    for arg in args {
+        // The value of a flag is whatever that flag means — a separator, a
+        // count, a script — and never the program's next positional operand.
+        // A path-valued flag (`-f`) is checked as a path all the same.
+        if std::mem::take(&mut flag_value) {
+            roles.push(if arg.contains('$') || arg.contains('`') {
                 OperandRole::Path
             } else {
                 OperandRole::Other
-            }
-        })
-        .collect()
+            });
+            continue;
+        }
+        // BSD `sed -i ''` passes an empty backup suffix where GNU `sed -i`
+        // passes nothing, so the empty argument there spends no operand slot.
+        // Only there: `grep '' file` is an empty *pattern*, and letting it go
+        // slotless would push the file into the slot a script would occupy and
+        // out of every check.
+        let in_place_suffix = std::mem::take(&mut after_in_place) && arg.is_empty();
+        if in_place_suffix {
+            roles.push(OperandRole::Other);
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            flag_value = value_flags.contains(&arg.as_str());
+            after_in_place = bsd_in_place && arg == "-i";
+            roles.push(OperandRole::Other);
+            continue;
+        }
+        let first_operand = !seen_operand;
+        seen_operand = true;
+        roles.push(if script_first && first_operand {
+            OperandRole::Script
+        } else if takes_paths {
+            OperandRole::Path
+        } else {
+            OperandRole::Other
+        });
+    }
+    roles
 }
 
 /// The three tiers, applied to whatever leaves were collected.
 fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> ShellAnalysis {
     let pending = expansion == Expansion::Pending;
-    let unvettable_argument = |token: &str, role: OperandRole, takes_paths: bool| {
-        pending && unvettable_path_argument(token, role, takes_paths)
-    };
+    let unvettable_argument =
+        |token: &str, role: OperandRole| pending && unvettable_path_argument(token, role);
     let unvettable_target = |token: &str| pending && unvettable_redirect_target(token);
     // (1) Deny floor — wins over every allow rule, including `All`.
     for sc in &acc.simples {
@@ -573,7 +775,6 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
             );
         }
         let roles = operand_roles(&sc.program, args);
-        let takes_paths = PATH_OPERAND_PROGRAMS.contains(&basename(&sc.program));
         for (token, role) in args.iter().zip(roles) {
             if hits_sensitive(token) {
                 return ShellAnalysis::with_offender(
@@ -589,7 +790,7 @@ fn evaluate(acc: &Collected, ruleset: &ShellRuleSet, expansion: Expansion) -> Sh
                     &sc.display(),
                 );
             }
-            if unvettable_argument(token, role, takes_paths) {
+            if unvettable_argument(token, role) {
                 return ShellAnalysis::with_offender(
                     ShellVerdict::Ask,
                     format!("unresolved path in arguments: {}", sc.display()),
