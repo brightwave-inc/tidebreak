@@ -145,6 +145,25 @@ in front of it. That case would justify the cloud-credential plumbing again,
 and it would need a verified route and a live check, not a route curated on
 documentation alone.
 
+## Writing outputs back into a connected folder, headlessly
+
+A headless install can read a folder an operator connected — list it, read text
+out of it, import a file from it as a source. Publishing an output *into* one is
+deliberately refused there, with a stable `output_writeback_authority_unavailable`
+result rather than a second write path.
+
+Writing into a user's folder is not just a host write. On the desktop it goes
+through the exec write overlay, which snapshots the destination, routes a
+replacement through the trash, and leaves the change reversible from the
+conversation. A headless embedding installs no folder-grant resolver, so it has
+none of that: no staged copy, no snapshot, no undo. Improvising one would be a
+second, weaker way to overwrite a file the operator cannot take back, which is
+worse than declining.
+
+Lifting this means giving the headless engine the same overlay and write-back
+machinery the desktop has, and a headless surface for the approval that a
+replacement always requires — not relaxing the refusal.
+
 ## Windows packaging
 
 Windows builds shipped through v0.34.0 as an unsigned x86_64 NSIS installer,

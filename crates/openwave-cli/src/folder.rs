@@ -156,7 +156,11 @@ pub async fn run(command: Command) -> Result<()> {
 /// folder may ever cover. Local command reach is decided by the same host
 /// probe, so a folder connected here carries the grants it would have carried
 /// had the desktop's picker connected it on this machine.
-fn open_broker(data_dir: &Path) -> Result<Broker> {
+///
+/// Also the handle [`crate::folder_executor`] reads through: one capability
+/// store, opened one way, whether an operator is provisioning a folder or a turn
+/// is reading one.
+pub(crate) fn open_broker(data_dir: &Path) -> Result<Broker> {
     let home = std::env::home_dir()
         .ok_or_else(|| AgentError::config("could not resolve the current user's home directory"))?
         .canonicalize()
@@ -880,13 +884,16 @@ async fn settle_pending_changes(
     Ok(())
 }
 
-/// This CLI's stable native-executor identity for attachment changes.
+/// This CLI's stable native-executor identity for this profile.
 ///
 /// It must survive across invocations: only the executor that began a change
-/// may finish it, so a fresh identity per run would strand an interrupted one.
-/// It is not a credential — it names who owns pending work — but it lives with
-/// the rest of the private profile state and inherits its permissions.
-fn executor_identity(data_dir: &Path) -> Result<Uuid> {
+/// may finish it, and only the executor that claimed a client tool call may
+/// recover it, so a fresh identity per run would strand interrupted work in
+/// either case. Both uses are the same claim — "this profile's CLI owns that
+/// pending work" — so they share one identity rather than inventing a second.
+/// It is not a credential, but it lives with the rest of the private profile
+/// state and inherits its permissions.
+pub(crate) fn executor_identity(data_dir: &Path) -> Result<Uuid> {
     let path = data_dir.join("cli-folder-executor");
     let read = |path: &Path| -> Result<Uuid> {
         let text = std::fs::read_to_string(path).map_err(|error| {
