@@ -310,7 +310,7 @@ fn register_at_the_gateway(state: &AppState, app_id: AppId, manifest: &AppManife
 ///
 /// A soft-deleted app answers as missing on the consent surface, exactly as
 /// it does on invoke.
-async fn current_live_app(
+pub(crate) async fn current_live_app(
     state: &AppState,
     app_id: AppId,
 ) -> Result<(AppRecord, AppRevision), ServerError> {

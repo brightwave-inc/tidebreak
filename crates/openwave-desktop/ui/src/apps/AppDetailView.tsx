@@ -1,14 +1,22 @@
-import { ChevronLeft, ExternalLink, ShieldCheck, Trash2, X } from "lucide-react";
+import {
+  ChevronLeft,
+  ExternalLink,
+  ShieldCheck,
+  Trash2,
+  Users,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import type { AppDetail, AppGrantState } from "@/api";
+import type { AppDetail, AppGrantState, GatewayTeamInfo } from "@/api";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
 import { openSignInPage } from "@/openSignInPage";
 import { AppConsentSheet } from "./AppConsentSheet";
 import { AppFrame } from "./AppFrame";
+import { AppPublishDialog } from "./AppPublishDialog";
 import { friendlyAppsError, updatedLabel } from "./AppsView";
 import type { AppsApis } from "./appsApis";
 
@@ -63,6 +71,13 @@ export function AppDetailView({
   // refusal, or null once dismissed. It names the bound app, so the banner
   // does not have to guess which one needs connecting.
   const [connectPrompt, setConnectPrompt] = useState<string | null>(null);
+  // The teams this app could be published to, or null while unknown. Null and
+  // an empty list are both "no affordance": publishing is only offered once
+  // the server has said this profile's gateway can hold shared apps at all.
+  const [publishTeams, setPublishTeams] = useState<GatewayTeamInfo[] | null>(
+    null,
+  );
+  const [publishOpen, setPublishOpen] = useState(false);
   const generationRef = useRef(0);
   const mutationGenerationRef = useRef(0);
   const refreshGenerationRef = useRef(0);
@@ -112,6 +127,8 @@ export function AppDetailView({
     setActionError(null);
     setBusy(false);
     setConnectPrompt(null);
+    setPublishTeams(null);
+    setPublishOpen(false);
     void (async () => {
       try {
         const [loadedDetail, loadedGrant] = await Promise.all([
@@ -124,6 +141,18 @@ export function AppDetailView({
       } catch (caught) {
         if (generation !== generationRef.current) return;
         setLoadError(friendlyAppsError(caught, "Could not load this app."));
+      }
+    })();
+    // Publishing is an aside to opening the app, so its read never gates the
+    // page or reports failure: a gateway that cannot answer simply leaves the
+    // affordance hidden, exactly as one that says it cannot publish does.
+    void (async () => {
+      try {
+        const targets = await apis.publishTeams();
+        if (generation !== generationRef.current) return;
+        setPublishTeams(targets.supported ? targets.teams : null);
+      } catch {
+        /* no publish affordance; the page is unaffected */
       }
     })();
     return () => {
@@ -415,6 +444,24 @@ export function AppDetailView({
                 {revisionSummary(detail)}{" "}
               </p>
 
+              {/* Publishing is offered only for an app that actually uses the
+                  gateway — the same bindings registration follows — and only
+                  where the gateway said it can hold shared apps. */}
+              {publishTeams &&
+                grant.bindings.some(
+                  (binding) => binding.gateway_app !== null,
+                ) && (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    disabled={busy}
+                    onClick={() => setPublishOpen(true)}
+                  >
+                    <Users className="size-3.5" aria-hidden="true" />
+                    Publish
+                  </Button>
+                )}
+
               <Button
                 variant="destructive"
                 size="xs"
@@ -425,6 +472,17 @@ export function AppDetailView({
                 Delete app
               </Button>
             </footer>
+
+            {publishTeams && (
+              <AppPublishDialog
+                open={publishOpen}
+                onOpenChange={setPublishOpen}
+                appName={detail.name}
+                teams={publishTeams}
+                grantedLocally={grant.granted}
+                onPublish={(teamId) => apis.publish(appId, teamId)}
+              />
+            )}
           </>
         )}
       </div>
