@@ -605,6 +605,53 @@ describe("pending approval recovery", () => {
     ).toBeNull();
   });
 
+  // A parked spawn approval used to make its chat unreopenable: the kind was
+  // absent from the renderer's approval vocabulary, so the row failed to parse
+  // and one unparseable row fails the whole hydration response.
+  it("recovers a parked background-agent spawn approval", async () => {
+    const spawn = {
+      ...safe,
+      action: "spawn_sandbox_agent",
+      approval: "delegate_may_run_background_agent",
+      preview: {
+        tool: "delegate_agent",
+        task: "summarize the filings",
+        network: {
+          mode: "allowed_hosts",
+          allowed_hosts: ["sec.gov"],
+          package_managers: false,
+        },
+      },
+    };
+    expect(parsePendingToolApproval(spawn)).toMatchObject({
+      action: "spawn_sandbox_agent",
+      approval: "delegate_may_run_background_agent",
+      canApprove: true,
+      canRemember: true,
+      preview: {
+        tool: "delegate_agent",
+        task: "summarize the filings",
+        network: {
+          mode: "allowed_hosts",
+          allowed_hosts: ["sec.gov"],
+          package_managers: false,
+        },
+      },
+    });
+
+    const client = new ApiClient("http://127.0.0.1", "token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify([spawn]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    await expect(client.listPendingApprovals("chat-1")).resolves.toHaveLength(1);
+  });
+
   it("fails closed on malformed, duplicate, or cross-turn pages", async () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     for (const body of [
@@ -663,6 +710,56 @@ describe("parseToolActionPreview", () => {
       tool: "search",
       query: "revenue",
     });
+  });
+
+  it("names the file a write lands in", () => {
+    expect(
+      parseToolActionPreview({ tool: "write_file", path: "reports/q1.md" }),
+    ).toEqual({ tool: "write_file", path: "reports/q1.md" });
+    expect(parseToolActionPreview({ tool: "write_file", path: "" })).toBeNull();
+  });
+
+  it("keeps the network policy a delegated run inherits", () => {
+    // The task says what the run does; the policy is the egress being
+    // approved, so a preview missing or misdescribing it is dropped rather
+    // than shown as a narrower run than it is.
+    const delegated = {
+      tool: "delegate_agent",
+      task: "reconcile the ledger",
+      network: {
+        mode: "allowed_hosts",
+        allowed_hosts: ["api.example.com"],
+        package_managers: true,
+      },
+    };
+    expect(parseToolActionPreview(delegated)).toEqual(delegated);
+    expect(
+      parseToolActionPreview({
+        tool: "delegate_agent",
+        task: "reconcile the ledger",
+        network: { mode: "open" },
+      }),
+    ).toEqual({
+      tool: "delegate_agent",
+      task: "reconcile the ledger",
+      network: { mode: "open" },
+    });
+    for (const broken of [
+      { ...delegated, task: "" },
+      { ...delegated, network: undefined },
+      { ...delegated, network: { mode: "everything" } },
+      { ...delegated, network: { mode: "allowed_hosts", allowed_hosts: ["a"] } },
+      {
+        ...delegated,
+        network: {
+          mode: "allowed_hosts",
+          allowed_hosts: "api.example.com",
+          package_managers: true,
+        },
+      },
+    ]) {
+      expect(parseToolActionPreview(broken)).toBeNull();
+    }
   });
 });
 

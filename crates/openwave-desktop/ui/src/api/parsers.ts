@@ -29,6 +29,7 @@ import {
   type ExecDegradation,
   type InboxItem,
   type InboxItemKind,
+  type NetworkPolicy,
   type PendingChatPrompt,
   type PendingFolderAccessRequest,
   type PendingOutputWritebackRequest,
@@ -909,6 +910,25 @@ export function parseToolActionPreview(
     if (typeof url !== "string" || url.length === 0) return null;
     return { tool: "web_extract", url };
   }
+  if (value.tool === "write_file") {
+    // The path is the whole variant: which file the call will create or
+    // replace. The content deliberately never crosses the boundary.
+    const { path } = value;
+    if (typeof path !== "string" || path.length === 0) return null;
+    return { tool: "write_file", path };
+  }
+  if (value.tool === "delegate_agent") {
+    // The task says what the unattended run will do; the network policy is
+    // what it can do with what it learns, and is the part actually being
+    // consented to. A policy that cannot be read whole drops the preview
+    // rather than describing a run's reach as narrower than it is.
+    const { task } = value;
+    const network = parseNetworkPolicy(value.network);
+    if (typeof task !== "string" || task.length === 0 || network === null) {
+      return null;
+    }
+    return { tool: "delegate_agent", task, network };
+  }
   if (value.tool !== "exec") return null;
   const { command, args, cwd, files } = value;
   // `files` joined the projection after previews were already being stored, so
@@ -927,6 +947,31 @@ export function parseToolActionPreview(
     return null;
   }
   return { tool: "exec", command, args, cwd, files: staged };
+}
+
+/**
+ * The network policy a delegated run inherits, validated mode by mode.
+ *
+ * Every mode carries its own fields, and the named-hosts one names the exact
+ * destinations the run may reach — so a policy is either read whole or not
+ * accepted at all. Half of it would understate the egress being approved.
+ */
+function parseNetworkPolicy(value: unknown): NetworkPolicy | null {
+  if (!isRecord(value)) return null;
+  const { mode } = value;
+  if (mode === "off" || mode === "package_managers" || mode === "open") {
+    return { mode };
+  }
+  if (mode !== "allowed_hosts") return null;
+  const { allowed_hosts, package_managers } = value;
+  if (
+    !Array.isArray(allowed_hosts) ||
+    !allowed_hosts.every((host): host is string => typeof host === "string") ||
+    typeof package_managers !== "boolean"
+  ) {
+    return null;
+  }
+  return { mode, allowed_hosts, package_managers };
 }
 
 /**
@@ -1259,15 +1304,31 @@ export function isRendererToolName(value: unknown): value is RendererToolName {
   );
 }
 
+/**
+ * Every approval kind the renderer will accept, at runtime.
+ *
+ * Typed as a total map over the generated union rather than written out as a
+ * chain of comparisons, so a kind added server-side cannot be left out here: a
+ * missing key fails to compile. The chain this replaces had already drifted —
+ * `delegate_may_run_background_agent` reached the wire without reaching the
+ * list, and because an unparseable row fails the whole hydration response, a
+ * chat with a parked spawn approval could not be reopened at all.
+ */
+const RENDERER_APPROVAL_KINDS = {
+  search_may_share_query_and_excerpts: true,
+  web_search_may_share_query: true,
+  web_extract_may_fetch_url: true,
+  exec_may_run_networked_command: true,
+  external_mcp_may_call_server: true,
+  workspace_may_modify_files: true,
+  delegate_may_run_background_agent: true,
+  unsupported: true,
+} as const satisfies Record<RendererApprovalKind, true>;
+
 function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
   return (
-    value === "search_may_share_query_and_excerpts" ||
-    value === "web_search_may_share_query" ||
-    value === "web_extract_may_fetch_url" ||
-    value === "exec_may_run_networked_command" ||
-    value === "external_mcp_may_call_server" ||
-    value === "workspace_may_modify_files" ||
-    value === "unsupported"
+    typeof value === "string" &&
+    Object.hasOwn(RENDERER_APPROVAL_KINDS, value)
   );
 }
 
