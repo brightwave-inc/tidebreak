@@ -34,7 +34,29 @@ pub async fn run(open: Open, server: crate::connect::Server) -> Result<()> {
     // background workers; holding it for the whole TUI session is what keeps
     // the engine running. Attached, it owns nothing.
     let session = crate::connect::Session::open(&server).await?;
-    attach(session.client().clone(), open).await
+    // An embedded TUI is the same trusted client for its own connected-folder
+    // tool calls that `-p` and `serve` are, for the same reason: it owns this
+    // machine's broker state for the length of the session. Without this a turn
+    // that read a connected folder would park here too. Attached, it starts
+    // nothing — see [`crate::folder_executor`].
+    let folder_executor = match session.client_executor_token() {
+        Some(executor_token) => crate::folder_executor::FolderExecutor::new(
+            session.client().clone(),
+            Some(executor_token),
+            &crate::profile_config()?.data_dir,
+        )?
+        .map(|executor| {
+            // Any conversation, not just the one opened at startup: the session
+            // can move between chats.
+            tokio::spawn(executor.run(crate::folder_executor::Scope::AllChats))
+        }),
+        None => None,
+    };
+    let outcome = attach(session.client().clone(), open).await;
+    if let Some(executor) = folder_executor {
+        executor.abort();
+    }
+    outcome
 }
 
 /// Resolve which chat to attach to, then hand the terminal to the app.

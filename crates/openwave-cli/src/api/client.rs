@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use openwave_core::{
     AgentError, AgentRunId, CallId, ChatId, OutputId, OutputRevisionId, Result, TurnId,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
@@ -41,6 +41,16 @@ struct ErrorBody {
 #[derive(Deserialize)]
 struct ChatCreated {
     id: ChatId,
+}
+
+/// What the ingest route says about one published source.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct IngestedSource {
+    /// Derived from the origin URI when one was given, so a repeat publish of
+    /// the same origin names the same source.
+    pub document_id: uuid::Uuid,
+    /// Whether the stored source has text a reader can be given.
+    pub readiness: openwave_core::DocumentReadiness,
 }
 
 impl Client {
@@ -684,27 +694,51 @@ impl Client {
         media_type: &str,
         bytes: Vec<u8>,
     ) -> Result<String> {
+        Ok(self
+            .publish_document_source(chat, Some(title), None, media_type, bytes)
+            .await?
+            .document_id
+            .to_string())
+    }
+
+    /// Publish one source into a conversation through the ingest route.
+    ///
+    /// `uri` is the source's durable provenance, and the server derives the
+    /// document id from it — so publishing the same origin twice recovers the one
+    /// source instead of adding a second. `title` is metadata the route
+    /// validates and may refuse; it never becomes a path.
+    pub async fn publish_document_source(
+        &self,
+        chat: ChatId,
+        title: Option<&str>,
+        uri: Option<&str>,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<IngestedSource> {
+        let mut url = format!("{}/chats/{chat}/documents/raw", self.base);
+        let mut separator = '?';
+        for (name, value) in [("title", title), ("uri", uri)] {
+            if let Some(value) = value {
+                url.push(separator);
+                url.push_str(name);
+                url.push('=');
+                url.push_str(&urlencode(value));
+                separator = '&';
+            }
+        }
         let response = self
             .http
-            .post(format!(
-                "{}/chats/{chat}/documents/raw?title={}",
-                self.base,
-                urlencode(title)
-            ))
+            .post(url)
             .header(reqwest::header::CONTENT_TYPE, media_type)
             .body(bytes)
             .send()
             .await
             .map_err(request_error)?;
-        let value = Self::expect_success(response)
+        Self::expect_success(response)
             .await?
-            .json::<serde_json::Value>()
+            .json::<IngestedSource>()
             .await
-            .map_err(request_error)?;
-        value["document_id"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| AgentError::msg("ingest answered without a document id"))
+            .map_err(request_error)
     }
 
     /// Publish one local image for a conversation, returning the identity a
@@ -802,13 +836,87 @@ pub struct PendingClientCall {
     pub client_executor_id: Option<uuid::Uuid>,
 }
 
+/// The canonical call one claim installed, plus the receipt needed to operate
+/// it.
+///
+/// The record is the server's own checkpointed `ToolCallRecord`: it is where an
+/// executor reads the arguments it is to act on, rather than trusting a
+/// restatement from whatever announced the work.
+#[derive(Debug, Deserialize)]
+pub struct ClaimedClientCall {
+    pub call: openwave_core::ToolCallRecord,
+    pub lease_token: uuid::Uuid,
+}
+
+/// The terminal answer an executor publishes for one claimed call.
+///
+/// The variants and field names are the server's `ClientExecutionResolution`
+/// wire shape. `rows` is the card projection the server rebuilds against the
+/// call's own stored name, so a completed call may report entries and a refusal
+/// reports none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ClientExecutionOutcome {
+    Completed {
+        result: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<serde_json::Value>,
+    },
+    Failed {
+        result: String,
+        error_code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_detail: Option<String>,
+    },
+    Cancelled {
+        result: String,
+    },
+}
+
+/// Why one client-execution request failed.
+///
+/// A conflict is separated from everything else because it is the lifecycle's
+/// own answer rather than a fault: the call is already claimed, already
+/// terminal, or no longer owned by this lease. An executor must recognize it to
+/// stand down instead of racing whoever does own the work.
+#[derive(Debug)]
+pub enum ClientExecutionError {
+    Conflict(AgentError),
+    Failed(AgentError),
+}
+
+impl ClientExecutionError {
+    #[must_use]
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Conflict(_))
+    }
+}
+
+impl From<ClientExecutionError> for AgentError {
+    fn from(error: ClientExecutionError) -> Self {
+        match error {
+            ClientExecutionError::Conflict(error) | ClientExecutionError::Failed(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for ClientExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(error) | Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+type ExecutionResult<T> = std::result::Result<T, ClientExecutionError>;
+
 impl Client {
     /// Every client-owned tool call currently parked on this chat.
     pub async fn pending_client_executions(
         &self,
         executor_token: &str,
         chat: ChatId,
-    ) -> Result<Vec<PendingClientCall>> {
+    ) -> ExecutionResult<Vec<PendingClientCall>> {
         let response = self
             .http
             .get(format!(
@@ -818,15 +926,20 @@ impl Client {
             .header(CLIENT_EXECUTOR_HEADER, executor_token)
             .send()
             .await
-            .map_err(request_error)?;
-        Self::expect_success(response)
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))?;
+        Self::expect_execution_success(response)
             .await?
             .json::<Vec<PendingClientCall>>()
             .await
-            .map_err(request_error)
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))
     }
 
     /// Take ownership of one parked call so it can be resolved.
+    ///
+    /// The same `(executor_id, lease_token)` pair recovers an existing claim,
+    /// which is how an executor picks its own interrupted work back up. No other
+    /// executor can ever claim it, so a conflict means the work is not this
+    /// caller's.
     pub async fn claim_client_execution(
         &self,
         executor_token: &str,
@@ -834,7 +947,7 @@ impl Client {
         call_id: CallId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
-    ) -> Result<()> {
+    ) -> ExecutionResult<ClaimedClientCall> {
         let response = self
             .http
             .post(format!(
@@ -848,8 +961,34 @@ impl Client {
             }))
             .send()
             .await
-            .map_err(request_error)?;
-        Self::expect_success(response).await?;
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))?;
+        Self::expect_execution_success(response)
+            .await?
+            .json::<ClaimedClientCall>()
+            .await
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))
+    }
+
+    /// Renew the lease on a claim before work that will take a while.
+    pub async fn heartbeat_client_execution(
+        &self,
+        executor_token: &str,
+        chat: ChatId,
+        call_id: CallId,
+        lease_token: uuid::Uuid,
+    ) -> ExecutionResult<()> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/chats/{chat}/client-executions/{call_id}/heartbeat",
+                self.base
+            ))
+            .header(CLIENT_EXECUTOR_HEADER, executor_token)
+            .json(&serde_json::json!({ "lease_token": lease_token }))
+            .send()
+            .await
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))?;
+        Self::expect_execution_success(response).await?;
         Ok(())
     }
 
@@ -860,8 +999,8 @@ impl Client {
         chat: ChatId,
         call_id: CallId,
         lease_token: uuid::Uuid,
-        result: &str,
-    ) -> Result<()> {
+        outcome: &ClientExecutionOutcome,
+    ) -> ExecutionResult<()> {
         let response = self
             .http
             .post(format!(
@@ -871,13 +1010,25 @@ impl Client {
             .header(CLIENT_EXECUTOR_HEADER, executor_token)
             .json(&serde_json::json!({
                 "lease_token": lease_token,
-                "resolution": { "status": "completed", "result": result },
+                "resolution": outcome,
             }))
             .send()
             .await
-            .map_err(request_error)?;
-        Self::expect_success(response).await?;
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))?;
+        Self::expect_execution_success(response).await?;
         Ok(())
+    }
+
+    /// [`Self::expect_success`], keeping the lifecycle's conflict distinct.
+    async fn expect_execution_success(
+        response: reqwest::Response,
+    ) -> ExecutionResult<reqwest::Response> {
+        let conflict = response.status() == reqwest::StatusCode::CONFLICT;
+        match Self::expect_success(response).await {
+            Ok(response) => Ok(response),
+            Err(error) if conflict => Err(ClientExecutionError::Conflict(error)),
+            Err(error) => Err(ClientExecutionError::Failed(error)),
+        }
     }
 }
 

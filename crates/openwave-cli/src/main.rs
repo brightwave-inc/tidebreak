@@ -51,6 +51,10 @@
 //! broker state and the local data directory, so it embeds and takes no
 //! `--server`.
 //!
+//! Once a folder is connected, the tools that read it are executed by whichever
+//! process owns that broker state — `serve`, or the engine `-p` embeds. See
+//! [`folder_executor`].
+//!
 //! Every client command above embeds its own server by default. `--server
 //! <url>` (or `OPENWAVE_SERVER_URL`) makes it a pure client of one that is
 //! already running instead, with the bearer token coming from
@@ -70,6 +74,7 @@ use openwave_core::{
 mod api;
 mod connect;
 mod folder;
+mod folder_executor;
 mod outputs;
 mod print;
 mod setup;
@@ -694,10 +699,24 @@ fn profile_config() -> Result<Config> {
 async fn serve() -> Result<()> {
     let config = profile_config()?;
     let profile = config.profile;
+    let data_dir = config.data_dir.clone();
     // Tracing events land in `logs/openwave.log` under the profile data dir
     // (plus stderr in debug builds); see `openwave_server::logging`.
     openwave_server::logging::init_logging(&config.data_dir);
     let server = openwave_server::bind_configured(config).await?;
+    // The daemon is the trusted client for its own connected-folder tool calls:
+    // it holds this machine's broker state, so a turn that reads a folder an
+    // operator connected is executed here rather than parked for a shell that
+    // does not exist. It is the same executor `openwave -p` runs, over every
+    // conversation this credential can see. See [`folder_executor`].
+    let folder_executor = folder_executor::FolderExecutor::new(
+        api::client::Client::new(server.local_addr(), server.token())?,
+        Some(server.client_executor_token()),
+        &data_dir,
+    )?;
+    if let Some(executor) = folder_executor {
+        tokio::spawn(executor.run(folder_executor::Scope::AllChats));
+    }
     // The address is the client's entry point: the parent process that launched
     // the daemon reads it from stdout to connect, and a container entrypoint
     // waits on the same line.

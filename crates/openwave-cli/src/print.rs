@@ -25,6 +25,12 @@
 //! `declined` result, the same answer an undecided desktop prompt gives.
 //! Standing folder consent comes from `openwave folder connect` and nowhere
 //! else. See [`crate::folder`].
+//!
+//! *Using* a folder an operator already connected is a different matter, and it
+//! works: an embedded run starts [`crate::folder_executor`] over the chat it is
+//! driving, which claims the parked folder tool calls and runs them through the
+//! host broker's capability checks. That executor answers only for folders that
+//! are already connected; it has no path to a new grant.
 
 use std::collections::HashMap;
 use std::io::{IsTerminal as _, Write as _};
@@ -36,7 +42,7 @@ use openwave_core::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::api::client::{Client, EventSocket};
+use crate::api::client::{Client, ClientExecutionOutcome, EventSocket};
 use crate::api::wire::{ChatFrame, ClientEvent, ToolCallStatus};
 
 mod driver;
@@ -125,7 +131,27 @@ pub async fn run(
     let driving = format == OutputFormat::Json && !std::io::stdin().is_terminal();
     let mut driver = Driver::from_stdin(driving);
 
-    one_turn(
+    // The folder tools the agent may use on a folder an operator already
+    // connected execute in this process, because this process is the one that
+    // owns the broker state they read. Scoped to this run's chat: a print run
+    // answers for the conversation it drives and no other. An attached run has
+    // no executor credential and starts nothing — it touches no local data
+    // directory either, which is why the profile is only resolved here.
+    let folder_executor = match executor_token.as_deref() {
+        Some(executor_token) => crate::folder_executor::FolderExecutor::new(
+            client.clone(),
+            Some(executor_token),
+            &crate::profile_config()?.data_dir,
+        )?
+        .map(|executor| {
+            FolderExecutorTask(tokio::spawn(
+                executor.run(crate::folder_executor::Scope::Chat(chat)),
+            ))
+        }),
+        None => None,
+    };
+
+    let outcome = one_turn(
         &client,
         executor_token.as_deref(),
         chat,
@@ -133,7 +159,18 @@ pub async fn run(
         format,
         &mut driver,
     )
-    .await
+    .await;
+    drop(folder_executor);
+    outcome
+}
+
+/// Aborts the folder executor when the turn is over, however it ended.
+struct FolderExecutorTask(tokio::task::JoinHandle<()>);
+
+impl Drop for FolderExecutorTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Post the message and follow the event stream until the turn ends.
@@ -482,8 +519,20 @@ async fn decline(
     let declined = serde_json::to_string(&RequestFolderAccessResult::Declined)
         .map_err(|error| AgentError::msg(format!("could not encode the refusal: {error}")))?;
     client
-        .resolve_client_execution(executor_token, chat, call_id, lease_token, &declined)
-        .await
+        .resolve_client_execution(
+            executor_token,
+            chat,
+            call_id,
+            lease_token,
+            // The same `{"status":"completed","result":…}` body this has always
+            // sent: `rows` is omitted rather than sent as null.
+            &ClientExecutionOutcome::Completed {
+                result: declined,
+                rows: None,
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 /// The event socket plus the cursor a reconnect resumes from.

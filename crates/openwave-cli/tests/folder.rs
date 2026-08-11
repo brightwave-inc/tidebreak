@@ -1,10 +1,13 @@
 //! Operator-provisioned folder consent, end to end at the process boundary.
 //!
-//! These exercise the one thing the CLI is uniquely responsible for: that a
-//! grant it records is the same record the desktop reads and revokes, not a
-//! parallel one. The desktop side is represented by the broker query its
-//! consent surface runs (`ListGrantStatements`, behind
-//! `list_capability_consents`) against the same data directory.
+//! Two things are exercised here, both of which only a whole process can show.
+//! First, that a grant the CLI records is the same record the desktop reads and
+//! revokes rather than a parallel one — the desktop side represented by the
+//! broker query its consent surface runs (`ListGrantStatements`, behind
+//! `list_capability_consents`) against the same data directory. Second, that an
+//! unattended turn can then *use* that folder: the folder tools are executed by
+//! whichever process owns the broker state, and a headless install has to
+//! answer them or the turn parks forever.
 //!
 //! The connected folder lives under the real home directory because that is
 //! what the host root policy allows: on macOS a temporary directory
@@ -14,7 +17,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use openwave_host_broker::{
     Broker, Capability, ConsentMethod, ControlEnvelope, ControlRequest, ControlResult, GrantId,
@@ -24,6 +28,35 @@ use openwave_host_broker::{
 
 /// Kills the daemon on drop, including on an assertion panic.
 struct Reaper(Child);
+
+impl Reaper {
+    fn wait_with_output(&mut self, timeout: Duration) -> Output {
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child did not exit within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = self.0.stdout.take() {
+            pipe.read_to_end(&mut stdout).unwrap();
+        }
+        if let Some(mut pipe) = self.0.stderr.take() {
+            pipe.read_to_end(&mut stderr).unwrap();
+        }
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+}
 
 impl Drop for Reaper {
     fn drop(&mut self) {
@@ -263,4 +296,217 @@ fn folder_commands_refuse_to_pretend_they_target_another_server() {
         stderr.contains("folder") && stderr.contains("--server"),
         "stderr: {stderr}"
     );
+}
+
+/// A turn boots the engine and runs the tool loop, so it is given more room
+/// than a command that only has to refuse and exit. Generous rather than tight:
+/// the failure this bounds is a parked call that never resolves, and there is
+/// nothing to gain from declaring it early.
+const TURN_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Connect one folder as an operator and return its opaque root id.
+fn connect_folder(data_dir: &Path, path: &Path, chat: &str) -> String {
+    let (ok, stdout, stderr) = run(
+        data_dir,
+        &["folder", "connect", path.to_str().unwrap(), "--chat", chat],
+    );
+    assert!(ok, "connect failed: {stderr}");
+    // "openwave: connected <name> to chat <id> (root <root id>, operator …)"
+    let root = stdout
+        .split("(root ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .expect("the connect report names the root id")
+        .trim()
+        .to_owned();
+    assert!(
+        uuid::Uuid::parse_str(&root).is_ok(),
+        "unexpected root id {root:?} in {stdout:?}"
+    );
+    root
+}
+
+/// Every client-executed folder tool the executor answers, in one script: list
+/// the folder, read a file out of it as text, import that file as a source, then
+/// answer. Each tool step parks a client-executed call, which is exactly what
+/// used to hang.
+fn folder_reading_script(root: &str) -> String {
+    serde_json::json!([
+        {"tool": "list_folder", "input": {"root_id": root, "path": ""}},
+        {"tool": "read_connected_file", "input": {"root_id": root, "path": "q3.md"}},
+        {"tool": "import_connected_file", "input": {"root_id": root, "path": "q3.md"}},
+        {"text": "read the report"}
+    ])
+    .to_string()
+}
+
+/// The folder tools whose calls the script above parks. Every one must come back
+/// completed: a single parked call is the whole failure this closes.
+const SCRIPTED_FOLDER_TOOLS: &[&str] = &[
+    "list_folder",
+    "read_connected_file",
+    "import_connected_file",
+];
+
+/// The journal frames one print-mode run wrote, decoded from its stdout.
+fn journal_events(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|frame| frame.get("event").cloned())
+        .collect()
+}
+
+/// Assert the scripted turn ran every folder tool for real and finished.
+fn assert_folder_tools_completed(stdout: &str, stderr: &str) {
+    let events = journal_events(stdout);
+    for tool in SCRIPTED_FOLDER_TOOLS {
+        let call = events
+            .iter()
+            .find(|event| event["type"] == "tool_call_started" && event["name"] == *tool)
+            .unwrap_or_else(|| {
+                panic!("{tool} was never called\nstdout: {stdout}\nstderr: {stderr}")
+            });
+        let call_id = call["call_id"].clone();
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "tool_call_completed" && event["call_id"] == call_id)
+            .unwrap_or_else(|| {
+                panic!("{tool} never completed — it parked\nstdout: {stdout}\nstderr: {stderr}")
+            });
+        assert_eq!(
+            completed["status"], "completed",
+            "{tool} did not succeed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+    assert!(
+        events.iter().any(|event| event["type"] == "turn_completed"),
+        "the turn never completed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// The gap #1884 closed, driven end to end: an operator connects a folder, and
+/// an unattended turn *uses* it. `list_folder` and `read_connected_file` are
+/// client-executed calls with no client on a headless install, so before this
+/// executor existed they parked and the run hung until it was killed. The model
+/// is scripted, but the engine, the turn worker, the parked-call lifecycle, the
+/// host broker's capability checks, and the journal are all the production path.
+#[test]
+fn an_unattended_turn_reads_a_folder_the_operator_connected() {
+    let base = tempfile::tempdir_in(home()).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let data_dir = data.path().join("profile");
+    let reports = base.path().join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("q3.md"), "revenue held flat\n").unwrap();
+
+    let chat = create_chat(&data_dir);
+    let root = connect_folder(&data_dir, &reports, &chat);
+
+    let output = openwave(&data_dir)
+        .args([
+            "-p",
+            "summarize the report",
+            "--chat",
+            &chat,
+            "--permission-mode",
+            "allow",
+            "--output-format",
+            "json",
+        ])
+        .env("OPENWAVE_SCRIPTED_PROVIDER", folder_reading_script(&root))
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn a scripted openwave -p");
+    let mut child = Reaper(output);
+    let output = child.wait_with_output(TURN_EXIT_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_folder_tools_completed(&stdout, &stderr);
+    // Nothing was written back into the folder: these tools only read it.
+    assert_eq!(
+        std::fs::read_to_string(reports.join("q3.md")).unwrap(),
+        "revenue held flat\n"
+    );
+}
+
+/// The other half of the scoping decision, and the reason an attached client
+/// needs no new authority: the executor belongs to the process that owns the
+/// broker state. Here that process is `openwave serve`, and the run driving the
+/// turn is a plain `--server` client holding only a bearer token. It cannot
+/// execute a folder call — it has no executor credential and no flag grants it
+/// one — and it does not have to, because the daemon does.
+#[test]
+fn a_serve_daemon_executes_folder_calls_for_an_attached_client() {
+    let base = tempfile::tempdir_in(home()).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let data_dir = data.path().join("profile");
+    let reports = base.path().join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("q3.md"), "revenue held flat\n").unwrap();
+
+    let chat = create_chat(&data_dir);
+    let root = connect_folder(&data_dir, &reports, &chat);
+
+    // The script belongs to the engine, which now lives in the daemon.
+    let mut daemon = openwave(&data_dir)
+        .arg("serve")
+        .env("OPENWAVE_SCRIPTED_PROVIDER", folder_reading_script(&root))
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave serve");
+    let stdout = daemon.stdout.take().unwrap();
+    let _daemon = Reaper(daemon);
+    let mut lines = BufReader::new(stdout).lines();
+    let addr_line = lines.next().unwrap().unwrap();
+    let token_line = lines.next().unwrap().unwrap();
+    let url = format!(
+        "http://{}",
+        addr_line.rsplit("http://").next().unwrap().trim()
+    );
+    let token = token_line
+        .trim_start_matches("openwave: token ")
+        .trim()
+        .to_owned();
+
+    let attached = openwave(&data_dir)
+        .args([
+            "-p",
+            "summarize the report",
+            "--chat",
+            &chat,
+            "--permission-mode",
+            "allow",
+            "--output-format",
+            "json",
+            "--server",
+        ])
+        .arg(&url)
+        .env("OPENWAVE_SERVER_TOKEN", &token)
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SCRIPTED_PROVIDER")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn an attached openwave -p");
+    let mut attached = Reaper(attached);
+    let output = attached.wait_with_output(TURN_EXIT_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_folder_tools_completed(&stdout, &stderr);
 }
