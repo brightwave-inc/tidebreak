@@ -3,12 +3,14 @@
 //!
 //! The renderer never supplies grant content. Consent (`POST`) is a bare
 //! affirmative — the server computes the grant from the app's *current*
-//! manifest and the connected-app definitions and folder registrations
-//! *current* at that moment, so a stale sheet can never grant capabilities
-//! the manifest no longer pins or pin a definition that has since changed.
+//! manifest and the connected-app definitions, folder registrations, and
+//! gateway catalogs *current* at that moment, so a stale sheet can never
+//! grant capabilities the manifest no longer pins or pin a definition that
+//! has since changed.
 //! State (`GET`) is renderer-safe metadata: connected-app, folder, and
 //! operation *names* with coverage/staleness booleans, never definitions,
-//! never paths, and never environment or credential values.
+//! never paths, never the gateway deployment behind a gateway app, and never
+//! environment or credential values.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -48,15 +50,16 @@ pub struct AppGrantState {
 
 /// One current-manifest binding, projected for the consent sheet.
 ///
-/// Exactly one of `app` and `folder` is present for the two locally resolved
-/// vocabularies, matching what the binding names. An app-keyed row carries
-/// `operation_ids`; a folder row carries `access`. A gateway binding carries
-/// its operation ids and, once one reads back, the gateway app's display
-/// name — it names neither a local record nor a root, so both id fields stay
-/// absent until this projection carries the gateway's own id. The sheet
-/// derives the combined-consent exfiltration warning
-/// (docs/folder-bindings.md) from the rows themselves: a manifest with both a
-/// folder row and a network row can read files and reach the network.
+/// Exactly one of `app`, `folder`, and `gateway_app` is present, matching what
+/// the binding names: a local record id, a broker root id, or the gateway's
+/// own connected-app id. An app-keyed or gateway row carries `operation_ids`;
+/// a folder row carries `access`. A gateway row names the gateway's app and
+/// the operations pinned under it, and — once the live read answers — that
+/// app's display name; the gateway's deployment URL is never projected, the
+/// same names-only posture the `rest_api` rows hold. The sheet derives the
+/// combined-consent exfiltration warning (docs/folder-bindings.md) from the
+/// rows themselves: a manifest with both a folder row and a network row —
+/// local or gateway — can read files and reach the network.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AppGrantBindingState {
     /// Connected app the manifest binds, by record id, for an app-keyed
@@ -65,14 +68,18 @@ pub struct AppGrantBindingState {
     /// Connected folder the manifest binds, by broker root id, for a folder
     /// binding.
     pub folder: Option<HostRootId>,
+    /// Gateway connected app the manifest binds, by the gateway's own app id,
+    /// for a gateway binding. The id alone — never the gateway that serves
+    /// it.
+    pub gateway_app: Option<String>,
     /// The access level a folder binding requests.
     pub access: Option<FolderAccess>,
-    /// The bound connected app's or folder's display name, absent when
-    /// nothing configured or approved answers to the id — the sheet says so
-    /// instead of showing a raw id alone.
+    /// The bound connected app's, folder's, or gateway app's display name,
+    /// absent when nothing configured, approved, or readable answers to the
+    /// id — the sheet says so instead of showing a raw id alone.
     pub name: Option<String>,
     /// Catalog `operationId`s the current manifest pins under this app, for a
-    /// `rest_api` binding.
+    /// `rest_api` or gateway binding.
     pub operation_ids: Option<Vec<String>>,
     /// Whether the live grant covers every listed capability under this
     /// binding and its target still matches the granted fingerprint.
@@ -142,17 +149,41 @@ pub async fn post_app_grant(
                 }));
             }
             AppBinding::GatewayOperations(binding) => {
-                // A gateway binding pins an app the gateway describes. With
-                // nothing readable answering to the id there is no catalog to
-                // fingerprint, so there is nothing coherent to consent to —
-                // the same fail-closed reading as an unconfigured connected
-                // app or a folder that is no longer approved.
+                // A gateway binding pins an app only the gateway describes,
+                // so consent needs a live read to pin. With no session there
+                // is nothing to ask, and with nothing answering to the id
+                // there is no catalog to fingerprint — both leave nothing
+                // coherent to consent to, the same fail-closed reading as an
+                // unconfigured connected app or a folder that is no longer
+                // approved.
+                if !current.gateway_session {
+                    return Err(ServerError::conflict(format!(
+                        "there is no gateway session, so gateway app {} cannot be \
+                         granted",
+                        binding.gateway_app
+                    )));
+                }
                 let Some(gateway_app) = current.gateway_apps.get(&binding.gateway_app) else {
                     return Err(ServerError::conflict(format!(
                         "gateway app {} is not available, so this app cannot be granted",
                         binding.gateway_app
                     )));
                 };
+                // Every pinned operation must exist in the app's live
+                // catalog, exactly as a `rest_api` pin must exist in the
+                // record's — a pin the gateway no longer declares leaves
+                // nothing coherent to consent to.
+                if let Some(operation_id) = binding
+                    .operation_ids
+                    .iter()
+                    .find(|operation_id| !gateway_app.operation_ids.contains(operation_id))
+                {
+                    return Err(ServerError::conflict(format!(
+                        "operation {operation_id:?} is not declared by gateway app \
+                         {:?}, so this app cannot be granted",
+                        gateway_app.name
+                    )));
+                }
                 bindings.push(AppGrantBinding::GatewayOperations(
                     AppGatewayOperationsGrantBinding {
                         gateway_app: binding.gateway_app.clone(),
@@ -345,6 +376,7 @@ pub(crate) fn grant_state(
                     AppBinding::Folder(binding) => Some(binding.folder),
                     _ => None,
                 },
+                gateway_app: binding.gateway_app().map(str::to_owned),
                 access,
                 name,
                 operation_ids,

@@ -272,15 +272,16 @@ revisions: Array<AppRevisionSummary>, };
 /**
  * One current-manifest binding, projected for the consent sheet.
  *
- * Exactly one of `app` and `folder` is present for the two locally resolved
- * vocabularies, matching what the binding names. An app-keyed row carries
- * `operation_ids`; a folder row carries `access`. A gateway binding carries
- * its operation ids and, once one reads back, the gateway app's display
- * name — it names neither a local record nor a root, so both id fields stay
- * absent until this projection carries the gateway's own id. The sheet
- * derives the combined-consent exfiltration warning
- * (docs/folder-bindings.md) from the rows themselves: a manifest with both a
- * folder row and a network row can read files and reach the network.
+ * Exactly one of `app`, `folder`, and `gateway_app` is present, matching what
+ * the binding names: a local record id, a broker root id, or the gateway's
+ * own connected-app id. An app-keyed or gateway row carries `operation_ids`;
+ * a folder row carries `access`. A gateway row names the gateway's app and
+ * the operations pinned under it, and — once the live read answers — that
+ * app's display name; the gateway's deployment URL is never projected, the
+ * same names-only posture the `rest_api` rows hold. The sheet derives the
+ * combined-consent exfiltration warning (docs/folder-bindings.md) from the
+ * rows themselves: a manifest with both a folder row and a network row —
+ * local or gateway — can read files and reach the network.
  */
 export type AppGrantBindingState = { 
 /**
@@ -294,18 +295,24 @@ app: ConnectedAppId | null,
  */
 folder: HostRootId | null, 
 /**
+ * Gateway connected app the manifest binds, by the gateway's own app id,
+ * for a gateway binding. The id alone — never the gateway that serves
+ * it.
+ */
+gateway_app: string | null, 
+/**
  * The access level a folder binding requests.
  */
 access: FolderAccess | null, 
 /**
- * The bound connected app's or folder's display name, absent when
- * nothing configured or approved answers to the id — the sheet says so
- * instead of showing a raw id alone.
+ * The bound connected app's, folder's, or gateway app's display name,
+ * absent when nothing configured, approved, or readable answers to the
+ * id — the sheet says so instead of showing a raw id alone.
  */
 name: string | null, 
 /**
  * Catalog `operationId`s the current manifest pins under this app, for a
- * `rest_api` binding.
+ * `rest_api` or gateway binding.
  */
 operation_ids: Array<string> | null, 
 /**
