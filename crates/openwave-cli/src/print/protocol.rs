@@ -216,6 +216,16 @@ pub enum HaltReason {
     PlanUndriven,
     QuestionsUndriven,
     DecisionFailed,
+    /// The request behind a parked interaction could not be read at all, so the
+    /// run cannot tell what it is waiting on.
+    PendingLookupFailed,
+    /// A parked `request_folder_access` call could not be refused. Its own
+    /// reason, not `decision_failed`: nothing a driver said produced it, and a
+    /// caller reading exit 4 should be able to tell that a folder request —
+    /// which no decision line can ever answer — is what ended the run.
+    FolderDeclineFailed,
+    /// SIGINT reached the run; the turn is cancelled rather than abandoned.
+    Interrupted,
 }
 
 impl HaltReason {
@@ -224,16 +234,24 @@ impl HaltReason {
             Self::PlanUndriven => "plan_undriven",
             Self::QuestionsUndriven => "questions_undriven",
             Self::DecisionFailed => "decision_failed",
+            Self::PendingLookupFailed => "pending_lookup_failed",
+            Self::FolderDeclineFailed => "folder_decline_failed",
+            Self::Interrupted => "interrupted",
         }
     }
 
     /// The process exit status this halt produces. Both undriven reasons share
     /// one code — they are the same fact ("nobody was there to answer") and the
-    /// `reason` field separates them.
+    /// `reason` field separates them. The three failure reasons share one for
+    /// the same reason: the run reached something it had to settle and could
+    /// not carry it through.
     pub fn exit_code(self) -> i32 {
         match self {
             Self::PlanUndriven | Self::QuestionsUndriven => super::EXIT_INTERACTION_UNDRIVEN,
-            Self::DecisionFailed => super::EXIT_DECISION_FAILED,
+            Self::DecisionFailed | Self::PendingLookupFailed | Self::FolderDeclineFailed => {
+                super::EXIT_DECISION_FAILED
+            }
+            Self::Interrupted => super::EXIT_INTERRUPTED,
         }
     }
 }
