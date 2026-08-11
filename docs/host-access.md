@@ -280,23 +280,36 @@ kinds bind a stable operation identity to their original request, including the
 trusted consent method for an attach, so an exact retry is idempotent and
 identity reuse with different inputs is rejected. The broker stamps new
 subject grants with that current attachment consent instead of copying another
-subject's earlier consent record. It mints those grants only when the folder is
-actually arriving in that conversation, and only for a subject that holds no
-statement over that root: attaching or re-picking a folder says where it may be
-used, not what may be done in it, so a subject that already has a standing
-position keeps exactly that position — including one narrowed by revoking a
+subject's earlier consent record. It mints those grants once and only once per
+subject and folder: attaching or re-picking a folder says where it may be used,
+not what may be done in it, so a subject that has already been given a folder
+keeps exactly the position it has — including one narrowed by revoking a
 statement, and including one narrowed to nothing — and widening it needs the
 permission-dialog capability grant.
 
-That grant covers reading as well as writing and commands. Revoking read
-narrows a folder to nothing an agent can act on — it takes the folder's command
-reach with it — but the folder stays attached, so the surfaces that list it are
-what has to offer the way back. They list an attached folder by its approval
-rather than by what it currently allows, precisely so a folder narrowed to
-nothing keeps both the control that disconnects it and the one that asks for
-read again. Asking is always an explicit action answered in the host's own
-dialog; nothing restores a revoked capability as a side effect of attaching,
-re-picking, or listing.
+Once is measured against a record the broker keeps of the folder positions each
+subject has already been given, not against the grants that survive. Revocation
+deletes grant rows, so the grant table cannot tell a subject narrowed to nothing
+apart from one that never had anything, and neither can the attachment: grants
+are held by the subject while attachments are held by the conversation, and for
+a chat in a project those are different entities. Without that record a sibling
+chat in the same project connecting the folder for the first time re-minted the
+access its neighbour had just revoked, and a chat that disconnected an emptied
+folder got the full set back when it reconnected. The record is dropped when the
+folder's approval is revoked or the conversation subject is purged, because at
+that point the position itself is gone and picking the folder again is a first
+arrival.
+
+Widening covers reading as well as writing and commands. Revoking read narrows a
+folder to nothing an agent can act on — it takes the folder's command reach with
+it — but the folder stays attached, so the surfaces that list it are what has to
+offer the way back. They list an attached folder by its approval rather than by
+what it currently allows, precisely so a folder narrowed to nothing keeps both
+the control that disconnects it and the one that asks for read again.
+Disconnecting requires no access to the folder at all; a folder that allows
+nothing must still be removable. Asking for access back is always an explicit
+action answered in the host's own dialog, and nothing restores a revoked
+capability as a side effect of attaching, detaching, re-picking, or listing.
 
 A read-only attachment receipt lets a
 recovering native client distinguish unknown, completed, and failed work

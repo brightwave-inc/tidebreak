@@ -22,7 +22,7 @@ use crate::{
     GrantSubject, OperationId, RootAttachment, RootId, RootPolicy, Scope, UnavailableRootReason,
 };
 
-const STATE_VERSION: u32 = 4;
+const STATE_VERSION: u32 = 5;
 const STATE_FILE_NAME: &str = "host-broker-state.json";
 pub(super) const MAX_STATE_FILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -44,6 +44,19 @@ struct PersistedState {
     grants: Vec<Grant>,
     attachments: Vec<RootAttachment>,
     mutations: Vec<PersistedMutation>,
+    /// Folder positions this install has already settled. Absent in files
+    /// written before version 5, where it is recovered from the grants that
+    /// survive — see [`StateFile::load`].
+    #[serde(default)]
+    settled: Vec<PersistedSettledRoot>,
+}
+
+/// One subject's settled position on one folder. See `State::settled`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedSettledRoot {
+    subject: GrantSubject,
+    root_id: RootId,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,6 +174,31 @@ impl StateFile {
             grants.retain(|grant| grant.capability() != Capability::ExecuteCommands);
         }
         let mut attachments = persisted.attachments;
+        // A folder a subject can still reach is a folder that subject has
+        // already been granted, so a file written before this record existed
+        // recovers everything except the positions already narrowed to
+        // nothing. Those few re-mint once on the next arrival and are settled
+        // from then on; inventing a settled position for a subject that never
+        // had one would be the worse error, because it leaves a folder that
+        // can only be opened through the permission dialog.
+        let mut settled: HashSet<(GrantSubject, RootId)> = grants
+            .iter()
+            .filter_map(|grant| match grant.scope() {
+                Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => {
+                    Some((grant.subject(), *root_id))
+                }
+                Scope::Subject => None,
+            })
+            .collect();
+        settled.extend(
+            persisted
+                .settled
+                .into_iter()
+                .map(|item| (item.subject, item.root_id)),
+        );
+        settled.retain(|(_, root_id)| {
+            roots.contains_key(root_id) || unavailable.iter().any(|root| root.id == *root_id)
+        });
         for root in &mut unavailable {
             let root_id = root.id;
             root.grants = take_matching(&mut grants, |grant| {
@@ -208,6 +246,7 @@ impl StateFile {
             receipt_order,
             active_mutations: Default::default(),
             unavailable,
+            settled,
         };
         validate_loaded_state(&state)?;
         Ok(state)
@@ -290,6 +329,14 @@ impl StateFile {
             grants,
             attachments,
             mutations,
+            settled: state
+                .settled
+                .iter()
+                .map(|(subject, root_id)| PersistedSettledRoot {
+                    subject: *subject,
+                    root_id: *root_id,
+                })
+                .collect(),
         };
         let bytes = serde_json::to_vec_pretty(&persisted).map_err(invalid_data)?;
         if bytes.len() > MAX_STATE_FILE_BYTES {
@@ -426,6 +473,16 @@ fn carry_forward_exec_grants(grants: &mut Vec<Grant>) -> Result<(), BrokerError>
     Ok(())
 }
 
+/// Refuse a state file whose tables disagree with each other.
+///
+/// Three of these rules used a surviving grant as the evidence that a root, an
+/// attachment or a registration receipt was genuine. That was only ever a
+/// stand-in: revoking deletes rows, so a user who narrowed a folder all the way
+/// down on the permissions panel wrote a file the next start refused to load,
+/// and the broker came up with no folders at all. The settled record is the
+/// evidence that was missing — it says the position existed and was answered —
+/// so each of those rules now accepts either. A row backed by neither, which is
+/// what an invented attachment or root looks like, is still refused.
 pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
     for grant in &state.grants {
         let root_id = match grant.scope() {
@@ -453,7 +510,24 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                 }
             }
         });
-        if !has_matching_grant {
+        // An attachment says where a folder may be used; it authorizes
+        // nothing on its own. A folder narrowed all the way down keeps its
+        // attachment and loses every grant, and rejecting that state made the
+        // broker refuse to start for a user who had only used the permissions
+        // panel as documented. The settled record answers for exactly that
+        // case, so a row with neither a grant nor a settled position — which
+        // is what a hand-edited file adding an attachment looks like — is
+        // still refused.
+        let has_settled_position = state.settled.iter().any(|(subject, root_id)| {
+            *root_id == attachment.root_id()
+                && match subject.kind() {
+                    crate::SubjectKind::Project => true,
+                    crate::SubjectKind::Conversation => {
+                        subject.id() == attachment.conversation_id()
+                    }
+                }
+        });
+        if !has_matching_grant && !has_settled_position {
             return Err(invalid_data("attachment has no matching subject grant").into());
         }
         if !attachment_identities.insert((attachment.conversation_id(), attachment.root_id())) {
@@ -472,7 +546,7 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                         } if granted == root_id
                 )
         });
-        if !has_grant {
+        if !has_grant && !state.settled.contains(&(root.owner, *root_id)) {
             return Err(invalid_data("persisted root is missing its grant").into());
         }
     }
@@ -491,7 +565,9 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                                     | Scope::PathSubtree { root_id, .. }
                                     if *root_id == result.root.root_id
                             )
-                    });
+                    }) || state
+                        .settled
+                        .contains(&(request.subject, result.root.root_id));
                     if root.display_name != result.root.display_name || !subject_has_grant {
                         return Err(invalid_data(
                             "successful register receipt does not match authoritative state",

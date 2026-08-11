@@ -186,6 +186,22 @@ struct State {
     /// held out of the live tables so the rest of the registry still works, and
     /// written back verbatim so the approval survives the outage.
     unavailable: Vec<UnavailableRoot>,
+    /// Subject/folder pairs whose access the user has already settled once.
+    ///
+    /// Revocation deletes rows, so the grant table cannot tell "narrowed to
+    /// nothing" apart from "never granted" — and every other trace is keyed on
+    /// the wrong entity. Attachments are per conversation while grants are per
+    /// subject, so a chat's own attachment cannot answer for a project subject
+    /// its siblings share, and detaching removes even that. This is the one
+    /// record kept on the same key the grants use, and it only ever answers
+    /// one question: has this subject been given this folder's default access
+    /// before? Once it has, access is the user's to widen through the
+    /// permission dialog, never something an arrival re-mints.
+    ///
+    /// It is dropped when the folder's registration is revoked or the
+    /// conversation subject is purged — the points where the position itself
+    /// stops existing.
+    settled: HashSet<(GrantSubject, RootId)>,
 }
 
 /// A registration that is dormant for the lifetime of this process.
@@ -917,6 +933,11 @@ impl Controller {
                     next.roots.insert(prepared.root_id, prepared.root);
                     next.grants.extend(prepared.grants);
                     next.attachments.push(prepared.attachment);
+                    // A first registration is the first mint for this subject,
+                    // so it settles the position too. Without this, revoking
+                    // the whole folder and picking it again would count as a
+                    // first arrival and hand the access back.
+                    next.settled.insert((fingerprint.subject, prepared.root_id));
                     Ok(result)
                 }
             }
@@ -1185,6 +1206,9 @@ impl Controller {
                 .retain(|grant| !scope_targets_root(grant.scope(), request.root_id));
             next.attachments
                 .retain(|attachment| attachment.root_id() != request.root_id);
+            // The approval itself is gone, so there is no position left to
+            // remember. Picking this folder again is a first arrival.
+            next.settled.retain(|(_, root)| *root != request.root_id);
         }
         let result = Ok(RevokeRootResult { revoked });
         complete_revoke(&mut next, operation_id, fingerprint, result.clone())
@@ -1244,6 +1268,10 @@ impl Controller {
         let before = next.grants.len();
         next.grants.retain(|grant| grant.subject() != subject);
         changed |= next.grants.len() != before;
+        // The conversation subject is gone with the chat, so its settled
+        // positions go too. A project subject the chat happened to use is not
+        // this subject and keeps its own.
+        next.settled.retain(|(settled, _)| *settled != subject);
 
         let before = next.attachments.len();
         next.attachments
@@ -1287,6 +1315,7 @@ impl Controller {
                     .retain(|grant| !scope_targets_root(grant.scope(), root_id));
                 next.attachments
                     .retain(|attachment| attachment.root_id() != root_id);
+                next.settled.retain(|(_, settled)| *settled != root_id);
             }
         }
 
@@ -2385,6 +2414,14 @@ fn apply_root_attachment(
             // folder this chat already has — must leave authority exactly as it
             // is. Minting here is what let a redundant attach undo a
             // revocation.
+            //
+            // A genuinely new attachment still only mints for a subject that
+            // has never held this folder. This check is keyed on the
+            // conversation and the grants it guards are keyed on the subject,
+            // and for a project chat those are different entities — a sibling
+            // chat's first attach passes here while pointing at a position its
+            // neighbour already narrowed. `ensure_default_subject_grants` is
+            // where the subject's own history is consulted.
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
             } else {
@@ -2407,11 +2444,12 @@ fn apply_root_attachment(
             if request.consent_method.is_some() {
                 return Err(BrokerError::InvalidConsentMethod);
             }
-            if state.roots.contains_key(&request.root_id)
-                && !subject_has_root_grant(state, request.subject, request.root_id)
-            {
-                return Err(BrokerError::Denied);
-            }
+            // Disconnecting a folder is not an exercise of access to it, so it
+            // must not require any. Requiring read here meant that narrowing a
+            // folder to nothing also took away the only way to get rid of it:
+            // the folder stayed attached, allowed nothing, and refused to go.
+            // Detach only ever removes this conversation's own attachment rows,
+            // which is why nothing is being protected by asking.
             let before = state.attachments.len();
             state.attachments.retain(|attachment| {
                 attachment.conversation_id() != request.conversation_id
@@ -2552,7 +2590,7 @@ fn subject_has_any_root_grant(state: &State, subject: GrantSubject, root_id: Roo
         .any(|grant| grant.subject() == subject && scope_targets_root(grant.scope(), root_id))
 }
 
-/// Give a subject the folder's default access, but only if it has none.
+/// Give a subject the folder's default access, but only if it has never had it.
 ///
 /// Registration mints read, write and exec together because choosing a folder
 /// in the picker is how the user says the agent may work in it. The same set
@@ -2560,15 +2598,19 @@ fn subject_has_any_root_grant(state: &State, subject: GrantSubject, root_id: Roo
 /// a re-pick, so a chat that connects a folder can use it the way the product
 /// says it can.
 ///
-/// It is not right afterwards. Once the subject holds any statement over the
-/// root, that set is the user's position — possibly narrowed on the folders
-/// panel — and widening it is a consent decision, which belongs to
+/// It is not right afterwards, and "afterwards" cannot be read off the grant
+/// table: revoking deletes rows, so a subject narrowed to nothing looks exactly
+/// like a subject that never had anything. Neither can it be read off the
+/// conversation, because grants are keyed on the subject and attachments are
+/// keyed on the conversation — for a project subject those are different
+/// entities, and a sibling chat connecting the folder used to re-mint the
+/// access its neighbour had just revoked. `State::settled` is the record kept
+/// on the grant's own key, and it is what makes this once-only: after the first
+/// mint, widening is a consent decision belonging to
 /// [`Controller::grant_root_capability`] and its permission dialog.
 ///
-/// Both callers gate this on the folder actually arriving in the conversation,
-/// so an emptied position cannot be refilled by repeating an action against a
-/// folder the chat already has. This check is the second half of that rule, for
-/// the position a subject carries across its other conversations.
+/// A surviving grant still counts on its own, so an install that predates the
+/// record is not re-minted for folders it can currently reach.
 fn ensure_default_subject_grants(
     state: &mut State,
     subject: GrantSubject,
@@ -2576,7 +2618,10 @@ fn ensure_default_subject_grants(
     consent: ConsentRecord,
     execute_commands: bool,
 ) -> Result<(), BrokerError> {
-    if subject_has_any_root_grant(state, subject, root_id) {
+    let settled = state.settled.contains(&(subject, root_id))
+        || subject_has_any_root_grant(state, subject, root_id);
+    state.settled.insert((subject, root_id));
+    if settled {
         return Ok(());
     }
     ensure_subject_grants(state, subject, root_id, consent, execute_commands)

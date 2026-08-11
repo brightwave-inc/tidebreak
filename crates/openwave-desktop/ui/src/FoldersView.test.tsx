@@ -196,18 +196,31 @@ describe("FoldersView", () => {
     vi.mocked(host.listConnectedFolders).mockResolvedValue([
       folder("locked-out", "Archive"),
     ]);
-    vi.mocked(host.listCapabilityConsents)
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([statement("locked-out", "read_files")]);
-    vi.mocked(host.grantFolderCapability).mockResolvedValue(true);
+    let granted: ConsentStatementSnapshot[] = [];
+    vi.mocked(host.listCapabilityConsents).mockImplementation(
+      async () => granted,
+    );
+    vi.mocked(host.grantFolderCapability).mockImplementation(async () => {
+      granted = [statement("locked-out", "read_files")];
+      return true;
+    });
     const user = userEvent.setup();
     render(<FoldersView chat={chat} />);
 
     await screen.findByText("Archive");
     expect(screen.getByText("No access")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Disconnect" }),
-    ).toBeInTheDocument();
+
+    // Disconnect has to work from here, not merely be on screen: the broker
+    // used to refuse a detach for a folder the chat could not read, which made
+    // this button a dead control in the one state it exists for.
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    const confirmations = await screen.findAllByRole("button", {
+      name: "Disconnect",
+    });
+    await user.click(confirmations[confirmations.length - 1]);
+    await waitFor(() =>
+      expect(host.disconnectFolder).toHaveBeenCalledWith(chat, "locked-out"),
+    );
 
     // Read is the first thing offered back, and granting it is an explicit
     // action answered natively — nothing here restores it on its own.

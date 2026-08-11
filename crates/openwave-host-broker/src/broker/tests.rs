@@ -2007,29 +2007,32 @@ fn a_failed_mutation_reports_the_attachment_it_could_not_change() {
     );
     let root_id = registered.root.root_id;
 
-    // The conversation itself holds no grant on this root, so detaching under
-    // that subject is denied while the attachment plainly still exists.
-    let ungranted = GrantSubject::conversation(conversation).unwrap();
+    // A detach that carries a consent method is malformed — detaching answers
+    // no question — so it is refused while the attachment plainly still exists.
+    let subject = GrantSubject::conversation(conversation).unwrap();
     let operation_id = OperationId::new();
     assert_eq!(
-        mutate_attachment(
-            &broker.controller(),
-            operation_id,
-            ungranted,
-            conversation,
-            root_id,
-            RootAttachmentMutationKind::Detach,
-        )
+        unwrap_response(broker.controller().handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::DetachRoot(RootAttachmentMutationRequest {
+                operation_id,
+                subject,
+                conversation_id: conversation,
+                root_id,
+                consent_method: Some(ConsentMethod::PermissionDialog),
+            }),
+        }))
         .unwrap_err()
         .code,
-        ErrorCode::Denied
+        ErrorCode::InvalidRequest
     );
     assert!(matches!(
         lookup_attachment_receipt(
             &broker.controller(),
             LookupRootAttachmentReceiptRequest {
                 operation_id,
-                subject: ungranted,
+                subject,
                 conversation_id: conversation,
                 root_id,
                 mutation: RootAttachmentMutationKind::Detach,
@@ -3954,9 +3957,10 @@ fn purge_conversation_subject_forgets_deleted_chat_authority() {
 
 /// Attaching a folder says where it may be used, not what may be done in it.
 /// A capability withdrawn on the folders panel has to survive every route back
-/// to the same folder — a redundant attach, a detach and re-attach, and
-/// choosing the same folder in the picker again — because none of those asks
-/// the user the question the revocation answered. A conversation that has
+/// to the same folder — a redundant attach, a detach and re-attach, choosing
+/// the same folder in the picker again, and a sibling chat under the same
+/// project subject connecting it for the first time — because none of those
+/// asks the user the question the revocation answered. A subject that has
 /// never held the folder still gets what a fresh pick grants.
 #[test]
 fn attaching_a_folder_never_restores_a_revoked_capability() {
@@ -4073,6 +4077,30 @@ fn attaching_a_folder_never_restores_a_revoked_capability() {
     assert!(!attach(OperationId::new()).changed);
     assert!(capabilities(subject).is_empty());
 
+    // Taking the emptied folder out of the chat and putting it back is the
+    // same non-question. Disconnecting no longer needs read — a folder
+    // narrowed to nothing must still be removable — so this route is open in
+    // a way it was not when the read check stood in for the rule.
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap()
+        .changed,
+        "a folder that allows nothing must still detach"
+    );
+    assert!(attach(OperationId::new()).changed);
+    assert!(
+        capabilities(subject).is_empty(),
+        "detaching and re-attaching must not refill an emptied position: {:?}",
+        capabilities(subject)
+    );
+
     // A conversation with no standing position on this folder is a first
     // grant, not a widening, and still gets the access a pick describes.
     let newcomer = Uuid::new_v4();
@@ -4090,6 +4118,113 @@ fn attaching_a_folder_never_restores_a_revoked_capability() {
         .changed
     );
     assert!(capabilities(newcomer_subject).contains(&Capability::WriteFiles));
+
+    // The same rule holds for a project subject, where the chat that connects
+    // the folder and the subject that holds the access are different entities.
+    // A sibling chat attaching for the first time is a first arrival for that
+    // chat and not for the project, so it must not restore what the project's
+    // other chat revoked.
+    let project = GrantSubject::project(Uuid::new_v4()).unwrap();
+    let first_chat = Uuid::new_v4();
+    let sibling_chat = Uuid::new_v4();
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            project,
+            first_chat,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap()
+        .changed
+    );
+    assert!(capabilities(project).contains(&Capability::WriteFiles));
+    for grant_id in grant_statements(&controller)
+        .into_iter()
+        .filter(|grant| {
+            grant.subject == project
+                && matches!(grant.scope, Scope::Root { root_id: granted } if granted == root_id)
+        })
+        .map(|grant| grant.grant_id)
+        .collect::<Vec<_>>()
+    {
+        revoke_grant(&controller, project, grant_id);
+    }
+    assert!(capabilities(project).is_empty());
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            project,
+            sibling_chat,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap()
+        .changed,
+        "the sibling chat still gets the folder, it just gets no access with it"
+    );
+    assert!(
+        capabilities(project).is_empty(),
+        "a sibling chat's attach must not restore the project's revoked access: {:?}",
+        capabilities(project)
+    );
+}
+
+/// A revoked position has to outlive the process that revoked it. The record
+/// that says "this subject has already been given this folder" is the only
+/// thing standing between an emptied folder and a re-mint, so a restart that
+/// dropped it would hand the access back on the next attach.
+#[test]
+fn an_emptied_folder_position_survives_a_restart() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let root_id = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    )
+    .root
+    .root_id;
+    for grant_id in grant_statements(&broker.controller())
+        .into_iter()
+        .filter(
+            |grant| matches!(grant.scope, Scope::Root { root_id: granted } if granted == root_id),
+        )
+        .map(|grant| grant.grant_id)
+        .collect::<Vec<_>>()
+    {
+        revoke_grant(&broker.controller(), subject, grant_id);
+    }
+    drop(broker);
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let controller = broker.controller();
+    assert!(
+        mutate_attachment(
+            &controller,
+            OperationId::new(),
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .is_ok(),
+        "the folder is still approved, so attaching it is not an error"
+    );
+    assert!(
+        grant_statements(&controller)
+            .into_iter()
+            .all(|grant| !matches!(
+                grant.scope,
+                Scope::Root { root_id: granted } if granted == root_id
+            )),
+        "a restart must not turn an emptied position back into a first arrival"
+    );
 }
 
 /// Retry and receipt records are recovery state, not history: the broker keeps
