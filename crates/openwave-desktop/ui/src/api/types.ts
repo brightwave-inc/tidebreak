@@ -747,16 +747,27 @@ export class AppInvokeRefusalError extends Error {
 }
 
 
-/** Approval kinds a human may approve from the renderer. */
+/**
+ * Approval kinds a human may approve from the renderer.
+ *
+ * A total map over the generated union, not a list of the approvable ones: the
+ * server decides this and the renderer cross-checks its answer, so a kind added
+ * server-side has to be classified here deliberately rather than defaulting to
+ * "not approvable" and failing every snapshot that carries it.
+ */
+const APPROVABLE_KINDS = {
+  search_may_share_query_and_excerpts: true,
+  web_search_may_share_query: true,
+  web_extract_may_fetch_url: true,
+  exec_may_run_networked_command: true,
+  external_mcp_may_call_server: true,
+  workspace_may_modify_files: true,
+  delegate_may_run_background_agent: true,
+  unsupported: false,
+} as const satisfies Record<RendererApprovalKind, boolean>;
+
 export function isApprovableKind(kind: RendererApprovalKind): boolean {
-  return (
-    kind === "search_may_share_query_and_excerpts" ||
-    kind === "web_search_may_share_query" ||
-    kind === "web_extract_may_fetch_url" ||
-    kind === "exec_may_run_networked_command" ||
-    kind === "external_mcp_may_call_server" ||
-    kind === "workspace_may_modify_files"
-  );
+  return APPROVABLE_KINDS[kind];
 }
 
 /** Approval kinds whose authority is stable enough to remember by tool name. */
