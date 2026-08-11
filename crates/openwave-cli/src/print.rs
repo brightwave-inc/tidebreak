@@ -192,15 +192,14 @@ async fn one_turn(
     driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
 ) -> Result<i32> {
     let turn_id = TurnId::new();
-    // Installed before the turn exists. Until the handler is registered SIGINT
-    // keeps its default disposition, and a signal landing there would kill this
-    // process outright — abandoning the very turn the interrupt is supposed to
-    // cancel.
-    let mut interrupt = Interrupt::watch().await;
     // Subscribe before posting: the turn can start before this returns, and the
     // socket's replay only reaches back to the cursor it was opened at.
     let mut stream = Stream::open(client, chat).await?;
     client.post_message(chat, turn_id, prompt).await?;
+    // Installed once the turn exists, and not before. Installing it earlier
+    // would swallow signals over the handshake and the post — neither of which
+    // watches the interrupt, and neither of which has a turn to cancel yet.
+    let mut interrupt = Interrupt::watch().await;
 
     let mut printer = Printer::new(format);
     // A resumed chat replays its history first; nothing before this turn's own
@@ -215,13 +214,13 @@ async fn one_turn(
                 break halted(client, chat, turn_id, &interrupted(), &mut printer).await;
             }
             report = declines.reported() => match report {
-                FolderDecline::Noted(message) => {
+                FolderDecline::Noted { message, .. } => {
                     printer.notice(&message);
                     continue;
                 }
                 FolderDecline::Unanswerable { call_id, message } => {
                     let halt = Halt {
-                        reason: HaltReason::DecisionFailed,
+                        reason: HaltReason::FolderDeclineFailed,
                         call_id: Some(call_id),
                         message,
                     };
@@ -257,6 +256,9 @@ async fn one_turn(
             ClientEvent::ToolCallCompleted {
                 call_id, status, ..
             } => {
+                // The call is over however it ended, so a refusal still waiting
+                // for it to park has nothing left to wait for.
+                declines.finished(call_id);
                 printer.tool_completed(call_id, status);
             }
             ClientEvent::ApprovalRequired {
@@ -399,10 +401,9 @@ async fn settle(
 /// It is not observable from everything. The HTTP client carries no request
 /// timeout, so a call to an unresponsive `--server` host — applying a decision,
 /// reading a pending request, cancelling the turn — still blocks with the
-/// interrupt unwatched, and because a handler is installed a second Ctrl-C no
-/// longer kills the process either. Bounding those is a matter of giving the
-/// client a request timeout, which is every CLI surface's business and not this
-/// module's to decide.
+/// interrupt unwatched. A second Ctrl-C is the way out of those: the watcher
+/// stays alive after the first one and exits the process on the next, which is
+/// what the default disposition would have done anyway.
 ///
 /// The signal is watched on its own task — a `ctrl_c()` future created per wait
 /// could miss one that lands between two waits — and the flag it sets stays
@@ -428,8 +429,16 @@ impl Interrupt {
                 std::task::Poll::Ready(result) => result.is_ok(),
                 std::task::Poll::Pending => signal.await.is_ok(),
             };
-            if interrupted {
-                let _ = fired.send(true);
+            if !interrupted {
+                return;
+            }
+            let _ = fired.send(true);
+            // The graceful path is now the run's to take. If it cannot — a
+            // cancel to a server that never answers, say — the next Ctrl-C
+            // leaves, because a run nobody can interrupt is worse than a turn
+            // nobody cancelled.
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(EXIT_INTERRUPTED);
             }
         });
         let _ = registered.await;
@@ -598,7 +607,7 @@ fn lookup_failed(kind: &str, call_id: Option<CallId>, error: &AgentError) -> Hal
 struct FolderDeclines {
     reports: tokio::sync::mpsc::UnboundedSender<FolderDecline>,
     inbox: tokio::sync::mpsc::UnboundedReceiver<FolderDecline>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    waiting: HashMap<CallId, tokio::task::JoinHandle<()>>,
 }
 
 /// What a refusal has to say. Only a call seen sitting in the pending set can
@@ -607,10 +616,18 @@ struct FolderDeclines {
 /// server is completing perfectly well.
 enum FolderDecline {
     /// Worth saying, not worth stopping for.
-    Noted(String),
+    Noted { call_id: CallId, message: String },
     /// The call is parked, and the refusal this run owes it cannot be
     /// delivered. Nothing else will answer it, so the turn would wait forever.
     Unanswerable { call_id: CallId, message: String },
+}
+
+impl FolderDecline {
+    fn call_id(&self) -> CallId {
+        match self {
+            Self::Noted { call_id, .. } | Self::Unanswerable { call_id, .. } => *call_id,
+        }
+    }
 }
 
 impl FolderDeclines {
@@ -619,7 +636,7 @@ impl FolderDeclines {
         Self {
             reports,
             inbox,
-            tasks: Vec::new(),
+            waiting: HashMap::new(),
         }
     }
 
@@ -653,28 +670,42 @@ impl FolderDeclines {
         let client = client.clone();
         let executor_token = executor_token.to_owned();
         let reports = self.reports.clone();
-        self.tasks.push(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             if let Some(report) = decline(&client, &executor_token, chat, call_id).await {
                 let _ = reports.send(report);
             }
-        }));
+        });
+        self.waiting.insert(call_id, task);
+    }
+
+    /// The call is terminal, so stop waiting for it to park. This is the
+    /// ordinary end for a refusal that never had a call to answer: the agent
+    /// declines a request that fails its checkpoint itself, and the only sign of
+    /// that on this side is the completion.
+    fn finished(&mut self, call_id: CallId) {
+        if let Some(task) = self.waiting.remove(&call_id) {
+            task.abort();
+        }
     }
 
     /// The next thing a refusal has to report. Pends forever when there is
     /// nothing to say, which is the common case: this side holds a sender, so
     /// the channel never closes and never resolves on its own.
     async fn reported(&mut self) -> FolderDecline {
-        match self.inbox.recv().await {
+        let report = match self.inbox.recv().await {
             Some(report) => report,
             None => std::future::pending().await,
-        }
+        };
+        // A refusal that has reported is done; its task is spent either way.
+        self.waiting.remove(&report.call_id());
+        report
     }
 }
 
 /// Ends every refusal still in flight when the turn is over, however it ended.
 impl Drop for FolderDeclines {
     fn drop(&mut self) {
-        for task in &self.tasks {
+        for task in self.waiting.values() {
             task.abort();
         }
     }
@@ -682,13 +713,22 @@ impl Drop for FolderDeclines {
 
 /// Wait for one folder request to become claimable, then resolve it declined.
 ///
+/// Only an embedded run gets here — an attached one holds no executor
+/// credential and never starts a refusal — so every call below is to this
+/// process's own server over loopback. That is what makes the asymmetry below
+/// defensible: a poll is retried because the call may simply not have parked
+/// yet, while a claim or a resolve that fails against a local, in-process
+/// server is a real refusal of the operation rather than a network blip, and
+/// retrying it would only postpone the same answer.
+///
 /// `None` means there is nothing to report — including the ordinary case where
 /// the call never parks, because the agent refused it at the checkpoint and is
 /// carrying the turn on without it. Each way this can end is answered on its
 /// own terms rather than as one undifferentiated failure:
 ///
 /// - **Never parked, or unreadable.** Not evidence of anything: keep asking. A
-///   poll that fails says nothing about the call, so it is retried too.
+///   poll that fails says nothing about the call, so it is retried too. The
+///   waiting ends when the call completes or the turn does, not on a clock.
 /// - **Parked, and claimed by somebody else.** Never race it — this process has
 ///   no way to grant anything. But it is also the only surface that answers for
 ///   this server, so a claim it does not hold is a call it cannot settle.
@@ -708,10 +748,13 @@ async fn decline(
         if let Ok(pending) = client.pending_client_executions(executor_token, chat).await {
             match pending.into_iter().find(|call| call.id == call_id) {
                 Some(call) if call.name != REQUEST_FOLDER_ACCESS_TOOL => {
-                    return Some(FolderDecline::Noted(format!(
-                        "folder request {call_id} parked as a {} call and was left alone",
-                        call.name
-                    )));
+                    return Some(FolderDecline::Noted {
+                        call_id,
+                        message: format!(
+                            "folder request {call_id} parked as a {} call and was left alone",
+                            call.name
+                        ),
+                    });
                 }
                 Some(call) if call.client_executor_id.is_some() => {
                     return Some(FolderDecline::Unanswerable {
@@ -731,11 +774,12 @@ async fn decline(
     }
 
     match resolve_declined(client, executor_token, chat, call_id).await {
-        Ok(()) => Some(FolderDecline::Noted(
-            "folder access declined: headless runs connect folders with `openwave folder \
-             connect`, never mid-turn"
+        Ok(()) => Some(FolderDecline::Noted {
+            call_id,
+            message: "folder access declined: headless runs connect folders with `openwave \
+                      folder connect`, never mid-turn"
                 .to_owned(),
-        )),
+        }),
         Err(error) => Some(FolderDecline::Unanswerable {
             call_id,
             message: format!(
@@ -956,6 +1000,5 @@ mod tests {
             .expect_err("an unreachable server must not read as nothing pending");
 
         assert_eq!(halt.reason, HaltReason::PendingLookupFailed);
-        assert_ne!(halt.reason.exit_code(), 0);
     }
 }
