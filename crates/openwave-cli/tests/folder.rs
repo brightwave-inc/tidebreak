@@ -313,9 +313,13 @@ fn an_operator_grant_is_one_record_both_shells_read_and_either_side_can_revoke()
     );
 }
 
-/// #1965: disconnect left the subject-scoped list-folders grant standing;
-/// reconnect then minted a second one. After a sole-holder disconnect+reconnect
-/// the chat must hold exactly one list-folders grant.
+/// #1965 / #1978: disconnect left the subject-scoped list-folders grant
+/// standing; reconnect then minted a second one. After a sole-holder
+/// disconnect+reconnect the chat must hold exactly one list-folders grant.
+///
+/// #1974 only covered the default text path. JSON disconnect returned before
+/// `revoke_orphan_list_roots`, so drivers using `--output-format json` still
+/// stacked grants — exercise that path explicitly.
 #[test]
 fn disconnect_then_reconnect_keeps_a_single_list_folders_grant() {
     let base = tempfile::tempdir_in(home()).unwrap();
@@ -327,7 +331,7 @@ fn disconnect_then_reconnect_keeps_a_single_list_folders_grant() {
     let chat = create_chat(&data_dir);
     connect_folder(&data_dir, &reports, &chat);
 
-    let (ok, _, stderr) = run(
+    let (ok, stdout, stderr) = run(
         &data_dir,
         &[
             "folder",
@@ -335,15 +339,28 @@ fn disconnect_then_reconnect_keeps_a_single_list_folders_grant() {
             reports.to_str().unwrap(),
             "--chat",
             &chat,
+            "--output-format",
+            "json",
         ],
     );
     assert!(ok, "disconnect failed: {stderr}");
+    let body: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("disconnect json body");
+    assert_eq!(body["chat"].as_str(), Some(chat.as_str()));
+    assert!(body["root_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(body["approval_revoked"], true);
+    assert_eq!(body["approval_shared"], false);
+
     let after_disconnect = desktop_grant_statements(&data_dir);
     assert!(
         after_disconnect
             .iter()
             .all(|grant| grant.capability != Capability::ListRoots),
         "list-folders must not outlive the last root for the chat: {after_disconnect:?}"
+    );
+    assert!(
+        after_disconnect.is_empty(),
+        "sole-holder json disconnect must clear every grant: {after_disconnect:?}"
     );
 
     connect_folder(&data_dir, &reports, &chat);

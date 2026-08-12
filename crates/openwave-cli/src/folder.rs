@@ -709,6 +709,13 @@ async fn disconnect(
         approval_shared = true;
     }
 
+    // `RevokeRoot` drops only root-scoped grants. `ListRoots` is subject-scoped
+    // and would otherwise survive as a dangling list-folders row; the next
+    // connect then mints a second one. Drop it once this subject holds no
+    // root-scoped reach left to list. Must run before any format-specific
+    // return — JSON used to early-return here and leave the orphan standing.
+    revoke_orphan_list_roots(data_dir, subject)?;
+
     if format == OutputFormat::Json {
         return emit_json(&serde_json::json!({
             "chat": chat_id,
@@ -727,11 +734,6 @@ async fn disconnect(
              see `openwave folder list`"
         );
     }
-    // `RevokeRoot` drops only root-scoped grants. `ListRoots` is subject-scoped
-    // and would otherwise survive as a dangling list-folders row; the next
-    // connect then mints a second one. Drop it once this subject holds no
-    // root-scoped reach left to list.
-    revoke_orphan_list_roots(data_dir, subject)?;
     Ok(())
 }
 
