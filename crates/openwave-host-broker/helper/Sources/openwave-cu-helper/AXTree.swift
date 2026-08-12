@@ -65,6 +65,7 @@ enum AXTree {
     }
 
     static func read(_ request: HelperRequest) throws -> Result {
+        try Control.ensureNotBlocked(request.bundleId)
         // Surface both permission modals (Accessibility + Screen Recording) up
         // front so the user grants everything in one pass instead of hitting a
         // second modal and restart the first time a different tool runs.

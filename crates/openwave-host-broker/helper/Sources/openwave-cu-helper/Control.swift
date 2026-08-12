@@ -40,9 +40,9 @@ enum Control {
 
     // MARK: - Never-automate blocklist (defensive copy; the broker is authoritative)
 
-    /// Bundle ids (exact, or as a dotted prefix) the helper will never drive.
+    /// Bundle ids (exact, or as a dotted prefix) the helper will never act on.
     /// Mirrors the broker's blocklist — defense in depth, not the primary gate.
-    private static let blockedBundlePrefixes: [String] = [
+    static let blockedBundlePrefixes: [String] = [
         // Never automate OpenWave itself (covers the desktop and any
         // channel-suffixed variant).
         "io.brightwave.openwave",
@@ -59,8 +59,26 @@ enum Control {
         "com.apple.keychainaccess",
     ]
 
-    private static func isBlocked(_ bundleId: String) -> Bool {
-        blockedBundlePrefixes.contains { bundleId == $0 || bundleId.hasPrefix($0) }
+    /// Matches the broker's semantics exactly: an entry blocks its exact id and
+    /// anything nested under it at a dotted boundary, so `com.apple.Terminal`
+    /// blocks `com.apple.Terminal.helper` but not `com.apple.Terminalized`.
+    static func isBlocked(_ bundleId: String) -> Bool {
+        blockedBundlePrefixes.contains { entry in
+            let base = entry.hasSuffix(".") ? String(entry.dropLast()) : entry
+            return bundleId == base
+                || (bundleId.hasPrefix(base) && bundleId.dropFirst(base.count).hasPrefix("."))
+        }
+    }
+
+    /// Throw `operation_failed` when a request targets a blocked bundle. Shared
+    /// by every op that names an app — capture and read as well as control, so
+    /// a compromised broker cannot read Terminal or OpenWave through the helper
+    /// directly.
+    static func ensureNotBlocked(_ bundleId: String?) throws {
+        if let bundleId, isBlocked(bundleId) {
+            throw HelperError(
+                code: .operationFailed, message: "app \(bundleId) is not automatable")
+        }
     }
 
     // MARK: - Auto-yield on system security dialogs

@@ -16,6 +16,7 @@ enum Capture {
     }
 
     static func run(_ request: HelperRequest) async throws -> Result {
+        try Control.ensureNotBlocked(request.bundleId)
         // Surface both permission modals (Screen Recording + Accessibility) up
         // front so the user grants everything in one pass instead of hitting a
         // second modal and restart the first time a different tool runs.

@@ -24,6 +24,7 @@ enum Windows {
     }
 
     static func list(bundleId: String?) throws -> [Window] {
+        try Control.ensureNotBlocked(bundleId)
         // Enumeration itself works without a grant (titles just come back
         // nil), but this is usually the first computer-use op the agent runs,
         // so surface both permission modals here. That way the user grants
