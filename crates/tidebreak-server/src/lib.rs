@@ -121,13 +121,21 @@ use tidebreak_code_execution::ExecTool;
 #[cfg(test)]
 use tidebreak_core::DbStore;
 use tidebreak_core::{
-    ask_user_questions_tool_spec, exit_plan_mode_tool_spec, import_connected_file_tool_spec,
-    list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
-    request_folder_access_tool_spec, validate_ask_user_questions_arguments,
-    validate_exit_plan_mode_arguments, validate_import_connected_file_arguments,
-    validate_list_connected_folders_arguments, validate_list_folder_arguments,
-    validate_read_connected_file_arguments, validate_request_folder_access_arguments,
-    validate_write_output_to_connected_folder_arguments,
+    ask_user_questions_tool_spec, computer_capture_screen_tool_spec, computer_click_tool_spec,
+    computer_focus_window_tool_spec, computer_key_press_tool_spec, computer_list_windows_tool_spec,
+    computer_read_app_content_tool_spec, computer_return_to_openwave_tool_spec,
+    computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
+    exit_plan_mode_tool_spec, import_connected_file_tool_spec, list_connected_folders_tool_spec,
+    list_folder_tool_spec, read_connected_file_tool_spec, request_folder_access_tool_spec,
+    validate_ask_user_questions_arguments, validate_computer_capture_screen_arguments,
+    validate_computer_click_arguments, validate_computer_focus_window_arguments,
+    validate_computer_key_press_arguments, validate_computer_list_windows_arguments,
+    validate_computer_read_app_content_arguments, validate_computer_return_to_openwave_arguments,
+    validate_computer_scroll_arguments, validate_computer_type_text_arguments,
+    validate_computer_wait_arguments, validate_exit_plan_mode_arguments,
+    validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
+    validate_list_folder_arguments, validate_read_connected_file_arguments,
+    validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
     write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
     CachingSecretProvider, Config, CreateAppTool, FsBlobStore, KeychainSecretProvider, ListDir,
     Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
@@ -1147,6 +1155,12 @@ async fn bind_inner(
     );
     let foreground_web_search = web_search::foreground_tool(store.clone(), secrets.clone());
     let web_extract = web_search::foreground_extract_tool(store.clone(), secrets.clone());
+    // Computer use exists only where there is a display to capture and a
+    // trusted client to drive it: the desktop profile on macOS, where the
+    // bundled broker has a real computer-use backend. Anywhere else the tools
+    // are simply not registered, so the model never sees them and a
+    // self-host or background surface can never hold them.
+    let computer_use = config.profile == Profile::Desktop && cfg!(target_os = "macos");
     let (tools, agent_config) = agent_deps(
         code_execution.clone(),
         foreground_web_search,
@@ -1155,6 +1169,7 @@ async fn bind_inner(
         config.data_dir.clone(),
         host_folders.clone(),
         gateway.clone(),
+        computer_use,
     );
     let tools = Arc::new(tools);
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
@@ -1420,6 +1435,10 @@ fn agent_deps(
     profile_data_dir: std::path::PathBuf,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     gateway: Arc<gateway_runtime::GatewayRuntime>,
+    // Whether the computer-use tools register at all: desktop profile on
+    // macOS, decided by the caller. When false the contracts stay
+    // unregistered, so no turn surface can advertise or checkpoint them.
+    computer_use: bool,
 ) -> (ToolRegistry, AgentConfig) {
     /// The host-folder seam folded into `create_app`'s authoring-time folder
     /// lookup: approved roots as (id, name) pairs, empty on any error —
@@ -1539,6 +1558,9 @@ fn agent_deps(
         ApprovalClass::Workspace,
         validate_write_output_to_connected_folder_arguments,
     );
+    if computer_use {
+        register_computer_use_tools(&mut tools);
+    }
     tools.register_validated_foreground_client(
         ask_user_questions_tool_spec(),
         ApprovalClass::ReadOnly,
@@ -1559,6 +1581,65 @@ fn agent_deps(
         ..AgentConfig::default()
     };
     (tools, agent_config)
+}
+
+/// Register the computer-use contracts as validated client tools.
+///
+/// Registered only when the caller determined the host can honor them (the
+/// desktop profile on macOS). The tools are client-executed: the server parks
+/// each call for the desktop to claim, the desktop authorizes against the host
+/// broker's per-app grants, and the broker performs the work. Reads and capture
+/// are `ReadOnly` — once their broker grant exists they never card per call,
+/// and plan mode keeps them. The acting tools are `Sensitive`; they resolve to
+/// [`openwave_core::ToolApprovalKind::ComputerMayControlApp`] through
+/// `ToolApprovalKind::for_tool_name`, so plan mode refuses them and a control
+/// call cards once per app instead of per action.
+fn register_computer_use_tools(tools: &mut ToolRegistry) {
+    for (spec, validate) in [
+        (
+            computer_list_windows_tool_spec(),
+            validate_computer_list_windows_arguments as fn(&serde_json::Value) -> bool,
+        ),
+        (
+            computer_capture_screen_tool_spec(),
+            validate_computer_capture_screen_arguments,
+        ),
+        (
+            computer_read_app_content_tool_spec(),
+            validate_computer_read_app_content_arguments,
+        ),
+        (
+            computer_scroll_tool_spec(),
+            validate_computer_scroll_arguments,
+        ),
+        (
+            computer_focus_window_tool_spec(),
+            validate_computer_focus_window_arguments,
+        ),
+        (
+            computer_return_to_openwave_tool_spec(),
+            validate_computer_return_to_openwave_arguments,
+        ),
+        (computer_wait_tool_spec(), validate_computer_wait_arguments),
+    ] {
+        tools.register_validated_client(spec, ApprovalClass::ReadOnly, validate);
+    }
+    for (spec, validate) in [
+        (
+            computer_click_tool_spec(),
+            validate_computer_click_arguments as fn(&serde_json::Value) -> bool,
+        ),
+        (
+            computer_type_text_tool_spec(),
+            validate_computer_type_text_arguments,
+        ),
+        (
+            computer_key_press_tool_spec(),
+            validate_computer_key_press_arguments,
+        ),
+    ] {
+        tools.register_validated_client(spec, ApprovalClass::Sensitive, validate);
+    }
 }
 
 /// Open the durable store the profile selects.
