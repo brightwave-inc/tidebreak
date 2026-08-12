@@ -111,13 +111,6 @@ impl OpenAiCompatProvider {
         self.conversation_attribution = true;
         self
     }
-
-    /// Ask the endpoint to include usage in its streaming response.
-    #[must_use]
-    pub(crate) fn with_streaming_usage(mut self) -> Self {
-        self.streaming_usage = true;
-        self
-    }
 }
 
 #[async_trait]
@@ -1717,16 +1710,24 @@ mod tests {
 
     #[tokio::test]
     async fn compatible_route_in_band_errors_keep_the_public_provider_id() {
-        use axum::http::{header, StatusCode};
+        use axum::http::StatusCode;
         use axum::response::IntoResponse;
         use axum::routing::post;
         use axum::Router;
 
-        async fn error_stream() -> impl IntoResponse {
+        async fn error_stream(uri: axum::http::Uri) -> impl IntoResponse {
+            // The gateway's OpenAI route speaks Responses; its in-band
+            // terminal failure is `response.failed`. Chat-Completions routes
+            // carry the bare `error` frame.
+            let body = if uri.path().ends_with("/responses") {
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstream is overloaded\",\"type\":\"server_error\",\"code\":\"server_overloaded\"}}}\n\n"
+            } else {
+                "data: {\"error\":{\"message\":\"upstream is overloaded\",\"type\":\"server_error\",\"code\":\"server_overloaded\"}}\n\n"
+            };
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/event-stream")],
-                "data: {\"error\":{\"message\":\"upstream is overloaded\",\"type\":\"server_error\",\"code\":\"server_overloaded\"}}\n\n",
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                body,
             )
         }
 
@@ -1766,7 +1767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_gateway_request_uses_conversation_credentials_and_requests_streaming_usage() {
+    async fn a_gateway_request_uses_conversation_credentials_on_the_responses_surface() {
         use axum::body::Bytes;
         use axum::extract::State;
         use axum::http::{header, HeaderMap, StatusCode};
@@ -1798,7 +1799,8 @@ mod tests {
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/event-stream")],
-                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n\
+                 data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             )
         }
 
@@ -1870,7 +1872,9 @@ mod tests {
         assert_eq!(source.0.lock().unwrap().as_slice(), &[Some(conversation)]);
         let requests = capture_state.0.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].path, "/compat/openai/v1/chat/completions");
+        // The gateway's OpenAI surface is the Responses API; it serves no
+        // northbound Chat Completions route.
+        assert_eq!(requests[0].path, "/compat/openai/v1/responses");
         assert_eq!(
             requests[0].headers.get(header::AUTHORIZATION).unwrap(),
             "Bearer mg_at_rotating"
@@ -1882,10 +1886,9 @@ mod tests {
                 .unwrap(),
             conversation.to_string().as_str()
         );
-        assert_eq!(
-            requests[0].body["stream_options"],
-            json!({ "include_usage": true })
-        );
+        assert_eq!(requests[0].body["stream"], json!(true));
+        assert!(requests[0].body.get("stream_options").is_none());
+        assert_eq!(requests[1].path, "/compat/openai/v1/chat/completions");
         assert_eq!(
             requests[1].headers.get(header::AUTHORIZATION).unwrap(),
             "Bearer direct-key"
