@@ -48,8 +48,9 @@
 //! folder, which the broker stamps as operator configuration. It is deliberate
 //! provisioning only — nothing here answers a folder request an agent made
 //! during a turn. See [`folder`]. Unlike the client commands it works on local
-//! broker state and the local data directory, so it embeds and takes no
-//! `--server`.
+//! broker state and the local product store (not via `--server`/`--attach`): it
+//! opens them beside a running `serve`/desktop rather than embedding a second
+//! server, so a live profile can be provisioned without stopping the daemon.
 //!
 //! Once a folder is connected, the tools that read it are executed by whichever
 //! process owns that broker state — `serve`, or the engine `-p` embeds. See
@@ -136,8 +137,9 @@ tui, -p, output, attach, and the setup commands also take --server <url>
 running instead of embedding one. --attach reads {OPENWAVE_DATA_DIR}/listen.json
 (written by serve and the desktop). With --server the token comes from
 OPENWAVE_SERVER_TOKEN, or from the named variable; it is never an argument
-either. The folder commands do not: they provision local host consent in this
-machine's own broker state.";
+either. The folder commands do not take --server/--attach: they provision local
+host consent in this machine's own broker and product store, and they can run
+while serve or the desktop already owns the data directory.";
 
 #[tokio::main]
 async fn main() {

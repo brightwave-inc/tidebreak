@@ -81,38 +81,70 @@ fn home() -> PathBuf {
         .expect("canonical home")
 }
 
-/// Create one chat through the running server, then stop it: the folder
-/// commands need the data directory's locks for themselves.
-fn create_chat(data_dir: &Path) -> String {
+/// Endpoint of a live `openwave serve` process.
+struct ServeEndpoint {
+    url: String,
+    token: String,
+    /// Keep the daemon alive for the scope of the caller.
+    _daemon: Reaper,
+    /// Drain stdout so a full pipe cannot stall the child.
+    _stdout: std::thread::JoinHandle<()>,
+}
+
+/// Start `openwave serve` and return its base URL and bearer token.
+fn start_serve(data_dir: &Path) -> ServeEndpoint {
     let mut child = openwave(data_dir)
         .arg("serve")
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn openwave serve");
     let stdout = child.stdout.take().unwrap();
-    let mut reaper = Reaper(child);
     let mut lines = BufReader::new(stdout).lines();
     let addr_line = lines.next().unwrap().unwrap();
     let token_line = lines.next().unwrap().unwrap();
-    let addr = addr_line
-        .rsplit("http://")
-        .next()
-        .unwrap()
-        .trim()
-        .to_owned();
+    let url = format!(
+        "http://{}",
+        addr_line.rsplit("http://").next().unwrap().trim()
+    );
     let token = token_line
         .trim_start_matches("openwave: token ")
         .trim()
         .to_owned();
+    // Keep draining so a long-lived daemon cannot block on a full stdout pipe.
+    let drain = std::thread::spawn(move || for _ in lines {});
+    ServeEndpoint {
+        url,
+        token,
+        _daemon: Reaper(child),
+        _stdout: drain,
+    }
+}
 
-    let mut stream = TcpStream::connect(&addr).unwrap();
+/// Create one chat through a short-lived server, then stop it.
+///
+/// Most folder tests still want an idle data directory so they can open the
+/// broker without contending with a daemon. The concurrent case uses
+/// [`start_serve`] and creates the chat while the daemon stays up.
+fn create_chat(data_dir: &Path) -> String {
+    let endpoint = start_serve(data_dir);
+    create_chat_on(&endpoint)
+}
+
+/// Create one chat against a live serve endpoint.
+fn create_chat_on(endpoint: &ServeEndpoint) -> String {
+    let addr = endpoint
+        .url
+        .strip_prefix("http://")
+        .expect("serve url is http");
+    let mut stream = TcpStream::connect(addr).unwrap();
     let body = "{}";
     stream
         .write_all(
             format!(
-                "POST /chats HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
+                "POST /chats HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\
                  Content-Type: application/json\r\nContent-Length: {}\r\n\
                  Connection: close\r\n\r\n{body}",
+                endpoint.token,
                 body.len()
             )
             .as_bytes(),
@@ -125,11 +157,7 @@ fn create_chat(data_dir: &Path) -> String {
     let start = payload.find('{').expect("chat body");
     let chat: serde_json::Value = serde_json::from_str(&payload[start..])
         .unwrap_or_else(|error| panic!("chat body {payload:?}: {error}"));
-    let id = chat["id"].as_str().expect("chat id").to_owned();
-
-    reaper.0.kill().ok();
-    reaper.0.wait().ok();
-    id
+    chat["id"].as_str().expect("chat id").to_owned()
 }
 
 fn desktop_broker(data_dir: &Path) -> Broker {
@@ -444,6 +472,12 @@ fn an_unattended_turn_reads_a_folder_the_operator_connected() {
 /// turn is a plain `--server` client holding only a bearer token. It cannot
 /// execute a folder call — it has no executor credential and no flag grants it
 /// one — and it does not have to, because the daemon does.
+///
+/// The folder is connected *while a serve holds the data directory*, then the
+/// scripted daemon is started with that root. Concurrent connect is the
+/// operator workflow this change closes; the turn half still proves the daemon
+/// executor. (The scripted provider is process env at serve spawn, so the
+/// scripted engine cannot be the same process that was up during connect.)
 #[test]
 fn a_serve_daemon_executes_folder_calls_for_an_attached_client() {
     let base = tempfile::tempdir_in(home()).unwrap();
@@ -454,9 +488,12 @@ fn a_serve_daemon_executes_folder_calls_for_an_attached_client() {
     std::fs::write(reports.join("q3.md"), "revenue held flat\n").unwrap();
 
     let chat = create_chat(&data_dir);
+    // Prove connect against a live data-dir lock, then hand the root to a
+    // scripted serve for the turn.
+    let lock_holder = start_serve(&data_dir);
     let root = connect_folder(&data_dir, &reports, &chat);
+    drop(lock_holder);
 
-    // The script belongs to the engine, which now lives in the daemon.
     let mut daemon = openwave(&data_dir)
         .arg("serve")
         .env("OPENWAVE_SCRIPTED_PROVIDER", folder_reading_script(&root))
@@ -477,6 +514,7 @@ fn a_serve_daemon_executes_folder_calls_for_an_attached_client() {
         .trim_start_matches("openwave: token ")
         .trim()
         .to_owned();
+    let _drain = std::thread::spawn(move || for _ in lines {});
 
     let attached = openwave(&data_dir)
         .args([
@@ -509,4 +547,62 @@ fn a_serve_daemon_executes_folder_calls_for_an_attached_client() {
         "stdout: {stdout}\nstderr: {stderr}"
     );
     assert_folder_tools_completed(&stdout, &stderr);
+}
+
+/// The contract this change exists for: `openwave folder connect|list|
+/// disconnect` must succeed while `openwave serve` holds `openwave.lock`.
+/// Before, provisioning embedded a second server and refused. The daemon's
+/// folder executor opens the broker only per tool call, so a quiet serve leaves
+/// `host-broker.lock` free for these commands.
+#[test]
+fn folder_connect_while_serve_holds_the_data_directory() {
+    let base = tempfile::tempdir_in(home()).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let data_dir = data.path().join("profile");
+    let reports = base.path().join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("q3.md"), "revenue held flat\n").unwrap();
+
+    let endpoint = start_serve(&data_dir);
+    let chat = create_chat_on(&endpoint);
+
+    // The data directory is locked. Connect and list must still work.
+    assert!(
+        data_dir.join("openwave.lock").exists(),
+        "serve should hold openwave.lock"
+    );
+    let root = connect_folder(&data_dir, &reports, &chat);
+    let (ok, listed, stderr) = run(&data_dir, &["folder", "list", "--chat", &chat]);
+    assert!(ok, "list while serve is up failed: {stderr}");
+    // `folder list` reports grant rows (id, subject, capability, display name,
+    // provenance) — not the opaque root id, which only the connect report names.
+    assert!(
+        listed.contains("operator-config")
+            && listed.contains("\tread\treports\t")
+            && !root.is_empty(),
+        "listing: {listed}"
+    );
+
+    // Disconnect while the daemon still owns the profile.
+    let (ok, _, stderr) = run(
+        &data_dir,
+        &[
+            "folder",
+            "disconnect",
+            reports.to_str().unwrap(),
+            "--chat",
+            &chat,
+        ],
+    );
+    assert!(ok, "disconnect while serve is up failed: {stderr}");
+    let statements = desktop_grant_statements(&data_dir);
+    assert!(
+        statements
+            .iter()
+            .all(|grant| !matches!(grant.scope, Scope::Root { .. })),
+        "grants left after disconnect while serve held the lock: {statements:?}"
+    );
+
+    // Keep the endpoint alive until the assertions finish so the lock is real.
+    drop(endpoint);
 }

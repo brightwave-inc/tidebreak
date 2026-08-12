@@ -14,25 +14,44 @@
 //! same typed refusal an undecided desktop prompt produces — see
 //! [`crate::print`].
 //!
-//! Both shells hold exclusive locks on the profile data directory (the server's
-//! `openwave.lock` and the broker's `host-broker.lock`), so these commands
-//! refuse rather than write behind a running OpenWave. That is the intended
-//! failure: two owners of one capability store is not a supported arrangement.
+//! ## Locks, and why these commands do not take them
+//!
+//! A running `openwave serve` or desktop holds `openwave.lock` for the life of
+//! the process, and any process that has opened the broker holds
+//! `host-broker.lock` until that handle drops. Provisioning used to embed a
+//! second server and open the broker under those locks, which meant it refused
+//! whenever the profile was already owned — the exact moment an operator needs
+//! to connect a folder for a live daemon.
+//!
+//! The durable authority is not the locks; it is the product store (SQLite WAL)
+//! and the broker's own atomic state file. These commands therefore open the
+//! product store directly and open the broker for the duration of one control
+//! request only, then drop it. They never unlock a lock another process holds,
+//! never claim to be the server, and never half-grant: product projection and
+//! broker registration still converge or the approval is withdrawn.
+//!
+//! A second process that has already opened the broker for a long-lived handle
+//! (the desktop sidecar, or a headless executor mid-operation) will still make
+//! `open_broker` fail closed. The error names that condition; it does not offer
+//! to steal the lock. Server-mediated HTTP provisioning is deliberately not the
+//! path: the server has no broker, and root-attachment routes only move product
+//! state — they cannot mint host grants.
 
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Timelike, Utc};
 use openwave_core::{
-    AgentError, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, Chat, ChatId,
-    FinishRootAttachmentChangeOutcome, HostRootId, Result, RootAttachmentChange,
+    AgentError, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, Chat, ChatId, Config,
+    DbStore, FinishRootAttachmentChangeOutcome, HostRootId, Profile, Result, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangePhase,
     RootAttachmentChangeTerminal, Store, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 use openwave_host_broker::{
-    Broker, Capability, ConsentMethod, ControlEnvelope, ControlRequest, ControlResult,
+    Broker, BrokerError, Capability, ConsentMethod, ControlEnvelope, ControlRequest, ControlResult,
     GrantSubject, OperationId, RegisterRootReceipt, RegisterRootRequest, RequestId, Response,
     RevokeRootRequest, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
     RootAttachmentMutationRequest, RootId, RootPolicy, Scope, SubjectKind, PROTOCOL_VERSION,
@@ -133,20 +152,62 @@ pub async fn run(command: Command) -> Result<()> {
     // stdout carries the command's report; logs stay in the profile's log file.
     openwave_server::logging::init_logging_file_only(&config.data_dir);
     let data_dir = config.data_dir.clone();
-    // The engine owns the store, its migrations, and the data-directory lock.
-    // Booting it is what makes the CLI's product writes the same writes the
-    // desktop makes, rather than a second opinion about the schema.
-    let server = openwave_server::bind_configured(config).await?;
-    let store = server.store();
-    let broker = open_broker(&data_dir)?;
+    // Prefer a normal embed: that runs the desktop schema epoch path and is
+    // the only safe first-boot of an idle profile. When serve/desktop already
+    // holds `openwave.lock`, fall back to opening the product store beside it
+    // — WAL allows the concurrent writer, and a live profile has already
+    // passed the epoch gate. Broker handles are opened per control request so
+    // `host-broker.lock` is not held across the whole command.
+    let (store, _embedded) = open_product_store(config).await?;
 
     match command {
-        Command::Connect { chat, path } => connect(&store, &broker, &data_dir, chat, path).await,
-        Command::List { chat } => list(&store, &broker, chat).await,
-        Command::Disconnect { chat, target } => {
-            disconnect(&store, &broker, &data_dir, chat, &target).await
+        Command::Connect { chat, path } => connect(&store, &data_dir, chat, path).await,
+        Command::List { chat } => list(&store, &data_dir, chat).await,
+        Command::Disconnect { chat, target } => disconnect(&store, &data_dir, chat, &target).await,
+    }
+}
+
+/// Open the profile's product store, embedding a server when the data directory
+/// is free and sharing it when it is not.
+///
+/// The embedded [`openwave_server::Server`] is returned so its instance lock and
+/// accept loop stay alive for the command; drop order keeps the store usable.
+/// Self-host has no local broker and no operator folder path: refuse it here
+/// rather than half-open a remote store and fail on the broker later.
+async fn open_product_store(
+    config: Config,
+) -> Result<(Arc<dyn Store>, Option<openwave_server::Server>)> {
+    match config.profile {
+        Profile::Desktop => {}
+        // Self-host has no local broker. Any future profile is refused the
+        // same way until it grows an explicit operator-folder path.
+        _ => {
+            return Err(AgentError::config(
+                "`openwave folder` provisions host consent on this machine's broker; \
+                 it is not available on this profile",
+            ));
         }
     }
+    match openwave_server::bind_configured(config.clone()).await {
+        Ok(server) => {
+            let store = server.store();
+            Ok((store, Some(server)))
+        }
+        Err(error) if data_dir_held_by_another_process(&error) => {
+            // The running owner already migrated and marked the schema. Open
+            // the same SQLite file under WAL without taking `openwave.lock`.
+            let store = DbStore::connect(&config.database_url()?).await?;
+            Ok((Arc::new(store), None))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether a bind failure is the data-directory instance lock, not a real
+/// configuration problem. Matched on the stable phrase `InstanceLock` writes.
+fn data_dir_held_by_another_process(error: &AgentError) -> bool {
+    let message = error.to_string();
+    message.contains("already running on the data directory")
 }
 
 /// Open the same durable broker state the desktop's sidecar opens.
@@ -157,9 +218,10 @@ pub async fn run(command: Command) -> Result<()> {
 /// probe, so a folder connected here carries the grants it would have carried
 /// had the desktop's picker connected it on this machine.
 ///
-/// Also the handle [`crate::folder_executor`] reads through: one capability
-/// store, opened one way, whether an operator is provisioning a folder or a turn
-/// is reading one.
+/// Also the handle [`crate::folder_executor`] opens through the same path for
+/// each host operation: one capability store, opened one way, whether an
+/// operator is provisioning a folder or a turn is reading one. Callers must
+/// drop the returned handle promptly — it holds `host-broker.lock`.
 pub(crate) fn open_broker(data_dir: &Path) -> Result<Broker> {
     let home = std::env::home_dir()
         .ok_or_else(|| AgentError::config("could not resolve the current user's home directory"))?
@@ -176,12 +238,26 @@ pub(crate) fn open_broker(data_dir: &Path) -> Result<Broker> {
             AgentError::config(format!("could not initialize the folder policy: {error}"))
         })?;
     let execute_commands = openwave_code_execution::LocalExecutionProvider::availability().is_ok();
-    Broker::open_with_execute_commands(policy, &data_dir, execute_commands).map_err(|error| {
-        AgentError::config(format!(
-            "could not open connected-folder state: {error}. Close OpenWave before running \
-             `openwave folder`"
-        ))
-    })
+    Broker::open_with_execute_commands(policy, &data_dir, execute_commands)
+        .map_err(broker_open_error)
+}
+
+/// Map a broker-open failure into an operator-facing configuration error.
+///
+/// A lock held by another process is the expected contention case when the
+/// desktop sidecar (or another long-lived broker handle) is already open. The
+/// message names that condition and never suggests unlocking anything.
+pub(crate) fn broker_open_error(error: BrokerError) -> AgentError {
+    match error {
+        BrokerError::Io(ref io_error) if io_error.kind() == io::ErrorKind::WouldBlock => {
+            AgentError::config(
+                "connected-folder state is held by another OpenWave process \
+                 (desktop sidecar or a live folder executor). Retry in a moment; \
+                 do not remove host-broker.lock",
+            )
+        }
+        other => AgentError::config(format!("could not open connected-folder state: {other}")),
+    }
 }
 
 /// The broker subject a chat's host authority belongs to.
@@ -203,7 +279,15 @@ async fn load_chat(store: &Arc<dyn Store>, chat: ChatId) -> Result<Chat> {
         .ok_or_else(|| AgentError::msg(format!("chat {chat} not found")))
 }
 
-fn control(broker: &Broker, request: ControlRequest) -> Result<ControlResult> {
+/// Run one control request against a freshly opened broker handle, then drop
+/// it so `host-broker.lock` is released before the next product-store step.
+///
+/// Opening per request is what lets provisioning share a data directory with a
+/// running `serve`/desktop: the long-lived owner keeps `openwave.lock`, and
+/// this process only briefly contends for the broker lock. Holding the handle
+/// across an await would pin the lock under a concurrent folder executor.
+fn control(data_dir: &Path, request: ControlRequest) -> Result<ControlResult> {
+    let broker = open_broker(data_dir)?;
     let response = broker.controller().handle(ControlEnvelope {
         protocol_version: PROTOCOL_VERSION,
         request_id: RequestId::new(),
@@ -244,7 +328,6 @@ fn canonical_folder(path: &Path) -> Result<PathBuf> {
 
 async fn connect(
     store: &Arc<dyn Store>,
-    broker: &Broker,
     data_dir: &Path,
     chat_id: ChatId,
     path: PathBuf,
@@ -256,7 +339,7 @@ async fn connect(
     // A change left awaiting the broker by an interrupted run blocks the chat.
     // Drive it to a terminal before starting new work rather than reporting a
     // conflict the operator cannot act on.
-    settle_pending_changes(store, broker, &chat, subject, executor_id).await?;
+    settle_pending_changes(store, data_dir, &chat, subject, executor_id).await?;
     // Settling advances the projection's revision, so the CAS fence the attach
     // below carries has to come from a fresh read.
     let chat = load_chat(store, chat_id).await?;
@@ -272,7 +355,7 @@ async fn connect(
     // so this is the only place the CLI can create host reach.
     let operation_id = OperationId::new();
     let root = match control(
-        broker,
+        data_dir,
         ControlRequest::RegisterRoot(RegisterRootRequest {
             operation_id,
             subject,
@@ -287,7 +370,7 @@ async fn connect(
     // Read the durable receipt back rather than trusting the response: it is
     // the same authority the desktop's reconciler consults, and it reports a
     // registration that was revoked between commit and reply.
-    match lookup_registration(broker, operation_id, subject, chat.id.0)? {
+    match lookup_registration(data_dir, operation_id, subject, chat.id.0)? {
         RegisterRootReceipt::Completed { root: recorded } if recorded == root => {}
         _ => {
             return Err(AgentError::msg(
@@ -300,10 +383,10 @@ async fn connect(
     // visible in the desktop's connected-folders panel. If it cannot be
     // committed, withdraw the approval instead of leaving standing host reach
     // no surface can show.
-    let attached = attach_to_chat(store, broker, &chat, subject, root.root_id, executor_id).await;
+    let attached = attach_to_chat(store, data_dir, &chat, subject, root.root_id, executor_id).await;
     if let Err(error) = attached {
         let revoked = control(
-            broker,
+            data_dir,
             ControlRequest::RevokeRoot(RevokeRootRequest {
                 operation_id: OperationId::new(),
                 subject,
@@ -329,13 +412,13 @@ async fn connect(
 }
 
 fn lookup_registration(
-    broker: &Broker,
+    data_dir: &Path,
     operation_id: OperationId,
     subject: GrantSubject,
     conversation_id: Uuid,
 ) -> Result<RegisterRootReceipt> {
     match control(
-        broker,
+        data_dir,
         ControlRequest::LookupRegisterRootReceipt(
             openwave_host_broker::LookupRegisterRootReceiptRequest {
                 operation_id,
@@ -351,12 +434,12 @@ fn lookup_registration(
     }
 }
 
-async fn list(store: &Arc<dyn Store>, broker: &Broker, chat: Option<ChatId>) -> Result<()> {
+async fn list(store: &Arc<dyn Store>, data_dir: &Path, chat: Option<ChatId>) -> Result<()> {
     // `ListGrantStatements` is the same query the desktop's Permissions surface
     // reads (`list_capability_consents`), so the two shells cannot disagree
     // about what is granted or how it was granted.
     let ControlResult::ListGrantStatements { grants } =
-        control(broker, ControlRequest::ListGrantStatements)?
+        control(data_dir, ControlRequest::ListGrantStatements)?
     else {
         return Err(unexpected_broker_response());
     };
@@ -446,7 +529,6 @@ fn consent_label(method: ConsentMethod) -> &'static str {
 
 async fn disconnect(
     store: &Arc<dyn Store>,
-    broker: &Broker,
     data_dir: &Path,
     chat_id: ChatId,
     target: &OsStr,
@@ -454,11 +536,11 @@ async fn disconnect(
     let chat = load_chat(store, chat_id).await?;
     let subject = subject_for(&chat)?;
     let executor_id = executor_identity(data_dir)?;
-    settle_pending_changes(store, broker, &chat, subject, executor_id).await?;
+    settle_pending_changes(store, data_dir, &chat, subject, executor_id).await?;
     let chat = load_chat(store, chat_id).await?;
-    let root_id = resolve_target(broker, &chat, target)?;
+    let root_id = resolve_target(data_dir, &chat, target)?;
 
-    detach_from_chat(store, broker, &chat, subject, root_id, executor_id).await?;
+    detach_from_chat(store, data_dir, &chat, subject, root_id, executor_id).await?;
     println!("openwave: disconnected {root_id} from chat {chat_id}");
 
     // Detaching leaves the host approval standing, which is right when another
@@ -466,9 +548,9 @@ async fn disconnect(
     // would have no way to withdraw it. Withdraw it exactly when this chat's
     // subject is the only one with root-scoped grants on the folder, and say
     // so plainly when it is not.
-    if sole_grant_holder(broker, root_id, subject)? {
+    if sole_grant_holder(data_dir, root_id, subject)? {
         match control(
-            broker,
+            data_dir,
             ControlRequest::RevokeRoot(RevokeRootRequest {
                 operation_id: OperationId::new(),
                 subject,
@@ -491,9 +573,9 @@ async fn disconnect(
 }
 
 /// Whether `subject` is the only holder of root-scoped grants on `root_id`.
-fn sole_grant_holder(broker: &Broker, root_id: RootId, subject: GrantSubject) -> Result<bool> {
+fn sole_grant_holder(data_dir: &Path, root_id: RootId, subject: GrantSubject) -> Result<bool> {
     let ControlResult::ListGrantStatements { grants } =
-        control(broker, ControlRequest::ListGrantStatements)?
+        control(data_dir, ControlRequest::ListGrantStatements)?
     else {
         return Err(unexpected_broker_response());
     };
@@ -512,14 +594,14 @@ fn sole_grant_holder(broker: &Broker, root_id: RootId, subject: GrantSubject) ->
 /// A root id is exact. A path is matched by the leaf name the broker reports,
 /// because the broker deliberately never exposes a root's absolute path — so an
 /// ambiguous name is refused rather than guessed at.
-fn resolve_target(broker: &Broker, chat: &Chat, target: &OsStr) -> Result<RootId> {
+fn resolve_target(data_dir: &Path, chat: &Chat, target: &OsStr) -> Result<RootId> {
     let attached = chat
         .root_attachments
         .iter()
         .map(|attachment| *attachment.root_id.as_uuid())
         .collect::<std::collections::HashSet<_>>();
     let ControlResult::ListApprovedRoots { roots } =
-        control(broker, ControlRequest::ListApprovedRoots)?
+        control(data_dir, ControlRequest::ListApprovedRoots)?
     else {
         return Err(unexpected_broker_response());
     };
@@ -566,7 +648,7 @@ fn resolve_target(broker: &Broker, chat: &Chat, target: &OsStr) -> Result<RootId
 
 async fn attach_to_chat(
     store: &Arc<dyn Store>,
-    broker: &Broker,
+    data_dir: &Path,
     chat: &Chat,
     subject: GrantSubject,
     root_id: RootId,
@@ -574,7 +656,7 @@ async fn attach_to_chat(
 ) -> Result<()> {
     drive_change(
         store,
-        broker,
+        data_dir,
         chat,
         subject,
         root_id,
@@ -586,7 +668,7 @@ async fn attach_to_chat(
 
 async fn detach_from_chat(
     store: &Arc<dyn Store>,
-    broker: &Broker,
+    data_dir: &Path,
     chat: &Chat,
     subject: GrantSubject,
     root_id: RootId,
@@ -603,7 +685,7 @@ async fn detach_from_chat(
     }
     drive_change(
         store,
-        broker,
+        data_dir,
         chat,
         subject,
         root_id,
@@ -622,7 +704,7 @@ async fn detach_from_chat(
 /// the broker, which the next invocation settles.
 async fn drive_change(
     store: &Arc<dyn Store>,
-    broker: &Broker,
+    data_dir: &Path,
     chat: &Chat,
     subject: GrantSubject,
     root_id: RootId,
@@ -657,20 +739,20 @@ async fn drive_change(
             )))
         }
     };
-    settle_change(store, broker, subject, chat.id.0, executor_id, change).await
+    settle_change(store, data_dir, subject, chat.id.0, executor_id, change).await
 }
 
 /// Bring one durable change to a terminal phase and report what it means.
 async fn settle_change(
     store: &Arc<dyn Store>,
-    broker: &Broker,
+    data_dir: &Path,
     subject: GrantSubject,
     conversation_id: Uuid,
     executor_id: Uuid,
     change: RootAttachmentChange,
 ) -> Result<()> {
     let change = if change.phase == RootAttachmentChangePhase::AwaitingBroker {
-        let terminal = converge_broker(broker, subject, conversation_id, &change)?;
+        let terminal = converge_broker(data_dir, subject, conversation_id, &change)?;
         match store
             .finish_root_attachment_change(change.id, executor_id, &terminal, canonical_now())
             .await?
@@ -700,7 +782,7 @@ async fn settle_change(
 
 /// Dispatch (or recover) the broker half of one product change.
 fn converge_broker(
-    broker: &Broker,
+    data_dir: &Path,
     subject: GrantSubject,
     conversation_id: Uuid,
     change: &RootAttachmentChange,
@@ -714,7 +796,7 @@ fn converge_broker(
         RootAttachmentChangeAction::Detach => RootAttachmentMutationKind::Detach,
     };
     let mut receipt = lookup_mutation(
-        broker,
+        data_dir,
         subject,
         conversation_id,
         root_id,
@@ -735,7 +817,7 @@ fn converge_broker(
             },
         };
         let dispatched = control(
-            broker,
+            data_dir,
             match change.action {
                 RootAttachmentChangeAction::Attach => ControlRequest::AttachRoot(request),
                 RootAttachmentChangeAction::Detach => ControlRequest::DetachRoot(request),
@@ -748,7 +830,7 @@ fn converge_broker(
             Ok(_) => return Err(unexpected_broker_response()),
         }
         receipt = lookup_mutation(
-            broker,
+            data_dir,
             subject,
             conversation_id,
             root_id,
@@ -762,7 +844,7 @@ fn converge_broker(
 }
 
 fn lookup_mutation(
-    broker: &Broker,
+    data_dir: &Path,
     subject: GrantSubject,
     conversation_id: Uuid,
     root_id: RootId,
@@ -770,7 +852,7 @@ fn lookup_mutation(
     mutation: RootAttachmentMutationKind,
 ) -> Result<RootAttachmentMutationReceipt> {
     match control(
-        broker,
+        data_dir,
         ControlRequest::LookupRootAttachmentReceipt(
             openwave_host_broker::LookupRootAttachmentReceiptRequest {
                 operation_id,
@@ -867,7 +949,7 @@ fn safe_failure(code: &str, message: &str) -> openwave_core::RootAttachmentChang
 /// command's to finish — and until it is finished, the chat refuses new ones.
 async fn settle_pending_changes(
     store: &Arc<dyn Store>,
-    broker: &Broker,
+    data_dir: &Path,
     chat: &Chat,
     subject: GrantSubject,
     executor_id: Uuid,
@@ -879,7 +961,7 @@ async fn settle_pending_changes(
         if change.chat_id != chat.id {
             continue;
         }
-        settle_change(store, broker, subject, chat.id.0, executor_id, change).await?;
+        settle_change(store, data_dir, subject, chat.id.0, executor_id, change).await?;
     }
     Ok(())
 }

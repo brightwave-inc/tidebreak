@@ -28,6 +28,9 @@
 //! credential and starts no executor: the call belongs to whichever process owns
 //! that server's host state, and now — if that process is `openwave serve`, an
 //! embedded `openwave -p`, or `openwave tui` — it is actually answered there.
+//! Each host operation opens the broker briefly and drops it, so operator
+//! `openwave folder` provisioning can take `host-broker.lock` between calls
+//! without stopping the daemon.
 //!
 //! ## Recovery
 //!
@@ -69,7 +72,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
@@ -81,8 +83,8 @@ use openwave_core::{
     READ_CONNECTED_FILE_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 use openwave_host_broker::{
-    Broker, Capability, EntryKind, ExecutionContext, OperationEnvelope, OperationRequest,
-    OperationResult, PathRequest, RelativePath, RequestId, Response, RootId, PROTOCOL_VERSION,
+    Capability, EntryKind, ExecutionContext, OperationEnvelope, OperationRequest, OperationResult,
+    PathRequest, RelativePath, RequestId, Response, RootId, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
 
@@ -137,10 +139,6 @@ pub struct FolderExecutor {
     executor_id: Uuid,
     receipts: ReceiptStore,
     data_dir: PathBuf,
-    /// Opened on first use only. A run that never touches a connected folder
-    /// must not take the broker's exclusive lock, write its state file, or fail
-    /// to boot on a host whose home directory cannot be resolved.
-    broker: tokio::sync::OnceCell<Arc<Broker>>,
 }
 
 impl FolderExecutor {
@@ -164,7 +162,6 @@ impl FolderExecutor {
             executor_id: crate::folder::executor_identity(data_dir)?,
             receipts: ReceiptStore::open(data_dir)?,
             data_dir: data_dir.to_path_buf(),
-            broker: tokio::sync::OnceCell::new(),
         }))
     }
 
@@ -527,23 +524,31 @@ impl FolderExecutor {
     /// authorizes the request against the conversation's live grants, opens the
     /// root through its own pinned descriptor, and re-authorizes after the read
     /// — none of which this process can influence, skip, or cache.
+    ///
+    /// The broker handle is opened for this operation only and dropped before
+    /// return, so `host-broker.lock` is free for `openwave folder` provisioning
+    /// between tool calls. Holding it for the life of `serve` would pin the
+    /// lock under the daemon and make operator connect refuse forever.
     async fn broker_operation(
         &self,
         context: ExecutionContext,
         request: OperationRequest,
     ) -> Result<OperationResult> {
-        let broker = self.broker().await?;
+        let data_dir = self.data_dir.clone();
         let envelope = OperationEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new(),
             context,
             request,
         };
-        // The in-process broker does real, blocking host I/O.
-        let response =
-            tokio::task::spawn_blocking(move || broker.operator().handle(envelope).response)
-                .await
-                .map_err(|_| AgentError::msg("the connected-folder operation did not complete"))?;
+        // The in-process broker does real, blocking host I/O. Open and drop
+        // inside the blocking task so the lock never outlives the operation.
+        let response = tokio::task::spawn_blocking(move || {
+            let broker = crate::folder::open_broker(&data_dir)?;
+            Ok::<_, AgentError>(broker.operator().handle(envelope).response)
+        })
+        .await
+        .map_err(|_| AgentError::msg("the connected-folder operation did not complete"))??;
         match response {
             Response::Ok(result) => Ok(result),
             Response::Error(error) => Err(AgentError::msg(format!(
@@ -551,23 +556,6 @@ impl FolderExecutor {
                 error.code
             ))),
         }
-    }
-
-    /// Open the profile's broker state on first use.
-    async fn broker(&self) -> Result<Arc<Broker>> {
-        let broker = self
-            .broker
-            .get_or_try_init(|| async {
-                let data_dir = self.data_dir.clone();
-                tokio::task::spawn_blocking(move || crate::folder::open_broker(&data_dir))
-                    .await
-                    .map_err(|_| {
-                        AgentError::msg("could not open the connected-folder capability store")
-                    })?
-                    .map(Arc::new)
-            })
-            .await?;
-        Ok(broker.clone())
     }
 
     /// The broker execution context a conversation's folder reads run under.
