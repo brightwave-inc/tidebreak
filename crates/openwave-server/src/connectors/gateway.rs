@@ -29,7 +29,10 @@ pub const RESOURCE_CONTROL: &str = "control";
 pub const RESOURCE_LLM: &str = "llm";
 
 const SCOPE: &str = "openid profile offline_access models:read inference:invoke";
-const SECRET_KEY: &str = "gateway.credentials_v1";
+/// The secret-store key the gateway session lives under. Public so the secret
+/// cache at the server boundary can treat the session key specially (see
+/// `CachingSecretProvider::with_miss_passthrough`).
+pub const SECRET_KEY: &str = "gateway.credentials_v1";
 /// Refresh an access token this close to expiry instead of using it.
 const EXPIRY_LEEWAY_SECONDS: u64 = 60;
 const SIGN_IN_REQUIRED_PREFIX: &str = "gateway sign-in required";

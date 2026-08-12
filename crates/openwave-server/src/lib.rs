@@ -980,12 +980,23 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
 /// process rather than one per turn: [`resolver::ConfiguredResolver`] rebuilds
 /// its route set on every turn, and each candidate route reads its provider's
 /// credential to decide whether it exists.
+///
+/// The gateway session key is the one exception to memoized misses: a session
+/// can land in the keychain without this cache observing the write — a
+/// boot-time status read is in flight while sign-in completes, resolving to
+/// the old `NoEntry` after the write's invalidation already ran — and a
+/// cached `None` would then hide the session from the sync loop until
+/// restart. Its misses re-ask the store instead; an absent item answers
+/// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
 fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
     let keychain: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
         Some(service) => KeychainSecretProvider::with_service(service),
         None => KeychainSecretProvider::new(),
     });
-    Arc::new(CachingSecretProvider::new(keychain))
+    Arc::new(
+        CachingSecretProvider::new(keychain)
+            .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
+    )
 }
 
 /// Re-home the configured profile's credentials — see [`secret_rehome`].
