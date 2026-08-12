@@ -6,10 +6,13 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use openwave_code_execution::{PluginPackage, SkillPackage};
 use openwave_core::{AgentConfig, SecretProvider, Store, TurnWebSearch};
 use tokio::sync::Notify;
 
 use crate::bus::EventBus;
+use crate::code_execution::ConfiguredCodeExecutionProvider;
+use crate::foreground_prompt::skill_summary_catalog_lines;
 use crate::resolver::ProviderResolver;
 use crate::retry::RetrySchedule;
 use crate::state::SandboxAttemptGuard;
@@ -25,7 +28,7 @@ pub(super) const SANDBOX_DELEGATED_FILE_PROMPT_PREAMBLE: &str = "You are a sandb
 /// How to form exec calls. Stress-tested agents routinely waste steps by
 /// stuffing a whole shell line into `command` (which is argv[0] only) or by
 /// writing under `/tmp`, which this workspace cannot keep or publish.
-pub(super) const SANDBOX_PROMPT_EXEC_CLAUSE: &str = "exec with argv form only — command is a single executable (for example python3, mkdir, /bin/sh), and each shell token is its own args entry (mkdir -p output is command mkdir with args [\"-p\", \"output\"]; a one-liner is command /bin/sh with args [\"-c\", \"…\"]). Never put spaces inside command. Stay inside the workspace: create files under output/ or other relative paths, not under /tmp. Install packages with separate exec calls when needed (python3 -m pip install --user <pkg>==<ver>). There is no skills catalog and no shared conversation context — put any library or path detail you need into the commands themselves";
+pub(super) const SANDBOX_PROMPT_EXEC_CLAUSE: &str = "exec with argv form only — command is a single executable (for example python3, mkdir, /bin/sh), and each shell token is its own args entry (mkdir -p output is command mkdir with args [\"-p\", \"output\"]; a one-liner is command /bin/sh with args [\"-c\", \"…\"]). Never put spaces inside command. Stay inside the workspace: create files under output/ or other relative paths, not under /tmp. Install packages with separate exec calls when needed (python3 -m pip install --user <pkg>==<ver>). There is no shared conversation context";
 pub(super) const SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE: &str =
     "read_delegated_file to read that one delegated file";
 pub(super) const SANDBOX_PROMPT_WEB_SEARCH_CLAUSE: &str =
@@ -34,6 +37,9 @@ pub(super) const SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE: &str = "request_folder_acc
 pub(super) const SANDBOX_PROMPT_TASK_PLAN_CLAUSE: &str = "update_task_plan to keep an ordered checklist when the task takes several steps — send the whole list every time, keep exactly one step in_progress, and update it as steps finish rather than all at the end";
 pub(super) const SANDBOX_PROMPT_CLOSING: &str = "Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
 pub(super) const SANDBOX_CHAT_ONLY_PROMPT: &str = "You are a sandboxed background assistant. Work only on the task below. You cannot access the conversation, files, folders, the public internet, external capabilities, or other agents. Return the best final text result directly from the task and your own knowledge. Do not claim to have inspected, changed, or produced anything outside this reply.";
+/// Introduces the host-derived skill catalog on a tool-capable run. Names,
+/// one-line descriptions, and install pins only — never SKILL.md bodies.
+pub(super) const SANDBOX_PROMPT_SKILLS_INTRO: &str = "Document skills available in this workspace (before producing a listed kind of file, read `.openwave/skills/<name>/SKILL.md` via exec and follow it; install pins are host-validated):";
 
 /// Compose the run's instructions for the surface it actually has.
 ///
@@ -43,10 +49,17 @@ pub(super) const SANDBOX_CHAT_ONLY_PROMPT: &str = "You are a sandboxed backgroun
 /// A vendor-searching run still has `web_search` — the model provider runs it,
 /// but the model names and uses it the same way — so only a run with no search
 /// at all loses the clause, exactly as a foreground turn's prompt does.
+///
+/// `skills` / `plugins` are the same host-derived catalogs a foreground turn
+/// composes from (`ConfiguredCodeExecutionProvider::skill_catalog` /
+/// `plugin_catalog`). An empty catalog omits the skills section rather than
+/// inventing entries or claiming none exist when the host has no surface.
 pub(super) fn sandbox_system_prompt(
     delegated_file_available: bool,
     web_search: TurnWebSearch,
     tools_supported: bool,
+    skills: &[SkillPackage],
+    plugins: &[PluginPackage],
 ) -> String {
     if !tools_supported {
         return SANDBOX_CHAT_ONLY_PROMPT.to_owned();
@@ -81,7 +94,36 @@ pub(super) fn sandbox_system_prompt(
     } else {
         SANDBOX_PROMPT_PREAMBLE
     };
-    format!("{preamble} {tools} {SANDBOX_PROMPT_CLOSING}")
+    let mut prompt = format!("{preamble} {tools} {SANDBOX_PROMPT_CLOSING}");
+    if let Some(summary) = sandbox_skills_summary(skills, plugins) {
+        prompt.push(' ');
+        prompt.push_str(&summary);
+    }
+    prompt
+}
+
+/// Concise skills block for a tool-capable sandbox run: catalog lines with
+/// install pins, grouped the same way the foreground catalog groups them.
+///
+/// Returns `None` when every entry failed validation or the host passed an
+/// empty catalog, so a headless embedding with no skills stays silent.
+pub(super) fn sandbox_skills_summary(
+    skills: &[SkillPackage],
+    plugins: &[PluginPackage],
+) -> Option<String> {
+    let lines = skill_summary_catalog_lines(skills, plugins);
+    if lines.is_empty() {
+        return None;
+    }
+    // Bound how many skill lines a single prompt carries. The host catalog is
+    // already small; this is a hard ceiling against a future oversized load.
+    const MAX_SKILL_LINES: usize = 24;
+    let mut body = String::from(SANDBOX_PROMPT_SKILLS_INTRO);
+    for line in lines.into_iter().take(MAX_SKILL_LINES) {
+        body.push(' ');
+        body.push_str(&line);
+    }
+    Some(body)
 }
 
 /// Progress lines one step may publish for searches the provider ran itself.
@@ -178,5 +220,9 @@ pub(crate) struct SandboxAgentRunWorker {
     /// future sandbox-safe tool adapter must be given an exact per-run handle
     /// rather than a chat or project path.
     pub(crate) private_scratch_root: Option<PathBuf>,
+    /// Same host code-execution surface the foreground turn uses for its skill
+    /// catalog. Absent on a headless embedding with no exec provider — the
+    /// sandbox prompt then carries no skills section.
+    pub(crate) code_execution: Option<Arc<ConfiguredCodeExecutionProvider>>,
     pub(crate) config: SandboxAgentRunWorkerConfig,
 }

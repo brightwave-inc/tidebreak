@@ -116,7 +116,7 @@ fn render_timeout(timeout_ms: u64) -> String {
 /// description from ever composing into a prompt line, mirroring how folder
 /// paths are JSON-quoted elsewhere; an entry that fails is dropped, not
 /// sanitized.
-fn skill_line(skill: &SkillPackage) -> Option<String> {
+pub(crate) fn skill_line(skill: &SkillPackage) -> Option<String> {
     if !openwave_code_execution::is_valid_skill_name(&skill.name)
         || !openwave_code_execution::is_valid_skill_description(&skill.description)
     {
@@ -135,6 +135,34 @@ fn skill_line(skill: &SkillPackage) -> Option<String> {
     ))
 }
 
+/// One catalog line plus the pinned install pins the skill's manifest names.
+///
+/// Used by tool-capable sandbox prompts so a background agent can pick the
+/// right package and install path without pasting SKILL.md bodies. Dep pins
+/// already passed the skill parser's pin checks when the package was loaded;
+/// foreground composition keeps the leaner [`skill_line`] shape.
+pub(crate) fn skill_summary_line(skill: &SkillPackage) -> Option<String> {
+    let base = skill_line(skill)?;
+    let mut hints = Vec::new();
+    if !skill.python_deps.is_empty() {
+        hints.push(format!(
+            "pip install --user {}",
+            skill.python_deps.join(" ")
+        ));
+    }
+    if !skill.npm_deps.is_empty() {
+        hints.push(format!(
+            "npm install --ignore-scripts {}",
+            skill.npm_deps.join(" ")
+        ));
+    }
+    if hints.is_empty() {
+        Some(base)
+    } else {
+        Some(format!("{base} [{}]", hints.join("; ")))
+    }
+}
+
 /// Render the skill catalog, grouping the skills a plugin bundles under that
 /// plugin's router preamble.
 ///
@@ -147,7 +175,24 @@ fn skill_line(skill: &SkillPackage) -> Option<String> {
 /// skills still render — a bad line never suppresses a real capability. Skills
 /// no plugin claims follow the grouped ones in catalog order, which is where
 /// user-authored skills land.
-fn skill_catalog_lines(skills: &[SkillPackage], plugins: &[PluginPackage]) -> Vec<String> {
+pub(crate) fn skill_catalog_lines(skills: &[SkillPackage], plugins: &[PluginPackage]) -> Vec<String> {
+    skill_catalog_lines_with(skills, plugins, skill_line)
+}
+
+/// Same grouping as [`skill_catalog_lines`], with each skill rendered by
+/// [`skill_summary_line`] so install pins travel with the name.
+pub(crate) fn skill_summary_catalog_lines(
+    skills: &[SkillPackage],
+    plugins: &[PluginPackage],
+) -> Vec<String> {
+    skill_catalog_lines_with(skills, plugins, skill_summary_line)
+}
+
+fn skill_catalog_lines_with(
+    skills: &[SkillPackage],
+    plugins: &[PluginPackage],
+    mut render: impl FnMut(&SkillPackage) -> Option<String>,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let mut grouped: BTreeSet<&str> = BTreeSet::new();
     for plugin in plugins {
@@ -156,7 +201,7 @@ fn skill_catalog_lines(skills: &[SkillPackage], plugins: &[PluginPackage]) -> Ve
             .iter()
             .filter_map(|member| skills.iter().find(|skill| skill.name == *member))
             .collect();
-        let member_lines: Vec<String> = members.iter().copied().filter_map(skill_line).collect();
+        let member_lines: Vec<String> = members.iter().copied().filter_map(&mut render).collect();
         if member_lines.is_empty() {
             continue;
         }
@@ -174,7 +219,7 @@ fn skill_catalog_lines(skills: &[SkillPackage], plugins: &[PluginPackage]) -> Ve
         skills
             .iter()
             .filter(|skill| !grouped.contains(skill.name.as_str()))
-            .filter_map(skill_line),
+            .filter_map(render),
     );
     lines
 }

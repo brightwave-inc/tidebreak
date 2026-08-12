@@ -60,6 +60,7 @@ impl SandboxAgentRunWorker {
             Arc::new(SandboxAttemptGuard::default()),
             agent_config,
             private_scratch_root,
+            None,
             config,
         )
     }
@@ -75,6 +76,7 @@ impl SandboxAgentRunWorker {
         attempts: Arc<SandboxAttemptGuard>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
+        code_execution: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
         config: SandboxAgentRunWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
@@ -95,9 +97,11 @@ impl SandboxAgentRunWorker {
             fail_wait_set_resume_responses: Arc::new(AtomicUsize::new(0)),
             agent_config,
             private_scratch_root,
+            code_execution,
             config,
         }
     }
+
 
     pub(crate) async fn run(self) {
         let mut lanes = tokio::task::JoinSet::new();
@@ -426,12 +430,25 @@ impl SandboxAgentRunWorker {
             supports_vendor_web_search,
         )
         .await?;
+        // Same source the foreground turn freezes into its operating prompt:
+        // the host code-execution provider's enabled skill/plugin catalogs.
+        // Absent a provider (headless without exec), the run gets an empty
+        // catalog and the skills section is omitted — never a fake list.
+        let (skills, plugins) = match self.code_execution.as_ref() {
+            Some(provider) => (
+                provider.skill_catalog().await,
+                provider.plugin_catalog().await,
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
         let request = sandbox_request(
             &agent_config,
             task,
             &previous_calls,
             &*self.store,
             delegated_file_available,
+            &skills,
+            &plugins,
         )
         .await?;
         let Some(provider) = self.resolve_provider(run.id, lease_token, &cancel).await? else {
