@@ -1,6 +1,6 @@
 ---
 name: presentations
-description: Build PowerPoint (PPTX) decks — new decks with pptxgenjs, existing decks and templates edited in place through their OOXML — with visual QA before delivery.
+description: Build PowerPoint (PPTX) decks — new decks with pptxgenjs when Node is present, or python-pptx when it is not; existing decks and templates edited in place through their OOXML — with visual QA before delivery.
 deps: { npm: ["pptxgenjs@4.0.1"], host: ["libreoffice"] }
 ---
 
@@ -14,9 +14,12 @@ section — it applies to both.
 
 - **An existing `.pptx` is in play** — a template, a deck the user uploaded,
   a prior version of this deliverable, a downloaded starting point — **edit
-  it in place** with the XML pipeline below. Always.
-- **Nothing exists yet and there is no template** — write a Node.js script
-  with **pptxgenjs** and generate the deck.
+  it in place** with the XML pipeline below. Always. The edit path is
+  Python + the bundled helpers; it does not need Node.
+- **Nothing exists yet and there is no template** — generate a **new** deck.
+  Prefer **pptxgenjs** when Node and npm are actually usable; fall back to
+  **python-pptx** when they are not. Detect before you write the generator
+  (see below) — do not assume either runtime from the skill name alone.
 
 **Never rebuild an existing deck to apply a change.** Regenerating a deck
 re-authors every slide: the master, theme, fonts, colors, logos, footers, and
@@ -26,31 +29,98 @@ edit, not a rewrite. Equally, never recreate from scratch what a template
 already provides — if the user handed you a template, its design *is* the
 requirement.
 
-## New decks: pptxgenjs
+## New decks: detect the runtime first
 
-`require("pptxgenjs")` resolves in the sandbox with no install — the pinned
-version is baked into the image and `NODE_PATH` points at it. On a local exec
-workspace, install it once with its own `exec` call:
+Before writing a generator, decide Node vs Python carefully. Do not spend turns
+on `npm install` or a pptxgenjs script when `node`/`npm` are truly missing —
+that is how runs burn steps and then redo the deck in Python. Also do not treat
+every failed probe as "Node is gone for the turn."
+
+1. **Read this turn's operating notes** (the environment / capability lines
+   injected into the prompt). Gate the fallback on note state first:
+   - **Node is unavailable** → skip Node entirely; use the
+     [python-pptx](#new-decks-python-pptx-when-node-is-absent) path (install
+     may still need package-manager network policy).
+   - **Node is being installed** → do work that does not need Node, then
+     **recheck later in the turn**. Do **not** start the python-pptx path on
+     the first failed probe while install is in progress. If Node still does
+     not run after a later recheck, say so and only then take the python-pptx
+     path (or a markdown outline with the user's knowledge) — do not silently
+     switch generators mid-turn.
+   - **Node is available**, or the notes are silent about Node → continue to
+     step 2. Notes can lag a managed image or a host that lost its toolchain;
+     they do not replace a real binary check, and a probe always overrides a
+     stale "available" claim.
+2. **Probe the binaries once** in a single `exec` (no package install yet),
+   unless step 1 already sent you to python-pptx because Node is unavailable:
+
+   ```
+   command -v node && node -v && command -v npm && npm -v
+   ```
+
+   - If that fails **and** notes did not say Node is being installed →
+     **python-pptx** path. Do not retry with `npm install`, `npx`, or alternate
+     Node version managers.
+   - If that fails **while** notes say Node is being installed → wait/recheck;
+     do not fall through to python-pptx yet.
+   - If that succeeds → **pptxgenjs** path (preferred).
+
+Do not invent a third generator, and do not mix the two in one deck. Once you
+pick a path, stay on it for this deliverable unless the runtime disappears
+mid-run.
+
+### Local vs managed sandboxes
+
+- **Managed documents image** (the OpenWave sandbox image and templates built
+  from it): Node and the pinned `pptxgenjs` are usually preinstalled;
+  `require("pptxgenjs")` often resolves via `NODE_PATH` with no install. Still
+  run the detect step — some managed backends fall back to a generic image
+  (no Node, or Node without the library).
+- **Local exec**: Node may be host-managed, user-installed, or absent. The
+  operating notes are the best hint; the `command -v` probe is the truth.
+  When Node is present but the library is not, install the pin below.
+- **Never assume** that "sandbox" means `NODE_PATH` already points at
+  pptxgenjs. Prove it with detect (and a quick `require` if needed), then
+  install only if missing.
+
+## New decks: pptxgenjs (preferred when Node works)
+
+Use this path only after detect shows `node` and `npm` on `PATH`.
+
+### Ensure the library
+
+Try loading the pin without installing first:
+
+```
+node -e "require('pptxgenjs'); console.log('ok')"
+```
+
+If that fails, install **once** with its own `exec` call:
 
 ```
 npm install --ignore-scripts pptxgenjs@4.0.1
 ```
 
 Keep `--ignore-scripts`: a local workspace runs on the user's own machine, and
-a package's install hooks are arbitrary code nobody asked to run. The Node
-runtime itself is host-managed on that backend — the turn's operating notes say
-whether it is available, being installed, or absent, so read them before
-choosing this path.
+a package's install hooks are arbitrary code nobody asked to run.
 
 Installs work only when this chat's network policy allows package managers,
-and they persist for the rest of the conversation. If an install is refused by
-policy, do not retry: tell the user to enable the package-manager network
-policy for this chat, and offer the closest format you can produce without the
-library (a markdown outline of the deck) — only with their knowledge, never as
-a silent substitution. If a dependency cannot be installed at all, say so
-plainly instead of quietly delivering a lesser format.
+and they persist for the rest of the conversation.
 
-Write the deck as a script and run it:
+**Package-manager policy refusal is not a runtime fallback.** If Node is
+present but `npm install` is refused (or `require('pptxgenjs')` fails and the
+install cannot run), do **not** pivot to `pip install python-pptx` as if it were
+a different class of problem — pip hits the same package-manager gate. Tell the
+user to enable the package-manager network policy for this chat, and offer a
+markdown outline of the deck only with their knowledge, never as a silent
+substitution. The python-pptx path is for when the **Node runtime itself** is
+absent (or still missing after an honest Installing recheck), not for when npm
+was refused.
+
+If neither generator can be installed, say so plainly instead of quietly
+delivering a lesser format.
+
+### Write and run the deck
 
 ```js
 const PptxGenJS = require("pptxgenjs");
@@ -93,10 +163,85 @@ Style rules:
   the colors once as constants and reuse them.
 - Save with `pres.writeFile({ fileName: "output/<name>.pptx" })`.
 
+## New decks: python-pptx (when Node is absent)
+
+Use this path when the operating notes say Node is **unavailable**, or when
+detect's binary probe fails after notes are silent/available (not while Node is
+still **being installed**). It is a **fallback for new decks only** — never use
+it to "edit" an existing deck (that rebuilds and strips the design; use the XML
+pipeline instead). Do **not** take this path merely because `npm install` was
+refused while Node itself is present.
+
+### Install the pin
+
+`python-pptx` is **not** preinstalled on the documents image and is not in the
+offline package cache unless a prior install in this chat populated user
+site-packages. Install on demand with its own `exec` call — commands have a
+bounded wall clock, and one `pip` invocation per package stays inside it:
+
+```
+python3 -m pip install --user python-pptx==1.0.2
+```
+
+Same network-policy rules as npm: if the install is refused, do not retry;
+tell the user to enable the package-manager network policy, and offer a
+markdown outline only with their knowledge. If `python-pptx` cannot be
+installed either, say so plainly. Do not `import pptx` without a successful
+install in this chat.
+
+### Write and run the deck
+
+```python
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.util import Inches, Pt
+
+prs = Presentation()
+prs.slide_width = Inches(13.333)
+prs.slide_height = Inches(7.5)
+
+# Title slide
+title_layout = prs.slide_layouts[0]
+slide = prs.slides.add_slide(title_layout)
+slide.shapes.title.text = "Quarterly review"
+if slide.placeholders[1]:
+    slide.placeholders[1].text = "Highlights"
+
+# Body slide — prefer placeholders over free-floating text boxes
+body_layout = prs.slide_layouts[1]
+slide = prs.slides.add_slide(body_layout)
+slide.shapes.title.text = "Wins"
+body = slide.placeholders[1].text_frame
+body.paragraphs[0].text = "First highlight"
+body.paragraphs[0].level = 0
+p = body.add_paragraph()
+p.text = "Second highlight"
+p.level = 0
+
+prs.save("output/quarterly-review.pptx")
+```
+
+Style rules (same intent as the pptxgenjs path):
+
+- Use the default 16:9 geometry (`13.333` x `7.5` inches) or set it explicitly.
+  Any shape you position manually must stay inside the slide:
+  `left + width <= slide_width` and `top + height <= slide_height`.
+- Prefer layout placeholders (`slide.shapes.title`, content placeholders) over
+  ad-hoc text boxes so fonts and positions stay coherent.
+- One idea per slide. At most about 6 bullets, about 12 words each. When
+  content does not fit, split the slide rather than shrinking type.
+- Body text at 18pt or larger (`Pt(18)`). A slide that needs 12pt text is a
+  document.
+- Keep one font family and a small palette; reuse `RGBColor(...)` constants.
+- Images: set only width or only height so aspect ratio is preserved, and keep
+  them inside the slide bounds.
+- Save to `output/<name>.pptx`.
+
 ## Existing decks and templates: edit the XML in place
 
 A PPTX is a zip of XML parts. Editing those parts directly is the only way to
-change a deck without re-authoring it. The workflow:
+change a deck without re-authoring it. The workflow needs Python and the
+bundled helpers — not Node, not pptxgenjs, not python-pptx as a rewrite tool.
 
 1. **Unpack**
    `python3 .openwave/exec-scripts/office_unpack.py deck.pptx build/deck`
@@ -144,7 +289,9 @@ only when the user asks for a distinct deck.
 1. Confirm the deck opens. Rendering it (step 2) is that check: LibreOffice
    converts only a package it can parse, so a file the renderer cannot convert
    is not a deliverable — go back and fix the generator or the XML edit rather
-   than shipping it.
+   than shipping it. If you used python-pptx and cannot render, at least
+   reopen with `Presentation("output/<file>.pptx")` and confirm slide count
+   and titles.
 2. Render slides for a visual check with the bundled helper:
    `python3 .openwave/exec-scripts/render_office.py output/<file>.pptx`
    (images land in `preview/`; at most 3 are returned per exec call; the
