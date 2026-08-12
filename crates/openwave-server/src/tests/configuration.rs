@@ -1288,7 +1288,9 @@ async fn writing_a_provider_credential_enables_the_provider() {
                 .uri("/providers/openai")
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::json!({"enabled": false}).to_string()))
+                .body(Body::from(
+                    serde_json::json!({"enabled": false}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1328,7 +1330,9 @@ async fn writing_a_provider_credential_enables_the_provider() {
                 .uri("/providers/openai")
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::json!({"enabled": false}).to_string()))
+                .body(Body::from(
+                    serde_json::json!({"enabled": false}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
