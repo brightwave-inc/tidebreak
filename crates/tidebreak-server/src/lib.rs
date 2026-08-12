@@ -1427,6 +1427,7 @@ async fn bind_inner(
 /// [`resolver`]), so configuring a provider at runtime takes effect without a
 /// restart. The model *name* comes from `TIDEBREAK_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
+#[allow(clippy::too_many_arguments)]
 fn agent_deps(
     code_execution: Arc<dyn tidebreak_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,

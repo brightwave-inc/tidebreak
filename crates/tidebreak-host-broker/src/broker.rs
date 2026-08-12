@@ -2329,7 +2329,6 @@ impl Operator {
     /// bound the request, hard-refuse a blocked bundle, authorize against the
     /// live grants (deny-by-default, consent-card signal on a miss), and only
     /// then dispatch to the backend. The backend performs; it never decides.
-
     fn cu_list_windows(
         &self,
         context: ExecutionContext,

@@ -65,11 +65,12 @@ impl Capability {
         if granted == requested {
             return true;
         }
-        match (granted, requested) {
-            (ControlApp, ReadAppContent | CaptureScreen) => true,
-            (ReadAppContent, CaptureScreen) | (CaptureScreen, ReadAppContent) => true,
-            _ => false,
-        }
+        matches!(
+            (granted, requested),
+            (ControlApp, ReadAppContent | CaptureScreen)
+                | (ReadAppContent, CaptureScreen)
+                | (CaptureScreen, ReadAppContent)
+        )
     }
 }
 

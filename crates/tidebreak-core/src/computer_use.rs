@@ -377,8 +377,11 @@ pub fn validate_computer_read_app_content_arguments(arguments: &Value) -> bool {
     if args.app_id.trim().is_empty() {
         return false;
     }
-    args.max_depth.is_none_or(|d| d >= 1 && d <= MAX_READ_DEPTH)
-        && args.max_nodes.is_none_or(|n| n >= 1 && n <= MAX_READ_NODES)
+    args.max_depth
+        .is_none_or(|d| (1..=MAX_READ_DEPTH).contains(&d))
+        && args
+            .max_nodes
+            .is_none_or(|n| (1..=MAX_READ_NODES).contains(&n))
 }
 
 /// Validate a `computer_click` payload.
@@ -427,7 +430,7 @@ pub fn validate_computer_wait_arguments(arguments: &Value) -> bool {
         return false;
     };
     args.seconds
-        .is_none_or(|s| s.is_finite() && s >= 0.0 && s <= MAX_WAIT_SECONDS)
+        .is_none_or(|s| s.is_finite() && (0.0..=MAX_WAIT_SECONDS).contains(&s))
 }
 
 // MARK: - Tool specs
