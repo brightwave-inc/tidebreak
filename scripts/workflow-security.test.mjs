@@ -251,6 +251,24 @@ test("PR lanes are scope-gated, never label-gated", () => {
   );
   assert.match(
     ci,
+    /sed -i \\\n\s+-e 's\/TIDEBREAK\/TIDEBREAK\/g' \\\n\s+-e 's\/Tidebreak\/Tidebreak\/g' \\\n\s+-e 's\/tidebreak\/tidebreak\/g' \\\n\s+"\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
+  );
+  assert.match(ci, /CANONICAL_REPOSITORY: brightwave-inc\/tidebreak/);
+  assert.match(
+    ci,
+    /repos\/\$CANONICAL_REPOSITORY\/pulls\/\$PR_NUMBER/,
+  );
+  const releaseDraft = workflows["release-draft.yml"];
+  assert.match(
+    releaseDraft,
+    /CANONICAL_REPOSITORY: brightwave-inc\/tidebreak/,
+  );
+  assert.match(
+    workflowJob(releaseDraft, "label"),
+    /repos\/\$CANONICAL_REPOSITORY\/issues\/\$PR_NUMBER/,
+  );
+  assert.match(
+    ci,
     /node --test scripts\/\.trusted-workflow-security\.test\.mjs/,
   );
   assert.match(ci, /node --test scripts\/\*\.test\.mjs/);
