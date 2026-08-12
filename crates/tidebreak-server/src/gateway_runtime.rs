@@ -3061,7 +3061,7 @@ mod tests {
         // and the gateway session the policy authorizes.
         let store = DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
-            data_dir.join("openwave.db").display()
+            data_dir.join("tidebreak.db").display()
         ))
         .await
         .unwrap();
@@ -3099,8 +3099,8 @@ mod tests {
 
         // The epoch reset, as desktop_schema performs it: the database files
         // are deleted; everything else in the data directory stays.
-        std::fs::remove_file(data_dir.join("openwave.db")).unwrap();
-        assert!(!data_dir.join("openwave.db").exists());
+        std::fs::remove_file(data_dir.join("tidebreak.db")).unwrap();
+        assert!(!data_dir.join("tidebreak.db").exists());
 
         // Resolution needs no store at all now: the policy survives, still
         // managed to the same gateway, and the retire step — boot's session

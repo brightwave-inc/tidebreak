@@ -98,20 +98,6 @@ jobs:
             exit 1
           fi
           cp "$trusted" "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
-          # The assertions remain the base branch's trusted policy; project its
-          # retired product namespace onto the pull request's renamed tree.
-          sed -i \
-            -e 's/OPENWAVE/TIDEBREAK/g' \
-            -e 's/OpenWave/Tidebreak/g' \
-            -e 's/openwave/tidebreak/g' \
-            "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
-          # Keep the already-renamed base policy's projected assertion true
-          # for the one PR generation spanning the repository rename.
-          sed -i \
-            -e 's/TIDEBREAK/TIDEBREAK/g' \
-            -e 's/Tidebreak/Tidebreak/g' \
-            -e 's/tidebreak/tidebreak/g' \
-            "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
       - name: Test trusted base-branch release policy
         if: ${{ github.event_name == 'pull_request' }}
         run: node --test scripts/.trusted-workflow-security.test.mjs
