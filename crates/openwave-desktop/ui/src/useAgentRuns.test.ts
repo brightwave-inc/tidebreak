@@ -12,6 +12,7 @@ function run(status: AgentRun["status"] = "running"): AgentRun {
     spawn_call_id: "spawn-1",
     tier: "background",
     execution_location: "in_process",
+    code_execution_provider: "local",
     status,
     task: "Task for run-1",
     started_at: null,

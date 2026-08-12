@@ -472,10 +472,7 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             );
             println!(
                 "code_execution_provider  {}",
-                snapshot
-                    .code_execution_provider
-                    .as_deref()
-                    .unwrap_or("-")
+                snapshot.code_execution_provider.as_deref().unwrap_or("-")
             );
             println!("status              {}", snapshot.status);
             if let Some(error) = &snapshot.last_error_code {

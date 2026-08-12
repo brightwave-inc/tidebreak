@@ -76,13 +76,12 @@ async fn create_then_get_and_list() {
     assert!(snapshot.get("chat_id").is_none());
     // Default host selection: local where the sandbox exists, otherwise off.
     // Never confused with execution_location (the run-loop seat).
-    let expected_provider = if openwave_code_execution::LocalExecutionProvider::availability()
-        .is_ok()
-    {
-        "local"
-    } else {
-        "off"
-    };
+    let expected_provider =
+        if openwave_code_execution::LocalExecutionProvider::availability().is_ok() {
+            "local"
+        } else {
+            "off"
+        };
     assert_eq!(
         snapshot.get("code_execution_provider"),
         Some(&serde_json::json!(expected_provider))
