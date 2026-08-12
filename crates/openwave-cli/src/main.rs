@@ -71,7 +71,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use openwave_core::{
-    AgentError, ChatId, Config, ListDir, Profile, ReadFile, Result, ToolCtx, ToolRegistry,
+    AgentError, ChatId, Config, ListDir, Profile, ReadFile, Result, ToolCtx, ToolRegistry, TurnId,
 };
 
 mod api;
@@ -122,6 +122,7 @@ usage: openwave serve
        openwave chat list
        openwave chat create
        openwave chat delete <chat>
+       openwave chat steer <chat> <turn> <text...>
        openwave agent-run list <chat>
        openwave agent-run show <chat> <run>
        openwave agent-run cancel <chat> <run>
@@ -473,6 +474,37 @@ fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) 
             let chat = parse_chat_id(&cursor.positional("a chat id"));
             SetupCommand::ChatDelete { chat }
         }
+        ("chat", "steer") => {
+            // `turn` is the durable turn identity from the chat event stream
+            // (not an agent-run id). Remaining positionals are the steer text;
+            // `--output-format` may appear anywhere after the turn id.
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let turn = parse_turn_id(&cursor.positional("a turn id"));
+            let mut content_parts = Vec::new();
+            let mut format = OutputFormat::Text;
+            while let Some(arg) = cursor.next() {
+                match arg.as_str() {
+                    "--output-format" => {
+                        format = parse_format(cursor.value("--output-format"));
+                    }
+                    other if other.starts_with("--") => {
+                        usage_error(&format!("unknown chat steer argument {other:?}"));
+                    }
+                    other => content_parts.push(other.to_owned()),
+                }
+            }
+            if content_parts.is_empty() {
+                usage_error("expected steer text after the turn id");
+            }
+            return (
+                SetupCommand::ChatSteer {
+                    chat,
+                    turn,
+                    content: content_parts.join(" "),
+                },
+                format,
+            );
+        }
         ("agent-run", "list") => {
             let chat = parse_chat_id(&cursor.positional("a chat id"));
             SetupCommand::AgentRunList { chat }
@@ -599,6 +631,10 @@ fn parse_format(value: String) -> OutputFormat {
 
 fn parse_chat_id(value: &str) -> ChatId {
     ChatId::from_str(value).unwrap_or_else(|_| usage_error("expected a chat UUID"))
+}
+
+fn parse_turn_id(value: &str) -> TurnId {
+    TurnId::from_str(value).unwrap_or_else(|_| usage_error("expected a turn UUID"))
 }
 
 fn parse_agent_run_id(value: &str) -> openwave_core::AgentRunId {

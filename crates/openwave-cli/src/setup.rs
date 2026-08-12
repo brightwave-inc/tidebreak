@@ -1,5 +1,8 @@
 //! Scriptable setup: `openwave provider|model|settings|mcp-server|chat|agent-run`.
 //!
+//! `chat steer` posts more user text into an active turn (same route the TUI
+//! uses); `turn` is the durable turn identity from the chat event stream.
+//!
 //! Every command here is a thin client of a route the server already serves —
 //! the same ones the desktop settings pages call — so configuring OpenWave
 //! from a script and configuring it from the app converge on one
@@ -13,7 +16,7 @@
 
 use std::io::Read as _;
 
-use openwave_core::{AgentError, AgentRunId, ChatId, Result};
+use openwave_core::{AgentError, AgentRunId, ChatId, Result, TurnId};
 
 use crate::api::client::Client;
 use crate::api::wire::{McpServerInfo, McpServersInfo};
@@ -104,6 +107,15 @@ pub enum Command {
     ChatCreate,
     /// Delete a chat outright.
     ChatDelete { chat: ChatId },
+    /// Steer an active turn with more user text.
+    ///
+    /// `turn` is the durable turn identity from the chat's event stream (not
+    /// an agent-run id). A fresh steer id is minted per call.
+    ChatSteer {
+        chat: ChatId,
+        turn: TurnId,
+        content: String,
+    },
     /// Background (and foreground) agent runs for one chat.
     AgentRunList { chat: ChatId },
     /// One run's status plus its ordered activity timeline.
@@ -415,6 +427,25 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 return emit(&serde_json::json!({ "id": chat, "deleted": true }));
             }
             println!("openwave: deleted chat {chat}");
+        }
+        Command::ChatSteer {
+            chat,
+            turn,
+            content,
+        } => {
+            // Same client path the TUI uses: mint a steer id, interrupt the
+            // active turn with the new user text.
+            let steer_id = TurnId::new();
+            client.steer(chat, turn, steer_id, &content).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "chat": chat,
+                    "turn": turn,
+                    "steer_id": steer_id,
+                    "steered": true,
+                }));
+            }
+            println!("openwave: steered turn {turn}");
         }
         Command::AgentRunList { chat } => {
             let runs = client.list_agent_runs(chat).await?;
