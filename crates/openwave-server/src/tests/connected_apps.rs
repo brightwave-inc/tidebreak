@@ -604,9 +604,7 @@ async fn managed_profiles_refuse_rest_upserts_but_allow_delete() {
     .await;
     assert_eq!(seeded.status(), StatusCode::OK);
 
-    crate::managed_policy::provision(&*state.store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(&*state.provisioned_policy, "https://corp.gateway").unwrap();
 
     let refused = put_rest(
         &router,

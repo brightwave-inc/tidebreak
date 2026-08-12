@@ -6,6 +6,14 @@
 //! epoch (or a database from before epochs existed) is disposable and gets
 //! rebuilt. Once the lifecycle changes for v1, pre-v1 binaries fail closed
 //! instead.
+//!
+//! The reset deletes the SQLite files (and the host-broker's durable
+//! authority, which keys on conversation ids the reset invalidates) — and
+//! nothing else in the data directory. Durable state that must survive an
+//! epoch bump lives in sidecar files here by design: the schema marker
+//! itself, and the provisioned gateway policy (`gateway-policy.json`, see
+//! [`crate::managed_policy`]), whose loss would resolve the profile
+//! unmanaged and orphan the gateway session it authorized.
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;
@@ -408,6 +416,11 @@ mod tests {
         std::fs::write(&receipt, b"native recovery state").unwrap();
         let broker = dir.path().join("host-broker-state.json");
         std::fs::write(&broker, b"native broker state").unwrap();
+        // The provisioned gateway policy is a sidecar file precisely so this
+        // reset cannot orphan the session it authorizes: it must survive
+        // with the other non-database durable state.
+        let policy = dir.path().join("gateway-policy.json");
+        std::fs::write(&policy, br#"{"gateway_url": "https://corp.gateway/"}"#).unwrap();
         let vectors = dir.path().join(VECTOR_DIRECTORY).join("stale-index");
         std::fs::create_dir_all(vectors.parent().unwrap()).unwrap();
         std::fs::write(&vectors, b"stale searchable text").unwrap();
@@ -428,6 +441,11 @@ mod tests {
         assert!(
             !broker.exists(),
             "epoch reset must clear host-broker durable authority with the database"
+        );
+        assert_eq!(
+            std::fs::read(&policy).unwrap(),
+            br#"{"gateway_url": "https://corp.gateway/"}"#,
+            "epoch reset must leave the provisioned gateway policy in place"
         );
         assert!(!dir.path().join(VECTOR_DIRECTORY).exists());
         assert_eq!(

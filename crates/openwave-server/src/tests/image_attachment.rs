@@ -134,6 +134,7 @@ fn spawn_turn_worker_with_image_blobs(state: &AppState) {
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
+        state.provisioned_policy.clone(),
         state.os_policy.clone(),
         state.tools.clone(),
         state.approvals.clone(),
@@ -678,12 +679,14 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
@@ -789,12 +792,14 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,

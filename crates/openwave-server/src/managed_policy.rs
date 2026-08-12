@@ -8,6 +8,13 @@
 //! state over the open default — so a device-management assertion can never
 //! be shadowed by local state.
 //!
+//! The provisioned tier lives in a sidecar file, `{data_dir}/gateway-policy.json`
+//! ([`ProvisionedPolicyFile`]), not in the SQLite settings table: the pre-v1
+//! schema-epoch lifecycle ([`crate::desktop_schema`]) deletes the database on
+//! a baseline bump, and policy stored there would vanish with it — resolving
+//! the profile unmanaged and orphaning the gateway session the policy had
+//! authorized. Sidecar files survive the reset, so the policy now does too.
+//!
 //! Nothing here changes behavior yet. Lockdown of the BYOK and MCP write
 //! paths, the settings surfaces, and the sign-in gate all read this policy
 //! in follow-up slices. The provisioning write path is crate-internal by
@@ -15,14 +22,29 @@
 //! tests — it is deliberately not reachable from any renderer-writable
 //! route, which is what makes the state sticky rather than a setting.
 
-use std::io::ErrorKind;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openwave_core::{AgentError, Config, PermissionMode, Result, Store};
 use serde::{Deserialize, Serialize};
 
-const SETTING_KEY: &str = "managed_policy_v1";
+/// The filename the provisioned policy lives under, directly in the data
+/// directory. Deliberately outside the SQLite profile: a pre-v1 schema-epoch
+/// reset deletes the database files but leaves the rest of the data
+/// directory in place, and the policy must be in the surviving set or the
+/// reset would resolve the profile unmanaged and orphan its gateway session.
+const PROVISIONED_POLICY_FILE: &str = "gateway-policy.json";
+
+/// The settings key the provisioned policy lived under before it moved to
+/// [`PROVISIONED_POLICY_FILE`]. Read once per boot by
+/// [`import_legacy_setting`]; never written or deleted — pre-v1 epoch
+/// squashes remove the row naturally, and the [`Store`] API grows no delete
+/// for this.
+const LEGACY_SETTING_KEY: &str = "managed_policy_v1";
 
 /// The key every OS artifact stores the asserted URL under: the Windows
 /// registry value and the macOS managed-preferences key share this name.
@@ -162,6 +184,187 @@ impl OsPolicySource for NoOsPolicy {
     fn gateway_url(&self) -> Result<Option<String>> {
         Ok(None)
     }
+}
+
+/// The durable home of the provisioned (user-consented) policy tier: the
+/// sticky state a completed pairing writes and deprovisioning clears.
+///
+/// Threaded beside [`OsPolicySource`] everywhere policy is resolved — the
+/// production assembly roots it at the data directory
+/// ([`ProvisionedPolicyFile`]), tests substitute the in-memory double — so
+/// every reader sees the same record. The trait is deliberately synchronous,
+/// like the OS readers: the artifacts are tiny local files read on every
+/// resolution.
+pub(crate) trait ProvisionedPolicySource: Send + Sync {
+    /// The provisioned gateway URL on record, or `None` when the profile was
+    /// never paired (or was deprovisioned). `Err` means an artifact exists
+    /// but cannot be read or decoded — [`resolve`] projects that as a
+    /// misconfigured managed profile, never as unmanaged.
+    fn read(&self) -> Result<Option<String>>;
+
+    /// Persist the provisioned URL, atomically replacing any prior one. The
+    /// URL arrives already held to the gateway contract
+    /// ([`validated_gateway_url`]) by the caller; this is the raw persist.
+    fn write(&self, gateway_url: &str) -> Result<()>;
+
+    /// Drop the provisioned URL. Already-absent is a success: deprovisioning
+    /// an open profile is a no-op here.
+    fn clear(&self) -> Result<()>;
+}
+
+/// The provisioned policy as one JSON file in the data directory,
+/// `{"gateway_url": "https://…"}`, published atomically (unique temporary
+/// file at `0o600`, synced, renamed into place, directory synced — the same
+/// discipline as the schema marker in [`crate::desktop_schema`]) so a crash
+/// mid-write leaves either the old policy or the new one, never a torn file.
+///
+/// One process owns the data directory (the server's instance lock
+/// guarantees it) and every write is serialized under the pairing lock, so
+/// the read-modify-write in [`provision`]/[`reprovision`]/[`deprovision`]
+/// needs no wider transaction.
+pub(crate) struct ProvisionedPolicyFile {
+    path: PathBuf,
+}
+
+impl ProvisionedPolicyFile {
+    /// The production home: `{data_dir}/gateway-policy.json`.
+    pub(crate) fn in_data_dir(data_dir: &Path) -> Self {
+        Self {
+            path: data_dir.join(PROVISIONED_POLICY_FILE),
+        }
+    }
+
+    /// Test seam: an explicit path.
+    #[cfg(test)]
+    pub(crate) fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl ProvisionedPolicySource for ProvisionedPolicyFile {
+    fn read(&self) -> Result<Option<String>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(AgentError::config(format!(
+                    "provisioned policy file {} is unreadable: {error}",
+                    self.path.display()
+                )))
+            }
+        };
+        let saved: ProvisionedPolicy = serde_json::from_slice(&bytes).map_err(|_| {
+            AgentError::config(format!(
+                "provisioned policy file {} is not the expected JSON shape",
+                self.path.display()
+            ))
+        })?;
+        Ok(Some(saved.gateway_url))
+    }
+
+    fn write(&self, gateway_url: &str) -> Result<()> {
+        let mut bytes = serde_json::to_vec_pretty(&ProvisionedPolicy {
+            gateway_url: gateway_url.to_string(),
+        })?;
+        bytes.push(b'\n');
+        write_atomic(&self.path, &bytes)
+    }
+
+    fn clear(&self) -> Result<()> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AgentError::config(format!(
+                "failed to remove provisioned policy file {}: {error}",
+                self.path.display()
+            ))),
+        }
+    }
+}
+
+/// The in-memory provisioned-policy source for tests: the same trait with no
+/// disk, so a test can drive provision/reprovision/deprovision and resolution
+/// without a data directory.
+#[cfg(test)]
+pub(crate) struct MemoryProvisionedPolicy(std::sync::Mutex<Option<String>>);
+
+#[cfg(test)]
+impl MemoryProvisionedPolicy {
+    /// An empty source — the never-paired state.
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(None)))
+    }
+}
+
+#[cfg(test)]
+impl ProvisionedPolicySource for MemoryProvisionedPolicy {
+    fn read(&self) -> Result<Option<String>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn write(&self, gateway_url: &str) -> Result<()> {
+        *self.0.lock().unwrap() = Some(gateway_url.to_string());
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<()> {
+        *self.0.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+/// Publish `bytes` to `path` atomically: a unique sibling temporary at
+/// `0o600`, flushed to disk, renamed over the destination, then the
+/// directory synced — so a crash leaves either the old policy or the new
+/// one, never a torn file, and the rename is durable. Mirrors the
+/// schema-marker write in [`crate::desktop_schema`].
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let directory = path.parent().ok_or_else(|| {
+        AgentError::config(format!(
+            "provisioned policy file {} has no parent directory",
+            path.display()
+        ))
+    })?;
+    let temporary = directory.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut published = false;
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        published = true;
+        sync_directory(directory)
+    })();
+    if result.is_err() && !published {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| {
+        AgentError::config(format!(
+            "failed to write provisioned policy file {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Select this platform's OS policy reader.
@@ -649,7 +852,9 @@ fn asserted_policy_flag(raw: &str) -> Result<bool> {
     }
 }
 
-/// The durable provisioned state, stored as one setting.
+/// The on-disk payload of the provisioned policy file — and of the legacy
+/// settings row [`import_legacy_setting`] copies it from:
+/// `{"gateway_url": "https://…"}`.
 #[derive(Serialize, Deserialize)]
 struct ProvisionedPolicy {
     gateway_url: String,
@@ -666,14 +871,14 @@ struct ProvisionedPolicy {
 /// regardless of which authority asserted it — no platform reader has to
 /// remember to validate.
 ///
-/// The OS artifact is read on every call, deliberately: an MDM push or
-/// removal becomes visible on the next `/policy` read without an app
-/// restart, and the artifacts are tiny.
-pub(crate) async fn resolve(
-    store: &dyn Store,
+/// Both artifacts are read on every call, deliberately: an MDM push or
+/// removal — or a pairing commit — becomes visible on the next `/policy`
+/// read without an app restart, and the artifacts are tiny.
+pub(crate) fn resolve(
+    provisioned: &dyn ProvisionedPolicySource,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
-    let mut policy = resolve_gateway(store, os_policy).await?;
+    let mut policy = resolve_gateway(provisioned, os_policy)?;
     // The ceiling is asserted per key, independent of the gateway verdict: an
     // MDM profile can cap the mode without deploying a gateway URL, and the
     // cap rides on whatever policy the gateway resolution produced. A broken
@@ -706,8 +911,8 @@ pub(crate) async fn resolve(
 }
 
 /// The gateway half of [`resolve`]: managed verdict, URL, and authority.
-async fn resolve_gateway(
-    store: &dyn Store,
+fn resolve_gateway(
+    provisioned: &dyn ProvisionedPolicySource,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
     match os_policy.gateway_url() {
@@ -720,17 +925,20 @@ async fn resolve_gateway(
         }
         Ok(None) => {}
     }
-    if let Some(value) = store.get_setting(SETTING_KEY).await? {
-        let Ok(saved) = serde_json::from_value::<ProvisionedPolicy>(value) else {
-            tracing::warn!("stored provisioned policy does not decode; resolving misconfigured");
+    match provisioned.read() {
+        Ok(Some(gateway_url)) => {
+            return Ok(asserted(ManagedPolicySource::Provisioned, &gateway_url));
+        }
+        Err(error) => {
+            // A policy file that exists but cannot be read fails closed the
+            // same way a broken OS artifact does: the profile claimed
+            // management, so it must not quietly revert to open.
+            tracing::warn!("provisioned policy is present but unusable: {error}");
             return Ok(ManagedPolicy::misconfigured(
                 ManagedPolicySource::Provisioned,
             ));
-        };
-        return Ok(asserted(
-            ManagedPolicySource::Provisioned,
-            &saved.gateway_url,
-        ));
+        }
+        Ok(None) => {}
     }
     Ok(ManagedPolicy {
         managed: false,
@@ -779,11 +987,14 @@ pub(crate) fn validated_gateway_url(gateway_url: &str) -> Result<String> {
 /// already-provisioned profile at a different gateway: re-provisioning the
 /// same gateway is idempotent, a conflicting one is refused. Re-pairing is
 /// a real product flow, but it runs through [`reprovision`] — which demands
-/// the caller name the row it believes it is replacing — never through this
-/// write path.
-pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()> {
+/// the caller name the policy it believes it is replacing — never through
+/// this write path.
+pub(crate) fn provision(
+    provisioned: &dyn ProvisionedPolicySource,
+    gateway_url: &str,
+) -> Result<()> {
     let gateway_url = validated_gateway_url(gateway_url)?;
-    if let Some(existing) = provisioned_url(store).await? {
+    if let Some(existing) = provisioned_url(provisioned)? {
         if existing == gateway_url {
             return Ok(());
         }
@@ -791,71 +1002,116 @@ pub(crate) async fn provision(store: &dyn Store, gateway_url: &str) -> Result<()
             "this profile is already provisioned to a different gateway",
         ));
     }
-    store
-        .set_setting(
-            SETTING_KEY,
-            &serde_json::to_value(ProvisionedPolicy { gateway_url })?,
-        )
-        .await
+    provisioned.write(&gateway_url)
 }
 
 /// Replace the provisioned gateway, compare-and-swap style: the write lands
-/// only if the row still holds `expected_current` — the URL the user's
-/// re-pair confirmation actually named. A row that changed in between (a
-/// competing pairing; deletion) refuses rather than overwrites, because the
-/// consent on record was given against a different state. Callers serialize
-/// the read-check-write under the pairing lock; this check is the belt to
-/// that suspender, and the part a unit seam can hold still.
-pub(crate) async fn reprovision(
-    store: &dyn Store,
+/// only if the policy file still holds `expected_current` — the URL the
+/// user's re-pair confirmation actually named. A file that changed in
+/// between (a competing pairing; deletion) refuses rather than overwrites,
+/// because the consent on record was given against a different state.
+/// Callers serialize the read-check-write under the pairing lock; this check
+/// is the belt to that suspender, and the part a unit seam can hold still.
+pub(crate) fn reprovision(
+    provisioned: &dyn ProvisionedPolicySource,
     new_url: &str,
     expected_current: &str,
 ) -> Result<()> {
     let new_url = validated_gateway_url(new_url)?;
-    if provisioned_url(store).await?.as_deref() != Some(expected_current) {
+    if provisioned_url(provisioned)?.as_deref() != Some(expected_current) {
         return Err(AgentError::config(
             "the gateway managing this profile changed while re-pairing; nothing was changed",
         ));
     }
-    store
-        .set_setting(
-            SETTING_KEY,
-            &serde_json::to_value(ProvisionedPolicy {
-                gateway_url: new_url,
-            })?,
-        )
-        .await
+    provisioned.write(&new_url)
 }
 
-/// Delete the sticky provisioned row, compare-and-swap style: the delete
-/// lands only if the row still holds `expected_current` — the URL the user's
-/// disconnect confirmation actually named. A row that changed in between
-/// refuses rather than deletes, because the consent on record was given
-/// against a different state. Callers serialize the read-check-write under
-/// the pairing lock; this check is the belt to that suspender.
+/// Delete the sticky provisioned policy, compare-and-swap style: the delete
+/// lands only if the file still holds `expected_current` — the URL the
+/// user's disconnect confirmation actually named. A file that changed in
+/// between refuses rather than deletes, because the consent on record was
+/// given against a different state. Callers serialize the read-check-write
+/// under the pairing lock; this check is the belt to that suspender.
 ///
 /// The OS authority is untouched by design: resolution precedence means an
-/// MDM-asserted gateway still wins after the row underneath is gone.
-pub(crate) async fn deprovision(store: &dyn Store, expected_current: &str) -> Result<()> {
-    if provisioned_url(store).await?.as_deref() != Some(expected_current) {
+/// MDM-asserted gateway still wins after the file underneath is gone.
+pub(crate) fn deprovision(
+    provisioned: &dyn ProvisionedPolicySource,
+    expected_current: &str,
+) -> Result<()> {
+    if provisioned_url(provisioned)?.as_deref() != Some(expected_current) {
         return Err(AgentError::config(
             "the gateway managing this profile changed while disconnecting; nothing was changed",
         ));
     }
-    store.delete_setting(SETTING_KEY).await
+    provisioned.clear()
 }
 
 /// The provisioned gateway URL currently on record, if readable.
 ///
 /// Unreadable stored state reads as `None`, not as an error: [`provision`]
 /// treats it as repairable rather than honoring it as a conflict, and the
-/// pairing pre-check must agree with that judgment.
-pub(crate) async fn provisioned_url(store: &dyn Store) -> Result<Option<String>> {
-    Ok(store
-        .get_setting(SETTING_KEY)
-        .await?
-        .and_then(|value| serde_json::from_value::<ProvisionedPolicy>(value).ok())
-        .map(|saved| saved.gateway_url))
+/// pairing pre-check must agree with that judgment. (Resolution itself fails
+/// closed instead — see [`resolve_gateway`] — because an unreadable policy
+/// must never render as the open experience.)
+pub(crate) fn provisioned_url(provisioned: &dyn ProvisionedPolicySource) -> Result<Option<String>> {
+    match provisioned.read() {
+        Ok(gateway_url) => Ok(gateway_url),
+        Err(error) => {
+            tracing::warn!("provisioned policy is unreadable; treating it as repairable: {error}");
+            Ok(None)
+        }
+    }
+}
+
+/// One-time upgrade import, run at boot before the first policy read: the
+/// provisioned policy lived in the SQLite settings table before it moved to
+/// [`PROVISIONED_POLICY_FILE`], and a pairing an earlier build recorded must
+/// survive the move. When the file is absent and the legacy row holds a
+/// decodable policy, the row's URL becomes the file's contents.
+///
+/// Everything else is deliberately untouched. The legacy row itself is left
+/// in place — the [`Store`] API grows no delete for this, and pre-v1
+/// schema-epoch squashes remove the row naturally. A file that exists but
+/// does not decode is not repaired here: importing over it would launder a
+/// tampered artifact into a fresh policy, and the fail-closed misconfigured
+/// projection plus the [`provision`] repair path already cover it. An
+/// undecodable legacy *row* is skipped with a warning for the same reason —
+/// the only writes this function may make are faithful copies of what the
+/// row actually asserted.
+///
+/// Boot propagates a failed import rather than starting unmanaged: the boot
+/// path retires gateway sessions the policy no longer stands behind, so
+/// booting with the policy silently lost would destroy the very state this
+/// import exists to preserve.
+pub(crate) async fn import_legacy_setting(
+    provisioned: &dyn ProvisionedPolicySource,
+    store: &dyn Store,
+) -> Result<()> {
+    match provisioned.read() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                "provisioned policy file is present but unusable: {error}; \
+                 skipping the legacy-settings import"
+            );
+            return Ok(());
+        }
+    }
+    let Some(value) = store.get_setting(LEGACY_SETTING_KEY).await? else {
+        return Ok(());
+    };
+    match serde_json::from_value::<ProvisionedPolicy>(value) {
+        Ok(saved) => provisioned.write(&saved.gateway_url),
+        Err(_) => {
+            tracing::warn!(
+                "legacy provisioned policy setting does not decode; \
+                 leaving it for the next schema-epoch reset to remove"
+            );
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -898,16 +1154,16 @@ mod tests {
 
     #[tokio::test]
     async fn resolution_prefers_os_policy_over_provisioned_over_open() {
-        let (store, _directory) = test_store().await;
+        let provisioned = MemoryProvisionedPolicy::new();
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = resolve(&*provisioned, &NoOsPolicy).unwrap();
         assert!(!policy.managed);
         assert_eq!(policy.source, ManagedPolicySource::Unmanaged);
         assert!(policy.gateway_url.is_none());
         assert!(!policy.misconfigured);
 
-        provision(&*store, "https://gw.example").await.unwrap();
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        provision(&*provisioned, "https://gw.example").unwrap();
+        let policy = resolve(&*provisioned, &NoOsPolicy).unwrap();
         assert!(policy.managed);
         assert_eq!(policy.source, ManagedPolicySource::Provisioned);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://gw.example/"));
@@ -915,9 +1171,7 @@ mod tests {
         // The OS authority passes through the same validation and
         // normalization as the provisioned one: no trailing slash in, one
         // URL shape out.
-        let policy = resolve(&*store, &OsAsserted("https://mdm.example"))
-            .await
-            .unwrap();
+        let policy = resolve(&*provisioned, &OsAsserted("https://mdm.example")).unwrap();
         assert_eq!(policy.source, ManagedPolicySource::Os);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://mdm.example/"));
     }
@@ -929,81 +1183,253 @@ mod tests {
     /// underneath must not resurface.
     #[tokio::test]
     async fn a_broken_authority_resolves_misconfigured_never_open() {
-        let (store, _directory) = test_store().await;
-        provision(&*store, "https://gw.example").await.unwrap();
+        let provisioned = MemoryProvisionedPolicy::new();
+        provision(&*provisioned, "https://gw.example").unwrap();
 
         for os_policy in [
             &OsAsserted("http://user:pw@mdm.example") as &dyn OsPolicySource,
             &OsUnreadable,
         ] {
-            let policy = resolve(&*store, os_policy).await.unwrap();
+            let policy = resolve(&*provisioned, os_policy).unwrap();
             assert!(policy.managed && policy.misconfigured);
             assert_eq!(policy.source, ManagedPolicySource::Os);
             assert!(policy.gateway_url.is_none());
         }
 
-        // A degenerate stored provisioned value gets the same projection on
-        // its own authority.
-        store
-            .set_setting(SETTING_KEY, &serde_json::json!({ "gateway_url": "" }))
-            .await
-            .unwrap();
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
-        assert!(policy.managed && policy.misconfigured);
-        assert_eq!(policy.source, ManagedPolicySource::Provisioned);
-        assert!(policy.gateway_url.is_none());
+        // A degenerate provisioned assertion gets the same projection on its
+        // own authority — here through the real file, so both the invalid-URL
+        // and the undecodable-blob shapes are exercised.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(PROVISIONED_POLICY_FILE);
+        let file = ProvisionedPolicyFile::at(&path);
+        for broken in [
+            &br#"{"gateway_url": ""}"#[..],
+            &br#"{"gateway_url": "http://user:pw@gw.example"}"#[..],
+            b"not json",
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            let policy = resolve(&file, &NoOsPolicy).unwrap();
+            assert!(policy.managed && policy.misconfigured);
+            assert_eq!(policy.source, ManagedPolicySource::Provisioned);
+            assert!(policy.gateway_url.is_none());
+        }
+
+        // The repair path agrees with `provisioned_url`'s judgment: an
+        // unreadable file is overwritten, not honored as a conflict.
+        provision(&file, "https://repaired.example").unwrap();
+        let policy = resolve(&file, &NoOsPolicy).unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(
+            policy.gateway_url.as_deref(),
+            Some("https://repaired.example/")
+        );
     }
 
     #[tokio::test]
     async fn provisioning_holds_the_url_to_the_gateway_contract() {
-        let (store, _directory) = test_store().await;
+        let provisioned = MemoryProvisionedPolicy::new();
         // The contract itself is asserted in the connectors crate; here only
         // that a rejected write leaves the profile unmanaged.
-        assert!(provision(&*store, "http://user:pw@gw.example")
-            .await
-            .is_err());
-        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+        assert!(provision(&*provisioned, "http://user:pw@gw.example").is_err());
+        assert!(!resolve(&*provisioned, &NoOsPolicy).unwrap().managed);
     }
 
     /// Deprovision shares reprovision's CAS discipline: it deletes only the
-    /// row its confirmation named, refuses one that moved, and leaves the
-    /// profile open (never misconfigured) once the row is gone.
+    /// policy its confirmation named, refuses one that moved, and leaves the
+    /// profile open (never misconfigured) once the file is gone.
     #[tokio::test]
-    async fn deprovision_deletes_only_the_row_the_confirmation_named() {
-        let (store, _directory) = test_store().await;
-        provision(&*store, "https://corp.gateway").await.unwrap();
+    async fn deprovision_deletes_only_the_policy_the_confirmation_named() {
+        let directory = tempfile::tempdir().unwrap();
+        let provisioned = ProvisionedPolicyFile::in_data_dir(directory.path());
+        provision(&provisioned, "https://corp.gateway").unwrap();
 
-        let error = deprovision(&*store, "https://other.example")
-            .await
+        let error = deprovision(&provisioned, "https://other.example")
             .err()
             .unwrap();
         assert!(error.to_string().contains("changed while disconnecting"));
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = resolve(&provisioned, &NoOsPolicy).unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
 
-        deprovision(&*store, "https://corp.gateway/").await.unwrap();
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        deprovision(&provisioned, "https://corp.gateway/").unwrap();
+        let policy = resolve(&provisioned, &NoOsPolicy).unwrap();
         assert!(!policy.managed && !policy.misconfigured);
-        assert!(store.get_setting(SETTING_KEY).await.unwrap().is_none());
+        assert!(provisioned.read().unwrap().is_none());
+        assert!(!directory.path().join(PROVISIONED_POLICY_FILE).exists());
 
-        // With no row left, any expectation refuses rather than pretends.
-        assert!(deprovision(&*store, "https://corp.gateway/").await.is_err());
+        // With no policy left, any expectation refuses rather than pretends.
+        assert!(deprovision(&provisioned, "https://corp.gateway/").is_err());
     }
 
     #[tokio::test]
     async fn a_conflicting_re_provision_is_refused() {
-        let (store, _directory) = test_store().await;
-        provision(&*store, "https://corp.gateway").await.unwrap();
+        let provisioned = MemoryProvisionedPolicy::new();
+        provision(&*provisioned, "https://corp.gateway").unwrap();
         // Same gateway (modulo normalization): idempotent.
-        provision(&*store, "https://corp.gateway/").await.unwrap();
+        provision(&*provisioned, "https://corp.gateway/").unwrap();
         // Different gateway: refused, and the original pairing survives.
-        let error = provision(&*store, "https://evil.example")
-            .await
+        let error = provision(&*provisioned, "https://evil.example")
             .err()
             .unwrap();
         assert!(error.to_string().contains("already provisioned"));
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = resolve(&*provisioned, &NoOsPolicy).unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+    }
+
+    /// The reprovision compare-and-swap, at the unit seam: a policy file
+    /// that moved to a third gateway after the confirmation named it refuses
+    /// the write, and the file keeps what it actually holds.
+    #[tokio::test]
+    async fn reprovision_refuses_a_file_that_changed_under_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let provisioned = ProvisionedPolicyFile::in_data_dir(directory.path());
+        provision(&provisioned, "https://old.example").unwrap();
+        // A competing pairing re-pointed the file after the user's
+        // confirmation named https://old.example/.
+        provisioned.write("https://third.example/").unwrap();
+
+        let error = reprovision(&provisioned, "https://new.example", "https://old.example/")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("changed while re-pairing"));
+        assert_eq!(
+            provisioned.read().unwrap().as_deref(),
+            Some("https://third.example/")
+        );
+
+        // Naming what the file actually holds lands the swap.
+        reprovision(
+            &provisioned,
+            "https://new.example",
+            "https://third.example/",
+        )
+        .unwrap();
+        assert_eq!(
+            provisioned.read().unwrap().as_deref(),
+            Some("https://new.example/")
+        );
+    }
+
+    /// The file's on-disk contract: one JSON payload the schema marker's
+    /// sibling tooling would recognize, published at owner-only permissions,
+    /// atomically overwritten on reprovision, gone on deprovision.
+    #[tokio::test]
+    async fn the_policy_file_round_trips_atomically_at_owner_only_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(PROVISIONED_POLICY_FILE);
+        let provisioned = ProvisionedPolicyFile::at(&path);
+
+        assert_eq!(provisioned.read().unwrap(), None);
+        provision(&provisioned, "https://corp.gateway").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"gateway_url\": \"https://corp.gateway/\"\n}\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // Reprovisioning overwrites in place rather than failing on the
+        // existing file, and no temporary is left behind either way.
+        reprovision(&provisioned, "https://new.gateway", "https://corp.gateway/").unwrap();
+        assert_eq!(
+            provisioned.read().unwrap().as_deref(),
+            Some("https://new.gateway/")
+        );
+        let strays = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            strays.len(),
+            1,
+            "no temporary files left behind: {strays:?}"
+        );
+
+        deprovision(&provisioned, "https://new.gateway/").unwrap();
+        assert!(!path.exists());
+        // Clearing an absent file is a success, not an error.
+        provisioned.clear().unwrap();
+    }
+
+    /// The upgrade import, end to end: a profile paired before the policy
+    /// moved out of the settings table boots onto the file, the legacy row
+    /// is left for the epoch squashes to remove, and the import never
+    /// overwrites what the file already says.
+    #[tokio::test]
+    async fn the_legacy_setting_row_is_imported_once_then_left_alone() {
+        let (store, _store_directory) = test_store().await;
+        let directory = tempfile::tempdir().unwrap();
+        let provisioned = ProvisionedPolicyFile::in_data_dir(directory.path());
+
+        // Nothing to import: no file, no row.
+        import_legacy_setting(&provisioned, &*store).await.unwrap();
+        assert_eq!(provisioned.read().unwrap(), None);
+
+        store
+            .set_setting(
+                LEGACY_SETTING_KEY,
+                &serde_json::json!({ "gateway_url": "https://corp.gateway/" }),
+            )
+            .await
+            .unwrap();
+        import_legacy_setting(&provisioned, &*store).await.unwrap();
+        let policy = resolve(&provisioned, &NoOsPolicy).unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+        // The row is left in place; the next pre-v1 epoch squash removes it.
+        assert!(
+            store
+                .get_setting(LEGACY_SETTING_KEY)
+                .await
+                .unwrap()
+                .is_some(),
+            "the import copies, never deletes"
+        );
+
+        // Once the file exists it wins: a changed row is not re-imported.
+        store
+            .set_setting(
+                LEGACY_SETTING_KEY,
+                &serde_json::json!({ "gateway_url": "https://elsewhere.example/" }),
+            )
+            .await
+            .unwrap();
+        import_legacy_setting(&provisioned, &*store).await.unwrap();
+        assert_eq!(
+            provisioned.read().unwrap().as_deref(),
+            Some("https://corp.gateway/")
+        );
+
+        // An undecodable row is skipped, not laundered into policy.
+        let directory = tempfile::tempdir().unwrap();
+        let provisioned = ProvisionedPolicyFile::in_data_dir(directory.path());
+        store
+            .set_setting(LEGACY_SETTING_KEY, &serde_json::json!({"not_a_url": 7}))
+            .await
+            .unwrap();
+        import_legacy_setting(&provisioned, &*store).await.unwrap();
+        assert_eq!(provisioned.read().unwrap(), None);
+
+        // Nor does the import paper over a corrupt file: that is the
+        // fail-closed misconfigured state, repaired by re-pairing only.
+        let directory = tempfile::tempdir().unwrap();
+        let provisioned = ProvisionedPolicyFile::in_data_dir(directory.path());
+        std::fs::write(directory.path().join(PROVISIONED_POLICY_FILE), b"not json").unwrap();
+        store
+            .set_setting(
+                LEGACY_SETTING_KEY,
+                &serde_json::json!({ "gateway_url": "https://corp.gateway/" }),
+            )
+            .await
+            .unwrap();
+        import_legacy_setting(&provisioned, &*store).await.unwrap();
+        let policy = resolve(&provisioned, &NoOsPolicy).unwrap();
+        assert!(policy.managed && policy.misconfigured);
+        assert_eq!(policy.source, ManagedPolicySource::Provisioned);
     }
 
     /// The Linux reader end to end through resolution: absent file is the
@@ -1011,15 +1437,15 @@ mod tests {
     /// closed as misconfigured. Portable — the path is injected.
     #[tokio::test]
     async fn policy_file_reader_resolves_absent_valid_and_corrupt_files() {
-        let (store, _directory) = test_store().await;
+        let provisioned = MemoryProvisionedPolicy::new();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("managed-policy.json");
         let reader = PolicyFileSource::at(&path);
 
-        assert!(!resolve(&*store, &reader).await.unwrap().managed);
+        assert!(!resolve(&*provisioned, &reader).unwrap().managed);
 
         std::fs::write(&path, br#"{ "gateway_url": "https://corp.gateway" }"#).unwrap();
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(policy.managed && !policy.misconfigured);
         assert_eq!(policy.source, ManagedPolicySource::Os);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
@@ -1028,7 +1454,7 @@ mod tests {
         // The ceiling is per key: a file asserting only the mode cap leaves
         // the gateway side unmanaged, and one asserting both carries both.
         std::fs::write(&path, br#"{ "maximum_permission_mode": "ask" }"#).unwrap();
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(!policy.managed);
         assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Ask));
 
@@ -1037,7 +1463,7 @@ mod tests {
             br#"{ "gateway_url": "https://corp.gateway", "maximum_permission_mode": "auto" }"#,
         )
         .unwrap();
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(policy.managed && !policy.misconfigured);
         assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Auto));
         // The local-MCP allowance defaults to deny; the org asserts it as a
@@ -1048,12 +1474,12 @@ mod tests {
             br#"{ "gateway_url": "https://corp.gateway", "allow_local_mcp_servers": true }"#,
         )
         .unwrap();
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(policy.managed && policy.allow_local_mcp_servers);
 
         for corrupt in [&b"not json"[..], br#"{ "gateway": "wrong shape" }"#] {
             std::fs::write(&path, corrupt).unwrap();
-            let policy = resolve(&*store, &reader).await.unwrap();
+            let policy = resolve(&*provisioned, &reader).unwrap();
             assert!(policy.managed && policy.misconfigured);
             assert_eq!(policy.source, ManagedPolicySource::Os);
         }
@@ -1164,18 +1590,15 @@ mod tests {
             }
         }
 
-        let (store, _directory) = test_store().await;
-        let policy = resolve(&*store, &CeilingOnly(Ok(Some(PermissionMode::Ask))))
-            .await
-            .unwrap();
+        let provisioned = MemoryProvisionedPolicy::new();
+        let policy = resolve(&*provisioned, &CeilingOnly(Ok(Some(PermissionMode::Ask)))).unwrap();
         assert!(!policy.managed);
         assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Ask));
 
         let policy = resolve(
-            &*store,
+            &*provisioned,
             &CeilingOnly(Err(AgentError::config("artifact present but unreadable"))),
         )
-        .await
         .unwrap();
         assert_eq!(policy.permission_mode_ceiling, Some(PermissionMode::Ask));
 
@@ -1208,7 +1631,7 @@ mod tests {
     /// abort-on-first-error fails here.
     #[tokio::test]
     async fn a_broken_user_channel_falls_through_to_the_device_channel() {
-        let (store, _directory) = test_store().await;
+        let provisioned = MemoryProvisionedPolicy::new();
         let directory = tempfile::tempdir().unwrap();
         let user_path = directory.path().join("user").join("app.plist");
         let device_path = directory.path().join("app.plist");
@@ -1231,7 +1654,7 @@ mod tests {
             reader.trusted_owner = std::fs::metadata(&device_path).unwrap().uid();
         }
 
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(policy.managed && !policy.misconfigured);
         assert_eq!(policy.source, ManagedPolicySource::Os);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
@@ -1239,7 +1662,7 @@ mod tests {
         // With no device channel behind it, the broken user channel is what
         // the reader has to say: misconfigured, never silently unmanaged.
         std::fs::remove_file(&device_path).unwrap();
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(policy.managed && policy.misconfigured);
         assert!(policy.gateway_url.is_none());
     }
@@ -1252,7 +1675,7 @@ mod tests {
     async fn a_channel_plist_not_owned_by_root_is_refused() {
         use std::os::unix::fs::MetadataExt;
 
-        let (store, _directory) = test_store().await;
+        let provisioned = MemoryProvisionedPolicy::new();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("app.plist");
         std::fs::write(
@@ -1269,7 +1692,7 @@ mod tests {
         }
 
         let reader = ManagedPreferencesSource::with_paths(vec![path]);
-        let policy = resolve(&*store, &reader).await.unwrap();
+        let policy = resolve(&*provisioned, &reader).unwrap();
         assert!(policy.managed && policy.misconfigured);
         assert_eq!(policy.source, ManagedPolicySource::Os);
         assert!(policy.gateway_url.is_none());

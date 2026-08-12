@@ -1057,12 +1057,25 @@ async fn bind_inner(
     // handlers, so they can never disagree on the resolved policy.
     let os_policy: Arc<dyn managed_policy::OsPolicySource> =
         managed_policy::platform_source(&config);
+    // The provisioned policy's durable home is the sidecar file in the data
+    // directory, not the SQLite profile: a pre-v1 schema-epoch reset deletes
+    // the database, and the policy (and with it the gateway session's
+    // authorization) must survive that. One instance, shared the same way.
+    let provisioned_policy: Arc<dyn managed_policy::ProvisionedPolicySource> = Arc::new(
+        managed_policy::ProvisionedPolicyFile::in_data_dir(&config.data_dir),
+    );
+    // One-time upgrade import: a pairing recorded by an earlier build lives
+    // in the settings table. Copy it to the file before the first policy
+    // read — and fail the boot if the copy fails, because the retire step
+    // below would read the unmigrated profile as unmanaged and clear the
+    // very session the import exists to preserve.
+    managed_policy::import_legacy_setting(&*provisioned_policy, &*store).await?;
     // The legacy Anthropic auto-enable is gated on one policy read. A resolution
     // `Err` is
     // deliberately swallowed as "not allowed": an unreadable policy fails
     // closed to no BYOK arming while boot still proceeds, so the profile can
     // surface the error and be repaired instead of bricking.
-    let boot_policy = managed_policy::resolve(&*store, &*os_policy).await;
+    let boot_policy = managed_policy::resolve(&*provisioned_policy, &*os_policy);
     let byok_boot_allowed = matches!(&boot_policy, Ok(policy) if !policy.managed);
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade. Never
@@ -1082,8 +1095,12 @@ async fn bind_inner(
         providers::retire_legacy_gateway_row(&*store, policy).await?;
         gateway_runtime::retire_superseded_gateway_session(secrets.clone(), policy).await?;
     }
-    let gateway =
-        gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+    let gateway = gateway_runtime::GatewayRuntime::new(
+        store.clone(),
+        secrets.clone(),
+        provisioned_policy.clone(),
+        os_policy.clone(),
+    );
     let chatgpt = Arc::new(chatgpt_runtime::ChatGptRuntime::new(
         store.clone(),
         secrets.clone(),
@@ -1093,6 +1110,7 @@ async fn bind_inner(
         secrets.clone(),
         gateway.clone(),
         chatgpt.clone(),
+        provisioned_policy.clone(),
         os_policy.clone(),
     ));
     // Under the `scripted-provider` feature only — absent from every released
@@ -1158,6 +1176,7 @@ async fn bind_inner(
         client_executor_id.unwrap_or_else(Uuid::new_v4),
         gateway,
         chatgpt,
+        provisioned_policy,
         os_policy,
     )?;
     // Without a restart-stable native executor identity, durable
@@ -1214,6 +1233,7 @@ async fn bind_inner(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
+        state.provisioned_policy.clone(),
         state.os_policy.clone(),
         state.approvals.clone(),
     );
@@ -1228,6 +1248,7 @@ async fn bind_inner(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
+        state.provisioned_policy.clone(),
         state.os_policy.clone(),
         state.tools.clone(),
         state.approvals.clone(),

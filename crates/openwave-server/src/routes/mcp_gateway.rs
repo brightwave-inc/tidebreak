@@ -63,7 +63,7 @@ pub async fn put_mcp_servers(
     // itself re-reads the lockdown under that lock, so such a definition
     // persists inert and never connects. The residue is a millisecond-wide
     // cosmetic entry in durable config, not an execution bypass.
-    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     // Once validation/startup begins, finish the durable/live commit even if
     // the HTTP client disconnects and drops this handler future.
     let runtime = state.mcp.clone();
@@ -167,7 +167,7 @@ pub async fn get_policy(
 async fn policy_with_pending(
     state: &AppState,
 ) -> Result<crate::managed_policy::ManagedPolicy, ServerError> {
-    let mut policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let mut policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     policy.pending_gateway_url = state.gateway.pending_pairing_url().await;
     Ok(policy)
 }

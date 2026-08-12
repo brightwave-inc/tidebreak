@@ -229,9 +229,10 @@ pub async fn create_chat(
         // arrived: a remembered `allow` under an `ask` ceiling seeds `ask`,
         // mirroring how the turn gate treats stored over-ceiling modes.
         None => match read_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY).await? {
-            Some(sticky) => crate::managed_policy::resolve(&*state.store, &*state.os_policy)
-                .await?
-                .clamp_permission_mode(Some(sticky)),
+            Some(sticky) => {
+                crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?
+                    .clamp_permission_mode(Some(sticky))
+            }
             None => None,
         },
     };

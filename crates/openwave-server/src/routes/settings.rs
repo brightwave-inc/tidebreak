@@ -875,9 +875,10 @@ pub(super) async fn read_sticky_chat_defaults(
         // policy arrived: a remembered `allow` under an `ask` ceiling seeds
         // (and reads back) `ask`, mirroring the turn gate's treatment of
         // stored over-ceiling modes.
-        Some(mode) => crate::managed_policy::resolve(store, &*state.os_policy)
-            .await?
-            .clamp_permission_mode(Some(mode)),
+        Some(mode) => {
+            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?
+                .clamp_permission_mode(Some(mode))
+        }
         None => None,
     };
     Ok(StickyChatDefaults {

@@ -45,9 +45,15 @@ Policy resolution has three tiers, strongest first:
    by the app, and is never replaceable from inside it. A present-but-broken
    artifact fails closed: managed-but-misconfigured, with no usable gateway
    and no fallback to the open product.
-2. **Provisioned.** The sticky `managed_policy_v1` row in the profile
-   database, written only by a completed pairing (below). User-consented,
-   and replaceable by the same consent that created it.
+2. **Provisioned.** The sticky policy file `gateway-policy.json` in the
+   profile's data directory, written only by a completed pairing (below).
+   User-consented, and replaceable by the same consent that created it. It
+   is deliberately a sidecar file rather than a database row: a pre-v1
+   schema-epoch reset deletes the SQLite profile, and the policy must
+   survive that — losing it would resolve the profile unmanaged and orphan
+   the session below. Profiles paired before the move are imported once at
+   boot from the legacy `managed_policy_v1` settings row, which the next
+   epoch reset then removes naturally.
 3. **Open.** Neither present; the unmanaged product, which has no gateway
    surface at all.
 
@@ -73,7 +79,7 @@ is that **the link never writes anything**:
 - A link naming a *different* gateway than the provisioned one escalates to
   a native confirmation naming both origins. Confirming parks a *replacing*
   pairing that remembers what it expects to replace; the commit is a
-  compare-and-swap, so a policy row that moved mid-flow refuses rather than
+  compare-and-swap, so a policy that moved mid-flow refuses rather than
   clobbers. An OS-asserted gateway is never replaceable this way.
 - Registration and commit are called on the embedded server's handles
   directly from the shell. No HTTP route reaches the policy write path, and

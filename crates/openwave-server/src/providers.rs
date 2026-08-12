@@ -1082,6 +1082,7 @@ pub async fn update_provider(
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
     update: ProviderUpdate,
+    provisioned_policy: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
 ) -> std::result::Result<ProviderInfo, ServerError> {
     if kind == ProviderKind::ModelGateway {
@@ -1095,7 +1096,7 @@ pub async fn update_provider(
              pair via your gateway's page to connect",
         ));
     }
-    let policy = crate::managed_policy::resolve(store, os_policy).await?;
+    let policy = crate::managed_policy::resolve(provisioned_policy, os_policy)?;
     if policy.managed && (update.credential.is_some() || update.base_url.is_some()) {
         return Err(managed_profile_refusal(format!(
             "this profile is managed by a model gateway; {kind} credentials and endpoints are locked"

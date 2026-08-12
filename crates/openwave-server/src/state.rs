@@ -168,6 +168,12 @@ pub struct AppState {
     /// assembly in `bind_inner` injects the platform's reader via
     /// `managed_policy::platform_source`.
     pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    /// The durable provisioned-policy home for managed-mode resolution.
+    /// Directly assembled state roots it at the profile's own data directory
+    /// (`Config::data_dir`), hermetic per profile; the production assembly
+    /// in `bind_inner` shares the one instance the pairing write path and
+    /// the legacy-row import ran on, so no reader can disagree with them.
+    pub(crate) provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     /// Wakes the durable turn worker after acceptance or cancellation commits.
     pub(crate) turn_job_wake: Arc<Notify>,
     /// Wakes the bounded sandbox-run worker after delegated work commits.
@@ -270,14 +276,20 @@ impl AppState {
         agent_config: AgentConfig,
         client_executor_id: Uuid,
     ) -> Result<Self> {
-        // Hermetic default wiring: the policy source that asserts nothing and
-        // one gateway runtime built over these same inputs. The sharing
-        // invariant lives in `with_gateway_runtime`; this only picks inputs.
+        // Hermetic default wiring: the OS policy source that asserts
+        // nothing, the provisioned-policy file rooted at this profile's own
+        // data directory, and one gateway runtime built over these same
+        // inputs. The sharing invariant lives in `with_gateway_runtime`;
+        // this only picks inputs.
         let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
             Arc::new(crate::managed_policy::NoOsPolicy);
+        let provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource> = Arc::new(
+            crate::managed_policy::ProvisionedPolicyFile::in_data_dir(&config.data_dir),
+        );
         let gateway = crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             secrets.clone(),
+            provisioned_policy.clone(),
             os_policy.clone(),
         );
         let chatgpt = Arc::new(crate::chatgpt_runtime::ChatGptRuntime::new(
@@ -294,6 +306,7 @@ impl AppState {
             client_executor_id,
             gateway,
             chatgpt,
+            provisioned_policy,
             os_policy,
         )
     }
@@ -326,6 +339,7 @@ impl AppState {
         client_executor_id: Uuid,
         gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
         chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
+        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Result<Self> {
         if client_executor_id.is_nil() {
@@ -355,6 +369,7 @@ impl AppState {
             store.clone(),
             secrets.clone(),
             gateway.clone(),
+            provisioned_policy.clone(),
             os_policy.clone(),
         ));
         let rest_dispatch = crate::connected_apps::governed_rest_dispatcher(secrets.clone());
@@ -387,6 +402,7 @@ impl AppState {
             gateway,
             chatgpt,
             os_policy,
+            provisioned_policy,
             turn_job_wake: Arc::new(Notify::new()),
             agent_run_wake: Arc::new(Notify::new()),
             blob_retirement_wake: Arc::new(Notify::new()),
