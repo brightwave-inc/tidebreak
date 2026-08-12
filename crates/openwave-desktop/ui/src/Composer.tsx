@@ -20,6 +20,8 @@ import {
   ListPlus,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
+import { ContextUsageIndicator } from "./ContextUsageIndicator";
+import type { RendererTurnUsage } from "./generated/wire";
 import {
   activeSlashQuery,
   availableSlashOptions,
@@ -272,6 +274,12 @@ export type ComposerProps = {
   history?: readonly string[];
   modelMenu?: ReactNode;
   permissionMenu?: ReactNode;
+  /** Context-window reading, shown with the composer's own controls. */
+  contextUsage?: {
+    usage: RendererTurnUsage | null;
+    contextWindow: number | undefined;
+    modelName: string | undefined;
+  };
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
   plugins?: ComposerPlugins;
@@ -319,6 +327,7 @@ export function Composer({
   history = [],
   modelMenu,
   permissionMenu,
+  contextUsage,
   network,
   reasoning,
   plugins,
@@ -1055,6 +1064,16 @@ export function Composer({
           {/* The permission mode sits with the send cluster: it is what the
               next turn will be allowed to do, not another way to prepare it. */}
           {permissionMenu}
+          {/* Context usage lives in the composer's action row: the reading
+              answers "how much room is left for what I'm about to send", so
+              it belongs beside the control that sends it. */}
+          {contextUsage && (
+            <ContextUsageIndicator
+              usage={contextUsage.usage}
+              contextWindow={contextUsage.contextWindow}
+              modelName={contextUsage.modelName}
+            />
+          )}
           {/* The mic sits immediately before send: both act on the draft, so
               they belong in the same cluster, apart from the tools and
               model controls that only set the turn up. */}
@@ -1105,8 +1124,8 @@ export function Composer({
                   <Button
                     type="submit"
                     variant="default"
-                    size="sm"
-                    className="min-w-[5rem]"
+                    size="xs"
+                    className="h-8 min-w-[5rem] px-3 text-sm"
                     aria-label={
                       queueAvailable && sendMode === "queue"
                         ? "Queue message for after this response"

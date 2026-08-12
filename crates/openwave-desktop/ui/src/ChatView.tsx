@@ -8,6 +8,7 @@ import {
   type RefObject,
 } from "react";
 import type { ApiClient, Chat } from "./api";
+import type { RendererTurnUsage } from "./generated/wire";
 import {
   followScrollBehavior,
   isNearBottom,
@@ -68,6 +69,12 @@ export type ChatViewProps = {
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
   composerPermissionMenu: ReactNode;
+  /** Context-window reading the composer shows beside its own controls. */
+  contextUsage?: {
+    usage: RendererTurnUsage | null;
+    contextWindow: number | undefined;
+    modelName: string | undefined;
+  };
   composerNetwork?: ComposerNetwork;
   composerReasoning?: ComposerReasoning;
   composerImages: ComposerImages;
@@ -108,6 +115,7 @@ export function ChatView({
   draftRef,
   composerModelMenu,
   composerPermissionMenu,
+  contextUsage,
   composerNetwork,
   composerReasoning,
   composerImages,
@@ -678,6 +686,7 @@ export function ChatView({
             history={composerHistory}
             modelMenu={composerModelMenu}
             permissionMenu={composerPermissionMenu}
+            contextUsage={contextUsage}
             network={composerNetwork}
             reasoning={composerReasoning}
             plugins={composerPlugins.plugins}

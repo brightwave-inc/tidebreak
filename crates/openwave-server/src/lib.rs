@@ -555,6 +555,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(routes::put_queue_paused),
         )
         .route(
+            "/chats/{chat_id}/queued/send-now",
+            post(routes::post_queue_send_now),
+        )
+        .route(
             "/chats/{chat_id}/agent-runs/{run_id}/steer",
             post(routes::post_agent_run_steer),
         )

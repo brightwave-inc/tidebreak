@@ -19,8 +19,8 @@ import { cn } from "./lib/utils";
  * turn. Switching models mid-chat is a question about what will fit next, so
  * the reading moves the moment the selection does.
  *
- * Lives in the chat header beside the activity chip so the reading stays on
- * screen for the whole conversation, not only while the composer is in view.
+ * Lives in the composer's action row so the reading sits beside the control
+ * that spends the remaining window.
  */
 export function ContextUsageIndicator({
   usage,
