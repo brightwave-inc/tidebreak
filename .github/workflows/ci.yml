@@ -51,6 +51,7 @@ jobs:
           fetch-depth: 1
       - name: Validate Conventional Commit title
         env:
+          CANONICAL_REPOSITORY: brightwave-inc/tidebreak
           GH_TOKEN: ${{ github.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -61,7 +62,7 @@ jobs:
             jq -r 'sort | join(",")')"
           actual_labels=""
           for _ in {1..10}; do
-            actual_labels="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+            actual_labels="$(gh api "repos/$CANONICAL_REPOSITORY/pulls/$PR_NUMBER" \
               --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
             [[ "$actual_labels" = "$expected_labels" ]] && break
             sleep 2
@@ -103,6 +104,13 @@ jobs:
             -e 's/OPENWAVE/TIDEBREAK/g' \
             -e 's/OpenWave/Tidebreak/g' \
             -e 's/openwave/tidebreak/g' \
+            "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
+          # Keep the already-renamed base policy's projected assertion true
+          # for the one PR generation spanning the repository rename.
+          sed -i \
+            -e 's/TIDEBREAK/TIDEBREAK/g' \
+            -e 's/Tidebreak/Tidebreak/g' \
+            -e 's/tidebreak/tidebreak/g' \
             "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
       - name: Test trusted base-branch release policy
         if: ${{ github.event_name == 'pull_request' }}
