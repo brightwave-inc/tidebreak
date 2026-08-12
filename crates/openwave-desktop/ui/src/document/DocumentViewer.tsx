@@ -1,8 +1,8 @@
 /**
  * `document/` is the heavy side of viewing a source: the media-type dispatcher
- * below, the viewers built on a document engine of their own (pdf.js, Univer)
- * with the parsing and control surfaces those need, and the download every
- * viewer shares (`useFileDownload`).
+ * below, the viewers built on a document engine of their own (pdf.js,
+ * docx-preview, Univer) with the parsing and control surfaces those need, and
+ * the download every viewer shares (`useFileDownload`).
  *
  * `components/document/` next to it is the reading side: the extracted text,
  * the panel's view switcher, and the viewers that need nothing beyond the
@@ -21,13 +21,11 @@ const PdfViewer = lazy(() =>
   import("@/document/PdfViewer").then((m) => ({ default: m.PdfViewer })),
 );
 // The spreadsheet and word-document engines are larger still, and split apart
-// so that opening a workbook does not also fetch the document renderer.
+// so that opening a workbook does not also fetch the DOCX renderer.
 const UniverSpreadsheetViewer = lazy(
   () => import("@/document/UniverSpreadsheetViewer"),
 );
-const UniverDocumentViewer = lazy(
-  () => import("@/document/UniverDocumentViewer"),
-);
+const DocxViewer = lazy(() => import("@/document/DocxViewer"));
 // Presentations render as converted PDFs; the viewer carries the conversion
 // states (preparing, converter missing) on top of the lazy PDF engine.
 const PresentationViewer = lazy(() =>
@@ -156,11 +154,7 @@ export function DocumentViewer({
   if (type === WORD_DOCUMENT_MEDIA_TYPE) {
     return (
       <ViewerBoundary>
-        <UniverDocumentViewer
-          key={source.id}
-          source={source}
-          className={className}
-        />
+        <DocxViewer key={source.id} source={source} className={className} />
       </ViewerBoundary>
     );
   }
