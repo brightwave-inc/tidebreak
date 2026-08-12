@@ -60,7 +60,10 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(response.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(response).await;
     assert!(settings["model"].is_null());
-    assert_eq!(settings["max_active_background_agents"], 5);
+    assert_eq!(
+        settings["max_active_background_agents"],
+        openwave_core::AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS
+    );
     assert_eq!(settings["sandbox_agent_checkin_steps"], 100);
     assert_eq!(settings["sandbox_agent_error_checkin"], 5);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.75);
@@ -80,7 +83,7 @@ async fn settings_default_then_update_roundtrips() {
                 .body(Body::from(
                     serde_json::json!({
                         "model": "claude-x",
-                        "max_active_background_agents": 7,
+                        "max_active_background_agents": 3,
                         "sandbox_agent_checkin_steps": 250,
                         "sandbox_agent_error_checkin": 3,
                         "compaction": {
@@ -99,7 +102,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(response.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
-    assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(settings["max_active_background_agents"], 3);
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
@@ -120,11 +123,51 @@ async fn settings_default_then_update_roundtrips() {
         .unwrap();
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
-    assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(settings["max_active_background_agents"], 3);
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
+}
+
+#[tokio::test]
+async fn settings_reject_active_background_agents_above_wait_cap() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let over_cap = openwave_core::AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS + 1;
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/settings")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "max_active_background_agents": over_cap }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/settings")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let settings: serde_json::Value = json_body(response).await;
+    assert_eq!(
+        settings["max_active_background_agents"],
+        openwave_core::AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS
+    );
 }
 
 async fn put_mcp_servers(

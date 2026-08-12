@@ -223,8 +223,16 @@ impl AgentRun {
     pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
     /// Largest accepted scheduler concurrency bound.
     pub const MAX_CONCURRENCY_LIMIT: u32 = 1_024;
-    /// Default maximum concurrently active background agents in one chat.
-    pub const DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS: u32 = 5;
+    /// Ceiling for unsettled depth-one children on one origin turn.
+    ///
+    /// Matches [`super::turns::TurnAgentRunWaitSet::MAX_CHILDREN`] so every
+    /// child spawn admits can join one `wait_for_agents` call. The wait bound
+    /// is the durable result-envelope budget; spawn and settings share it so
+    /// admission cannot outrun a single ordered wait.
+    pub const MAX_ACTIVE_BACKGROUND_AGENTS: u32 =
+        super::turns::TurnAgentRunWaitSet::MAX_CHILDREN as u32;
+    /// Default maximum unsettled background agents on one origin turn.
+    pub const DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS: u32 = Self::MAX_ACTIVE_BACKGROUND_AGENTS;
     /// Maximum stable failure-category length.
     pub const MAX_ERROR_CODE_LEN: usize = 128;
     /// Maximum persisted diagnostic-detail length.
