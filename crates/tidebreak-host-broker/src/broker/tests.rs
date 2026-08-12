@@ -4456,6 +4456,7 @@ struct StubCuBackend {
     scrolled: Mutex<Vec<String>>,
     focused: Mutex<Vec<String>>,
     capture_png: Vec<u8>,
+    fail_click: Mutex<Option<BackendErrorKind>>,
 }
 
 impl StubCuBackend {
@@ -4578,6 +4579,12 @@ impl ComputerUseBackend for StubCuBackend {
         _button: Option<&str>,
         _click_count: Option<u32>,
     ) -> Result<ControlMeta, BackendError> {
+        if let Some(kind) = *self.fail_click.lock().unwrap() {
+            return Err(BackendError {
+                kind,
+                message: "injected click failure".to_owned(),
+            });
+        }
         self.clicked
             .lock()
             .unwrap()
@@ -5428,6 +5435,86 @@ fn a_once_grant_does_not_survive_broker_reload() {
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].id(), standing_id);
     assert!(!grants[0].is_single_use());
+}
+
+fn durable_cu_setup() -> CuFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = StubCuBackend::available();
+    let audit = Arc::new(CollectingAudit::default());
+    let state_dir = temp.path().join("app-data/host-broker");
+    let broker = Broker::test_open_with_computer_use(
+        test_policy(&temp),
+        &state_dir,
+        audit.clone(),
+        backend.clone(),
+        temp.path().join("cu-staging"),
+    )
+    .unwrap();
+    let conversation = Uuid::new_v4();
+    CuFixture {
+        _temp: temp,
+        broker,
+        backend,
+        audit,
+        subject: GrantSubject::conversation(conversation).unwrap(),
+        context: ExecutionContext::standalone(conversation).unwrap(),
+    }
+}
+
+#[test]
+fn a_failed_save_does_not_keep_a_consumed_once_grant() {
+    let fixture = durable_cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    fixture
+        .broker
+        .shared
+        .state_file
+        .as_ref()
+        .unwrap()
+        .fail_after_saves(0);
+    fixture.click("com.example.app").unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn a_failed_save_does_not_block_revoking_an_once_grant() {
+    let fixture = durable_cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    fixture
+        .broker
+        .shared
+        .state_file
+        .as_ref()
+        .unwrap()
+        .fail_after_saves(0);
+    let revoked = fixture
+        .control(ControlRequest::CuRevokeApp(CuRevokeAppRequest {
+            subject: fixture.subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some("com.example.app".to_owned()),
+        }))
+        .unwrap();
+    assert!(matches!(
+        revoked,
+        ControlResult::CuRevokeApp { revoked: true }
+    ));
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn a_post_authorize_error_spends_an_once_grant() {
+    let fixture = cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    *fixture.backend.fail_click.lock().unwrap() = Some(BackendErrorKind::Yielded);
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Yielded);
+    *fixture.backend.fail_click.lock().unwrap() = None;
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.clicks().is_empty());
 }
 
 #[test]
