@@ -30,8 +30,8 @@ pub const RESOURCE_LLM: &str = "llm";
 
 const SCOPE: &str = "openid profile offline_access models:read inference:invoke";
 /// The secret-store key the gateway session lives under. Public so the secret
-/// cache at the server boundary can treat the session key specially (see
-/// `CachingSecretProvider::with_miss_passthrough`).
+/// cache can treat it as a miss-passthrough key, and so [`crate::secret_rehome`]
+/// can name every stored credential.
 pub const SECRET_KEY: &str = "gateway.credentials_v1";
 /// Refresh an access token this close to expiry instead of using it.
 const EXPIRY_LEEWAY_SECONDS: u64 = 60;

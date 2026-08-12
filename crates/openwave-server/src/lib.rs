@@ -1037,6 +1037,17 @@ async fn bind_inner(
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let store = connect_store(&config).await?;
     let secrets = secret_provider(&config);
+    // An app update replaces this binary, and macOS pins each keychain
+    // item's access to the creating binary's signature — so the first boot
+    // of a new binary re-homes every stored credential before any consumer
+    // reads one. Inline, not spawned: a concurrent pass could interleave
+    // with token refresh and strand a session (see the function), and the
+    // pass is cheap — one read+rewrite per stored credential, once per
+    // binary, with later boots of the same binary skipping it entirely.
+    // Best-effort: a failure here must not take boot down with it.
+    if let Err(error) = secret_rehome::rehome_once_per_binary(&*store, &*secrets).await {
+        tracing::warn!("could not re-home stored credentials: {error}");
+    }
     // The product boot path is where this platform's OS-managed (MDM) policy
     // reader gets selected; directly assembled AppState stays hermetic. This
     // is the one instance shared by the boot policy read, the legacy-key

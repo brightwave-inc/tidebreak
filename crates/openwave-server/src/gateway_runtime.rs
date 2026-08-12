@@ -2921,6 +2921,79 @@ mod tests {
         );
     }
 
+    /// A secret store whose reads fail while `fail_reads` is set — the
+    /// transient shape of a keychain read whose ACL no longer matches the
+    /// running binary (denied or pending prompt), as opposed to a confirmed
+    /// absence.
+    #[derive(Default)]
+    struct FlakySecrets {
+        values: MockSecrets,
+        fail_reads: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl SecretProvider for FlakySecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            if self.fail_reads.load(Ordering::SeqCst) {
+                return Err(AgentError::Secret("keychain read denied".into()));
+            }
+            self.values.get_secret(key).await
+        }
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.values.set_secret(key, value).await
+        }
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.values.delete_secret(key).await
+        }
+    }
+
+    /// Retire is a one-way door — the session is gone afterwards — so it
+    /// must not open on a transient read error: a keychain read that fails
+    /// (or an unparsable blob, which also errors the load) proves nothing
+    /// about whether the session is superseded. Only a successful read that
+    /// shows a definitive policy mismatch may retire it.
+    #[tokio::test]
+    async fn boot_keeps_the_session_when_the_credential_read_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets = Arc::new(FlakySecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": "http://127.0.0.1:1",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_survivor",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+
+        // Unmanaged policy: a readable session WOULD be retired. With the
+        // read erroring, retire must leave it exactly where it is.
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        assert!(!policy.managed);
+        secrets.fail_reads.store(true, Ordering::SeqCst);
+        retire_superseded_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        secrets.fail_reads.store(false, Ordering::SeqCst);
+        assert!(
+            crate::connectors::has_stored_credentials(&*secrets).await,
+            "a transient read error must not retire the session"
+        );
+    }
+
     /// The session half of the legacy hard cut: an unmanaged profile with a
     /// session left over from the retired additive mode has no surface that
     /// could ever revoke it, so boot clears it. Without this the refresh
