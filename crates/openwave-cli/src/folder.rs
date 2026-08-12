@@ -11,8 +11,8 @@
 //! **These commands never run inside a turn.** They are standalone provisioning
 //! that an operator invokes; there is no flag that answers a folder request the
 //! agent made. A mid-turn `request_folder_access` in a headless run gets the
-//! same typed refusal an undecided desktop prompt produces — see
-//! [`crate::print`].
+//! same typed refusal an undecided desktop prompt produces — settled by
+//! [`crate::folder_executor`] (and by print mode when it embeds the engine).
 //!
 //! ## Locks, and why these commands do not take them
 //!
