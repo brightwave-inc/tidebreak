@@ -583,3 +583,44 @@ fn a_killed_server_leaves_its_data_directory_usable() {
     let (_reclaimed, url, _token) = spawn_serve(dir.path());
     assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
 }
+
+/// `--model` is applied before the turn; a selection the server rejects must
+/// fail the process without writing assistant text to stdout.
+#[test]
+fn print_mode_rejects_an_unknown_model_before_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args([
+            "-p",
+            "hello",
+            "--model",
+            "openai::definitely-not-a-real-model",
+            "--permission-mode",
+            "allow",
+        ])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SERVER_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave -p --model");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.to_lowercase().contains("model") || stderr.to_lowercase().contains("provider"),
+        "stderr: {stderr}"
+    );
+}

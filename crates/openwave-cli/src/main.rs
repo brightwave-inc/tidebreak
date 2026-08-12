@@ -34,9 +34,9 @@
 //! terminal. stdout carries the assistant's text (or, with
 //! `--output-format json`, the turn's event stream as NDJSON), and the exit
 //! status says whether the turn completed. `--permission-mode` sets the chat's
-//! permission mode for the run, and under `--output-format json` a driving
-//! process answers approvals, plans, and questions over stdin — see
-//! [`print::protocol`].
+//! permission mode for the run, `--model` pins the chat's model selection
+//! before the turn, and under `--output-format json` a driving process answers
+//! approvals, plans, and questions over stdin — see [`print::protocol`].
 //!
 //! `openwave provider|model|settings|mcp-server …` configure the profile the
 //! same way the desktop's settings pages do — over the server's own routes.
@@ -90,6 +90,7 @@ usage: openwave serve
        openwave tui [--chat <id> | --new]
        openwave -p <prompt> [--chat <id>] [--output-format text|json]
                   [--permission-mode ask|auto|allow|plan]
+                  [--model <key>]
 
        openwave output list <chat>
        openwave output show <chat> <output> [--revision <id>]
@@ -239,6 +240,7 @@ async fn run() -> Result<i32> {
             let mut chat = None;
             let mut format = OutputFormat::Text;
             let mut permission_mode = None;
+            let mut model = None;
             while let Some(flag) = args.next() {
                 if flag == OsStr::new("--chat") {
                     let Some(id) = args.next() else {
@@ -268,6 +270,17 @@ async fn run() -> Result<i32> {
                         }
                         _ => usage_error("--permission-mode expects ask, auto, allow, or plan"),
                     }
+                } else if flag == OsStr::new("--model") {
+                    let Some(value) = args.next() else {
+                        usage_error("--model requires a catalog key");
+                    };
+                    let Some(value) = value.to_str().map(str::to_owned) else {
+                        usage_error("--model expects a UTF-8 catalog key");
+                    };
+                    if value.is_empty() || value.starts_with("--") {
+                        usage_error("--model requires a catalog key");
+                    }
+                    model = Some(value);
                 } else {
                     usage_error(&format!("unknown print-mode argument {flag:?}"));
                 }
@@ -277,6 +290,7 @@ async fn run() -> Result<i32> {
                 chat,
                 format,
                 permission_mode,
+                model,
                 server_flags.resolve()?,
             )
             .await
