@@ -613,7 +613,11 @@ mod tests {
             .await
             .expect("create a chat");
         let listed = client.list_chats().await.expect("list after create");
-        assert_eq!(listed.len(), 1, "create must leave exactly one chat visible");
+        assert_eq!(
+            listed.len(),
+            1,
+            "create must leave exactly one chat visible"
+        );
 
         serve.abort();
     }
