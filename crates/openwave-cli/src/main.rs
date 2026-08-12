@@ -124,13 +124,14 @@ usage: openwave serve
        openwave agent-run list <chat>
        openwave agent-run show <chat> <run>
 
-       openwave folder connect <path> --chat <id>
-       openwave folder list [--chat <id>]
-       openwave folder disconnect <path-or-root-id> --chat <id>
+       openwave folder connect <path> --chat <id> [--output-format text|json]
+       openwave folder list [--chat <id>] [--output-format text|json]
+       openwave folder disconnect <path-or-root-id> --chat <id> [--output-format text|json]
 
-The setup commands and the output family take --output-format text|json. A key
-is read from stdin, or from the environment variable named by --from-env —
-never from an argument, which every process on the machine can read.
+The setup commands, the output family, and the folder commands take
+--output-format text|json. A key is read from stdin, or from the environment
+variable named by --from-env — never from an argument, which every process on
+the machine can read.
 
 tui, -p, output, attach, and the setup commands also take --server <url>
 [--server-token-env <var>] or --attach, which talks to a server that is already
