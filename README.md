@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="assets/tidebreak-logo.png" alt="Tidebreak" width="380">
+  <img src="assets/tidebreak-mark.svg" alt="Tidebreak mark" width="300">
 </p>
+
+<h1 align="center">Tidebreak</h1>
 
 <p align="center">
   <strong>A private AI coworker that runs on your machine.</strong><br>
