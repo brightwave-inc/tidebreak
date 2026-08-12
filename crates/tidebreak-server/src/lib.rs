@@ -1601,7 +1601,7 @@ fn agent_deps(
 /// broker's per-app grants, and the broker performs the work. Reads and capture
 /// are `ReadOnly` — once their broker grant exists they never card per call,
 /// and plan mode keeps them. The acting tools are `Sensitive`; they resolve to
-/// [`openwave_core::ToolApprovalKind::ComputerMayControlApp`] through
+/// [`tidebreak_core::ToolApprovalKind::ComputerMayControlApp`] through
 /// `ToolApprovalKind::for_tool_name`, so plan mode refuses them and a control
 /// call cards once per app instead of per action.
 fn register_computer_use_tools(tools: &mut ToolRegistry) {

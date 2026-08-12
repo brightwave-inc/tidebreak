@@ -1557,17 +1557,16 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
 /// assembly tests that never execute a command.
 struct UnavailableCodeExecution;
 
-    #[async_trait::async_trait]
-    impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecution {
-        async fn execute(
-            &self,
-            _request: tidebreak_code_execution::CodeExecutionRequest,
-        ) -> std::result::Result<
-            tidebreak_code_execution::CodeExecutionResponse,
-            tidebreak_code_execution::CodeExecutionError,
-        > {
-            Err(tidebreak_code_execution::CodeExecutionError::NotConfigured)
-        }
+#[async_trait::async_trait]
+impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecution {
+    async fn execute(
+        &self,
+        _request: tidebreak_code_execution::CodeExecutionRequest,
+    ) -> std::result::Result<
+        tidebreak_code_execution::CodeExecutionResponse,
+        tidebreak_code_execution::CodeExecutionError,
+    > {
+        Err(tidebreak_code_execution::CodeExecutionError::NotConfigured)
     }
 }
 
@@ -1609,7 +1608,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
     // Disabled (self-host, non-macOS, or any non-desktop profile): none of
     // the contracts exist, so no surface can advertise or checkpoint them.
     let (tools, _) = agent_deps_for_test(dir.path(), false).await;
-    for name in openwave_core::COMPUTER_USE_TOOLS {
+    for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert!(
             tools.registered_class(name).is_none(),
             "{name} must not register when computer use is disabled"
@@ -1627,7 +1626,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
     // Enabled: every contract registers as a validated client tool the server
     // parks for the desktop to claim; the server itself never executes one.
     let (tools, _) = agent_deps_for_test(dir.path(), true).await;
-    for name in openwave_core::COMPUTER_USE_TOOLS {
+    for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert_eq!(
             tools.execution(name),
             Some(ToolCallExecution::Client),
@@ -1638,15 +1637,15 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
             "{name} has no server-side executor"
         );
     }
-    for name in openwave_core::COMPUTER_USE_CONTROL_TOOLS {
+    for name in tidebreak_core::COMPUTER_USE_CONTROL_TOOLS {
         assert_eq!(
             tools.registered_class(name),
             Some(ApprovalClass::Sensitive),
             "{name} is an acting tool and must gate as Sensitive"
         );
         assert_eq!(
-            openwave_core::ToolApprovalKind::for_tool_name(name),
-            openwave_core::ToolApprovalKind::ComputerMayControlApp,
+            tidebreak_core::ToolApprovalKind::for_tool_name(name),
+            tidebreak_core::ToolApprovalKind::ComputerMayControlApp,
             "{name} must consent as app control"
         );
     }
@@ -1654,11 +1653,11 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
     // tools (they synthesize input and move windows) and are covered by the
     // control-tool loop above.
     for name in [
-        openwave_core::COMPUTER_LIST_WINDOWS_TOOL,
-        openwave_core::COMPUTER_CAPTURE_SCREEN_TOOL,
-        openwave_core::COMPUTER_READ_APP_CONTENT_TOOL,
-        openwave_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL,
-        openwave_core::COMPUTER_WAIT_TOOL,
+        tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL,
+        tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL,
+        tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL,
+        tidebreak_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL,
+        tidebreak_core::COMPUTER_WAIT_TOOL,
     ] {
         assert_eq!(
             tools.registered_class(name),
@@ -1668,19 +1667,19 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
     }
     // The checkpoint fence validates with each tool's canonical arguments.
     assert!(tools.client_arguments_are_valid(
-        openwave_core::COMPUTER_CLICK_TOOL,
+        tidebreak_core::COMPUTER_CLICK_TOOL,
         &serde_json::json!({ "app_id": "com.apple.Notes", "mark": 3 })
     ));
     assert!(!tools.client_arguments_are_valid(
-        openwave_core::COMPUTER_CLICK_TOOL,
+        tidebreak_core::COMPUTER_CLICK_TOOL,
         &serde_json::json!({ "app_id": "com.apple.Notes", "x": 10 })
     ));
     assert!(tools.client_arguments_are_valid(
-        openwave_core::COMPUTER_WAIT_TOOL,
+        tidebreak_core::COMPUTER_WAIT_TOOL,
         &serde_json::json!({ "seconds": 2 })
     ));
     assert!(!tools.client_arguments_are_valid(
-        openwave_core::COMPUTER_WAIT_TOOL,
+        tidebreak_core::COMPUTER_WAIT_TOOL,
         &serde_json::json!({ "seconds": 3600 })
     ));
 
@@ -1690,16 +1689,16 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
         .into_iter()
         .map(|spec| spec.name)
         .collect::<std::collections::HashSet<_>>();
-    for name in openwave_core::COMPUTER_USE_CONTROL_TOOLS {
+    for name in tidebreak_core::COMPUTER_USE_CONTROL_TOOLS {
         assert!(
             !plan_specs.contains(name),
             "plan mode must not advertise {name}"
         );
     }
     for name in [
-        openwave_core::COMPUTER_LIST_WINDOWS_TOOL,
-        openwave_core::COMPUTER_CAPTURE_SCREEN_TOOL,
-        openwave_core::COMPUTER_READ_APP_CONTENT_TOOL,
+        tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL,
+        tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL,
+        tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL,
     ] {
         assert!(
             plan_specs.contains(name),

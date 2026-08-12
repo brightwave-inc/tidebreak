@@ -23,7 +23,9 @@
 use std::collections::HashMap;
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
-use openwave_core::{
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tidebreak_core::{
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
     validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
     validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
@@ -37,14 +39,12 @@ use openwave_core::{
     COMPUTER_RETURN_TO_OPENWAVE_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
     COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
 };
-use openwave_host_broker::{
+use tidebreak_host_broker::{
     extract_marks, is_blocked_control_bundle, Capability, ConsentMethod, ControlRequest,
     ControlResult, CuConfirmControlActionRequest, CuGrantAppRequest, CuResolveHandoffRequest,
     CuRevokeAppRequest, ElementTargetWire, ErrorCode, GrantSubject, Mark, OperationEnvelope,
     OperationRequest, OperationResult, PROTOCOL_VERSION,
 };
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -73,7 +73,7 @@ const MAX_WINDOW_ROWS: usize = 64;
 /// are a look-then-act affordance, so a dropped entry only costs a re-capture.
 const MAX_MARK_TABLES: usize = 64;
 /// Mark numbers are 1-based; mirrors the core contract's bound.
-const MAX_CACHED_MARKS: usize = openwave_core::MAX_MARK as usize;
+const MAX_CACHED_MARKS: usize = tidebreak_core::MAX_MARK as usize;
 /// The broker's exact words when auto-yield refuses an op. `ErrorCode::Denied`
 /// covers a grant miss, the blocklist, and a yield; the blocklist is
 /// pre-checked natively, so this message is what tells a security-surface
@@ -717,8 +717,8 @@ fn build_action(
             let args: ComputerCaptureScreenArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
             let target = match args.app_id {
-                Some(bundle_id) => openwave_host_broker::CaptureTargetWire::App { bundle_id },
-                None => openwave_host_broker::CaptureTargetWire::Display {
+                Some(bundle_id) => tidebreak_host_broker::CaptureTargetWire::App { bundle_id },
+                None => tidebreak_host_broker::CaptureTargetWire::Display {
                     display_id: args.display_id,
                 },
             };
@@ -743,8 +743,8 @@ fn build_action(
                 bundle_id: args.app_id,
                 target,
                 button: args.button.map(|button| match button {
-                    openwave_core::ClickButton::Left => "left".to_owned(),
-                    openwave_core::ClickButton::Right => "right".to_owned(),
+                    tidebreak_core::ClickButton::Left => "left".to_owned(),
+                    tidebreak_core::ClickButton::Right => "right".to_owned(),
                 }),
                 click_count: if args.double.unwrap_or(false) {
                     Some(2)
@@ -770,11 +770,11 @@ fn build_action(
                 modifiers
                     .into_iter()
                     .map(|modifier| match modifier {
-                        openwave_core::KeyModifier::Cmd => "cmd",
-                        openwave_core::KeyModifier::Shift => "shift",
-                        openwave_core::KeyModifier::Ctrl => "ctrl",
-                        openwave_core::KeyModifier::Alt => "alt",
-                        openwave_core::KeyModifier::Fn => "fn",
+                        tidebreak_core::KeyModifier::Cmd => "cmd",
+                        tidebreak_core::KeyModifier::Shift => "shift",
+                        tidebreak_core::KeyModifier::Ctrl => "ctrl",
+                        tidebreak_core::KeyModifier::Alt => "alt",
+                        tidebreak_core::KeyModifier::Fn => "fn",
                     })
                     .map(str::to_owned)
                     .collect()
@@ -823,7 +823,7 @@ fn resolve_target(
     cu: &ComputerUseState,
     chat_id: ChatId,
     bundle_id: &str,
-    target: &openwave_core::ElementTargetArgs,
+    target: &tidebreak_core::ElementTargetArgs,
 ) -> Result<ElementTargetWire, StoredResolution> {
     if let Some(mark) = target.mark {
         let Some((element_id, element_fingerprint)) = cu.resolve_mark(chat_id.0, bundle_id, mark)
@@ -853,8 +853,8 @@ fn request_bundle_id(request: &OperationRequest) -> Option<&str> {
     match request {
         OperationRequest::CuListWindows { bundle_id } => bundle_id.as_deref(),
         OperationRequest::CuCaptureScreen { target } => match target {
-            openwave_host_broker::CaptureTargetWire::App { bundle_id } => Some(bundle_id),
-            openwave_host_broker::CaptureTargetWire::Display { .. } => None,
+            tidebreak_host_broker::CaptureTargetWire::App { bundle_id } => Some(bundle_id),
+            tidebreak_host_broker::CaptureTargetWire::Display { .. } => None,
         },
         OperationRequest::CuReadAppContent { bundle_id, .. }
         | OperationRequest::CuClick { bundle_id, .. }
@@ -871,7 +871,7 @@ fn request_bundle_id(request: &OperationRequest) -> Option<&str> {
 /// scroll, focus, and tree reads need `ReadAppContent`; capture and window
 /// listing need `CaptureScreen`.
 fn consent_capability(call: &ToolCallRecord, request: &OperationRequest) -> ConsentCapability {
-    if openwave_core::is_computer_use_control_tool(&call.name) {
+    if tidebreak_core::is_computer_use_control_tool(&call.name) {
         return ConsentCapability::ControlApp;
     }
     match request {
@@ -886,7 +886,7 @@ fn consent_capability(call: &ToolCallRecord, request: &OperationRequest) -> Cons
 /// opposed to only reading. Acting ops are what the Stop latch halts, what the
 /// indicator reports, and what the blocklist pre-check guards.
 fn acts_on_host(name: &str) -> bool {
-    openwave_core::is_computer_use_control_tool(name)
+    tidebreak_core::is_computer_use_control_tool(name)
         || name == COMPUTER_SCROLL_TOOL
         || name == COMPUTER_FOCUS_WINDOW_TOOL
 }
@@ -927,7 +927,7 @@ async fn dispatch_broker(
         .broker
         .operation(OperationEnvelope {
             protocol_version: PROTOCOL_VERSION,
-            request_id: openwave_host_broker::RequestId::new(),
+            request_id: tidebreak_host_broker::RequestId::new(),
             context: context.execution,
             request: request.clone(),
         })
@@ -1105,7 +1105,7 @@ async fn dispatch_consent(
         .broker
         .operation(OperationEnvelope {
             protocol_version: PROTOCOL_VERSION,
-            request_id: openwave_host_broker::RequestId::new(),
+            request_id: tidebreak_host_broker::RequestId::new(),
             context: context.execution,
             request,
         })
@@ -1165,7 +1165,7 @@ async fn dispatch_confirmation(
     app: &AppHandle,
     state: &HostAccess,
     call: &ToolCallRecord,
-    held: openwave_host_broker::CuNeedsConfirmationResult,
+    held: tidebreak_host_broker::CuNeedsConfirmationResult,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     let view = ConfirmationPromptView {
@@ -1235,7 +1235,7 @@ async fn dispatch_confirmation(
 /// can carry it as structured image references once the server accepts them.
 /// Today the same identity reaches the model through the result text.
 fn capture_image_refs(published: &PublishedImageAttachment) -> Vec<ImageRef> {
-    let Some(media_type) = openwave_core::ImageMediaType::parse(published.media_type()) else {
+    let Some(media_type) = tidebreak_core::ImageMediaType::parse(published.media_type()) else {
         return Vec::new();
     };
     vec![ImageRef {
@@ -1333,7 +1333,7 @@ async fn finish_capture(
     state: &HostAccess,
     context: AuthoritativeContext,
     call: &ToolCallRecord,
-    capture: openwave_host_broker::CuCaptureScreenResult,
+    capture: tidebreak_host_broker::CuCaptureScreenResult,
 ) -> StoredResolution {
     let cu = &state.computer_use;
     // The handoff is single-use; a replayed redeem fails as unknown, so it is
@@ -1434,7 +1434,7 @@ async fn finish_capture(
     completed_with_images(result, Some(rows), Some(image_refs))
 }
 
-fn control_meta_json(meta: &openwave_host_broker::ControlMeta) -> serde_json::Value {
+fn control_meta_json(meta: &tidebreak_host_broker::ControlMeta) -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
         "used_fallback": meta.used_fallback,
@@ -1505,7 +1505,7 @@ mod tests {
             element_fingerprint: format!("fp-{id}"),
             role: "AXButton".to_owned(),
             label: format!("Button {id}"),
-            frame: openwave_host_broker::MarkFrame {
+            frame: tidebreak_host_broker::MarkFrame {
                 x: 0.0,
                 y: 0.0,
                 width: 10.0,
@@ -1514,8 +1514,8 @@ mod tests {
         }
     }
 
-    fn target_with_mark(mark: u32) -> openwave_core::ElementTargetArgs {
-        openwave_core::ElementTargetArgs {
+    fn target_with_mark(mark: u32) -> tidebreak_core::ElementTargetArgs {
+        tidebreak_core::ElementTargetArgs {
             mark: Some(mark),
             ..Default::default()
         }
@@ -1595,7 +1595,7 @@ mod tests {
     #[test]
     fn an_explicit_element_target_passes_through_untouched() {
         let cu = ComputerUseState::default();
-        let target = openwave_core::ElementTargetArgs {
+        let target = tidebreak_core::ElementTargetArgs {
             element_id: Some("0.3.1".to_owned()),
             element_fingerprint: Some("abc".to_owned()),
             ..Default::default()
@@ -1638,7 +1638,7 @@ mod tests {
         let call = |name: &str, arguments: serde_json::Value| ToolCallRecord {
             id: CallId::new(),
             chat_id: ChatId::new(),
-            turn_id: openwave_core::TurnId::new(),
+            turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: name.into(),
             arguments,
@@ -1707,7 +1707,7 @@ mod tests {
         assert!(matches!(
             action,
             Ok(CuAction::Broker(OperationRequest::CuCaptureScreen {
-                target: openwave_host_broker::CaptureTargetWire::Display { display_id: None }
+                target: tidebreak_host_broker::CaptureTargetWire::Display { display_id: None }
             }))
         ));
 

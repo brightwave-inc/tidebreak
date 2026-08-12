@@ -132,7 +132,7 @@ pub async fn get_chat_image_attachment(
                 tidebreak_core::ToolResultPreview::Exec { images, .. } => images
                     .into_iter()
                     .find(|image| image.blob_id == attachment_id),
-                openwave_core::ToolResultPreview::ScreenCapture { image, .. } => {
+                tidebreak_core::ToolResultPreview::ScreenCapture { image, .. } => {
                     (image.blob_id == attachment_id).then_some(image)
                 }
                 _ => None,

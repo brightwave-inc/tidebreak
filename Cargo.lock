@@ -4358,278 +4358,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "tidebreak-cli"
-version = "0.0.0"
-dependencies = [
- "base64 0.23.1",
- "chrono",
- "crossterm",
- "futures",
- "tidebreak-code-execution",
- "tidebreak-core",
- "tidebreak-host-broker",
- "tidebreak-mcp",
- "tidebreak-server",
- "pulldown-cmark",
- "ratatui",
- "ratatui-textarea",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "syntect",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tracing",
- "unicode-width",
- "uuid",
-]
-
-[[package]]
-name = "tidebreak-code-execution"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.23.1",
- "cap-fs-ext",
- "cap-std",
- "futures",
- "image",
- "libc",
- "tidebreak-core",
- "tidebreak-egress",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "trash",
- "ts-rs",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "tidebreak-core"
-version = "0.0.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "cap-fs-ext",
- "cap-std",
- "chrono",
- "futures",
- "futures-timer",
- "jsonschema",
- "keyring",
- "tidebreak-shell-policy",
- "schemars 1.2.2",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "ts-rs",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tidebreak-desktop"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "cap-fs-ext",
- "cap-std",
- "chrono",
- "futures",
- "libc",
- "tidebreak-code-execution",
- "tidebreak-core",
- "tidebreak-host-broker",
- "tidebreak-server",
- "opus-decoder",
- "reqwest 0.12.28",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "symphonia",
- "tauri",
- "tauri-build",
- "tauri-plugin-deep-link",
- "tauri-plugin-dialog",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-updater",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "unicode-general-category",
- "url",
- "uuid",
- "whisper-rs",
- "windows-sys 0.61.2",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "tidebreak-egress"
-version = "0.0.0"
-
-[[package]]
-name = "tidebreak-host-broker"
-version = "0.0.0"
-dependencies = [
- "base64 0.23.1",
- "cap-fs-ext",
- "cap-std",
- "chrono",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.20",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tidebreak-mcp"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.23.1",
- "chrono",
- "futures",
- "image",
- "tidebreak-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "tidebreak-router"
-version = "0.0.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "axum",
- "base64 0.23.1",
- "chrono",
- "futures",
- "tidebreak-core",
- "reqwest 0.12.28",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "tidebreak-sandbox-agent"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "libc",
- "tidebreak-core",
- "tidebreak-egress",
- "tidebreak-sandbox-protocol",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "tidebreak-sandbox-protocol"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "tidebreak-server"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.23.1",
- "cap-fs-ext",
- "cap-std",
- "chrono",
- "dom_query 0.28.0",
- "dom_smoothie",
- "flate2",
- "futures",
- "image",
- "infer 0.22.0",
- "jsonschema",
- "libc",
- "tidebreak-code-execution",
- "tidebreak-core",
- "tidebreak-egress",
- "tidebreak-mcp",
- "tidebreak-router",
- "tidebreak-sandbox-agent",
- "tidebreak-sandbox-protocol",
- "tidebreak-shell-policy",
- "plist",
- "reqwest 0.12.28",
- "schemars 1.2.2",
- "sea-orm",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "similar 3.1.2",
- "tar",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
- "unicode-general-category",
- "url",
- "uuid",
- "windows-sys 0.61.2",
- "winreg 0.56.0",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "tidebreak-shell-policy"
-version = "0.0.0"
-dependencies = [
- "brush-parser",
- "fancy-regex 0.19.0",
-]
-
-[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7829,6 +7557,278 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tidebreak-cli"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "crossterm",
+ "futures",
+ "pulldown-cmark",
+ "ratatui",
+ "ratatui-textarea",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-host-broker",
+ "tidebreak-mcp",
+ "tidebreak-server",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
+name = "tidebreak-code-execution"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "cap-fs-ext",
+ "cap-std",
+ "futures",
+ "image",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tidebreak-core",
+ "tidebreak-egress",
+ "tokio",
+ "tracing",
+ "trash",
+ "ts-rs",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "tidebreak-core"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "futures",
+ "futures-timer",
+ "jsonschema",
+ "keyring",
+ "schemars 1.2.2",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tidebreak-shell-policy",
+ "tokio",
+ "tracing",
+ "ts-rs",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tidebreak-desktop"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "futures",
+ "libc",
+ "opus-decoder",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "symphonia",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-dialog",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-updater",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-host-broker",
+ "tidebreak-server",
+ "tokio",
+ "tokio-util",
+ "unicode-general-category",
+ "url",
+ "uuid",
+ "whisper-rs",
+ "windows-sys 0.61.2",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "tidebreak-egress"
+version = "0.0.0"
+
+[[package]]
+name = "tidebreak-host-broker"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tidebreak-mcp"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "futures",
+ "image",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tidebreak-core",
+ "tokio",
+]
+
+[[package]]
+name = "tidebreak-router"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "futures",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tidebreak-core",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tidebreak-sandbox-agent"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tidebreak-core",
+ "tidebreak-egress",
+ "tidebreak-sandbox-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "tidebreak-sandbox-protocol"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tidebreak-server"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "dom_query 0.28.0",
+ "dom_smoothie",
+ "flate2",
+ "futures",
+ "image",
+ "infer 0.22.0",
+ "jsonschema",
+ "libc",
+ "plist",
+ "reqwest 0.12.28",
+ "schemars 1.2.2",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar 3.1.2",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-egress",
+ "tidebreak-mcp",
+ "tidebreak-router",
+ "tidebreak-sandbox-agent",
+ "tidebreak-sandbox-protocol",
+ "tidebreak-shell-policy",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
+ "unicode-general-category",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+ "winreg 0.56.0",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "tidebreak-shell-policy"
+version = "0.0.0"
+dependencies = [
+ "brush-parser",
+ "fancy-regex 0.19.0",
 ]
 
 [[package]]

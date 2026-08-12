@@ -45,7 +45,7 @@ enum Control {
     static let blockedBundlePrefixes: [String] = [
         // Never automate OpenWave itself (covers the desktop and any
         // channel-suffixed variant).
-        "io.brightwave.openwave",
+        "io.brightwave.tidebreak",
         "io.brightwave.",
         // Terminals are arbitrary code execution outside the broker's
         // confinement.

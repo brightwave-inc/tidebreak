@@ -14,7 +14,7 @@
 pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[
     // OpenWave itself — the agent must never capture or drive the surface it
     // is being watched through.
-    "io.brightwave.openwave",
+    "io.brightwave.tidebreak",
     "io.brightwave.",
     // Terminals: shell access would bypass the sandboxed exec path entirely.
     "com.apple.Terminal",
@@ -47,8 +47,8 @@ mod tests {
     #[test]
     fn exact_and_dotted_prefix_entries_match() {
         for blocked in [
-            "io.brightwave.openwave",
-            "io.brightwave.openwave.helper",
+            "io.brightwave.tidebreak",
+            "io.brightwave.tidebreak.helper",
             "io.brightwave.anything",
             "com.apple.Terminal",
             "com.apple.Terminal.helper",

@@ -342,7 +342,7 @@ pub(super) enum StoredResolution {
         /// `ScreenCapture` preview and the transcript reattaches the image.
         /// Defaulted for the same receipt-compat reason as `rows`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        images: Option<Vec<openwave_core::ImageRef>>,
+        images: Option<Vec<tidebreak_core::ImageRef>>,
     },
     Failed {
         result: String,

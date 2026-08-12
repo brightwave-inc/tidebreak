@@ -348,7 +348,7 @@ async fn read_settings(state: &AppState) -> Result<Settings, ServerError> {
 
 /// Whether computer use is enabled. Default on; an explicit `false` disables
 /// it (the tools unregister at the next boot).
-pub(crate) async fn read_computer_use_enabled(store: &dyn Store) -> openwave_core::Result<bool> {
+pub(crate) async fn read_computer_use_enabled(store: &dyn Store) -> tidebreak_core::Result<bool> {
     Ok(store
         .get_setting(crate::routes::COMPUTER_USE_ENABLED_SETTING)
         .await?

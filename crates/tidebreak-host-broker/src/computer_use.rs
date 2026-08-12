@@ -5,7 +5,7 @@
 //! The broker owns every decision — capability check, consent, audit. A backend
 //! only performs an already-authorized operation and returns structured data.
 //! The shipping backend ([`HelperBackend`]) spawns the signed
-//! `openwave-cu-helper` binary, one process per operation, over a small
+//! `tidebreak-cu-helper` binary, one process per operation, over a small
 //! JSON-stdio protocol; the default [`UnsupportedBackend`] (no helper
 //! configured / non-macOS) refuses every op so the broker degrades gracefully
 //! and the ops stay unadvertised in the `Hello` handshake.
@@ -39,7 +39,7 @@ const MAX_HELPER_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 /// Environment override for the helper binary path (development / testing). In
 /// a packaged build the broker resolves the helper from a stable bundled
 /// location instead.
-pub const HELPER_PATH_ENV: &str = "OPENWAVE_CU_HELPER_PATH";
+pub const HELPER_PATH_ENV: &str = "TIDEBREAK_CU_HELPER_PATH";
 
 /// What a screen capture targets. Scoped per the broker's capability model: a
 /// whole-display capture needs the `Screen` scope; an app capture needs the
@@ -363,7 +363,7 @@ impl ComputerUseBackend for UnsupportedBackend {
     }
 }
 
-/// The shipping backend: spawns the signed `openwave-cu-helper` binary once per
+/// The shipping backend: spawns the signed `tidebreak-cu-helper` binary once per
 /// operation, writes one JSON request to its stdin, and reads one JSON response
 /// from its stdout.
 #[derive(Debug, Clone)]
@@ -399,7 +399,7 @@ impl HelperBackend {
             .parent()?
             .join("Resources")
             .join("host-broker")
-            .join("openwave-cu-helper");
+            .join("tidebreak-cu-helper");
         bundled.is_file().then(|| Self::new(bundled))
     }
 

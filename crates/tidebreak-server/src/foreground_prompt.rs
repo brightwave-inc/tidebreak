@@ -473,13 +473,13 @@ pub(crate) fn compose_for_surface(
 
     if names
         .iter()
-        .any(|name| openwave_core::is_computer_use_tool(name))
+        .any(|name| tidebreak_core::is_computer_use_tool(name))
     {
         // A plan-mode surface keeps the reading tools but drops the acting
         // ones, so the section names only what this turn can actually do.
         let acting = names
             .iter()
-            .any(|name| openwave_core::is_computer_use_control_tool(name));
+            .any(|name| tidebreak_core::is_computer_use_control_tool(name));
         let mut lines = vec![if acting {
             "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_focus_window`, `computer_return_to_openwave`, and `computer_wait` to act."
         } else {
@@ -973,16 +973,16 @@ mod tests {
     #[test]
     fn computer_use_section_tracks_the_exact_surface() {
         let full = compose(&[
-            spec(openwave_core::COMPUTER_LIST_WINDOWS_TOOL),
-            spec(openwave_core::COMPUTER_CAPTURE_SCREEN_TOOL),
-            spec(openwave_core::COMPUTER_READ_APP_CONTENT_TOOL),
-            spec(openwave_core::COMPUTER_CLICK_TOOL),
-            spec(openwave_core::COMPUTER_TYPE_TEXT_TOOL),
-            spec(openwave_core::COMPUTER_KEY_PRESS_TOOL),
-            spec(openwave_core::COMPUTER_SCROLL_TOOL),
-            spec(openwave_core::COMPUTER_FOCUS_WINDOW_TOOL),
-            spec(openwave_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL),
-            spec(openwave_core::COMPUTER_WAIT_TOOL),
+            spec(tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL),
+            spec(tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL),
+            spec(tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL),
+            spec(tidebreak_core::COMPUTER_CLICK_TOOL),
+            spec(tidebreak_core::COMPUTER_TYPE_TEXT_TOOL),
+            spec(tidebreak_core::COMPUTER_KEY_PRESS_TOOL),
+            spec(tidebreak_core::COMPUTER_SCROLL_TOOL),
+            spec(tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL),
+            spec(tidebreak_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL),
+            spec(tidebreak_core::COMPUTER_WAIT_TOOL),
         ]);
         assert!(full.contains(COMPUTER_USE_HEADING));
         assert!(full.contains("`computer_click`"));
@@ -1002,9 +1002,9 @@ mod tests {
         // A plan-mode surface arrives already narrowed to the reads; the
         // section must not claim the turn can act.
         let reads_only = compose(&[
-            spec(openwave_core::COMPUTER_LIST_WINDOWS_TOOL),
-            spec(openwave_core::COMPUTER_CAPTURE_SCREEN_TOOL),
-            spec(openwave_core::COMPUTER_READ_APP_CONTENT_TOOL),
+            spec(tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL),
+            spec(tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL),
+            spec(tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL),
         ]);
         assert!(reads_only.contains(COMPUTER_USE_HEADING));
         assert!(reads_only.contains("`computer_capture_screen`"));

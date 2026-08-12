@@ -15,7 +15,7 @@ import PackageDescription
 // and the bundled path stable across releases — changing either resets the
 // user's grants.
 let package = Package(
-    name: "openwave-cu-helper",
+    name: "tidebreak-cu-helper",
     platforms: [
         // SCScreenshotManager requires macOS 14. The Accessibility and
         // CGWindowList APIs are far older; 14 is the binding constraint.
@@ -23,8 +23,8 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "openwave-cu-helper",
-            path: "Sources/openwave-cu-helper"
+            name: "tidebreak-cu-helper",
+            path: "Sources/tidebreak-cu-helper"
         )
     ]
 )

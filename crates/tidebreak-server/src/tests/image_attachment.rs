@@ -669,10 +669,10 @@ async fn a_screen_capture_preview_is_fetchable_only_through_its_chat() {
         })
         .await
         .unwrap();
-    let preview = openwave_core::ToolResultPreview::ScreenCapture {
-        image: openwave_core::ImageRef {
+    let preview = tidebreak_core::ToolResultPreview::ScreenCapture {
+        image: tidebreak_core::ImageRef {
             blob_id,
-            media_type: openwave_core::ImageMediaType::Png,
+            media_type: tidebreak_core::ImageMediaType::Png,
             width: 2056,
             height: 1329,
             byte_len: bytes.len() as u64,

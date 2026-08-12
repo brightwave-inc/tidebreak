@@ -98,7 +98,7 @@ pub enum ClientExecutionResolution {
         /// projects them into the call's preview so the transcript reattaches
         /// them, gated on the model's image-input flag.
         #[serde(default)]
-        images: Option<Vec<openwave_core::ImageRef>>,
+        images: Option<Vec<tidebreak_core::ImageRef>>,
     },
     Failed {
         result: String,
@@ -123,7 +123,7 @@ impl ClientExecutionResolution {
 
     /// The image references the executor returned, if any. Only a completed
     /// call has any — a failure describes work that did not happen.
-    fn images(&self) -> Option<&[openwave_core::ImageRef]> {
+    fn images(&self) -> Option<&[tidebreak_core::ImageRef]> {
         match self {
             Self::Completed { images, .. } => images.as_deref(),
             Self::Failed { .. } | Self::Cancelled { .. } => None,
@@ -488,9 +488,9 @@ mod tests {
         // to for a capture. Build it by serializing the real `ImageRef` so the
         // test tracks the type's wire shape (`media_type` is the snake_case
         // variant name, not the IANA string).
-        let image = openwave_core::ImageRef {
+        let image = tidebreak_core::ImageRef {
             blob_id,
-            media_type: openwave_core::ImageMediaType::Png,
+            media_type: tidebreak_core::ImageMediaType::Png,
             width: 2056,
             height: 1329,
             byte_len: 979437,
