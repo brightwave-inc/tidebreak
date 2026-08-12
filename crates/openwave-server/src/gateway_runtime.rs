@@ -1626,12 +1626,12 @@ mod tests {
             openwave_core::CachingSecretProvider::new(inner.clone())
                 .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
         );
-        crate::managed_policy::provision(&*store, &base)
-            .await
-            .unwrap();
+        let provisioned_policy = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned_policy, &base).unwrap();
         let runtime = GatewayRuntime::new(
             store.clone(),
             secrets,
+            provisioned_policy,
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
 
@@ -2898,15 +2898,6 @@ mod tests {
     /// shows a definitive policy mismatch may retire it.
     #[tokio::test]
     async fn boot_keeps_the_session_when_the_credential_read_errors() {
-        let directory = tempfile::tempdir().unwrap();
-        let store: Arc<dyn Store> = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                directory.path().join("gateway.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
         let secrets = Arc::new(FlakySecrets::default());
         let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": "http://127.0.0.1:1",
@@ -2923,9 +2914,10 @@ mod tests {
 
         // Unmanaged policy: a readable session WOULD be retired. With the
         // read erroring, retire must leave it exactly where it is.
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         assert!(!policy.managed);
         secrets.fail_reads.store(true, Ordering::SeqCst);
         retire_superseded_gateway_session(secrets.clone(), &policy)
