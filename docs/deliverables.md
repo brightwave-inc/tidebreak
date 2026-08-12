@@ -35,8 +35,8 @@ symlinks rather than following them.
 - Text previews return at most 100,000 Unicode characters. Export always uses
   the complete file.
 - Formats with an inline viewer — spreadsheets and CSV (Univer), Word documents
-  (Univer), PDFs, and images — load the revision's complete bytes through a
-  separate native read and reuse the same engines as source documents.
+  (docx-preview), PDFs, and images — load the revision's complete bytes and
+  reuse the same engines as source documents.
 - Markdown previews use the same safe renderer as assistant messages: raw HTML,
   local-file links, executable URL schemes, and remote image loads are not
   rendered. Plain text, JSON, and HTML outputs use a syntax-highlighted source

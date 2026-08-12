@@ -59,9 +59,6 @@ importers:
       '@univerjs/core':
         specifier: 0.25.1
         version: 0.25.1(react@19.2.7)(rxjs@7.8.2)
-      '@univerjs/preset-docs-core':
-        specifier: 0.25.1
-        version: 0.25.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rxjs@7.8.2)
       '@univerjs/preset-sheets-core':
         specifier: 0.25.1
         version: 0.25.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rxjs@7.8.2)
@@ -83,6 +80,9 @@ importers:
       date-fns:
         specifier: 4.1.0
         version: 4.1.0
+      docx-preview:
+        specifier: 0.4.0
+        version: 0.4.0
       jszip:
         specifier: 3.10.1
         version: 3.10.1
@@ -2365,6 +2365,9 @@ packages:
 
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
+
+  docx-preview@0.4.0:
+    resolution: {integrity: sha512-OdKtE/uj3M4RfGarLkGjahUzRg8/kBp0Sraj1r1NAY1tp/sTpHOBqDrzVf9onMBt9vxP6SdQ6bpLCUCsFwjgcA==}
 
   dom-accessibility-api@0.5.16:
     resolution: {integrity: sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==}
@@ -6468,6 +6471,10 @@ snapshots:
   devlop@1.1.0:
     dependencies:
       dequal: 2.0.3
+
+  docx-preview@0.4.0:
+    dependencies:
+      jszip: 3.10.1
 
   dom-accessibility-api@0.5.16: {}
 
