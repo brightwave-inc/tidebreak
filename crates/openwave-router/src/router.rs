@@ -79,10 +79,10 @@ pub enum RouteKind {
     /// A model-gateway deployment's Anthropic-compatible surface, authenticated
     /// with short-lived resource-scoped tokens instead of a static key.
     ModelGateway,
-    /// The same model-gateway deployment's OpenAI-compatible Chat Completions
-    /// surface. It shares the public `model_gateway` provider namespace with
-    /// [`ModelGateway`](Self::ModelGateway); the synced model protocol chooses
-    /// which concrete route serves a request.
+    /// The same model-gateway deployment's OpenAI Responses surface
+    /// (`/compat/openai/v1/responses`). It shares the public `model_gateway`
+    /// provider namespace with [`ModelGateway`](Self::ModelGateway); the
+    /// synced model protocol chooses which concrete route serves a request.
     ModelGatewayOpenai,
 }
 
@@ -332,25 +332,27 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         #[cfg(not(feature = "anthropic"))]
         RouteKind::ModelGateway => None,
 
-        #[cfg(feature = "openai-compat")]
+        #[cfg(feature = "openai")]
         RouteKind::ModelGatewayOpenai => {
             // Like the Anthropic gateway route, this surface is unusable
             // without a live token source: static credentials cannot follow
-            // the gateway's rotation or conversation attestation context.
+            // the gateway's rotation or conversation attestation context. The
+            // gateway's OpenAI surface is the Responses API — it serves no
+            // northbound Chat Completions route.
             let base = route.base_url.as_deref()?;
             if !(base.starts_with("https://") || base.starts_with("http://")) {
                 return None;
             }
             let source = route.token_source.clone()?;
             Some(Arc::new(
-                OpenAiCompatProvider::compatible(String::new(), base.to_string())
-                    .with_id(route.kind.provider_id())
+                OpenAiProvider::new(String::new())
+                    .with_base_url(base.to_string())
+                    .with_provider_label(route.kind.provider_id())
                     .with_token_source(source)
-                    .with_conversation_attribution()
-                    .with_streaming_usage(),
+                    .with_conversation_attribution(),
             ))
         }
-        #[cfg(not(feature = "openai-compat"))]
+        #[cfg(not(feature = "openai"))]
         RouteKind::ModelGatewayOpenai => None,
 
         #[cfg(feature = "openai")]

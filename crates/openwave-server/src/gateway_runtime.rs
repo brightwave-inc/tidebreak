@@ -506,8 +506,16 @@ impl GatewayRuntime {
                         Ok(()) => {
                             // Best-effort: a failed first sync leaves an
                             // explicit refresh affordance, not a failed
-                            // sign-in.
-                            let _ = runtime.sync_models().await;
+                            // sign-in — but say so in the log, or support
+                            // cannot tell an empty model list from a sync
+                            // that never ran.
+                            if let Err(error) = runtime.sync_models().await {
+                                tracing::warn!(
+                                    "gateway model sync after sign-in failed \
+                                     (the background sync will retry): {}",
+                                    error.message()
+                                );
+                            }
                             // Likewise: mount-by-default must never fail a
                             // sign-in, and the background sync retries it.
                             if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
@@ -1374,7 +1382,7 @@ mod tests {
                 },
                 {
                     "id": "sample-coder",
-                    "protocol": "openai_chat_completions",
+                    "protocol": "openai_responses",
                     "name": "Sample Coder",
                     "context_window": null,
                     "max_output_tokens": null,
@@ -1564,7 +1572,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.model_protocols.get("sample-coder"),
-            Some(&providers::GatewayModelProtocol::OpenaiChatCompletions)
+            Some(&providers::GatewayModelProtocol::OpenaiResponses)
         );
 
         // The synced snapshot resolves as a model policy under the gateway key.
@@ -1578,6 +1586,68 @@ mod tests {
             crate::providers::ProviderKind::ModelGateway
         );
         assert_eq!(policy.display_name, "Sample Claude");
+    }
+
+    /// The boot-before-sign-in race: a status or sync read caches the
+    /// keychain's `NoEntry`, and the session then lands without the cache
+    /// observing the write — a read that was in flight while sign-in
+    /// completed stores its stale miss *after* the write's invalidation, and
+    /// a session written by another process never invalidates at all. The
+    /// gateway session key's misses are not memoized
+    /// (`CachingSecretProvider::with_miss_passthrough`), so the next
+    /// background tick sees the session with no restart and no manual sync.
+    #[tokio::test]
+    async fn a_session_written_behind_the_secret_cache_syncs_without_a_restart() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let inner = Arc::new(MockSecrets::default());
+        // The same wrap `secret_provider` in lib.rs applies at boot.
+        let secrets: Arc<dyn SecretProvider> = Arc::new(
+            openwave_core::CachingSecretProvider::new(inner.clone())
+                .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
+        );
+        crate::managed_policy::provision(&*store, &base)
+            .await
+            .unwrap();
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        );
+
+        // Boot before sign-in: the tick reads the empty store. Were the miss
+        // memoized, this is the read that would hide the session forever.
+        assert_eq!(runtime.sync_models_if_connected().await.unwrap(), None);
+
+        // The session lands behind the cache's back, straight into the store.
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "account_hint": "abaas@example.test",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        inner
+            .set_secret(
+                crate::connectors::GATEWAY_SECRET_KEY,
+                &serde_json::to_string(&credentials).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The very next tick recovers — no restart, no manual sync click.
+        assert_eq!(runtime.sync_models_if_connected().await.unwrap(), Some(2));
     }
 
     /// A gateway that serves a model under its upstream id is serving that
@@ -2778,6 +2848,79 @@ mod tests {
                 .unwrap()
                 .base_url
                 .is_none()
+        );
+    }
+
+    /// A secret store whose reads fail while `fail_reads` is set — the
+    /// transient shape of a keychain read whose ACL no longer matches the
+    /// running binary (denied or pending prompt), as opposed to a confirmed
+    /// absence.
+    #[derive(Default)]
+    struct FlakySecrets {
+        values: MockSecrets,
+        fail_reads: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl SecretProvider for FlakySecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            if self.fail_reads.load(Ordering::SeqCst) {
+                return Err(AgentError::Secret("keychain read denied".into()));
+            }
+            self.values.get_secret(key).await
+        }
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.values.set_secret(key, value).await
+        }
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.values.delete_secret(key).await
+        }
+    }
+
+    /// Retire is a one-way door — the session is gone afterwards — so it
+    /// must not open on a transient read error: a keychain read that fails
+    /// (or an unparsable blob, which also errors the load) proves nothing
+    /// about whether the session is superseded. Only a successful read that
+    /// shows a definitive policy mismatch may retire it.
+    #[tokio::test]
+    async fn boot_keeps_the_session_when_the_credential_read_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets = Arc::new(FlakySecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": "http://127.0.0.1:1",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_survivor",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+
+        // Unmanaged policy: a readable session WOULD be retired. With the
+        // read erroring, retire must leave it exactly where it is.
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        assert!(!policy.managed);
+        secrets.fail_reads.store(true, Ordering::SeqCst);
+        retire_superseded_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        secrets.fail_reads.store(false, Ordering::SeqCst);
+        assert!(
+            crate::connectors::has_stored_credentials(&*secrets).await,
+            "a transient read error must not retire the session"
         );
     }
 

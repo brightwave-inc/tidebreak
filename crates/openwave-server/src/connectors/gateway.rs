@@ -29,7 +29,10 @@ pub const RESOURCE_CONTROL: &str = "control";
 pub const RESOURCE_LLM: &str = "llm";
 
 const SCOPE: &str = "openid profile offline_access models:read inference:invoke";
-const SECRET_KEY: &str = "gateway.credentials_v1";
+/// The secret-store key the gateway session lives under. Public so the secret
+/// cache can treat it as a miss-passthrough key, and so [`crate::secret_rehome`]
+/// can name every stored credential.
+pub const SECRET_KEY: &str = "gateway.credentials_v1";
 /// Refresh an access token this close to expiry instead of using it.
 const EXPIRY_LEEWAY_SECONDS: u64 = 60;
 const SIGN_IN_REQUIRED_PREFIX: &str = "gateway sign-in required";
@@ -153,7 +156,7 @@ pub struct GatewayModel {
     ///
     /// Older gateways exposed only Anthropic Messages and omitted the field,
     /// so absence preserves that route. Newer deployments report their exact
-    /// protocol (`anthropic_messages` or `openai_chat_completions`) so clients
+    /// protocol (`anthropic_messages` or `openai_responses`) so clients
     /// can select the matching compatibility surface.
     #[serde(default = "default_gateway_model_protocol")]
     pub protocol: String,
@@ -559,7 +562,7 @@ impl GatewayAuth {
 
     /// The models the authenticated user may invoke, optionally filtered to
     /// one inference protocol (`anthropic_messages` /
-    /// `openai_chat_completions`).
+    /// `openai_responses`).
     pub async fn models(
         &self,
         access_token: &str,

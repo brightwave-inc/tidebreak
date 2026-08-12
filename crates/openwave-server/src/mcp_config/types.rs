@@ -665,7 +665,7 @@ pub(super) const fn default_request_timeout_ms() -> u64 {
 /// Derived from the connected-app record id, never from anything in a
 /// request, so this surface can only ever read and write its own secrets.
 /// Mirrors `rest_credential_secret_key` for the REST connected-app kind.
-pub(super) fn env_secret_key(id: ConnectedAppId) -> String {
+pub(crate) fn env_secret_key(id: ConnectedAppId) -> String {
     format!("mcp.{id}.env_v1")
 }
 

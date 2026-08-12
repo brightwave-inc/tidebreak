@@ -56,7 +56,6 @@ import {
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
-import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
@@ -741,6 +740,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onChange={onModelChange}
             />
           }
+          contextUsage={{
+            usage: lastTurnUsage,
+            contextWindow: activeModel?.context_window,
+            modelName: activeModel?.display_name,
+          }}
           composerPermissionMenu={
             <PermissionModeMenu
               scopeKey={chatId}
@@ -850,21 +854,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     }
   }
 
-  // Header chrome reads the active model's window so the meter stays honest
-  // when the selection changes, without living in the composer.
-  const headerModel = modelForSelection(models, chat.model);
-
   return (
     <RouteFrame sidebar={<AppSidebar chat={chat} />}>
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
         <ChatHeaderTitle chat={chat} />
         <div className="flex shrink-0 items-center gap-2">
-          <ContextUsageIndicator
-            usage={lastTurnUsage}
-            contextWindow={headerModel?.context_window}
-            modelName={headerModel?.display_name}
-          />
           <ChatStatusChip
             outputCount={deliverables.length}
             folders={folders.items}

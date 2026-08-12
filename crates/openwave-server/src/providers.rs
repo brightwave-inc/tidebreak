@@ -73,8 +73,12 @@ pub(crate) enum GatewayModelProtocol {
     /// Anthropic Messages at `/compat/anthropic/v1/messages`.
     #[default]
     AnthropicMessages,
-    /// OpenAI Chat Completions at `/compat/openai/v1/chat/completions`.
-    OpenaiChatCompletions,
+    /// OpenAI Responses at `/compat/openai/v1/responses` — the only OpenAI
+    /// surface a gateway serves northbound. Snapshots written before the
+    /// route spoke Responses recorded `openai_chat_completions`; accept the
+    /// old spelling rather than dropping the model.
+    #[serde(alias = "openai_chat_completions")]
+    OpenaiResponses,
 }
 
 impl GatewayModelProtocol {
@@ -83,8 +87,8 @@ impl GatewayModelProtocol {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "anthropic" | "anthropic_messages" => Some(Self::AnthropicMessages),
-            "openai" | "openai_compatible" | "openai_chat_completions" => {
-                Some(Self::OpenaiChatCompletions)
+            "openai" | "openai_compatible" | "openai_chat_completions" | "openai_responses" => {
+                Some(Self::OpenaiResponses)
             }
             _ => None,
         }
@@ -1414,7 +1418,7 @@ pub async fn collect_routes(
             for model in models {
                 match model_protocols.get(&model.id).copied().unwrap_or_default() {
                     GatewayModelProtocol::AnthropicMessages => anthropic_models.push(model.id),
-                    GatewayModelProtocol::OpenaiChatCompletions => openai_models.push(model.id),
+                    GatewayModelProtocol::OpenaiResponses => openai_models.push(model.id),
                 }
             }
             let base = base.trim_end_matches('/');
@@ -1940,6 +1944,40 @@ mod tests {
                 .unwrap_or_default(),
             GatewayModelProtocol::AnthropicMessages
         );
+    }
+
+    #[test]
+    fn a_chat_completions_era_snapshot_still_routes_its_openai_models() {
+        // Snapshots written while the gateway's OpenAI route spoke Chat
+        // Completions recorded `openai_chat_completions`; the route now speaks
+        // Responses, the only OpenAI surface a gateway serves.
+        let snapshot: GatewayModelSnapshot = serde_json::from_value(serde_json::json!({
+            "gateway_url": "https://gateway.example/",
+            "models": [{
+                "id": "legacy-coder",
+                "context_window": 32768,
+                "max_output_tokens": 4096
+            }],
+            "model_protocols": {"legacy-coder": "openai_chat_completions"}
+        }))
+        .expect("the persisted chat-completions spelling still loads");
+
+        assert_eq!(
+            snapshot.model_protocols.get("legacy-coder"),
+            Some(&GatewayModelProtocol::OpenaiResponses)
+        );
+        for spelling in [
+            "openai",
+            "openai_compatible",
+            "openai_chat_completions",
+            "openai_responses",
+        ] {
+            assert_eq!(
+                GatewayModelProtocol::parse(spelling),
+                Some(GatewayModelProtocol::OpenaiResponses),
+                "{spelling}"
+            );
+        }
     }
 
     /// An unset display name is represented by the key being absent, in both

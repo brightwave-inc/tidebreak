@@ -3546,3 +3546,123 @@ async fn a_headless_folder_request_resumes_the_turn_with_the_declined_result() {
         "the model was not told the folder request was declined"
     );
 }
+
+/// `POST /chats/{id}/queued/send-now` releases a paused queue: the promoter
+/// runs the oldest message on its next sweep, and the row leaves the queue.
+#[tokio::test]
+async fn send_now_releases_a_paused_queue() {
+    // The first turn parks in the provider, keeping the chat busy so the
+    // follow-ups park as queued rows instead of running immediately.
+    let gate = Arc::new(Notify::new());
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(GatedProvider {
+            gate: gate.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "gated".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let router = app(state.clone());
+    spawn_turn_worker(&state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, TurnId::new(), "blocking turn").await,
+        StatusCode::ACCEPTED
+    );
+    // Pause promotion. Through the store, not the route: a pause PUT that
+    // lands while the gated turn is still being accepted would race the
+    // promoter claiming that same turn and read as a leak below.
+    store
+        .set_setting(
+            &format!("chats.{}.queue_paused", chat.id),
+            &serde_json::json!(true),
+        )
+        .await
+        .unwrap();
+    for content in ["hold one", "hold two"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{}/messages", chat.id))
+                    .header(header::AUTHORIZATION, bearer.as_str())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "turn_id": TurnId::new(),
+                            "content": content,
+                            "queue": true,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+    assert_eq!(
+        store.list_queued_turns(chat.id).await.unwrap().len(),
+        2,
+        "the follow-ups did not park as queued rows"
+    );
+
+    // End the blocking turn. A paused promoter must leave both rows alone.
+    gate.notify_one();
+    wait_for_turn(&store, chat.id).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        store.list_queued_turns(chat.id).await.unwrap().len(),
+        2,
+        "a paused queue promoted a message"
+    );
+
+    let send_now = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/queued/send-now", chat.id))
+                .header(header::AUTHORIZATION, bearer.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(send_now, StatusCode::NO_CONTENT);
+
+    // Tests build the router with `app()`, which never spawns the background
+    // promoter task, so drive the sweep directly: the send-now route has
+    // cleared the gate, promotion should now move one row per sweep while
+    // the gate releases one parked turn at a time.
+    for _ in 0..20 {
+        crate::routes::promote_queued_turns(&state).await.unwrap();
+        if store.list_queued_turns(chat.id).await.unwrap().is_empty() {
+            return;
+        }
+        gate.notify_one();
+        // Let the accepted turn reach its provider call before the next
+        // sweep, or the promoter's `ChatBusy` just parks the row again.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("send-now left rows in the queue");
+}

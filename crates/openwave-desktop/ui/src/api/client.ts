@@ -1332,6 +1332,15 @@ export class ApiClient {
     );
   }
 
+  /** Release a paused queue so the oldest message starts on the next sweep. */
+  async sendQueuedNow(chatId: string): Promise<void> {
+    await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/queued/send-now`,
+      { method: "POST", headers: this.headers() },
+      204,
+    );
+  }
+
   steer(
     chatId: string,
     turnId: string,

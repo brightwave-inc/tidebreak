@@ -557,6 +557,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(routes::put_queue_paused),
         )
         .route(
+            "/chats/{chat_id}/queued/send-now",
+            post(routes::post_queue_send_now),
+        )
+        .route(
             "/chats/{chat_id}/agent-runs/{run_id}/steer",
             post(routes::post_agent_run_steer),
         )
@@ -978,12 +982,23 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
 /// process rather than one per turn: [`resolver::ConfiguredResolver`] rebuilds
 /// its route set on every turn, and each candidate route reads its provider's
 /// credential to decide whether it exists.
+///
+/// The gateway session key is the one exception to memoized misses: a session
+/// can land in the keychain without this cache observing the write — a
+/// boot-time status read is in flight while sign-in completes, resolving to
+/// the old `NoEntry` after the write's invalidation already ran — and a
+/// cached `None` would then hide the session from the sync loop until
+/// restart. Its misses re-ask the store instead; an absent item answers
+/// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
 fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
     let keychain: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
         Some(service) => KeychainSecretProvider::with_service(service),
         None => KeychainSecretProvider::new(),
     });
-    Arc::new(CachingSecretProvider::new(keychain))
+    Arc::new(
+        CachingSecretProvider::new(keychain)
+            .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
+    )
 }
 
 /// Re-home the configured profile's credentials — see [`secret_rehome`].
@@ -1024,6 +1039,17 @@ async fn bind_inner(
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let store = connect_store(&config).await?;
     let secrets = secret_provider(&config);
+    // An app update replaces this binary, and macOS pins each keychain
+    // item's access to the creating binary's signature — so the first boot
+    // of a new binary re-homes every stored credential before any consumer
+    // reads one. Inline, not spawned: a concurrent pass could interleave
+    // with token refresh and strand a session (see the function), and the
+    // pass is cheap — one read+rewrite per stored credential, once per
+    // binary, with later boots of the same binary skipping it entirely.
+    // Best-effort: a failure here must not take boot down with it.
+    if let Err(error) = secret_rehome::rehome_once_per_binary(&*store, &*secrets).await {
+        tracing::warn!("could not re-home stored credentials: {error}");
+    }
     // The product boot path is where this platform's OS-managed (MDM) policy
     // reader gets selected; directly assembled AppState stays hermetic. This
     // is the one instance shared by the boot policy read, the legacy-key
