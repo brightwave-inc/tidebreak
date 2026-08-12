@@ -411,16 +411,17 @@ where
                             "needs_input sandbox child {child_id} is missing its check-in delivery"
                         ))
                     })?;
-                let result_claim =
-                    entities::agent_run_claim::Entity::find_by_id(inbox.result.lease_token)
-                        .one(conn)
-                        .await
-                        .map_err(store_err)?
-                        .ok_or_else(|| {
-                            AgentError::Store(format!(
-                                "needs_input sandbox child {child_id} check-in is missing claim provenance"
-                            ))
-                        })?;
+                let result_claim = entities::agent_run_claim::Entity::find_by_id(
+                    inbox.result.lease_token,
+                )
+                .one(conn)
+                .await
+                .map_err(store_err)?
+                .ok_or_else(|| {
+                    AgentError::Store(format!(
+                        "needs_input sandbox child {child_id} check-in is missing claim provenance"
+                    ))
+                })?;
                 if inbox.chat_id != ChatId(turn.chat_id)
                     || inbox.result.agent_run_id != child_id
                     || !matches!(inbox.result.payload, AgentRunResultPayload::CheckIn { .. })
