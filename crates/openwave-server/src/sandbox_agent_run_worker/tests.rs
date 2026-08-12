@@ -2283,7 +2283,13 @@ async fn delegated_file_read_answers_nonempty_arguments_without_parking_work() {
         provider: None,
         model: "m".into(),
         reasoning_model: false,
-        system: Some(sandbox_system_prompt(true, TurnWebSearch::Host, true, &[], &[])),
+        system: Some(sandbox_system_prompt(
+            true,
+            TurnWebSearch::Host,
+            true,
+            &[],
+            &[],
+        )),
         messages: vec![ChatMessage::text(Role::User, "task")],
         tools: vec![sandbox_read_delegated_file_tool_spec()],
         max_tokens: Some(100),
@@ -2745,20 +2751,12 @@ fn tool_capable_sandbox_prompt_includes_host_skills_summary() {
     assert!(summary.contains("pip install --user fpdf2==2.8.3 pypdf==6.15.0"));
     assert!(summary.contains("npm install --ignore-scripts pptxgenjs@4.0.1"));
     assert!(summary.contains("- spreadsheets: Build Excel workbooks with openpyxl."));
-    assert!(summary.contains(
-        "- Pick by the file: pdf-documents for PDF, presentations for decks."
-    ));
+    assert!(summary.contains("- Pick by the file: pdf-documents for PDF, presentations for decks."));
     // Never paste skill bodies.
     assert!(!summary.contains("# PDF documents"));
     assert!(!summary.contains("Produce PDF deliverables"));
 
-    let prompt = sandbox_system_prompt(
-        false,
-        TurnWebSearch::Host,
-        true,
-        &skills,
-        &plugins,
-    );
+    let prompt = sandbox_system_prompt(false, TurnWebSearch::Host, true, &skills, &plugins);
     assert!(
         prompt.contains(SANDBOX_PROMPT_SKILLS_INTRO),
         "tool-capable prompt must include the skills summary: {prompt}"
@@ -2767,13 +2765,7 @@ fn tool_capable_sandbox_prompt_includes_host_skills_summary() {
     assert!(prompt.contains(".openwave/skills/<name>/SKILL.md"));
 
     // Chat-only routes never advertise skills or exec install paths.
-    let chat_only = sandbox_system_prompt(
-        false,
-        TurnWebSearch::Off,
-        false,
-        &skills,
-        &plugins,
-    );
+    let chat_only = sandbox_system_prompt(false, TurnWebSearch::Off, false, &skills, &plugins);
     assert_eq!(chat_only, super::config::SANDBOX_CHAT_ONLY_PROMPT);
     assert!(!chat_only.contains("pdf-documents"));
     assert!(!chat_only.contains(SANDBOX_PROMPT_SKILLS_INTRO));

@@ -175,7 +175,10 @@ pub(crate) fn skill_summary_line(skill: &SkillPackage) -> Option<String> {
 /// skills still render — a bad line never suppresses a real capability. Skills
 /// no plugin claims follow the grouped ones in catalog order, which is where
 /// user-authored skills land.
-pub(crate) fn skill_catalog_lines(skills: &[SkillPackage], plugins: &[PluginPackage]) -> Vec<String> {
+pub(crate) fn skill_catalog_lines(
+    skills: &[SkillPackage],
+    plugins: &[PluginPackage],
+) -> Vec<String> {
     skill_catalog_lines_with(skills, plugins, skill_line)
 }
 

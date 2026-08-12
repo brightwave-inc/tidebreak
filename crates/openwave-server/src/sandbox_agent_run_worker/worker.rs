@@ -102,7 +102,6 @@ impl SandboxAgentRunWorker {
         }
     }
 
-
     pub(crate) async fn run(self) {
         let mut lanes = tokio::task::JoinSet::new();
         for _ in 0..self.config.max_concurrency {
