@@ -26,7 +26,7 @@ a stale one.
 ## Summary
 
 - Rust crates: 885
-- Desktop UI production packages: 461
+- Desktop UI production packages: 442
 - Distinct license texts: 581
 - Packages with no declared license: 0
 - Packages with a curated license: 28
@@ -2053,7 +2053,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/chanced/jsonptr
 - License text: `LICENSE-APACHE` ([L-ae8de7e1b783](#l-ae8de7e1b783)), `LICENSE-MIT` ([L-055a17110636](#l-055a17110636))
 
-### jsonschema 0.49.8
+### jsonschema 0.49.9
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -5496,12 +5496,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/primitive 1.1.6
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/primitive 1.1.7
 
 - License: `MIT`
@@ -5509,12 +5503,6 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
 ### @radix-ui/react-alert-dialog 1.1.23
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-arrow 1.1.12
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5538,19 +5526,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-compose-refs 1.1.3
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-compose-refs 1.1.5
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-context 1.2.0
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5569,12 +5545,6 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
 ### @radix-ui/react-direction 1.1.4
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-dismissable-layer 1.1.16
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5610,12 +5580,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-id 1.1.2
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-id 1.1.4
 
 - License: `MIT`
@@ -5634,19 +5598,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-popper 1.3.4
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-popper 1.3.7
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-portal 1.1.14
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5664,19 +5616,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-presence 1.1.8
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-primitive 2.1.10
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-primitive 2.1.7
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5712,12 +5652,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-slot 1.3.0
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-slot 1.3.3
 
 - License: `MIT`
@@ -5736,13 +5670,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-tooltip 1.2.13
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-use-callback-ref 1.1.2
+### @radix-ui/react-tooltip 1.2.16
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5754,19 +5682,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-use-controllable-state 1.2.4
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-use-controllable-state 1.2.6
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-use-effect-event 0.0.3
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5784,12 +5700,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-use-layout-effect 1.1.2
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-use-layout-effect 1.1.4
 
 - License: `MIT`
@@ -5802,19 +5712,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-use-rect 1.1.2
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-use-rect 1.1.4
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-use-size 1.1.2
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5827,18 +5725,6 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
 ### @radix-ui/react-visually-hidden 1.2.11
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-visually-hidden 1.2.8
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/rect 1.1.2
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
