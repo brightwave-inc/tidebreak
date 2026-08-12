@@ -1,5 +1,5 @@
 {
-  "name": "openwave-e2b-publish-tooling",
+  "name": "tidebreak-e2b-publish-tooling",
   "version": "0.0.0",
   "private": true,
   "packageManager": "pnpm@10.18.3",

@@ -12,14 +12,14 @@ const homePage = getPage([]);
 const homeImage = homePage ? getPageImage(homePage).url : '/og/image.png';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://brightwave.io/openwave/docs'),
+  metadataBase: new URL('https://tidebreak.dev'),
   title: {
-    default: 'OpenWave Docs',
-    template: '%s — OpenWave Docs',
+    default: 'Tidebreak Docs',
+    template: '%s — Tidebreak Docs',
   },
-  description: 'Documentation for OpenWave.',
+  description: 'Documentation for Tidebreak.',
   openGraph: {
-    siteName: 'OpenWave Docs',
+    siteName: 'Tidebreak Docs',
     images: homeImage,
   },
   twitter: {

@@ -1,16 +1,16 @@
-# Working in OpenWave
+# Working in Tidebreak
 
 Guidance for Claude (and other coding agents) working in this repository. Humans
 should read [`CONTRIBUTING.md`](CONTRIBUTING.md) first — this file layers the
 day-to-day standards an agent needs on top of it, and does not repeat what's
 already there.
 
-OpenWave is a Cargo workspace of Rust crates plus a Tauri desktop app whose UI is
-React/TypeScript under `crates/openwave-desktop/ui`.
+Tidebreak is a Cargo workspace of Rust crates plus a Tauri desktop app whose UI is
+React/TypeScript under `crates/tidebreak-desktop/ui`.
 
 ## Workflow
 
-- **Do not use the `bw` CLI in OpenWave.** It is tooling for the separate Alpha
+- **Do not use the `bw` CLI in Tidebreak.** It is tooling for the separate Alpha
   repository, not this one; use this repository's documented Cargo, pnpm, and
   GitHub commands instead.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
@@ -20,7 +20,7 @@ React/TypeScript under `crates/openwave-desktop/ui`.
   [`docs/decisions/`](docs/decisions) rather than in an issue thread — see
   below. Keep deliberately parked product scope in
   [`docs/deferred.md`](docs/deferred.md), which is the canonical
-  account of what OpenWave does not yet implement and why. Work the user is
+  account of what Tidebreak does not yet implement and why. Work the user is
   directing interactively in this session doesn't need an issue; filing one
   adds tracking overhead without coordinating anyone. If you do pick up
   substantial parallel-track work, claim its issue **before you start editing**
@@ -173,17 +173,17 @@ The change-scope gate in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 is the whole rule, and it is coarse on purpose:
 
 - Any changed file outside `*.md`, `docs/`, `assets/`, `.githooks/`, `LICENSE`,
-  `NOTICE`, and `crates/openwave-desktop/ui/` marks the change **Rust** —
+  `NOTICE`, and `crates/tidebreak-desktop/ui/` marks the change **Rust** —
   including `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy
   (`--all-targets -D warnings`), and the desktop tests. Every Cargo invocation
   passes `--locked`, so a lockfile drift fails there too.
 - A Rust change also marks the **workspace** scope, which adds the headless
   workspace tests plus the PostgreSQL turn-state lane, unless every changed file
-  is one of `openwave-desktop`'s own sources. Nothing in the workspace depends on
+  is one of `tidebreak-desktop`'s own sources. Nothing in the workspace depends on
   the desktop crate and the headless lane already excludes it, so those lanes
   cannot see such a change. `ui/src/generated/` is not covered by the carve-out
-  because its staleness check lives in `openwave-server`.
-- Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
+  because its staleness check lives in `tidebreak-server`.
+- Any file under `crates/tidebreak-desktop/ui/` marks it **UI**, which runs
   `pnpm test` and `pnpm build`.
 - Branch protection requires the pull-request jobs directly. A lane outside a
   change's scope reports a successful skip. The always-running change detector

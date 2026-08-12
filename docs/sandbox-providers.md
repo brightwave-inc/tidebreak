@@ -1,6 +1,6 @@
 # Execution providers and sandbox-resident agent runs
 
-This document defines where OpenWave runs background agent work once it stops
+This document defines where Tidebreak runs background agent work once it stops
 being a process on the local machine, what an isolated workload may call back
 into, and the sequence from today's in-process scheduler to an agent loop that
 executes inside an isolation boundary.
@@ -18,7 +18,7 @@ The sandbox-resident run tier is **deliberately parked** as of 2026-08; see
 code — the local Docker backend, the container run driver, the admission gate,
 and their post-merge e2e lane — stays in the tree and is kept green, but no
 further roadmap step below is being built, and the tier remains opt-in
-(`OPENWAVE_CONTAINER_EXECUTION_ENABLED`) and attached-only. In-process
+(`TIDEBREAK_CONTAINER_EXECUTION_ENABLED`) and attached-only. In-process
 background agent runs are the supported path.
 
 The deferral covers the durable operation log (#858, #859),
@@ -36,17 +36,17 @@ automation stays fully maintained — the execution providers depend on it.
 
 | Tier | Today | What isolates the work |
 | --- | --- | --- |
-| Background agent run | `openwave-server` sandbox agent-run worker | Capability restriction: no history, supervised step cadence, bounded I/O. |
-| Execution provider | `openwave-code-execution` | OS, container, or VM enforcement: Seatbelt on supported hosts, a container on the host's own runtime, a vendor sandbox remotely. |
+| Background agent run | `tidebreak-server` sandbox agent-run worker | Capability restriction: no history, supervised step cadence, bounded I/O. |
+| Execution provider | `tidebreak-code-execution` | OS, container, or VM enforcement: Seatbelt on supported hosts, a container on the host's own runtime, a vendor sandbox remotely. |
 
 Both tiers can end up running a container, which is exactly why the rule below
-matters: `openwave-server`'s `sandbox_docker` provisions containers that speak
+matters: `tidebreak-server`'s `sandbox_docker` provisions containers that speak
 the sandbox-agent wire protocol for the *run* tier, while
-`openwave-code-execution`'s Docker backend runs one bounded `docker exec` per
+`tidebreak-code-execution`'s Docker backend runs one bounded `docker exec` per
 call for the *provider* tier. They share only the published image; neither
 depends on the other.
 
-These are orthogonal. Background agent work currently runs inside the OpenWave
+These are orthogonal. Background agent work currently runs inside the Tidebreak
 server process; an execution provider performs one bounded process invocation
 per call. A background agent run performs no code execution today, and an
 `exec` call is issued by the foreground coordinator, not by a background
@@ -83,7 +83,7 @@ richer deliverables, and connected apps. Two of them — plan/execution modes
 and connected apps — imply a background agent that outlives a single bounded
 model call and works near credentials. The end state this document plans for
 is a background agent run that executes inside an execution provider's
-boundary — a container or managed sandbox — rather than inside the OpenWave
+boundary — a container or managed sandbox — rather than inside the Tidebreak
 server process, with the host retaining ownership of admission, results,
 credentials, and policy.
 
@@ -125,7 +125,7 @@ defines the semantics that lift that deferral when the relevant step lands.
 The entry condition for moving the loop inside the boundary: a
 sandbox-resident loop becomes mandatory before a background agent gains any
 tool whose effects are model-authored rather than host-bounded — execution
-above all — and before OpenWave promises work that survives host absence.
+above all — and before Tidebreak promises work that survives host absence.
 Below that line, the current worker's fixed budget is sufficient and cheaper.
 The gate is mechanical, not prose: the background tool surface is a closed
 set pinned by a test, in the same spirit as the generated renderer tool
@@ -205,7 +205,7 @@ per topology (TLS identity for a vendor-fronted endpoint, loopback address
 plus the per-run secret for a local container), and everything arriving over
 the channel — events, results, reverse-RPC requests — is treated as
 untrusted input attributed to the run's provider. An unauthenticated
-agent-control listener is not acceptable in any topology; OpenWave's own
+agent-control listener is not acceptable in any topology; Tidebreak's own
 local API is bearer-authenticated and the broker authorizes every operation
 on a private channel, and this surface meets the same bar.
 
@@ -214,7 +214,7 @@ the host for a model completion while the host is the model proxy, host-side
 search, a consent prompt. The plan is reverse RPC over the host-held
 connection: the host keeps a bidirectional stream open and the sandbox
 supervisor multiplexes requests back over it, authorized by capability
-grants and audited, following the `openwave-host-broker` envelope pattern
+grants and audited, following the `tidebreak-host-broker` envelope pattern
 (versioned protocol, deny-by-default capabilities, per-operation
 authorization, bounded results). Two rules carry over from that pattern
 unchanged: every reverse-RPC request bears a durable per-run operation
@@ -514,9 +514,9 @@ The protocol at issue here is the sandbox-agent boundary — provisioning,
 init, the event stream, artifact collection, reverse RPC — not the `exec`
 adapters that shipped in the execution-provider tier, which speak each
 vendor's own API and are unaffected. A self-hosted sandbox backend means
-someone other than OpenWave runs the sandbox side of this boundary, so the
+someone other than Tidebreak runs the sandbox side of this boundary, so the
 wire contract is a public, versioned interface that third parties implement:
-the protocol is the deliverable, and OpenWave's own backends are its first
+the protocol is the deliverable, and Tidebreak's own backends are its first
 consumers.
 
 - Define the protocol before the backends that implement it. A protocol
@@ -526,8 +526,8 @@ consumers.
   protocol's artifact surface is defined fresh at the protocol step, scoped
   to the run.)
 - Version it explicitly: a protocol version the host checks and refuses on
-  mismatch, following `openwave-host-broker`'s exact-equality check. The
-  protocol is declared unstable until a named release; while OpenWave is
+  mismatch, following `tidebreak-host-broker`'s exact-equality check. The
+  protocol is declared unstable until a named release; while Tidebreak is
   pre-1.0 nobody should build on it without expecting breakage.
 - Split provisioning from addressing. The backend abstraction decomposes
   into provision (returns a handle; may be a no-op wrapping a user-supplied
@@ -538,7 +538,7 @@ consumers.
 
 Reachability of a self-hosted backend is the user's responsibility: the
 endpoint must be dialable from the host by the user's own means (LAN, VPN,
-or public ingress). OpenWave operates no rendezvous or relay, so a backend
+or public ingress). Tidebreak operates no rendezvous or relay, so a backend
 behind NAT without one of those is simply not addressable — stated up front
 rather than discovered.
 
@@ -581,7 +581,7 @@ The implementation is intentionally incremental:
    CI against the local container backend from the next step onward. This
    step exists whether or not the spike says go; its reverse-RPC surface is
    shaped by the spike's outcome. *(Contract, reference backend, and
-   conformance suite shipped — the `openwave-sandbox-protocol` crate:
+   conformance suite shipped — the `tidebreak-sandbox-protocol` crate:
    `PROTOCOL_VERSION` with an exact-equality check and an attach handshake,
    deny-by-default capability grants with run provenance, a reserved control
    lane for cancel/liveness, the resumable event-cursor contract, artifact
@@ -637,7 +637,7 @@ The implementation is intentionally incremental:
 
 The in-sandbox agent image (loop plus sandbox supervisor) is built in step
 7.1 and is a prerequisite of 7.2; connected apps inside sandbox-resident
-runs are blocked on it. OpenWave's agent loop, tool trait, and provider
+runs are blocked on it. Tidebreak's agent loop, tool trait, and provider
 abstraction are already plain Rust in the core crates; running the loop
 inside a sandbox is the same code with a different tool registry and
 transport, not a second implementation. The sequence itself ships no change
@@ -646,7 +646,7 @@ a separate design, gated on the entry condition above.
 
 ## Trust model
 
-Self-hosted sandbox backends. Pointing OpenWave at a self-hosted backend
+Self-hosted sandbox backends. Pointing Tidebreak at a self-hosted backend
 places that endpoint inside the trust boundary: it executes background work,
 and with a callback channel it can ask things of the host. Attaching one is
 a trust decision of the same weight as connecting a folder — explicit
@@ -691,7 +691,7 @@ Consistent with the repository's testing policy, the CI artifact for the
 protocol is one conformance suite, shipped with the protocol step against an
 in-process reference backend and run against the local container backend
 once it exists, including the semantics cases listed in the delivery
-sequence. That suite has landed in `openwave-sandbox-protocol` (the
+sequence. That suite has landed in `tidebreak-sandbox-protocol` (the
 `conformance` module, surfaced as `tests/conformance.rs`): it covers version-
 mismatch refusal, deny-by-default, the resumable event-cursor contract and
 buffer-overflow checkpointing, reverse-RPC correlation / cancellation /
@@ -703,7 +703,7 @@ face of the suite: pointed by environment at any backend's address and
 credential, it verifies the attach gates — ordered version-then-secret
 refusal, unauthenticated refusal installing nothing, exact version echo on
 acceptance — without sending a run init, so a third party can prove their
-endpoint conforms with no OpenWave code on their side.
+endpoint conforms with no Tidebreak code on their side.
 Re-pointing those scenarios at the local container
 backend is the next step's work; the assertions do not change. The managed adapters keep their existing CI coverage through
 injected HTTP seams; what stays out of CI is live vendor exercise, which
@@ -721,7 +721,7 @@ this way is stated here rather than left silent.
   cleared environment (the local adapter's existing hygiene) and, as an
   image requirement, run under a different UID than the agent process where
   the platform allows.
-- No OpenWave-operated relay or rendezvous as a requirement of this design;
+- No Tidebreak-operated relay or rendezvous as a requirement of this design;
   every topology works with a purely local control plane. (Deployment tiers
   themselves are [host access](host-access.md)'s subject.)
 - No weakening of consent: the foreground `exec` tool stays `Sensitive`

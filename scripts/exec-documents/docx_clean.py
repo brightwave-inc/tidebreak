@@ -8,8 +8,8 @@ resolves to a part that exists. It reports; it never rewrites.
 
 from __future__ import annotations
 
-from _openwave_ooxml import check_tree, parser
-from _openwave_preview import run_cli
+from _tidebreak_ooxml import check_tree, parser
+from _tidebreak_preview import run_cli
 
 
 def main() -> int:

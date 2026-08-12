@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from _openwave_calc import (
+from _tidebreak_calc import (
     DEFAULT_TIMEOUT,
     ERROR_VALUES,
     calc_document,
@@ -29,7 +29,7 @@ from _openwave_calc import (
     looks_like_number,
     used_area,
 )
-from _openwave_preview import HelperError, existing_file, run_cli
+from _tidebreak_preview import HelperError, existing_file, run_cli
 
 # A used area can be enormous once a stray cell sits far from the data; stop
 # well before the scan becomes the slowest part of a turn and say so.

@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from _openwave_calc import (
+from _tidebreak_calc import (
     DEFAULT_TIMEOUT,
     apply_cell_input,
     calc_document,
@@ -25,7 +25,7 @@ from _openwave_calc import (
     sheet_by_name,
     used_area,
 )
-from _openwave_preview import HelperError, existing_file, run_cli
+from _tidebreak_preview import HelperError, existing_file, run_cli
 
 SPREADSHEETS = [".xlsx", ".xlsm", ".ods", ".csv"]
 

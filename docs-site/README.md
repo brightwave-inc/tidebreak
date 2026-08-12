@@ -1,6 +1,6 @@
-# OpenWave Docs
+# Tidebreak Docs
 
-The documentation site for OpenWave. Next.js (App Router) with MDX content,
+The documentation site for Tidebreak. Next.js (App Router) with MDX content,
 built as a static export.
 
 ## Local development
@@ -49,7 +49,7 @@ at the root of its own origin, so it must be built with `BASE_PATH` set to that
 path:
 
 ```sh
-BASE_PATH=/openwave/docs pnpm build
+BASE_PATH=/docs pnpm build
 ```
 
 `next.config.mjs` passes `BASE_PATH` through to Next's `basePath`, which
@@ -64,7 +64,7 @@ as separate sites.
 
 ## Design tokens
 
-`src/app/global.css` carries the OpenWave palette, kept in step with the
-desktop app's `crates/openwave-desktop/ui/src/styles.css`. Dark mode uses cool
+`src/app/global.css` carries the Tidebreak palette, kept in step with the
+desktop app's `crates/tidebreak-desktop/ui/src/styles.css`. Dark mode uses cool
 near-neutral grays and carries elevation on the lightness ramp alone: page
 chrome `0.12` < popover `0.14` < card `0.16` < content surface `0.21`.

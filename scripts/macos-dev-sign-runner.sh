@@ -3,15 +3,15 @@
 # Cargo runner for macOS (wired up in `.cargo/config.toml`): re-sign the
 # freshly built binary with a stable code-signing identity, then launch it.
 #
-# Why: OpenWave stores secrets in the macOS login keychain, and keychain
+# Why: Tidebreak stores secrets in the macOS login keychain, and keychain
 # access approvals are tied to the binary's code signature. Dev builds are
 # only ad-hoc signed by the linker, so every rebuild produces a new
-# signature and the "OpenWave wants to use your confidential information"
+# signature and the "Tidebreak wants to use your confidential information"
 # prompt returns — "Always Allow" can never stick. Signing with a real,
 # stable identity gives the binary a stable designated requirement, so one
 # approval per binary persists across rebuilds.
 #
-# Every binary is signed with the same fixed identifier (`openwave-dev`)
+# Every binary is signed with the same fixed identifier (`tidebreak-dev`)
 # rather than codesign's default (the file name). The keychain ACL matches on
 # the designated requirement — identifier + certificate — so with a shared
 # identifier one "Always Allow" covers every dev binary, including test
@@ -28,16 +28,16 @@
 # development touches a distribution key that it otherwise would not.
 #
 # Identity, in order of preference:
-#   1. $OPENWAVE_DEV_SIGNING_IDENTITY (set to opt out with an empty value)
+#   1. $TIDEBREAK_DEV_SIGNING_IDENTITY (set to opt out with an empty value)
 #   2. the first "Apple Development" identity — team-identified, and the one
 #      meant for local builds
 #   3. the first "Developer ID Application" identity — also team-identified
-#   4. an "openwave-dev" certificate already in a searchable keychain
-#   5. a local-only "openwave-dev" identity bootstrapped in its own keychain,
+#   4. an "tidebreak-dev" certificate already in a searchable keychain
+#   5. a local-only "tidebreak-dev" identity bootstrapped in its own keychain,
 #      which stops the per-rebuild prompt for nothing else on the list
 #
 # Switching between identities re-homes nothing: credentials stored under the
-# previous one keep prompting until `cargo run -p openwave-cli --
+# previous one keep prompting until `cargo run -p tidebreak-cli --
 # rehome-secrets` rewrites them.
 
 set -euo pipefail
@@ -53,7 +53,7 @@ find_identity() {
   for pattern in \
     '"\(Apple Development: [^"]*\)"' \
     '"\(Developer ID Application: [^"]*\)"' \
-    '"\(openwave-dev\)"'; do
+    '"\(tidebreak-dev\)"'; do
     local match
     match="$(sed -n "s/.*${pattern}.*/\\1/p" <<<"$identities" | head -n 1)"
     if [[ -n "$match" ]]; then
@@ -64,8 +64,8 @@ find_identity() {
   return 0
 }
 
-if [[ -n "${OPENWAVE_DEV_SIGNING_IDENTITY+x}" ]]; then
-  identity="$OPENWAVE_DEV_SIGNING_IDENTITY"
+if [[ -n "${TIDEBREAK_DEV_SIGNING_IDENTITY+x}" ]]; then
+  identity="$TIDEBREAK_DEV_SIGNING_IDENTITY"
 else
   identity="$(find_identity)"
   if [[ -z "$identity" ]]; then
@@ -74,14 +74,14 @@ else
     # never lists it even though codesign can use it; setting it up (or
     # confirming it is already there) is what makes it available.
     if "$script_dir/setup-macos-dev-signing.sh"; then
-      identity="openwave-dev"
+      identity="tidebreak-dev"
     else
       echo "warning: could not set up durable macOS dev signing; running unsigned" >&2
     fi
   fi
 fi
 
-identifier="openwave-dev"
+identifier="tidebreak-dev"
 
 if [[ -n "$identity" ]]; then
   # Unchanged binaries keep their signature from the previous run; re-signing

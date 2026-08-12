@@ -1,13 +1,13 @@
 ---
 title: Installation
-description: Download OpenWave for macOS, or build it from source.
+description: Download Tidebreak for macOS, or build it from source.
 ---
 
 ## macOS
 
-Download the disk image and drag OpenWave to Applications.
+Download the disk image and drag Tidebreak to Applications.
 
-[Download for macOS (Apple Silicon)](https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-apple-silicon.dmg)
+[Download for macOS (Apple Silicon)](https://github.com/brightwave-inc/openwave/releases/latest/download/Tidebreak-macos-apple-silicon.dmg)
 
 Releases ship an Apple Silicon (`aarch64`) build only. There is no Intel
 build; on an Intel Mac, build from source.
@@ -17,7 +17,7 @@ override. Each download has a `.sha256` sidecar on the same release if you want
 to check it:
 
 ```sh
-shasum -a 256 -c OpenWave-macos-apple-silicon.dmg.sha256
+shasum -a 256 -c Tidebreak-macos-apple-silicon.dmg.sha256
 ```
 
 An installed macOS build keeps itself current. It checks for a newer signed
@@ -59,26 +59,26 @@ On Linux you also need the platform WebView dependencies (WebKitGTK); see the
 
 ## Where your data lives
 
-OpenWave owns one application data directory, created on first launch:
+Tidebreak owns one application data directory, created on first launch:
 
 | Platform | Path |
 | --- | --- |
-| macOS | `~/Library/Application Support/io.brightwave.openwave` |
-| Windows | `%APPDATA%\io.brightwave.openwave` |
+| macOS | `~/Library/Application Support/io.brightwave.tidebreak` |
+| Windows | `%APPDATA%\io.brightwave.tidebreak` |
 
 Inside it:
 
 | Item | What it holds |
 | --- | --- |
-| `openwave.db` | The SQLite database: chats, messages, turns, event history, document metadata, and canonical text |
+| `tidebreak.db` | The SQLite database: chats, messages, turns, event history, document metadata, and canonical text |
 | `blobs/` | The original bytes of every document you attached |
-| `openwave.lock` | Proof that one process owns this directory |
+| `tidebreak.lock` | Proof that one process owns this directory |
 
 Provider API keys are **not** in that directory. They go to your OS credential
-store (the login keychain on macOS) under the service name `openwave`.
+store (the login keychain on macOS) under the service name `tidebreak`.
 
 <Callout type="warn">
-While OpenWave is pre-1.0, opening a database written by an older build can
+While Tidebreak is pre-1.0, opening a database written by an older build can
 rebuild it from scratch rather than migrate it. Do not treat this directory as
 durable storage for anything you cannot lose. Export what you care about.
 </Callout>
@@ -88,7 +88,7 @@ durable storage for anything you cannot lose. Export what you care about.
 The same server the desktop app embeds can run on its own:
 
 ```sh
-ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
+ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 ```
 
 It prints a loopback URL and a per-launch bearer token. See

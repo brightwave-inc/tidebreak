@@ -1,0 +1,46 @@
+[package]
+name = "tidebreak-router"
+description = "Tidebreak model routing: provider adapters and the composite Router."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["anthropic", "openai", "xai", "openai-compat", "gemini"]
+# The Anthropic (Messages API) provider adapter.
+anthropic = ["_http"]
+# Native OpenAI Responses API adapter.
+openai = ["_http"]
+# First-party xAI Responses API adapter. It reuses the shared Responses
+# transport while retaining a distinct provider identity and error profile.
+xai = ["openai"]
+# OpenAI-compatible Chat Completions adapter (OpenRouter, vLLM, …).
+openai-compat = ["_http"]
+# Google Gemini Developer API adapter (native GenerateContent protocol).
+gemini = ["_http", "dep:uuid"]
+# Internal: the shared HTTP transport every adapter is built on. Not meant to
+# be enabled directly.
+_http = ["dep:reqwest", "dep:async-stream", "dep:tokio"]
+
+[dependencies]
+tidebreak-core = { path = "../tidebreak-core", default-features = false }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+# `Retry-After` in its HTTP-date form is resolved against the current clock.
+chrono = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, optional = true }
+async-stream = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["time"], optional = true }
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["tools"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "test-util"] }

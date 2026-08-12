@@ -18,8 +18,8 @@
 !crates/*/build.rs
 !crates/*/src/
 !crates/*/src/**
-!crates/openwave-code-execution/baseline_python_deps.txt
-!crates/openwave-sandbox-agent/documents-requirements.txt
+!crates/tidebreak-code-execution/baseline_python_deps.txt
+!crates/tidebreak-sandbox-agent/documents-requirements.txt
 
 # Built-in manifests are source inputs for compile-time contract checks. Admit
 # only the reviewed manifest names, not arbitrary files beside them.
@@ -55,8 +55,8 @@
 **/.aws/**
 **/.ssh
 **/.ssh/**
-**/.openwave
-**/.openwave/**
+**/.tidebreak
+**/.tidebreak/**
 **/.*
 **/.*/**
 

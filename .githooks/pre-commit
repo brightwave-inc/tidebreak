@@ -8,7 +8,7 @@ if ! git diff --cached --quiet --diff-filter=ACMR -- '*.rs'; then
 fi
 
 if ! git diff --cached --quiet --diff-filter=ACMR -- \
-  ':(glob)crates/openwave-desktop/ui/**/*.ts' \
-  ':(glob)crates/openwave-desktop/ui/**/*.tsx'; then
-  pnpm --dir crates/openwave-desktop/ui exec tsc --noEmit
+  ':(glob)crates/tidebreak-desktop/ui/**/*.ts' \
+  ':(glob)crates/tidebreak-desktop/ui/**/*.tsx'; then
+  pnpm --dir crates/tidebreak-desktop/ui exec tsc --noEmit
 fi

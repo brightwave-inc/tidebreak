@@ -1,12 +1,12 @@
 # Tested and community MCP servers
 
-Any MCP server can be mounted, and OpenWave treats them all the same at
+Any MCP server can be mounted, and Tidebreak treats them all the same at
 runtime: the same discovery bounds, the same approval gate, the same
 namespacing. Server *quality* is not uniform, though, and a badly-schema'd
 server makes the whole agent feel broken rather than the server. So the
 Connected apps surface labels each configured server one of two ways.
 
-- **Tested** — the server matches an entry on OpenWave's curated list. Someone
+- **Tested** — the server matches an entry on Tidebreak's curated list. Someone
   mounted that exact server, drove it, and dated the result.
 - **Community** — everything else. Mounted, connected, and callable, exactly
   like a tested one. We simply have not driven it ourselves and will not imply
@@ -17,14 +17,14 @@ connection behavior. It exists so the two claims stay distinguishable.
 
 ## What "tested" claims
 
-An entry means a person ran the server against a real OpenWave profile and
+An entry means a person ran the server against a real Tidebreak profile and
 exercised, at minimum:
 
 - **The auth flow** — whatever the server needs to authenticate (a stdio
   server's forwarded environment names, or an HTTP server's bearer token
   variable), configured from Settings and reconnecting cleanly after a
   restart.
-- **Tool schemas** — discovery completes inside OpenWave's bounds (frame size,
+- **Tool schemas** — discovery completes inside Tidebreak's bounds (frame size,
   tool count, description and schema limits), the mounted names survive the
   `mcp__{namespace}__{tool}` contract, and the published schemas describe the
   arguments the server actually accepts.
@@ -39,7 +39,7 @@ we have a relationship with. It is a report on one session, with a date.
 
 ## What the list holds
 
-The list lives in `crates/openwave-server/src/mcp_curated.rs`, next to the
+The list lives in `crates/tidebreak-server/src/mcp_curated.rs`, next to the
 model registry it is modelled on: a static table compiled into the app, no
 network fetch, no background refresh. Each entry carries a display name, the
 pattern that recognises the server, the date it was last exercised, and a

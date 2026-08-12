@@ -1,6 +1,6 @@
 # What comes after v1
 
-OpenWave's first stable release is deliberately narrow: a local-first coworker
+Tidebreak's first stable release is deliberately narrow: a local-first coworker
 that can work over user-approved files, use configured models and bounded
 tools, run code in an isolation boundary, and produce files the user explicitly
 exports. The work below is valuable, but it is not silently implied by that
@@ -37,7 +37,7 @@ in a parking label.
 
 ## A coworker that can work later
 
-Background agent runs make work durable, but OpenWave does not yet schedule
+Background agent runs make work durable, but Tidebreak does not yet schedule
 work for a future time or recurring cadence. A future local-first scheduler
 should reuse the run journal and admission path rather than create a second
 automation engine. Its first useful shape is deliberately modest: one-time,
@@ -54,7 +54,7 @@ runtime are outside that first step.
 
 Browser automation is a major missing capability, but it must not become a way
 to take over the user's everyday browser or desktop. The future browser surface
-needs its own OpenWave-managed profile, clear cookie and login lifetime rules,
+needs its own Tidebreak-managed profile, clear cookie and login lifetime rules,
 visible foreground control, durable history, cancellation, and a reset path.
 
 The initial contract must distinguish navigation from entering sensitive text,
@@ -93,13 +93,13 @@ instruction-only pipeline; it is not a v1 dependency.
 
 ## Connected services: local control first, managed entitlements later
 
-OpenWave already has local connected folders, configured MCP servers, web
+Tidebreak already has local connected folders, configured MCP servers, web
 search, and a governed REST executor for local apps. It does not plan to become
 the publisher and refresh-token broker for a parallel catalog of Slack, Google,
 Microsoft 365, Dropbox, or Box integrations.
 
 Where a service requires a registered OAuth app, the intended managed path is a
-model gateway entitlement. OpenWave should consume those entitled apps or
+model gateway entitlement. Tidebreak should consume those entitled apps or
 virtual MCP endpoints and explain what a gateway provides, while unmanaged
 users retain local escape hatches such as MCP mounting and user-provided REST
 definitions and credentials. Curated desktop-owned OAuth connectors are not on
@@ -115,7 +115,7 @@ access control.
 
 ## Deeper isolation and reliability
 
-OpenWave can run code through local and managed execution providers today. The
+Tidebreak can run code through local and managed execution providers today. The
 more ambitious sandbox-resident agent-run tier remains attached-only and
 opt-in. Detached background execution needs scoped model tokens, provider
 lifetime caps, image verification in the right trust root, no
@@ -135,7 +135,7 @@ part of picking the tier back up, not a separate task.
 The first-class Google Vertex AI and Amazon Bedrock Mantle providers were
 removed, along with the service-account and AWS access-key credential types
 that existed only to serve them. Google service accounts and AWS SigV4 are the
-only credential shapes OpenWave ever carried that are not an API key in the OS
+only credential shapes Tidebreak ever carried that are not an API key in the OS
 keychain, and every model those routes served is already reachable — through a
 direct Anthropic or Google API key, or through an OpenAI-compatible base-URL
 override pointed at a gateway that fronts them. The routes added no model
@@ -204,7 +204,7 @@ sign-in restartable, and validate the external-app protocol against its SDK.
 
 ## What this means for planning
 
-V1 is not a claim that OpenWave has every kind of automation or connector. It
+V1 is not a claim that Tidebreak has every kind of automation or connector. It
 is a commitment to make the capabilities it does expose legible, local-first,
 and bounded. New ideas should be added here when they describe a deliberate
 product direction or a dependency outside this repository. Once a direction has

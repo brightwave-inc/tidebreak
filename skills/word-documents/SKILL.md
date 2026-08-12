@@ -73,7 +73,7 @@ A DOCX is a zip of XML parts. Editing those parts directly is the only way to
 change a document without re-authoring it. The workflow:
 
 1. **Unpack**
-   `python3 .openwave/exec-scripts/office_unpack.py doc.docx build/doc`
+   `python3 .tidebreak/exec-scripts/office_unpack.py doc.docx build/doc`
    writes the package out as a directory tree, byte for byte.
 2. **Survey before editing.** Read `build/doc/word/document.xml` and find the
    passages you need to change. Decide what you are editing and what you are
@@ -90,12 +90,12 @@ change a document without re-authoring it. The workflow:
    file: a round trip through a generic writer reorders namespaces and drops
    content Word needs.
 4. **Check**
-   `python3 .openwave/exec-scripts/docx_clean.py build/doc`
+   `python3 .tidebreak/exec-scripts/docx_clean.py build/doc`
    parses every XML part and confirms every relationship target exists. Fix
    what it names before going on; a malformed part is the "Word found
    unreadable content" dialog.
 5. **Pack**
-   `python3 .openwave/exec-scripts/office_pack.py build/doc output/<name>.docx`
+   `python3 .tidebreak/exec-scripts/office_pack.py build/doc output/<name>.docx`
    rezips the tree into a valid package.
 
 Unpack once and keep the tree for the rest of the conversation — later
@@ -119,13 +119,13 @@ change it only when the user asks for a distinct document.
    converts only a package it can parse. A file that fails to open either way
    is not a deliverable.
 2. Render pages for a visual check with the bundled helper:
-   `python3 .openwave/exec-scripts/render_office.py output/<file>.docx`
+   `python3 .tidebreak/exec-scripts/render_office.py output/<file>.docx`
    (images land in `preview/`; at most 3 are returned per exec call; the
    renderer needs `pypdfium2` and `pillow`, installable with pip). The
    helper converts through a sandbox LibreOffice when one exists; otherwise
    it renders the PDF the host converts after every successful command that
    saved the document — the workspace sync notes name it (under
-   `.openwave/render/`), and on a managed sandbox you must list that PDF in
+   `.tidebreak/render/`), and on a managed sandbox you must list that PDF in
    the helper call's `files` to stage it in. Inspect for clipped text, broken
    tables, and lost formatting. When you edited an existing document, check
    the pages you meant to preserve too — they should look exactly as they did

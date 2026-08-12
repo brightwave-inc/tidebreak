@@ -1,6 +1,6 @@
 # Agent runs and sandboxed background work
 
-OpenWave separates the conversation a person sees from the durable agents that
+Tidebreak separates the conversation a person sees from the durable agents that
 do its work. This keeps the foreground chat responsive while longer tasks run
 asynchronously, and it gives every background task an isolated place to work.
 
@@ -62,7 +62,7 @@ differ:
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
-This shared foundation is important. OpenWave must not grow separate,
+This shared foundation is important. Tidebreak must not grow separate,
 incompatible foreground and sandbox loops.
 
 ## Starting background work
@@ -84,7 +84,7 @@ spawn:
 
 The bounded `spawn_sandbox_agent` contract is available only to a durably
 claimed foreground turn. One bounded `task` derives a child identity from its
-exact tool call. In one transaction, OpenWave admits the queued child, records
+exact tool call. In one transaction, Tidebreak admits the queued child, records
 the completed orchestration tool result containing its opaque `agent_id`,
 journals that completion, applies model progress once, and releases the
 foreground lease into `resuming`. The foreground can therefore be reclaimed
@@ -238,7 +238,7 @@ may later supply stronger isolation behind the same contract.
 Which adapter a child gets is decided once per server process, not per spawn.
 The default is the in-process worker described above, whose isolation is the
 narrow tool surface rather than a runtime boundary. Setting
-`OPENWAVE_CONTAINER_EXECUTION_ENABLED=true` routes newly admitted children to a
+`TIDEBREAK_CONTAINER_EXECUTION_ENABLED=true` routes newly admitted children to a
 local container instead, when a container runtime is detected; an absent
 runtime reports the capability as unavailable and admission falls back to the
 in-process worker rather than failing. A container-located run is attached-only
@@ -346,7 +346,7 @@ The response is deliberately renderer-safe: worker lease tokens, delegated
 input, raw failure details, and scheduler bookkeeping never cross this API
 boundary. A bounded failure code may be included for display and recovery
 guidance; detailed provider, transport, or executor diagnostics remain
-server-side. A sandbox snapshot also carries its opaque OpenWave spawn-call id
+server-side. A sandbox snapshot also carries its opaque Tidebreak spawn-call id
 so the transcript can attach it to the exact visible delegation row; this is a
 renderer correlation key, not a provider call identity or scheduler control.
 
@@ -457,7 +457,7 @@ The agent hierarchy preserves the runtime's existing rules:
    `resuming`, with exact retry recovery at both boundaries.
 8. Clients recover from a durable snapshot plus ordered event replay.
 
-Until a tool satisfies the side-effect receipt contract, OpenWave continues to
+Until a tool satisfies the side-effect receipt contract, Tidebreak continues to
 fail conservatively after an ambiguous execution rather than replay it.
 
 ## Delivery sequence

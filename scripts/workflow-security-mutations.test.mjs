@@ -19,11 +19,11 @@ const fixturePaths = [
   ".github/workflows",
   ".github/release-drafter.yml",
   ".github/e2b-cli/package.json",
-  "crates/openwave-desktop/tauri.conf.json",
-  "crates/openwave-desktop/Cargo.toml",
-  "crates/openwave-desktop/src/lib.rs",
-  "crates/openwave-desktop/src/updater.rs",
-  "crates/openwave-desktop/src/broker.rs",
+  "crates/tidebreak-desktop/tauri.conf.json",
+  "crates/tidebreak-desktop/Cargo.toml",
+  "crates/tidebreak-desktop/src/lib.rs",
+  "crates/tidebreak-desktop/src/updater.rs",
+  "crates/tidebreak-desktop/src/broker.rs",
   "deploy/self-host/Dockerfile.dockerignore",
   "scripts/stage-self-host-build-context.sh",
   "deny.toml",
@@ -31,7 +31,7 @@ const fixturePaths = [
 ];
 
 function policyFixture() {
-  const root = mkdtempSync(join(tmpdir(), "openwave-policy-mutation-"));
+  const root = mkdtempSync(join(tmpdir(), "tidebreak-policy-mutation-"));
   for (const path of fixturePaths) {
     const source = join(repositoryRoot, path);
     const target = join(root, path);
@@ -52,8 +52,8 @@ function edit(root, path, mutate) {
 function runPolicy(root) {
   const env = {
     ...process.env,
-    OPENWAVE_POLICY_ROOT: root,
-    OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE: "1",
+    TIDEBREAK_POLICY_ROOT: root,
+    TIDEBREAK_SKIP_DOCKER_CONTEXT_PROBE: "1",
   };
   delete env.NODE_TEST_CONTEXT;
   // Running the file directly still executes node:test, while avoiding the
@@ -113,8 +113,8 @@ const mutations = [
     expected: "E2B template pin provenance",
     mutate: (source) =>
       source.replace(
-        "          ref: ${{ needs.resolve.outputs.source_sha }}\n          path: .release-source\n          fetch-depth: 1\n          sparse-checkout: |\n            crates/openwave-sandbox-agent/e2b\n          sparse-checkout-cone-mode: false\n\n      - name: Point the client at the published template",
-        "          ref: main\n          path: .release-source\n          fetch-depth: 1\n          sparse-checkout: |\n            crates/openwave-sandbox-agent/e2b\n          sparse-checkout-cone-mode: false\n\n      - name: Point the client at the published template",
+        "          ref: ${{ needs.resolve.outputs.source_sha }}\n          path: .release-source\n          fetch-depth: 1\n          sparse-checkout: |\n            crates/tidebreak-sandbox-agent/e2b\n          sparse-checkout-cone-mode: false\n\n      - name: Point the client at the published template",
+        "          ref: main\n          path: .release-source\n          fetch-depth: 1\n          sparse-checkout: |\n            crates/tidebreak-sandbox-agent/e2b\n          sparse-checkout-cone-mode: false\n\n      - name: Point the client at the published template",
       ),
   },
   {

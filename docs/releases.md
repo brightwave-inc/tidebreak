@@ -1,12 +1,12 @@
 # Releases and versioning
 
-OpenWave uses one Semantic Version for the desktop product. A published native
+Tidebreak uses one Semantic Version for the desktop product. A published native
 GitHub Release and its `vMAJOR.MINOR.PATCH` tag are the source of truth. There is
 no release branch, release pull request, or committed version-bump commit.
 
 The `0.0.0` values in Cargo, Tauri, and the private UI package are development
 metadata. On a release build, the workflow validates the tag, passes its version
-to Tauri through a configuration overlay, and exports `OPENWAVE_VERSION` so Rust
+to Tauri through a configuration overlay, and exports `TIDEBREAK_VERSION` so Rust
 code reports and gates on the same product version.
 
 ## Classify every pull request
@@ -161,8 +161,8 @@ automatic.
 8. A final job downloads every installer the immutable manifest lists back from
    the CDN, checks them against its digests, and attaches them to the GitHub
    Release with `.sha256` sidecars — today that is the notarized disk image as
-   `OpenWave-macos-apple-silicon.dmg`, and it would again include
-   `OpenWave-windows-x86_64-setup.exe` if the Windows lane were unparked. It
+   `Tidebreak-macos-apple-silicon.dmg`, and it would again include
+   `Tidebreak-windows-x86_64-setup.exe` if the Windows lane were unparked. It
    holds no signing or AWS credentials. The names omit the version so that
    `https://github.com/brightwave-inc/openwave/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
@@ -230,13 +230,13 @@ registry and prepared-build caches.
 The public download contract is rooted at:
 
 ```text
-https://downloads.brightwave.io/openwave/
+https://downloads.brightwave.io/tidebreak/
 ```
 
 Each release has an immutable prefix:
 
 ```text
-openwave/releases/vMAJOR.MINOR.PATCH/
+tidebreak/releases/vMAJOR.MINOR.PATCH/
 ├── manifest.json
 ├── macos/
 │   └── aarch64/
@@ -255,7 +255,7 @@ different bytes or move `latest.json` to an older version.
 Packaged macOS apps check `latest.json` 15 seconds after launch and every five
 minutes. When a newer signed version is available, the Tauri updater downloads
 and installs it in place, then emits a ready state to the UI. The user must
-choose **Restart to update** before OpenWave relaunches; the app never
+choose **Restart to update** before Tidebreak relaunches; the app never
 interrupts active work automatically. Development and unsupported-platform
 builds do not contact the production update feed.
 
@@ -299,7 +299,7 @@ that environment:
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater-signing key                  |
 
 Retain the Tauri updater keypair. Its public key is intentionally committed in
-`crates/openwave-desktop/tauri.conf.json` so packaged apps can verify update
+`crates/tidebreak-desktop/tauri.conf.json` so packaged apps can verify update
 signatures. Only the private key and its password belong in GitHub secrets.
 
 Configure these environment variables:
@@ -309,14 +309,14 @@ Configure these environment variables:
 | `APPLE_SIGNING_IDENTITY`                   | Developer ID Application signing identity                        |
 | `APPLE_API_KEY_ID`                         | App Store Connect API key ID                                      |
 | `APPLE_API_ISSUER`                         | App Store Connect API issuer UUID                                 |
-| `AWS_RELEASE_ROLE_ARN`                     | GitHub OIDC role allowed to publish OpenWave release files        |
+| `AWS_RELEASE_ROLE_ARN`                     | GitHub OIDC role allowed to publish Tidebreak release files        |
 | `DOWNLOADS_S3_BUCKET`                      | S3 bucket behind `downloads.brightwave.io`                        |
 | `DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID`     | CloudFront distribution serving the bucket                        |
 | `DOWNLOADS_AWS_REGION`                     | AWS region; defaults to `us-east-1` when omitted                   |
 
 The IAM role must trust GitHub's OIDC provider with the environment subject
 `repo:brightwave-inc/openwave:environment:desktop-production`. Grant only the
-S3 permissions needed beneath `openwave/` and CloudFront invalidation access for
+S3 permissions needed beneath `tidebreak/` and CloudFront invalidation access for
 the configured distribution. No long-lived AWS access key belongs in GitHub.
 
 Before the first public release, protect the environment as appropriate, verify
@@ -459,7 +459,7 @@ its local profile until this checklist is complete:
    configuration, CLI/API behavior, extension protocols, and supported upgrade
    window.
 2. Replace the pre-v1-only guard in
-   `crates/openwave-server/src/desktop_schema.rs` with the durable v1 lifecycle.
+   `crates/tidebreak-server/src/desktop_schema.rs` with the durable v1 lifecycle.
    It must preserve supported data, migrate transactionally, fail safely, and
    test upgrades from the latest 0.x state.
 3. Verify the provisioned signed, notarized, hosted macOS pipeline with clean

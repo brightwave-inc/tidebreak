@@ -17,12 +17,12 @@ const EXPECTED_ARTIFACT_COUNT = RELEASE_PLATFORMS.reduce(
 );
 
 function releaseFixture() {
-  const dist = mkdtempSync(path.join(tmpdir(), "openwave-release-"));
+  const dist = mkdtempSync(path.join(tmpdir(), "tidebreak-release-"));
   for (const descriptor of RELEASE_PLATFORMS) {
     for (const arch of descriptor.architectures) {
       const directory = path.join(dist, descriptor.platform, arch);
       mkdirSync(directory, { recursive: true });
-      const baseName = `OpenWave_0.4.2_${arch}`;
+      const baseName = `Tidebreak_0.4.2_${arch}`;
       for (const format of descriptor.formats) {
         const file = path.join(directory, `${baseName}${format.extension}`);
         writeFileSync(file, `${format.format}-${descriptor.platform}-${arch}`);
@@ -43,7 +43,7 @@ const RELEASE = {
   tag: "v0.4.2",
   sha: "0123456789abcdef0123456789abcdef01234567",
   publishedAt: "2026-07-22T16:00:00Z",
-  baseUrl: "https://downloads.brightwave.io/openwave",
+  baseUrl: "https://downloads.brightwave.io/tidebreak",
 };
 
 test("creates a complete manifest and Tauri updater document", () => {
@@ -54,7 +54,7 @@ test("creates a complete manifest and Tauri updater document", () => {
   assert.deepEqual(Object.keys(latest.platforms), ["darwin-aarch64"]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
-    /releases\/v0\.4\.2\/macos\/aarch64\/OpenWave_0\.4\.2_aarch64\.app\.tar\.gz$/,
+    /releases\/v0\.4\.2\/macos\/aarch64\/Tidebreak_0\.4\.2_aarch64\.app\.tar\.gz$/,
   );
   assert.equal(
     latest.platforms["darwin-aarch64"].signature,
@@ -67,7 +67,7 @@ test("creates a complete manifest and Tauri updater document", () => {
   assert.deepEqual(diskManifest, manifest);
   for (const artifact of manifest.artifacts) {
     assert.equal(artifact.sha256.length, 64);
-    assert.match(artifact.url, /^https:\/\/downloads\.brightwave\.io\/openwave\//);
+    assert.match(artifact.url, /^https:\/\/downloads\.brightwave\.io\/tidebreak\//);
     assert.match(
       readFileSync(path.join(dist, artifact.filename) + ".sha256", "utf8"),
       new RegExp(`^${artifact.sha256}  `),
@@ -81,7 +81,7 @@ test("fails closed when an architecture is incomplete", () => {
     dist,
     "macos",
     "aarch64",
-    "OpenWave_0.4.2_aarch64.app.tar.gz.sig",
+    "Tidebreak_0.4.2_aarch64.app.tar.gz.sig",
   );
   writeFileSync(missing, "");
 
@@ -102,7 +102,7 @@ test("rejects mismatched tags and non-production hosts", () => {
       createReleaseManifests({
         dist,
         ...RELEASE,
-        baseUrl: "https://example.com/openwave",
+        baseUrl: "https://example.com/tidebreak",
       }),
     /downloads\.brightwave\.io/,
   );
@@ -130,7 +130,7 @@ test("rejects a published manifest that points outside its immutable prefix", ()
   createReleaseManifests({ dist, ...RELEASE });
   const manifestPath = path.join(dist, "manifest.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  manifest.artifacts[0].url = "https://example.com/OpenWave.dmg";
+  manifest.artifacts[0].url = "https://example.com/Tidebreak.dmg";
   writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
 
   assert.throws(

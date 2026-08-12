@@ -1,0 +1,35 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { ServerInfo } from "./api";
+
+/**
+ * Resolve how the UI reaches the local API.
+ *
+ * - Inside Tauri: `server_info` from the host (in-process server).
+ * - In a plain browser (`pnpm --dir ui dev`): `VITE_TIDEBREAK_URL` +
+ *   `VITE_TIDEBREAK_TOKEN`, so the same React app can be exercised against
+ *   `tidebreak serve`. The server derives private scratch itself.
+ */
+export async function resolveServerInfo(): Promise<ServerInfo> {
+  if (isTauri()) {
+    return await invoke<ServerInfo>("server_info");
+  }
+
+  const fromEnv = envServerInfo();
+  if (fromEnv) return fromEnv;
+
+  throw new Error(
+    "Set VITE_TIDEBREAK_URL and VITE_TIDEBREAK_TOKEN (for `tidebreak serve`) " +
+      "to run the UI in a browser, or launch via `cargo tauri dev`.",
+  );
+}
+
+function envServerInfo(): ServerInfo | null {
+  const baseUrl = import.meta.env.VITE_TIDEBREAK_URL?.trim();
+  const token = import.meta.env.VITE_TIDEBREAK_TOKEN?.trim();
+  if (!baseUrl || !token) return null;
+
+  return {
+    baseUrl: baseUrl.replace(/\/$/, ""),
+    token,
+  };
+}

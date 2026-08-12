@@ -1,13 +1,13 @@
 # External MCP servers
 
-OpenWave connects to MCP servers over three transports: a local stdio child
+Tidebreak connects to MCP servers over three transports: a local stdio child
 process, a remote Streamable HTTP endpoint, or a model-gateway MCP endpoint
 bound to the signed-in gateway session. In the desktop app, open
 **Settings → Connected apps → MCP servers**, add a definition, pick its
 transport, and choose
-**Save and verify**. For a stdio server, OpenWave starts the executable
+**Save and verify**. For a stdio server, Tidebreak starts the executable
 directly with the argument array shown in the form; it never joins the fields
-into a shell command. For an HTTP server, OpenWave sends each JSON-RPC request
+into a shell command. For an HTTP server, Tidebreak sends each JSON-RPC request
 as an authenticated `POST` and accepts both plain JSON and `text/event-stream`
 responses.
 
@@ -18,9 +18,9 @@ Each server has:
   - **stdio** — an executable, zero or more individual arguments, an optional
     working directory, optional environment variable *names* (`env`) whose
     values are held in the OS credential store, and optional `env_from` names
-    selected from the OpenWave host environment; or
+    selected from the Tidebreak host environment; or
   - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
-    name selected from the OpenWave host environment; or
+    name selected from the Tidebreak host environment; or
   - **gateway** — the slug of a model-gateway MCP endpoint
     (`gateway_endpoint`). The endpoint URL and a short-lived `mcp:<slug>`
     bearer are resolved from the signed-in gateway session at every
@@ -43,12 +43,12 @@ fields. The two channels that do carry a value are:
   renderer and never enter SQLite. Deleting a name, or the server, deletes its
   stored value.
 - **`env_from`** and **Bearer token variable** — a name selected from the
-  environment that launched OpenWave, resolved at the connection boundary and
+  environment that launched Tidebreak, resolved at the connection boundary and
   never stored at all.
 
 A missing selected name produces a server-specific error containing the name,
 not a value. Child stderr is discarded so a server cannot copy a forwarded
-credential into OpenWave's host logs, and HTTP diagnostics are fixed strings
+credential into Tidebreak's host logs, and HTTP diagnostics are fixed strings
 that never echo the URL, a token, or a response body.
 
 Definitions saved before the values moved into the credential store held them
@@ -58,7 +58,7 @@ only. Names are all the definition fingerprint ever covered, so existing app
 grants stay valid across the migration.
 
 All mounted names use `mcp__{namespace}__{remote_tool}`. MCP tools are sensitive:
-the existing OpenWave approval gate must approve each call before it crosses
+the existing Tidebreak approval gate must approve each call before it crosses
 the process boundary. MCP approvals cannot be remembered for the chat. A server
 definition can change behind a stable namespace, so reusing a name-based grant
 would silently widen its authority.
@@ -66,7 +66,7 @@ would silently widen its authority.
 ## Tested and community servers
 
 Each configured server carries one of two labels in Settings: **Tested** when
-it matches OpenWave's curated list of servers we have exercised end to end, and
+it matches Tidebreak's curated list of servers we have exercised end to end, and
 **Community** otherwise. The label gates nothing — both tiers mount, connect,
 and call identically. See
 [Tested and community MCP servers](mcp-tested-servers.md) for what the tested
@@ -90,7 +90,7 @@ Each running turn holds an immutable registry snapshot, so a configuration or
 tool-list change applies only to subsequent turns.
 
 Discovery is fail-closed and bounded. Mounted names must fit the provider-safe
-64-byte `[A-Za-z0-9_-]` contract after namespacing. OpenWave caps JSON-RPC frame
+64-byte `[A-Za-z0-9_-]` contract after namespacing. Tidebreak caps JSON-RPC frame
 size, tool count, pagination, cursors, descriptions, individual schemas, and
 aggregate tool metadata before publishing a connection. A server that exceeds a
 limit stays out of the active tool set and receives only a fixed diagnostic in
@@ -100,7 +100,7 @@ Settings.
 
 A server may declare an [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
 view for a tool through `_meta` (`ui.resourceUri`, or the legacy flat
-`ui/resourceUri` spelling). OpenWave validates the declaration at discovery —
+`ui/resourceUri` spelling). Tidebreak validates the declaration at discovery —
 it must be a bounded, control-character-free `ui://` URI; a malformed
 declaration fails the connection — and prefetches the document once per
 connection through `resources/read`, bounded at 1 MiB.
@@ -114,7 +114,7 @@ the host, which serves it with its own strict Content-Security-Policy — an
 http-served frame does not inherit the app's policy the way a `blob:` or
 `srcdoc` document would, so the view's inline script runs while its network
 egress stays shut. The frame is sandboxed with `allow-scripts` only and is
-never same-origin with the app: it has no access to OpenWave's DOM, storage,
+never same-origin with the app: it has no access to Tidebreak's DOM, storage,
 bearer token, or IPC surface. Remote tool names, descriptions, and raw tool
 output still never reach the renderer.
 
@@ -134,8 +134,8 @@ default — it would remove a special case, not a subsystem.
 
 ## Headless bootstrap
 
-`openwave serve` can still read an initial configuration from the JSON file
-named by `OPENWAVE_MCP_CONFIG`:
+`tidebreak serve` can still read an initial configuration from the JSON file
+named by `TIDEBREAK_MCP_CONFIG`:
 
 ```json
 {

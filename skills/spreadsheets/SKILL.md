@@ -62,11 +62,11 @@ engine and saves it back through that engine's own filter — the edit lands
 in place and everything the file already carried survives:
 
 ```
-python3 .openwave/exec-scripts/calc_uno.py inspect input/model.xlsx
-python3 .openwave/exec-scripts/calc_uno.py get-cell input/model.xlsx Summary B7
-python3 .openwave/exec-scripts/calc_uno.py set-cell input/model.xlsx Summary B7 '=SUM(B2:B6)'
-python3 .openwave/exec-scripts/calc_uno.py list-named-ranges input/model.xlsx
-python3 .openwave/exec-scripts/calc_uno.py set-named-range input/model.xlsx Revenue '$Data.$B$2:$B$13'
+python3 .tidebreak/exec-scripts/calc_uno.py inspect input/model.xlsx
+python3 .tidebreak/exec-scripts/calc_uno.py get-cell input/model.xlsx Summary B7
+python3 .tidebreak/exec-scripts/calc_uno.py set-cell input/model.xlsx Summary B7 '=SUM(B2:B6)'
+python3 .tidebreak/exec-scripts/calc_uno.py list-named-ranges input/model.xlsx
+python3 .tidebreak/exec-scripts/calc_uno.py set-named-range input/model.xlsx Revenue '$Data.$B$2:$B$13'
 ```
 
 `set-cell` treats a leading `=` as a formula and anything else as a number
@@ -129,7 +129,7 @@ Two passes, in this order, after every create or edit.
 them:
 
 ```
-python3 .openwave/exec-scripts/xlsx_recalc.py output/<file>.xlsx
+python3 .tidebreak/exec-scripts/xlsx_recalc.py output/<file>.xlsx
 ```
 
 It opens the workbook in Calc, forces a full recalculation, saves the
@@ -144,7 +144,7 @@ rather than declaring them correct.
 **2. Inspect visually.** Re-read the saved file with the bundled analyzer:
 
 ```
-python3 .openwave/exec-scripts/analyze_xlsx.py output/<file>.xlsx
+python3 .tidebreak/exec-scripts/analyze_xlsx.py output/<file>.xlsx
 ```
 
 It prints each sheet's dimensions and sample rows and writes sheet

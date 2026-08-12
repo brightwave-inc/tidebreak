@@ -1,6 +1,6 @@
 # Tool architecture and roadmap
 
-Tools are the boundary between model decisions and real effects. OpenWave keeps
+Tools are the boundary between model decisions and real effects. Tidebreak keeps
 that boundary small, typed, and explicit: every advertised tool has a stable
 name and JSON Schema, an approval class, a bounded result, and a recorded call
 identity.
@@ -62,7 +62,7 @@ union and its runtime guard are now generated from `RendererToolName`, and its
 copy and icon tables are keyed on the generated union, so a missing entry is a
 compile error. [Wire types](wire-types.md) covers the generator and how to run it.
 
-There is now one copy of the vocabulary: `RendererToolName` in `openwave-core`,
+There is now one copy of the vocabulary: `RendererToolName` in `tidebreak-core`,
 which owns the enum and the single `From<&str>` fold that maps a registered tool
 name onto it. The live event projection, the history lookup that rebuilds a
 terminal card from the journal, and `ChatToolActivitySnapshot`'s own field type
@@ -101,7 +101,7 @@ stored document the same way or put the page URL directly in prose, and
 
 ## Core module layout
 
-`openwave-core` owns only generic tool contracts and tools that require no
+`tidebreak-core` owns only generic tool contracts and tools that require no
 provider or product adapter. Its built-in filesystem implementation is split by
 responsibility:
 
@@ -122,7 +122,7 @@ interface; server-owned source tools use it too.
 
 ## Code execution
 
-Command execution lives in `openwave-code-execution`, not in core. Its `exec`
+Command execution lives in `tidebreak-code-execution`, not in core. Its `exec`
 tool accepts one executable, direct argument vector, private-scratch-relative
 working directory, and an optional bounded `files` list naming the scratch
 paths to stage into a managed sandbox before the command runs — managed
@@ -147,7 +147,7 @@ bounded. A private durable running/terminal receipt prevents an ambiguous
 command from being silently replayed. Unsupported hosts fail closed with no
 unconfined fallback. See [Code execution](code-execution.md).
 
-External MCP servers follow the same rule through `openwave-mcp`. A connected
+External MCP servers follow the same rule through `tidebreak-mcp`. A connected
 server — a local stdio child or a remote Streamable HTTP endpoint — completes
 MCP initialization and paginated `tools/list` discovery before its proxies are
 registered. Each remote name is locally namespaced as
@@ -187,14 +187,14 @@ backoff, and establishes a fresh connection after
 Provider-safe names plus per-frame, per-tool, count, pagination, and aggregate
 metadata limits keep a malformed server from breaking or bloating later model
 requests.
-The legacy `OPENWAVE_MCP_CONFIG` JSON file remains available for headless boot;
+The legacy `TIDEBREAK_MCP_CONFIG` JSON file remains available for headless boot;
 when no saved configuration exists it uses the same closed schema and fails
 startup if an enabled server cannot initialize.
 See [External MCP servers](mcp-servers.md) for the field contract and setup flow.
 
 ## Foreground and sandbox surfaces
 
-Foreground and background agents need different tools. OpenWave should not
+Foreground and background agents need different tools. Tidebreak should not
 advertise every installed integration to every model call.
 
 The foreground coordinator needs tools for:
@@ -292,7 +292,7 @@ enterprise database tools, and recursive fleets remain deferred.
 
 ## Web search
 
-Web search now has a provider-neutral web-search module in `openwave-server` rather than
+Web search now has a provider-neutral web-search module in `tidebreak-server` rather than
 HTTP code embedded in the core loop:
 
 ```text
@@ -360,12 +360,12 @@ Network tools are sensitive. Approval, allowed outbound domains, credential
 injection, cancellation, and timeouts are enforced outside the model-supplied
 arguments.
 
-Sensitive server-tool approvals are durable. OpenWave commits the approval
+Sensitive server-tool approvals are durable. Tidebreak commits the approval
 request and its journal event atomically, freezes a renderer-safe approval kind,
 and uses exact idempotent decisions. A reclaimed turn resumes persisted pending
 calls before requesting another model step, so restart recovery cannot silently
 skip an approval or execute a call under a newly relaxed tool policy. Web
-search consent tells the user that the query may leave OpenWave for the
+search consent tells the user that the query may leave Tidebreak for the
 configured search provider.
 
 ## Reliability rules
@@ -381,5 +381,5 @@ Every new tool should answer these questions before it is registered:
 7. Can a stale worker publish its result?
 8. Does reconnect recovery reconstruct pending user interaction?
 
-Until an effect has an idempotency or reconciliation contract, OpenWave fails
+Until an effect has an idempotency or reconciliation contract, Tidebreak fails
 conservatively after an ambiguous execution instead of replaying it.

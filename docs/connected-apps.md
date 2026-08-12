@@ -40,7 +40,7 @@ product sense — is accepted for that symmetry, as the gateway accepted it.
 
 ## The executor
 
-The `rest_api` kind requires machinery OpenWave does not have today: a
+The `rest_api` kind requires machinery Tidebreak does not have today: a
 host-side executor that performs a declared operation against a connected
 app on behalf of a caller. Its guarantees, all server-side and fail-closed:
 
@@ -129,7 +129,7 @@ redirecting there), with no change to the record.
 ## Consumers
 
 Exactly one in v1: **local-app bindings.** A connected app's catalog is not
-projected to the model as tools. That convergence — OpenWave projecting
+projected to the model as tools. That convergence — Tidebreak projecting
 REST catalogs into chat turns the way the gateway does — may be wanted
 later, but it is a separate consent system (the chat approval gate, not app
 grants) and a separate decision, recorded here as deliberately not taken

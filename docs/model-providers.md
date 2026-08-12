@@ -1,6 +1,6 @@
 # Model providers and cross-provider replay
 
-How OpenWave treats multiple model providers, what mid-conversation switching
+How Tidebreak treats multiple model providers, what mid-conversation switching
 is for, and the rule that keeps that capability cheap.
 
 ## Why mid-conversation switching exists
@@ -82,11 +82,11 @@ Consequences:
 
 Existing machinery that already follows this:
 
-- [`MessageReasoning::replayable_for`](../crates/openwave-core/src/provider.rs)
+- [`MessageReasoning::replayable_for`](../crates/tidebreak-core/src/provider.rs)
   — thinking blocks and signed Gemini function-call state only for the minting
   route. Foreign or legacy Gemini history uses Google's documented validator
   bypass instead of replaying another route's opaque signature.
-- [`ProviderToolReplay::replayable_for`](../crates/openwave-core/src/provider.rs)
+- [`ProviderToolReplay::replayable_for`](../crates/tidebreak-core/src/provider.rs)
   — provider-executed native blocks only for the minting route.
 - Host-shaped cleartext on `ProviderExecutedToolCall.output` — what foreign
   adapters and the UI always have.

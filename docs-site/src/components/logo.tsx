@@ -2,18 +2,18 @@ import type { ComponentPropsWithoutRef } from 'react';
 import { cn } from '@/lib/utils';
 
 /**
- * The OpenWave mark, vendored from `assets/openwave-mark.svg` at the repo root
+ * The Tidebreak mark, vendored from `assets/tidebreak-mark.svg` at the repo root
  * and flattened so it renders standalone (no `<defs>`/`<use>` indirection) and
  * inherits `currentColor`.
  */
-function OpenWaveMark({ className, ...props }: ComponentPropsWithoutRef<'svg'>) {
+function TidebreakMark({ className, ...props }: ComponentPropsWithoutRef<'svg'>) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="127 217 757 407"
       fill="currentColor"
       role="img"
-      aria-label="OpenWave"
+      aria-label="Tidebreak"
       className={cn('h-5 w-auto', className)}
       {...props}
     >
@@ -27,7 +27,7 @@ function OpenWaveMark({ className, ...props }: ComponentPropsWithoutRef<'svg'>) 
   );
 }
 
-export function OpenWaveLogo({
+export function TidebreakLogo({
   className,
   ...props
 }: ComponentPropsWithoutRef<'span'>) {
@@ -36,9 +36,9 @@ export function OpenWaveLogo({
       className={cn('inline-flex items-center gap-2 text-foreground', className)}
       {...props}
     >
-      <OpenWaveMark />
+      <TidebreakMark />
       <span className="text-[15px] leading-none tracking-tight">
-        <span className="font-semibold">OpenWave</span>
+        <span className="font-semibold">Tidebreak</span>
         <span className="ml-1.5 text-muted-foreground">Docs</span>
       </span>
     </span>

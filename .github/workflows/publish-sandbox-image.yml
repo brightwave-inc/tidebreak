@@ -6,10 +6,10 @@ run-name: >-
     || format('Publish sandbox images {0}', github.ref_name) }}
 
 # Builds the two sandbox-agent image variants from
-# crates/openwave-sandbox-agent/Dockerfile and publishes them to GHCR:
+# crates/tidebreak-sandbox-agent/Dockerfile and publishes them to GHCR:
 #
-#   ghcr.io/brightwave-inc/openwave-sandbox-agent            (slim)
-#   ghcr.io/brightwave-inc/openwave-sandbox-agent-documents  (documents, the
+#   ghcr.io/brightwave-inc/tidebreak-sandbox-agent            (slim)
+#   ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents  (documents, the
 #                                                             local backend's
 #                                                             default)
 #
@@ -48,10 +48,10 @@ run-name: >-
 #
 # The final manifest-list digests land in the run summary, and the `pin` job
 # proposes the follow-up PR that records the documents digest as the local
-# backend's verified pin (see `sandbox_docker` in openwave-server), as the
+# backend's verified pin (see `sandbox_docker` in tidebreak-server), as the
 # ref the Daytona provider registers as a snapshot (see `daytona` in
-# openwave-code-execution), and as the base of the E2B template definition
-# (see `crates/openwave-sandbox-agent/e2b/`, whose alias is version-suffixed
+# tidebreak-code-execution), and as the base of the E2B template definition
+# (see `crates/tidebreak-sandbox-agent/e2b/`, whose alias is version-suffixed
 # and so moves with the tag too). The one pin the job deliberately leaves
 # alone is `E2B_TEMPLATE` in `e2b.rs`: that alias only resolves once the
 # template has actually been built and published on E2B, which happens when
@@ -84,12 +84,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: openwave-sandbox-image-${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
+  group: tidebreak-sandbox-image-${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
-  SLIM_REPOSITORY: ghcr.io/${{ github.repository_owner }}/openwave-sandbox-agent
-  DOCUMENTS_REPOSITORY: ghcr.io/${{ github.repository_owner }}/openwave-sandbox-agent-documents
+  SLIM_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-sandbox-agent
+  DOCUMENTS_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-sandbox-agent-documents
   TRIVY_VERSION: 0.73.0
 
 jobs:
@@ -156,7 +156,7 @@ jobs:
                       # agent crate (Dockerfile and documents-requirements.txt
                       # included), the exec-documents scripts baked into the
                       # documents variant, and this workflow itself.
-                      crates/openwave-sandbox-agent/*|scripts/exec-documents/*|.github/workflows/publish-sandbox-image.yml)
+                      crates/tidebreak-sandbox-agent/*|scripts/exec-documents/*|.github/workflows/publish-sandbox-image.yml)
                         publish=true
                         ;;
                     esac
@@ -222,12 +222,12 @@ jobs:
       - name: Build both image variants
         run: |
           docker build \
-            --file crates/openwave-sandbox-agent/Dockerfile \
+            --file crates/tidebreak-sandbox-agent/Dockerfile \
             --target slim \
             --tag "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
             .
           docker build \
-            --file crates/openwave-sandbox-agent/Dockerfile \
+            --file crates/tidebreak-sandbox-agent/Dockerfile \
             --target documents \
             --tag "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
             .
@@ -342,7 +342,7 @@ jobs:
             echo
             echo "The \`pin\` job proposes the follow-up PR that records the"
             echo "documents digest as \`PUBLISHED_IMAGE_DIGEST\` in"
-            echo "\`crates/openwave-server/src/sandbox_docker.rs\`."
+            echo "\`crates/tidebreak-server/src/sandbox_docker.rs\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Closes the pin loop: after a successful publish, propose (or refresh) the
@@ -393,7 +393,7 @@ jobs:
           import sys
 
           digest = sys.argv[1]
-          path = "crates/openwave-server/src/sandbox_docker.rs"
+          path = "crates/tidebreak-server/src/sandbox_docker.rs"
           with open(path) as handle:
               source = handle.read()
 
@@ -435,18 +435,18 @@ jobs:
           # pin above; they live in different files, so each is rewritten
           # where it is declared.
           crate_pins = {
-              "crates/openwave-code-execution/src/sandbox_image.rs": {
+              "crates/tidebreak-code-execution/src/sandbox_image.rs": {
                   r'(const DOCUMENTS_IMAGE: &str = ")[^"]*(";)':
                       f"{os.environ['DOCUMENTS_REPOSITORY']}@{digest}",
               },
-              "crates/openwave-code-execution/src/daytona.rs": {
+              "crates/tidebreak-code-execution/src/daytona.rs": {
                   # The -exec suffix marks the toolbox keepalive entrypoint
                   # contract (see DOCUMENTS_SNAPSHOT_ENTRYPOINT in daytona.rs).
                   # Keep it when the image version moves so accounts never
                   # silently re-adopt a pre-override registration of the
                   # same name shape.
                   r'(const DOCUMENTS_SNAPSHOT: &str = ")[^"]*(";)':
-                      f"openwave-documents-{os.environ['IMAGE_TAG']}-exec",
+                      f"tidebreak-documents-{os.environ['IMAGE_TAG']}-exec",
               },
           }
           for path, pins in crate_pins.items():
@@ -462,22 +462,22 @@ jobs:
           # E2B builds a template from this Dockerfile rather than pulling the
           # ref, so the template definition carries its own copy of the digest
           # and of the version-suffixed alias. Both move with the pin above.
-          # `E2B_TEMPLATE` in `crates/openwave-code-execution/src/e2b.rs`
+          # `E2B_TEMPLATE` in `crates/tidebreak-code-execution/src/e2b.rs`
           # deliberately does not: that alias only resolves once the template
           # has been built and published on E2B, and bumping the client ahead
           # of the publish would drop every user to the code-interpreter
           # fallback. Merging this PR triggers `publish-e2b-template.yml`,
           # which publishes the alias and then proposes that pin itself.
           repository = os.environ["DOCUMENTS_REPOSITORY"]
-          alias = f"openwave-documents-{os.environ['IMAGE_TAG']}".replace(".", "-")
+          alias = f"tidebreak-documents-{os.environ['IMAGE_TAG']}".replace(".", "-")
           template_pins = {
-              "crates/openwave-sandbox-agent/e2b/e2b.Dockerfile": {
+              "crates/tidebreak-sandbox-agent/e2b/e2b.Dockerfile": {
                   rf'(?m)^(# {re.escape(repository)}:)[^\n]*()$':
                       f"{os.environ['IMAGE_TAG']}.",
                   rf'(?m)^(FROM {re.escape(repository)}@)sha256:[0-9a-f]{{64}}()$':
                       digest,
               },
-              "crates/openwave-sandbox-agent/e2b/e2b.toml": {
+              "crates/tidebreak-sandbox-agent/e2b/e2b.toml": {
                   r'(?m)^(template_id = ")[^"]*(")$': alias,
                   r'(?m)^(template_name = ")[^"]*(")$': alias,
               },
@@ -513,10 +513,10 @@ jobs:
           Automated follow-up from a sandbox image publish: records the new documents
           image digest as the local backend's verified pin, as the ref the Daytona
           provider registers as a snapshot, and as the base of the E2B template
-          definition under \`crates/openwave-sandbox-agent/e2b/\` (Dockerfile digest
+          definition under \`crates/tidebreak-sandbox-agent/e2b/\` (Dockerfile digest
           plus the version-suffixed alias in \`e2b.toml\`).
 
-          \`E2B_TEMPLATE\` in \`crates/openwave-code-execution/src/e2b.rs\` is
+          \`E2B_TEMPLATE\` in \`crates/tidebreak-code-execution/src/e2b.rs\` is
           deliberately left alone. That alias resolves only once the template has been
           built and published on E2B; moving the client pin before that happens points
           every E2B user at a template that cannot be resolved and drops them to the

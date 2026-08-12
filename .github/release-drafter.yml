@@ -1,4 +1,4 @@
-name-template: "OpenWave v$RESOLVED_VERSION"
+name-template: "Tidebreak v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 tag-prefix: "v"
 categories:

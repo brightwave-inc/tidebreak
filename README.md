@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/openwave-logo.png" alt="OpenWave" width="380">
+  <img src="assets/tidebreak-logo.png" alt="Tidebreak" width="380">
 </p>
 
 <p align="center">
@@ -16,13 +16,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
+  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/Tidebreak-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
 </p>
 
 ---
 
 > [!WARNING]
-> **Pre-1.0 and moving fast.** OpenWave is built in the open. Interfaces,
+> **Pre-1.0 and moving fast.** Tidebreak is built in the open. Interfaces,
 > schema, and local data layout still change between releases, and the local
 > profile is rebuilt rather than migrated when it does. Expect rough edges.
 
@@ -80,7 +80,7 @@ PDFs under [`skills/`](skills) and [`plugins/`](plugins).
 
 ## Download
 
-OpenWave ships as a signed and notarized macOS app for **Apple Silicon**. Intel
+Tidebreak ships as a signed and notarized macOS app for **Apple Silicon**. Intel
 is paused while the product is in active development, and the release pipeline
 publishes one `aarch64` build ([`docs/releases.md`](docs/releases.md)). The
 button above always resolves to the newest release; the
@@ -91,14 +91,14 @@ Every release is also published to the hosted download root, which is the
 authoritative source for artifact bytes and digests:
 
 ```text
-https://downloads.brightwave.io/openwave/manifest.json
+https://downloads.brightwave.io/tidebreak/manifest.json
 ```
 
 That manifest names the current version's DMG along with its size and SHA-256,
 so you can verify what you downloaded:
 
 ```sh
-shasum -a 256 -c OpenWave_<version>_aarch64.dmg.sha256
+shasum -a 256 -c Tidebreak_<version>_aarch64.dmg.sha256
 ```
 
 An installed macOS build keeps itself current: it checks the release feed
@@ -119,7 +119,7 @@ platform differences below first.
 ## Model and provider portability
 
 Provider credentials go in the OS keychain, not in the database and not in a
-config file you might commit. OpenWave talks to Anthropic, OpenAI and
+config file you might commit. Tidebreak talks to Anthropic, OpenAI and
 OpenAI-compatible endpoints, Google Gemini, and xAI.
 
 The conversation journal is provider-neutral, so a chat can move from Claude to
@@ -182,13 +182,13 @@ Worth knowing before you install:
   nothing runs on a timer yet.
 - **No browser automation.**
 - **One local user.** The loopback bearer token is a capability check on the
-  local process, not a per-user identity. OpenWave is a single-user desktop
+  local process, not a per-user identity. Tidebreak is a single-user desktop
   product today; do not put more than one person behind one server.
 - **Local data is not migrated across pre-1.0 releases.** The desktop schema
   guard rebuilds the profile when the shape changes.
 
 [`docs/deferred.md`](docs/deferred.md) is the canonical account of what
-OpenWave deliberately does not do yet and why.
+Tidebreak deliberately does not do yet and why.
 
 ## Where this comes from
 
@@ -202,7 +202,7 @@ twenty-step task. Sandboxing has to be there from the start. A user who can't
 switch models is stuck with their vendor's outages and their vendor's pricing.
 And the thing people actually want at the end is a file, not a transcript.
 
-OpenWave is that engine rebuilt in Rust — the agent loop, the tool model,
+Tidebreak is that engine rebuilt in Rust — the agent loop, the tool model,
 sandboxed execution, connected apps, and permissions — Apache-2.0, local-first,
 and complete on its own.
 
@@ -218,27 +218,27 @@ Requires the Rust toolchain declared in
 
 ### Desktop app (Tauri)
 
-The desktop shell lives in [`crates/openwave-desktop`](crates/openwave-desktop).
-It boots the same local API as `openwave serve` inside the process and hosts a
+The desktop shell lives in [`crates/tidebreak-desktop`](crates/tidebreak-desktop).
+It boots the same local API as `tidebreak serve` inside the process and hosts a
 React UI in a webview. See that crate's README for prerequisites and the two
 local-test paths (`cargo tauri dev`, or the browser UI against
-`openwave serve`).
+`tidebreak serve`).
 
 ### Headless
 
 ```sh
-ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
+ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 # then: curl -s http://127.0.0.1:PORT/healthz
 #       curl -H "Authorization: Bearer TOKEN" http://127.0.0.1:PORT/chats
 ```
 
-The CLI also has an interactive terminal chat (`openwave tui`), a
-non-interactive single turn (`openwave -p "<prompt>"`, with
+The CLI also has an interactive terminal chat (`tidebreak tui`), a
+non-interactive single turn (`tidebreak -p "<prompt>"`, with
 `--output-format json` for the turn's NDJSON event stream), and an MCP stdio
 server confined to one explicit workspace:
 
 ```sh
-cargo run -p openwave-cli -- mcp /absolute/path/to/workspace
+cargo run -p tidebreak-cli -- mcp /absolute/path/to/workspace
 ```
 
 Note that host-brokered connected folders and the native execution sandbox are
@@ -248,8 +248,8 @@ desktop and macOS features; the headless server does not provide them.
 
 The desktop configures MCP servers under Settings; see
 [`docs/mcp-servers.md`](docs/mcp-servers.md). For headless use, both
-`openwave serve` and the desktop app can also mount external stdio MCP servers
-at startup from a JSON file named by `OPENWAVE_MCP_CONFIG`:
+`tidebreak serve` and the desktop app can also mount external stdio MCP servers
+at startup from a JSON file named by `TIDEBREAK_MCP_CONFIG`:
 
 ```json
 {
@@ -268,14 +268,14 @@ at startup from a JSON file named by `OPENWAVE_MCP_CONFIG`:
 ```
 
 ```sh
-OPENWAVE_MCP_CONFIG=/absolute/path/to/mcp.json \
-  cargo run -p openwave-cli -- serve
+TIDEBREAK_MCP_CONFIG=/absolute/path/to/mcp.json \
+  cargo run -p tidebreak-cli -- serve
 ```
 
 Commands are executed directly, without a shell. Each server receives only its
 configured literal `env` and the parent variables explicitly named by
 `env_from`, so use an absolute command path. A missing `env_from` variable fails
-startup; set `"inherit_env": true` only when the server must inherit OpenWave's
+startup; set `"inherit_env": true` only when the server must inherit Tidebreak's
 entire process environment. Prefer `env_from` for credentials so they need not
 be stored in JSON. Treat the file as sensitive and restrict its filesystem
 permissions if it does contain credentials. Startup fails if a configured
@@ -285,23 +285,23 @@ server cannot initialize. Its discovered tools are named
 ## Layout
 
 This is a single Cargo workspace. Libraries never depend on clients — the
-dependency graph only flows downward toward `openwave-core`. For a fuller
+dependency graph only flows downward toward `tidebreak-core`. For a fuller
 walkthrough of each crate, see [`docs/crates.md`](docs/crates.md); for an
 end-to-end, less technical tour of the runtime and its state machines, see
-[`docs/how-openwave-works.md`](docs/how-openwave-works.md).
+[`docs/how-tidebreak-works.md`](docs/how-tidebreak-works.md).
 
 | Crate | What it is |
 | --- | --- |
-| [`openwave-core`](crates/openwave-core) | agent loop, tools, event stream, storage traits |
-| [`openwave-router`](crates/openwave-router) | Anthropic, OpenAI, Google, and xAI providers + model routing |
-| [`openwave-host-broker`](crates/openwave-host-broker) | consented access to folders on the host |
-| [`openwave-code-execution`](crates/openwave-code-execution) | provider-neutral command execution + native, Docker, and managed backends |
-| [`openwave-egress`](crates/openwave-egress) | egress policy decisions for outbound network access |
-| [`openwave-sandbox-protocol`](crates/openwave-sandbox-protocol) | the sandbox-agent wire protocol |
-| [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
-| [`openwave-mcp`](crates/openwave-mcp) | MCP server face plus external stdio client tool mounting |
-| [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
-| [`openwave-cli`](crates/openwave-cli) | headless `openwave serve`, `tui`, print mode, and `mcp` |
+| [`tidebreak-core`](crates/tidebreak-core) | agent loop, tools, event stream, storage traits |
+| [`tidebreak-router`](crates/tidebreak-router) | Anthropic, OpenAI, Google, and xAI providers + model routing |
+| [`tidebreak-host-broker`](crates/tidebreak-host-broker) | consented access to folders on the host |
+| [`tidebreak-code-execution`](crates/tidebreak-code-execution) | provider-neutral command execution + native, Docker, and managed backends |
+| [`tidebreak-egress`](crates/tidebreak-egress) | egress policy decisions for outbound network access |
+| [`tidebreak-sandbox-protocol`](crates/tidebreak-sandbox-protocol) | the sandbox-agent wire protocol |
+| [`tidebreak-server`](crates/tidebreak-server) | authenticated local HTTP/WebSocket API + durable workers |
+| [`tidebreak-mcp`](crates/tidebreak-mcp) | MCP server face plus external stdio client tool mounting |
+| [`tidebreak-desktop`](crates/tidebreak-desktop) | desktop app (Tauri) |
+| [`tidebreak-cli`](crates/tidebreak-cli) | headless `tidebreak serve`, `tui`, print mode, and `mcp` |
 
 ## Contributing
 

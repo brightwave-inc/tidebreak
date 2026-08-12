@@ -1,6 +1,6 @@
-# Self-hosting OpenWave
+# Self-hosting Tidebreak
 
-The OpenWave desktop app is the primary product: it runs the whole engine
+The Tidebreak desktop app is the primary product: it runs the whole engine
 locally, keeps state in SQLite under your own home directory, and needs no
 server. **Self-hosting is for something else** — a team that wants one shared
 deployment inside its own network (a VM, a VPC, an office server), with named
@@ -13,10 +13,10 @@ branch; where something is not built yet, it says so.
 
 ## What the self-host profile is
 
-Selecting `OPENWAVE_PROFILE=self_host` changes three things about the server:
+Selecting `TIDEBREAK_PROFILE=self_host` changes three things about the server:
 
-- **The store is PostgreSQL**, opened from `OPENWAVE_DATABASE_URL`, and the
-  binary must be built with openwave-server's `postgres` feature for the
+- **The store is PostgreSQL**, opened from `TIDEBREAK_DATABASE_URL`, and the
+  binary must be built with tidebreak-server's `postgres` feature for the
   driver to exist at all.
 - **Every request must name a user.** The desktop profile's per-launch bearer
   token authenticates nobody here; credentials come from an operator-managed
@@ -24,7 +24,7 @@ Selecting `OPENWAVE_PROFILE=self_host` changes three things about the server:
   documents, transcripts, and the event stream are owner-scoped to that
   principal.
 - **Boot fails closed.** The server refuses to open the shared store unless
-  `OPENWAVE_AUTH_TOKENS_FILE` is set and loads cleanly — a shared database
+  `TIDEBREAK_AUTH_TOKENS_FILE` is set and loads cleanly — a shared database
   never comes up behind an API that cannot tell its callers apart, or that
   nobody is empowered to configure.
 
@@ -32,14 +32,14 @@ The deployment posture is stated in
 [decision record 4](decisions/0004-self-host-deployment-plane-authorization.md):
 the server and its database run inside the operator's own network, and TLS
 termination and network exposure belong to the operator's fronting
-infrastructure. OpenWave serves plain HTTP and never terminates TLS.
+infrastructure. Tidebreak serves plain HTTP and never terminates TLS.
 
 Settings are **deployment-scoped, not per-user** — enabled providers,
 credentials, model roles, and policy configure the deployment itself, and
 every administrator shares (and can change) them. The profile is for mutually
 trusting users of one operator's deployment, not for adversarial tenants. See
 the self-host section of
-[how OpenWave works](how-openwave-works.md#self-host) for the full statement
+[how Tidebreak works](how-tidebreak-works.md#self-host) for the full statement
 and for what is still integration work.
 
 ## Prerequisites
@@ -114,17 +114,17 @@ aspirational.
 
 | Variable | Required | Default | What it does |
 | --- | --- | --- | --- |
-| `OPENWAVE_PROFILE` | yes | `desktop` | `self_host` (or `selfhost`) selects this profile. Anything else is desktop or a config error. |
-| `OPENWAVE_DATABASE_URL` | yes (self-host) | — | PostgreSQL connection string for the shared store. |
-| `OPENWAVE_AUTH_TOKENS_FILE` | yes (self-host) | — | Path to the token file above. Absent, boot fails before the store opens. |
-| `OPENWAVE_DATA_DIR` | no | `./.openwave` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
-| `OPENWAVE_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,openwave_server=trace`. An invalid spec falls back to the default. |
-| `OPENWAVE_MODEL` | no | built-in default | Default model name; also settable at runtime through settings or per chat. |
-| `OPENWAVE_MCP_CONFIG` | no | unset | External stdio MCP server configuration file loaded at boot. |
-| `OPENWAVE_CONTAINER_EXECUTION_ENABLED` | no | `false` | Enables the container code-execution backend. The compose stack does not configure one. |
-| `OPENWAVE_CONTAINER_IMAGE` | no | server default | Agent container image, when the above is on. |
+| `TIDEBREAK_PROFILE` | yes | `desktop` | `self_host` (or `selfhost`) selects this profile. Anything else is desktop or a config error. |
+| `TIDEBREAK_DATABASE_URL` | yes (self-host) | — | PostgreSQL connection string for the shared store. |
+| `TIDEBREAK_AUTH_TOKENS_FILE` | yes (self-host) | — | Path to the token file above. Absent, boot fails before the store opens. |
+| `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
+| `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
+| `TIDEBREAK_MODEL` | no | built-in default | Default model name; also settable at runtime through settings or per chat. |
+| `TIDEBREAK_MCP_CONFIG` | no | unset | External stdio MCP server configuration file loaded at boot. |
+| `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` | no | `false` | Enables the container code-execution backend. The compose stack does not configure one. |
+| `TIDEBREAK_CONTAINER_IMAGE` | no | server default | Agent container image, when the above is on. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | no | unset | Fallback provider credentials, consulted when no credential is stored for that provider. A container has no OS keychain, so this is how a self-host deployment supplies model keys. |
-| `OPENWAVE_LISTEN_ADDR` | no | loopback, ephemeral port | Self-host only: the address and port the API binds, e.g. `0.0.0.0:8080`. The desktop profile refuses to boot with it set — that profile's loopback binding is what its per-launch token assumes. The image sets it to `0.0.0.0:8080` so the container is reachable at a known port. |
+| `TIDEBREAK_LISTEN_ADDR` | no | loopback, ephemeral port | Self-host only: the address and port the API binds, e.g. `0.0.0.0:8080`. The desktop profile refuses to boot with it set — that profile's loopback binding is what its per-launch token assumes. The image sets it to `0.0.0.0:8080` so the container is reachable at a known port. |
 
 ## Compose quickstart
 
@@ -167,8 +167,8 @@ Two things worth getting right:
 - **The WebSocket credential travels in `Sec-WebSocket-Protocol`.** Browsers
   cannot set an `Authorization` header on a WebSocket upgrade, so on upgrade
   requests the server also accepts the token as
-  `Sec-WebSocket-Protocol: openwave-token.<token>`, alongside the handshake
-  subprotocol `openwave-v1`. Proxies log that header far more readily than
+  `Sec-WebSocket-Protocol: tidebreak-token.<token>`, alongside the handshake
+  subprotocol `tidebreak-v1`. Proxies log that header far more readily than
   they log `Authorization`. **Exclude `Sec-WebSocket-Protocol` from your proxy
   access logs**, and check your log shipper too — otherwise every user's
   bearer token ends up in plaintext log storage.
@@ -195,15 +195,15 @@ that happens not to include request headers today.
 
 ## Backup
 
-**Back up the `openwave-postgres` volume.** All durable state — chats,
+**Back up the `tidebreak-postgres` volume.** All durable state — chats,
 projects, documents, transcripts, the event journal — lives in PostgreSQL.
-The `openwave-data` volume holds only the instance lock, logs, and per-turn
+The `tidebreak-data` volume holds only the instance lock, logs, and per-turn
 scratch, and is safe to lose.
 
 A logical dump is the simplest form:
 
 ```sh
-docker compose exec -T postgres pg_dump -U openwave openwave | gzip > openwave-$(date +%F).sql.gz
+docker compose exec -T postgres pg_dump -U tidebreak tidebreak | gzip > tidebreak-$(date +%F).sql.gz
 ```
 
 Restore into a fresh, empty database before starting the server against it.
@@ -220,7 +220,7 @@ docker image prune -f     # optional
 ```
 
 The server applies its own schema migrations on boot. Take a database backup
-before an upgrade: OpenWave is pre-1.0 and persisted formats may change
+before an upgrade: Tidebreak is pre-1.0 and persisted formats may change
 between versions (see
 [decision record 2](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md)).
 
@@ -228,7 +228,7 @@ between versions (see
 
 Self-host is a real profile with real gaps. Rather than restate them here,
 read the self-host section of
-[how OpenWave works](how-openwave-works.md#self-host) — it is the canonical
+[how Tidebreak works](how-tidebreak-works.md#self-host) — it is the canonical
 account. In summary, and each of these is a reason not to put irreplaceable
 data in a self-host deployment yet:
 

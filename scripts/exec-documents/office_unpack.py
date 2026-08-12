@@ -11,7 +11,7 @@ import argparse
 import zipfile
 from pathlib import Path
 
-from _openwave_preview import HelperError, existing_file, run_cli
+from _tidebreak_preview import HelperError, existing_file, run_cli
 
 OOXML_SUFFIXES = [".pptx", ".docx", ".xlsx", ".xlsm"]
 

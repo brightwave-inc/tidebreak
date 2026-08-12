@@ -35,7 +35,7 @@ const repositoryRoot = path.resolve(
 );
 
 export const NOTICES_RELATIVE_PATH = "legal/THIRD-PARTY-NOTICES.md";
-export const UI_RELATIVE_PATH = "crates/openwave-desktop/ui";
+export const UI_RELATIVE_PATH = "crates/tidebreak-desktop/ui";
 export const REGENERATE_COMMAND = "node scripts/generate-third-party-notices.mjs";
 
 // Files a package may distribute its license or notice text in. Matched
@@ -426,7 +426,7 @@ export function renderNotices({ rustPackages, nodePackages }) {
   const header = [
     "# Third-party notices",
     "",
-    "OpenWave is distributed with the third-party software listed below. This",
+    "Tidebreak is distributed with the third-party software listed below. This",
     "file is generated; do not edit it by hand. Regenerate it with:",
     "",
     "```",
@@ -434,7 +434,7 @@ export function renderNotices({ rustPackages, nodePackages }) {
     "```",
     "",
     "It covers every package in the resolved Cargo workspace graph that is not",
-    "an OpenWave crate, and every package in the desktop UI's production",
+    "an Tidebreak crate, and every package in the desktop UI's production",
     "dependency graph. Development-only dependencies are excluded because they",
     "are not distributed.",
     "",
@@ -519,7 +519,7 @@ export function generateNotices({ root = repositoryRoot } = {}) {
     rustPackages: collectRustPackages(runCargoMetadata(root)),
     nodePackages: collectNodePackages(runPnpmLicenses(uiDirectory), {
       root,
-      // The UI project itself is OpenWave, covered by LICENSE and NOTICE.
+      // The UI project itself is Tidebreak, covered by LICENSE and NOTICE.
       excludeNames: [uiManifest.name],
     }),
   });

@@ -1,7 +1,7 @@
 # Reverse-RPC callback channel — spike findings
 
 Spike for [sandbox-providers.md](../sandbox-providers.md) step 5, issue #821. The
-prototype lived in `crates/openwave-reverse-rpc-spike` (removed once its
+prototype lived in `crates/tidebreak-reverse-rpc-spike` (removed once its
 findings were absorbed; recover it from git history) and was **not wired into
 the server**. This document is the deliverable; the code exists to back its
 claims with runnable tests.
@@ -14,7 +14,7 @@ one multiplexed connection, durable per-run operation identity with recorded
 responses, cancellation, backpressure, and disconnect-fails-inflight — is
 demonstrated by a passing test against a real framed transport and a real
 concurrent host and supervisor. None of them required exotic machinery; each
-falls out of the same envelope discipline `openwave-host-broker` already uses.
+falls out of the same envelope discipline `tidebreak-host-broker` already uses.
 
 The GO carries **a durable-storage condition #822 must discharge**, not a caveat
 that can be deferred. It has two co-equal parts, both about the operation log:
@@ -30,7 +30,7 @@ which is why the recommendation is GO rather than "GO if."
 
 ## What the prototype exercises
 
-Its tests lived in `crates/openwave-reverse-rpc-spike/tests/reverse_rpc.rs`,
+Its tests lived in `crates/tidebreak-reverse-rpc-spike/tests/reverse_rpc.rs`,
 recoverable with the crate from git history.
 
 | Property | Test | What it proves |

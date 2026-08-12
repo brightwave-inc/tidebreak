@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from _openwave_preview import (
+from _tidebreak_preview import (
     HelperError,
     ensure_preview_dir,
     existing_file,

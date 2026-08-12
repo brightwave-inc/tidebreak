@@ -76,7 +76,7 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
 The containment story is inherited from MCP App views and unchanged: the frame
 is served by the host with its own strict CSP (`default-src 'none'`,
 `connect-src 'none'`), sandboxed `allow-scripts` only, opaque origin. The
-bundle cannot fetch, cannot reach OpenWave's DOM, storage, bearer token, or
+bundle cannot fetch, cannot reach Tidebreak's DOM, storage, bearer token, or
 IPC, and cannot talk to anything except its parent via `postMessage`. A
 malicious bundle can render lies; it cannot exfiltrate, and it cannot call
 anything the manifest did not pin and the user did not grant.
@@ -233,7 +233,7 @@ each harness that authors apps is a second interface of record that can only
 drift from the first. So the app page's **Publish at gateway** affordance
 resolves the app's page at the deployment holding it —
 `POST /apps/{id}/gateway-page`, which registers the draft if it never has been
-— and opens that page in the browser. Nothing in OpenWave calls the gateway's
+— and opens that page in the browser. Nothing in Tidebreak calls the gateway's
 publish route.
 
 Three properties make the registration a copy rather than a translation:

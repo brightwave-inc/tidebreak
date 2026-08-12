@@ -4,10 +4,10 @@
 # from a fresh profile.
 #
 # Dev builds keep every store separate from an installed release: the debug
-# identifier override keys the app-data dir (`io.brightwave.openwave.dev`),
-# secrets live under the `openwave.dev` keychain service, and on macOS the
+# identifier override keys the app-data dir (`io.brightwave.tidebreak.dev`),
+# secrets live under the `tidebreak.dev` keychain service, and on macOS the
 # unbundled debug binary's WebView data lands under its process name
-# (`openwave-desktop`) rather than a bundle identifier. This deletes exactly
+# (`tidebreak-desktop`) rather than a bundle identifier. This deletes exactly
 # those dev stores and never touches the release profile.
 #
 #   scripts/wipe-dev.sh        # list what would be deleted and ask first
@@ -18,10 +18,10 @@ set -euo pipefail
 assume_yes=false
 [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && assume_yes=true
 
-dev_id="io.brightwave.openwave.dev"
-dev_keychain_service="openwave.dev"
+dev_id="io.brightwave.tidebreak.dev"
+dev_keychain_service="tidebreak.dev"
 # The unbundled debug binary's name, which keys its WebView storage on macOS.
-dev_process="openwave-desktop"
+dev_process="tidebreak-desktop"
 
 if pgrep -x "$dev_process" >/dev/null 2>&1; then
   echo "A dev build ($dev_process) is running; quit it first." >&2

@@ -71,7 +71,7 @@ mid-run.
 
 ### Local vs managed sandboxes
 
-- **Managed documents image** (the OpenWave sandbox image and templates built
+- **Managed documents image** (the Tidebreak sandbox image and templates built
   from it): Node and the pinned `pptxgenjs` are usually preinstalled;
   `require("pptxgenjs")` often resolves via `NODE_PATH` with no install. Still
   run the detect step — some managed backends fall back to a generic image
@@ -244,7 +244,7 @@ change a deck without re-authoring it. The workflow needs Python and the
 bundled helpers — not Node, not pptxgenjs, not python-pptx as a rewrite tool.
 
 1. **Unpack**
-   `python3 .openwave/exec-scripts/office_unpack.py deck.pptx build/deck`
+   `python3 .tidebreak/exec-scripts/office_unpack.py deck.pptx build/deck`
    writes the package out as a directory tree, byte for byte.
 2. **Survey before editing.** List `build/deck/ppt/slides/` and read the
    slides. Classify each one: a *target* you will edit, or a slide to
@@ -266,12 +266,12 @@ bundled helpers — not Node, not pptxgenjs, not python-pptx as a rewrite tool.
    inherits the deck's design for free. Deleting a slide is the same three
    registrations in reverse.
 5. **Check**
-   `python3 .openwave/exec-scripts/pptx_clean.py build/deck`
+   `python3 .tidebreak/exec-scripts/pptx_clean.py build/deck`
    parses every XML part and confirms every relationship target exists. Fix
    what it names before going on; a malformed part is the "PowerPoint found a
    problem with this content" dialog.
 6. **Pack**
-   `python3 .openwave/exec-scripts/office_pack.py build/deck output/<name>.pptx`
+   `python3 .tidebreak/exec-scripts/office_pack.py build/deck output/<name>.pptx`
    rezips the tree into a valid package.
 
 Unpack once and keep the tree for the rest of the conversation — later
@@ -293,13 +293,13 @@ only when the user asks for a distinct deck.
    reopen with `Presentation("output/<file>.pptx")` and confirm slide count
    and titles.
 2. Render slides for a visual check with the bundled helper:
-   `python3 .openwave/exec-scripts/render_office.py output/<file>.pptx`
+   `python3 .tidebreak/exec-scripts/render_office.py output/<file>.pptx`
    (images land in `preview/`; at most 3 are returned per exec call; the
    renderer needs `pypdfium2` and `pillow`, installable with pip). The
    helper converts through a sandbox LibreOffice when one exists; otherwise
    it renders the PDF the host converts after every successful command that
    saved the deck — the workspace sync notes name it (under
-   `.openwave/render/`), and on a managed sandbox you must list that PDF in
+   `.tidebreak/render/`), and on a managed sandbox you must list that PDF in
    the helper call's `files` to stage it in. Inspect for clipped text,
    overlapping shapes, and anything crossing the slide edge, and fix the
    generator or the edited XML rather than accepting a flawed slide. When you

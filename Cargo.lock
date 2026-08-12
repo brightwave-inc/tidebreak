@@ -4358,18 +4358,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "openwave-cli"
+name = "tidebreak-cli"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
  "crossterm",
  "futures",
- "openwave-code-execution",
- "openwave-core",
- "openwave-host-broker",
- "openwave-mcp",
- "openwave-server",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-host-broker",
+ "tidebreak-mcp",
+ "tidebreak-server",
  "pulldown-cmark",
  "ratatui",
  "ratatui-textarea",
@@ -4386,7 +4386,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-code-execution"
+name = "tidebreak-code-execution"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -4397,8 +4397,8 @@ dependencies = [
  "futures",
  "image",
  "libc",
- "openwave-core",
- "openwave-egress",
+ "tidebreak-core",
+ "tidebreak-egress",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4414,7 +4414,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-core"
+name = "tidebreak-core"
 version = "0.0.0"
 dependencies = [
  "async-stream",
@@ -4426,7 +4426,7 @@ dependencies = [
  "futures-timer",
  "jsonschema",
  "keyring",
- "openwave-shell-policy",
+ "tidebreak-shell-policy",
  "schemars 1.2.2",
  "sea-orm",
  "sea-orm-migration",
@@ -4443,7 +4443,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-desktop"
+name = "tidebreak-desktop"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -4453,10 +4453,10 @@ dependencies = [
  "chrono",
  "futures",
  "libc",
- "openwave-code-execution",
- "openwave-core",
- "openwave-host-broker",
- "openwave-server",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-host-broker",
+ "tidebreak-server",
  "opus-decoder",
  "reqwest 0.12.28",
  "semver",
@@ -4484,11 +4484,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-egress"
+name = "tidebreak-egress"
 version = "0.0.0"
 
 [[package]]
-name = "openwave-host-broker"
+name = "tidebreak-host-broker"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
@@ -4505,7 +4505,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-mcp"
+name = "tidebreak-mcp"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -4514,7 +4514,7 @@ dependencies = [
  "chrono",
  "futures",
  "image",
- "openwave-core",
+ "tidebreak-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4522,7 +4522,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-router"
+name = "tidebreak-router"
 version = "0.0.0"
 dependencies = [
  "async-stream",
@@ -4531,7 +4531,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "futures",
- "openwave-core",
+ "tidebreak-core",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -4539,14 +4539,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-sandbox-agent"
+name = "tidebreak-sandbox-agent"
 version = "0.0.0"
 dependencies = [
  "async-trait",
  "libc",
- "openwave-core",
- "openwave-egress",
- "openwave-sandbox-protocol",
+ "tidebreak-core",
+ "tidebreak-egress",
+ "tidebreak-sandbox-protocol",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -4556,7 +4556,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-sandbox-protocol"
+name = "tidebreak-sandbox-protocol"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -4570,7 +4570,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-server"
+name = "tidebreak-server"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -4587,14 +4587,14 @@ dependencies = [
  "infer 0.22.0",
  "jsonschema",
  "libc",
- "openwave-code-execution",
- "openwave-core",
- "openwave-egress",
- "openwave-mcp",
- "openwave-router",
- "openwave-sandbox-agent",
- "openwave-sandbox-protocol",
- "openwave-shell-policy",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-egress",
+ "tidebreak-mcp",
+ "tidebreak-router",
+ "tidebreak-sandbox-agent",
+ "tidebreak-sandbox-protocol",
+ "tidebreak-shell-policy",
  "plist",
  "reqwest 0.12.28",
  "schemars 1.2.2",
@@ -4622,7 +4622,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openwave-shell-policy"
+name = "tidebreak-shell-policy"
 version = "0.0.0"
 dependencies = [
  "brush-parser",

@@ -1,6 +1,6 @@
 # Foreground agent operating prompt
 
-OpenWave gives every normal foreground turn a small host-owned operating
+Tidebreak gives every normal foreground turn a small host-owned operating
 prompt. Tool schemas still define how individual calls work; the operating
 prompt defines product-level behavior that otherwise varies between model
 providers, such as when to proceed, when to ask, how to handle untrusted
@@ -11,7 +11,7 @@ belongs to a project, organization, or shared workspace.
 
 ## Capability composition
 
-`openwave-server/src/foreground_prompt.rs` composes the prompt from the exact
+`tidebreak-server/src/foreground_prompt.rs` composes the prompt from the exact
 tool definitions advertised to a production foreground turn. Each claimed turn
 selects one immutable registry snapshot, derives both its advertised definitions
 and operating prompt from that snapshot, and retains the pair for the execution.

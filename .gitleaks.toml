@@ -1,4 +1,4 @@
-# gitleaks configuration for OpenWave.
+# gitleaks configuration for Tidebreak.
 # Extends the default ruleset; add allowlist entries for verified false positives.
 
 [extend]

@@ -38,7 +38,7 @@ const MIT_TEXT = 'MIT License\n\nCopyright (c) Example\n\nPermission is hereby g
 const CC_TEXT = "Creative Commons Attribution 3.0\n";
 
 function scratchTree() {
-  const root = mkdtempSync(path.join(tmpdir(), "openwave-notices-"));
+  const root = mkdtempSync(path.join(tmpdir(), "tidebreak-notices-"));
   test.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
 }
@@ -76,7 +76,7 @@ test("the Rust collector covers the whole non-workspace graph and preserves its 
   const bare = writePackage(root, "bare", { "Cargo.toml": "" });
   const member = writePackage(root, "member", {
     "Cargo.toml": "",
-    LICENSE: "OpenWave's own license\n",
+    LICENSE: "Tidebreak's own license\n",
   });
 
   const packages = collectRustPackages({
@@ -239,7 +239,7 @@ test("the UI collector reads terms from each package, not from pnpm's classifica
     }),
   });
   const ownProject = writePackage(root, "own", {
-    "package.json": JSON.stringify({ name: "openwave-desktop-ui" }),
+    "package.json": JSON.stringify({ name: "tidebreak-desktop-ui" }),
   });
 
   const packages = collectNodePackages(
@@ -250,14 +250,14 @@ test("the UI collector reads terms from each package, not from pnpm's classifica
       Unknown: [
         { name: "undeclared", versions: ["0.25.1"], paths: [undeclared] },
         {
-          name: "openwave-desktop-ui",
+          name: "tidebreak-desktop-ui",
           versions: ["0.0.0"],
           paths: [ownProject],
         },
       ],
       MIT: [{ name: "legacy", versions: ["0.1.0"], paths: [legacy] }],
     },
-    { excludeNames: ["openwave-desktop-ui"] },
+    { excludeNames: ["tidebreak-desktop-ui"] },
   );
 
   assert.deepEqual(
@@ -399,7 +399,7 @@ test("the notices ship with the desktop app and are verified against drift", () 
   // macOS artifact (DMG, updater archive, zip) is derived from that bundle.
   const tauriConfig = JSON.parse(
     readFileSync(
-      repositoryFile("crates", "openwave-desktop", "tauri.conf.json"),
+      repositoryFile("crates", "tidebreak-desktop", "tauri.conf.json"),
       "utf8",
     ),
   );

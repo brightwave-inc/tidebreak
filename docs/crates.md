@@ -1,22 +1,22 @@
-# The OpenWave crates
+# The Tidebreak crates
 
-OpenWave is a single Cargo workspace. It splits into **libraries** (reusable, and
+Tidebreak is a single Cargo workspace. It splits into **libraries** (reusable, and
 some independently publishable) and **client binaries** (the apps you run). The
 one rule that keeps it clean: **dependencies only flow downward toward
-`openwave-core`** — a library never depends on a client, and clients compose
+`tidebreak-core`** — a library never depends on a client, and clients compose
 libraries.
 
 ```
-      clients            openwave-desktop   openwave-cli
+      clients            tidebreak-desktop   tidebreak-cli
                                │                 │
-                               └────── openwave-server
+                               └────── tidebreak-server
                                             │
-      libraries          openwave-mcp
-                         openwave-router
-                         openwave-host-broker  openwave-code-execution
-                         openwave-egress       openwave-sandbox-protocol
+      libraries          tidebreak-mcp
+                         tidebreak-router
+                         tidebreak-host-broker  tidebreak-code-execution
+                         tidebreak-egress       tidebreak-sandbox-protocol
                                             │
-      the seam                         openwave-core
+      the seam                         tidebreak-core
 
 ```
 
@@ -24,7 +24,7 @@ libraries.
 
 ---
 
-## `openwave-core` — the open-core seam 🟢
+## `tidebreak-core` — the open-core seam 🟢
 
 The foundation every client (and, later, the Brightwave Connect control plane)
 sits on. It's independently publishable on crates.io and **never depends on a
@@ -34,7 +34,7 @@ It holds the agent loop, the tool registry, the `AgentEvent` stream that every
 client renders from, and the trait **contracts** — `Tool`, `ModelProvider`,
 `Store`, `BlobStore`, `SecretProvider` — together with their default local
 implementations (SQLite, the local filesystem, the OS keychain). Concrete
-model-provider adapters do **not** live here; they live in `openwave-router`.
+model-provider adapters do **not** live here; they live in `tidebreak-router`.
 
 Major surfaces present today:
 
@@ -53,7 +53,7 @@ Major surfaces present today:
 
 ---
 
-## `openwave-router` — model providers & routing 🟢
+## `tidebreak-router` — model providers & routing 🟢
 
 Owns the concrete Anthropic, OpenAI Responses, xAI Responses, Gemini, and
 OpenAI-compatible provider adapters (including Fireworks, Together, OpenRouter,
@@ -75,12 +75,12 @@ features are designed against Tier-1 providers; other routes stay honestly
 partial via registry flags, and foreign native artifacts flatten on switch
 instead of growing an N² translation layer.
 
-**Depends on:** `openwave-core`.
+**Depends on:** `tidebreak-core`.
 
 ---
 
 
-## `openwave-host-broker` — consented host access 🟡
+## `tidebreak-host-broker` — consented host access 🟡
 
 The runtime-neutral trust boundary for connected local folders. It owns opaque
 root/grant/operation identities, validated grant and attachment values, portable
@@ -104,9 +104,9 @@ sandbox read of one exact delegated file use this operation boundary; private
 scratch tools remain separate and confined to app storage.
 See [Host access and connected folders](host-access.md).
 
-**Depends on:** no OpenWave client crate.
+**Depends on:** no Tidebreak client crate.
 
-## `openwave-sandbox-protocol` — the sandbox-agent wire protocol 🟡
+## `tidebreak-sandbox-protocol` — the sandbox-agent wire protocol 🟡
 
 The versioned boundary between the host and a sandbox-resident agent run —
 provisioning, run init, the resumable monotonically sequenced event stream,
@@ -126,10 +126,10 @@ seam. **The protocol is UNSTABLE until a named release.** The crash-safe durable
 operation log and its retention are split into focused follow-ups.
 See [Execution providers and sandbox-resident agent runs](sandbox-providers.md).
 
-**Depends on:** no OpenWave crate (standalone wire contract).
+**Depends on:** no Tidebreak crate (standalone wire contract).
 
 
-## `openwave-code-execution` — provider-neutral command execution 🟢
+## `tidebreak-code-execution` — provider-neutral command execution 🟢
 
 The stable `exec` tool, normalized request/result contract, and native local
 sandbox. Requests carry a canonical execution id for retry reconciliation and
@@ -140,16 +140,16 @@ The initial local provider is macOS Seatbelt: no direct network, one exact
 loopback broker pinhole when a chat grants egress, no inherited environment or
 stdin, writes confined to private chat scratch, bounded time and output,
 process-group cleanup, and private running/terminal receipts. Other platforms
-fail closed rather than running unconfined. `openwave-server` owns the runtime
+fail closed rather than running unconfined. `tidebreak-server` owns the runtime
 provider/timeout setting and resolves the same per-chat network policy into the
 local broker, E2B, Daytona, or — for its strictest class only — a container
 created with no network at all.
 
 See [Code execution](code-execution.md).
 
-**Depends on:** `openwave-core`, `openwave-egress`.
+**Depends on:** `tidebreak-core`, `tidebreak-egress`.
 
-## `openwave-egress` — egress policy decisions 🟢
+## `tidebreak-egress` — egress policy decisions 🟢
 
 The dependency-free decision layer from
 [sandbox providers](sandbox-providers.md): one deny-by-default allowlist
@@ -165,49 +165,49 @@ HTTP client or async runtime into the sandbox image.
 
 **Depends on:** nothing in the workspace.
 
-## `openwave-mcp` — the MCP face 🟡
+## `tidebreak-mcp` — the MCP face 🟡
 
 The server half of [MCP](https://modelcontextprotocol.io): JSON-RPC
 `initialize`, `ping`, `tools/list`, and `tools/call` over stdio, backed by
-OpenWave's tool registry. Its atomic session lifecycle gates normal operations,
+Tidebreak's tool registry. Its atomic session lifecycle gates normal operations,
 and its execution boundary exposes read-only tools by default; wiring in an
 approval gate additionally exposes Workspace and Sensitive tools, routing each
 mutating `tools/call` through the same gate and standing grants the in-app agent
 consults. Its client
 half initializes external stdio servers, follows paginated tool discovery, and
 mounts each proxy as `mcp__{server}__{tool}` in the same registry. Mounted tools
-are classified sensitive so they cross OpenWave's approval boundary before the
+are classified sensitive so they cross Tidebreak's approval boundary before the
 client forwards a call. Their generic approval is one-shot rather than a
 standing name-based grant, since Settings can replace the executable behind a
 stable namespace. The desktop Settings page owns typed runtime configuration
-and renderer-safe health, while `OPENWAVE_MCP_CONFIG` remains a headless
+and renderer-safe health, while `TIDEBREAK_MCP_CONFIG` remains a headless
 bootstrap path. The server supervises idle-session health with bounded
 reconnect backoff and refreshes changed tool lists by publishing a fresh
 immutable registry for subsequent turns.
 
-**Depends on:** `openwave-core`.
+**Depends on:** `tidebreak-core`.
 
 ---
 
-## `openwave-desktop` — the desktop app 🟡
+## `tidebreak-desktop` — the desktop app 🟡
 
 The Tauri application: it compiles the server in-process, hosts the chat UI, and
 talks to it over an ephemeral loopback HTTP/WebSocket surface. This is the
-primary way most people will run OpenWave. Its private native executor also
+primary way most people will run Tidebreak. Its private native executor also
 recovers exact delegated-file checkpoints, revalidates product attachment
 authority, and sends one bounded read through the host broker without exposing
 the target or executor credentials to the renderer. See
-[`crates/openwave-desktop/README.md`](../crates/openwave-desktop/README.md) for
+[`crates/tidebreak-desktop/README.md`](../crates/tidebreak-desktop/README.md) for
 local run instructions.
 
-**Depends on:** `openwave-core`, `openwave-host-broker`, `openwave-server` (+ Tauri).
+**Depends on:** `tidebreak-core`, `tidebreak-host-broker`, `tidebreak-server` (+ Tauri).
 
-## `openwave-server` — local API and workers 🟢
+## `tidebreak-server` — local API and workers 🟢
 
 The authenticated loopback HTTP/WebSocket surface shared by desktop and
 headless clients. It owns route orchestration and the durable document,
 retirement, and audit workers while core state transitions remain in
-`openwave-core`.
+`tidebreak-core`.
 
 Two former standalone crates now live here as modules, because the server
 was their only consumer:
@@ -230,13 +230,13 @@ file delegation. Native-only pending/claim/heartbeat/resolve routes drive it;
 the headless profile does not advertise the tool because it has no embedded
 executor.
 
-**Depends on:** `openwave-core`, `openwave-router`.
+**Depends on:** `tidebreak-core`, `tidebreak-router`.
 
-## `openwave-cli` — headless daemon + CLI 🟡
+## `tidebreak-cli` — headless daemon + CLI 🟡
 
-The working headless daemon (`openwave serve`) over the same HTTP surface the
-desktop uses, plus `openwave mcp <workspace>` for a read-only MCP stdio server
+The working headless daemon (`tidebreak serve`) over the same HTTP surface the
+desktop uses, plus `tidebreak mcp <workspace>` for a read-only MCP stdio server
 confined to one explicit workspace. Indexed-document MCP search and additional
 command-line client workflows remain in development.
 
-**Depends on:** `openwave-core`, `openwave-mcp`, `openwave-server`.
+**Depends on:** `tidebreak-core`, `tidebreak-mcp`, `tidebreak-server`.

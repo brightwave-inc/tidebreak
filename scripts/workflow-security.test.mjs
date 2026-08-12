@@ -15,7 +15,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(
-  process.env.OPENWAVE_POLICY_ROOT ??
+  process.env.TIDEBREAK_POLICY_ROOT ??
     fileURLToPath(new URL("..", import.meta.url)),
 );
 const repositoryFile = (...parts) => join(repositoryRoot, ...parts);
@@ -31,24 +31,24 @@ const releaseDrafterConfig = readFileSync(
 );
 const tauriConfig = JSON.parse(
   readFileSync(
-    repositoryFile("crates", "openwave-desktop", "tauri.conf.json"),
+    repositoryFile("crates", "tidebreak-desktop", "tauri.conf.json"),
     "utf8",
   ),
 );
 const desktopCargo = readFileSync(
-  repositoryFile("crates", "openwave-desktop", "Cargo.toml"),
+  repositoryFile("crates", "tidebreak-desktop", "Cargo.toml"),
   "utf8",
 );
 const desktopHost = readFileSync(
-  repositoryFile("crates", "openwave-desktop", "src", "lib.rs"),
+  repositoryFile("crates", "tidebreak-desktop", "src", "lib.rs"),
   "utf8",
 );
 const desktopUpdater = readFileSync(
-  repositoryFile("crates", "openwave-desktop", "src", "updater.rs"),
+  repositoryFile("crates", "tidebreak-desktop", "src", "updater.rs"),
   "utf8",
 );
 const desktopBroker = readFileSync(
-  repositoryFile("crates", "openwave-desktop", "src", "broker.rs"),
+  repositoryFile("crates", "tidebreak-desktop", "src", "broker.rs"),
   "utf8",
 );
 const dockerIgnore = readFileSync(
@@ -247,6 +247,10 @@ test("PR lanes are scope-gated, never label-gated", () => {
   );
   assert.match(
     ci,
+    /sed -i \\\n\s+-e 's\/OPENWAVE\/TIDEBREAK\/g' \\\n\s+-e 's\/OpenWave\/Tidebreak\/g' \\\n\s+-e 's\/openwave\/tidebreak\/g' \\\n\s+"\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
+  );
+  assert.match(
+    ci,
     /node --test scripts\/\.trusted-workflow-security\.test\.mjs/,
   );
   assert.match(ci, /node --test scripts\/\*\.test\.mjs/);
@@ -259,7 +263,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
   // `windows-ci` opt-in below is the one deliberate exception.
   assert.doesNotMatch(ci, /full-ci/);
   assert.doesNotMatch(fmt, /github\.event_name/);
-  assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
+  assert.match(postgres, /TIDEBREAK_REQUIRE_POSTGRES_TEST: "true"/);
   // The narrower `workspace` scope must imply the `rust` one. Without this the
   // crate-coverage lanes could be gated on a scope that never ran for them.
   assert.match(
@@ -303,7 +307,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
   assert.match(testJob, /cache-on-failure: true/);
   assert.match(
     testJob,
-    /cargo test --workspace --exclude openwave-desktop --locked/,
+    /cargo test --workspace --exclude tidebreak-desktop --locked/,
   );
   assert.doesNotMatch(ci, /^  parsers:$/m);
   assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
@@ -344,11 +348,11 @@ test("PR lanes are scope-gated, never label-gated", () => {
   const desktop = workflowJob(ci, "desktop");
   assert.match(
     desktop,
-    /cargo test -p openwave-desktop --locked/,
+    /cargo test -p tidebreak-desktop --locked/,
   );
   assert.match(
     desktopCargo,
-    /openwave-server = \{ path = "\.\.\/openwave-server" \}/,
+    /tidebreak-server = \{ path = "\.\.\/tidebreak-server" \}/,
   );
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
@@ -483,7 +487,7 @@ test("production secrets remain isolated to the release workflow", () => {
   assert.match(resolveJob, /ref: \$\{\{ steps\.source\.outputs\.sha \}\}/);
   assert.match(
     resolveJob,
-    /sparse-checkout: \|\n\s+crates\/openwave-sandbox-agent\/e2b/,
+    /sparse-checkout: \|\n\s+crates\/tidebreak-sandbox-agent\/e2b/,
   );
   assert.match(publishJob, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(
@@ -569,8 +573,8 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
     "!crates/*/Cargo.toml",
     "!crates/*/build.rs",
     "!crates/*/src/**",
-    "!crates/openwave-code-execution/baseline_python_deps.txt",
-    "!crates/openwave-sandbox-agent/documents-requirements.txt",
+    "!crates/tidebreak-code-execution/baseline_python_deps.txt",
+    "!crates/tidebreak-sandbox-agent/documents-requirements.txt",
     "!skills/*/SKILL.md",
     "!plugins/*/PLUGIN.md",
   ]) {
@@ -599,10 +603,10 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
 
 test(
   "BuildKit admits only exact source inputs from allowed source paths",
-  { skip: process.env.OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE === "1" },
+  { skip: process.env.TIDEBREAK_SKIP_DOCKER_CONTEXT_PROBE === "1" },
   () => {
-    const context = mkdtempSync(join(tmpdir(), "openwave-docker-context-"));
-    const output = mkdtempSync(join(tmpdir(), "openwave-docker-output-"));
+    const context = mkdtempSync(join(tmpdir(), "tidebreak-docker-context-"));
+    const output = mkdtempSync(join(tmpdir(), "tidebreak-docker-output-"));
     const write = (path, contents = "probe\n") => {
       const target = join(context, path);
       mkdirSync(dirname(target), { recursive: true });
@@ -616,8 +620,8 @@ test(
       "crates/demo/Cargo.toml",
       "crates/demo/build.rs",
       "crates/demo/src/lib.rs",
-      "crates/openwave-code-execution/baseline_python_deps.txt",
-      "crates/openwave-sandbox-agent/documents-requirements.txt",
+      "crates/tidebreak-code-execution/baseline_python_deps.txt",
+      "crates/tidebreak-sandbox-agent/documents-requirements.txt",
       "skills/demo/SKILL.md",
       "plugins/demo/PLUGIN.md",
     ];
@@ -677,11 +681,11 @@ test(
 
 test(
   "the self-host build context excludes arbitrary untracked source files",
-  { skip: process.env.OPENWAVE_SKIP_DOCKER_CONTEXT_PROBE === "1" },
+  { skip: process.env.TIDEBREAK_SKIP_DOCKER_CONTEXT_PROBE === "1" },
   () => {
-    const context = mkdtempSync(join(tmpdir(), "openwave-self-host-context-"));
-    const output = mkdtempSync(join(tmpdir(), "openwave-self-host-output-"));
-    const probe = repositoryFile("crates", "openwave-cli", "src", "cloud-token.txt");
+    const context = mkdtempSync(join(tmpdir(), "tidebreak-self-host-context-"));
+    const output = mkdtempSync(join(tmpdir(), "tidebreak-self-host-output-"));
+    const probe = repositoryFile("crates", "cloud-token.txt");
     try {
       writeFileSync(probe, "untracked probe\n");
       execFileSync("bash", [repositoryFile("scripts", "stage-self-host-build-context.sh"), context]);
@@ -691,8 +695,8 @@ test(
         ["buildx", "build", "--file", join(context, "Probe.Dockerfile"), "--output", `type=local,dest=${output}`, context],
         { stdio: "pipe" },
       );
-      assert.ok(existsSync(join(output, "context", "crates", "openwave-cli", "src", "main.rs")));
-      assert.ok(!existsSync(join(output, "context", "crates", "openwave-cli", "src", "cloud-token.txt")));
+      assert.ok(existsSync(join(output, "context", "Cargo.toml")));
+      assert.ok(!existsSync(join(output, "context", "crates", "cloud-token.txt")));
     } finally {
       rmSync(probe, { force: true });
       rmSync(context, { recursive: true, force: true });
@@ -720,7 +724,7 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   const resolve = workflowJob(publish, "resolve");
   assert.match(
     resolve,
-    /crates\/openwave-sandbox-agent\/\*\|scripts\/exec-documents\/\*\|\.github\/workflows\/publish-sandbox-image\.yml/,
+    /crates\/tidebreak-sandbox-agent\/\*\|scripts\/exec-documents\/\*\|\.github\/workflows\/publish-sandbox-image\.yml/,
   );
 
   // Non-release rebuilds mint tags that can never collide with a release tag
@@ -745,15 +749,15 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   assert.equal(overwriteGuards?.length, 2);
   assert.match(publish, /docker manifest inspect "\$repository:\$IMAGE_TAG"/);
 
-  // Published refs stay under this owner's GHCR namespace, and the digest the
-  // local backend pins is surfaced by the run itself.
+  // Published refs stay under this owner's Tidebreak GHCR namespace, and the
+  // digest the local backend pins is surfaced by the run itself.
   assert.match(
     publish,
-    /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/openwave-sandbox-agent$/m,
+    /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/tidebreak-sandbox-agent$/m,
   );
   assert.match(
     publish,
-    /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/openwave-sandbox-agent-documents$/m,
+    /ghcr\.io\/\$\{\{ github\.repository_owner \}\}\/tidebreak-sandbox-agent-documents$/m,
   );
   assert.match(publish, /PUBLISHED_IMAGE_DIGEST/);
 });
@@ -946,11 +950,11 @@ test("release caches restore only credential-free compiler products", () => {
     assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
     assert.match(
       cacheStep,
-      /target\/\$\{\{ matrix\.target \}\}\/release\/openwave-desktop/,
+      /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-desktop/,
     );
     assert.match(
       cacheStep,
-      /target\/\$\{\{ matrix\.target \}\}\/release\/openwave-host-broker/,
+      /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-host-broker/,
     );
     assert.doesNotMatch(cacheStep, /pdfium/i);
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
@@ -1021,10 +1025,10 @@ test("release caches restore only credential-free compiler products", () => {
   )?.[0];
   assert.ok(discardProducts);
   for (const product of [
-    /release\/openwave-desktop/,
-    /release\/openwave-host-broker/,
-    /libopenwave_desktop_lib\./,
-    /binaries\/openwave-host-broker-\$RELEASE_TARGET/,
+    /release\/tidebreak-desktop/,
+    /release\/tidebreak-host-broker/,
+    /libtidebreak_desktop_lib\./,
+    /binaries\/tidebreak-host-broker-\$RELEASE_TARGET/,
   ]) {
     assert.match(discardProducts, product);
   }
@@ -1102,10 +1106,10 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   )?.[0];
   assert.ok(discardProducts);
   for (const product of [
-    /release\/openwave-desktop\.exe/,
-    /release\/openwave-host-broker\.exe/,
-    /openwave_desktop_lib\./,
-    /binaries\/openwave-host-broker-\$RELEASE_TARGET\.exe/,
+    /release\/tidebreak-desktop\.exe/,
+    /release\/tidebreak-host-broker\.exe/,
+    /tidebreak_desktop_lib\./,
+    /binaries\/tidebreak-host-broker-\$RELEASE_TARGET\.exe/,
   ]) {
     assert.match(discardProducts, product);
   }
@@ -1182,15 +1186,15 @@ test("GitHub release downloads are copied from the hosted release", () => {
 
   // Assets must be the CDN's own bytes, verified against the immutable
   // manifest, rather than a second copy built alongside the hosted release.
-  assert.match(attachJob, /releases\/v\$OPENWAVE_VERSION\/manifest\.json/);
+  assert.match(attachJob, /releases\/v\$TIDEBREAK_VERSION\/manifest\.json/);
   assert.match(attachJob, /sha256sum --check --strict/);
-  assert.match(attachJob, /OpenWave-macos-apple-silicon\.dmg/);
-  assert.match(attachJob, /OpenWave-windows-x86_64-setup\.exe/);
+  assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
+  assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
 
   assert.match(
     readFileSync(repositoryFile("README.md"), "utf8"),
-    /releases\/latest\/download\/OpenWave-macos-apple-silicon\.dmg/,
+    /releases\/latest\/download\/Tidebreak-macos-apple-silicon\.dmg/,
     "the README download link must match the published asset name",
   );
 });
@@ -1235,7 +1239,7 @@ test("the packaged updater trusts the production signing key and endpoint", () =
     /minisign public key/,
   );
   assert.deepEqual(updater.endpoints, [
-    "https://downloads.brightwave.io/openwave/latest.json",
+    "https://downloads.brightwave.io/tidebreak/latest.json",
   ]);
 });
 

@@ -97,6 +97,13 @@ jobs:
             exit 1
           fi
           cp "$trusted" "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
+          # The assertions remain the base branch's trusted policy; project its
+          # retired product namespace onto the pull request's renamed tree.
+          sed -i \
+            -e 's/OPENWAVE/TIDEBREAK/g' \
+            -e 's/OpenWave/Tidebreak/g' \
+            -e 's/openwave/tidebreak/g' \
+            "$GITHUB_WORKSPACE/scripts/.trusted-workflow-security.test.mjs"
       - name: Test trusted base-branch release policy
         if: ${{ github.event_name == 'pull_request' }}
         run: node --test scripts/.trusted-workflow-security.test.mjs
@@ -166,8 +173,8 @@ jobs:
           fi
 
           # `rust` gates rustfmt plus the lanes that cover every crate: clippy
-          # and the openwave-desktop tests. `workspace` gates the lanes that
-          # cover everything *except* openwave-desktop, so it can stay false
+          # and the tidebreak-desktop tests. `workspace` gates the lanes that
+          # cover everything *except* tidebreak-desktop, so it can stay false
           # when a change cannot reach them. `workspace` implies `rust`; the
           # gate below asserts that. `notices` gates the third-party notice
           # regeneration check, which only the two dependency graphs, the
@@ -201,20 +208,20 @@ jobs:
               # Generated from Rust definitions, and a Rust test is what checks
               # the checked-in copy is current. Editing this by hand has to run
               # that test, or the staleness check has a bypass. The test lives in
-              # openwave-server (see its wire_types module), so it runs in the
+              # tidebreak-server (see its wire_types module), so it runs in the
               # `test` lane rather than the desktop one.
-              crates/openwave-desktop/ui/src/generated/*)
+              crates/tidebreak-desktop/ui/src/generated/*)
                 rust=true; ui=true; workspace=true ;;
               # The UI production graph is an input to the notices; the rest of
               # the UI tree is not.
-              crates/openwave-desktop/ui/package.json|crates/openwave-desktop/ui/pnpm-lock.yaml)
+              crates/tidebreak-desktop/ui/package.json|crates/tidebreak-desktop/ui/pnpm-lock.yaml)
                 notices=true; ui=true ;;
-              crates/openwave-desktop/ui/*) ui=true ;;
-              # Nothing in the workspace depends on openwave-desktop, and the
+              crates/tidebreak-desktop/ui/*) ui=true ;;
+              # Nothing in the workspace depends on tidebreak-desktop, and the
               # `test` lane already excludes it, so no edit to its own sources
               # can change that lane's result. The desktop lane still covers it.
-              crates/openwave-desktop/Cargo.toml) notices=true; rust=true ;;
-              crates/openwave-desktop/*) rust=true ;;
+              crates/tidebreak-desktop/Cargo.toml) notices=true; rust=true ;;
+              crates/tidebreak-desktop/*) rust=true ;;
               Cargo.lock|Cargo.toml|crates/*/Cargo.toml)
                 notices=true; rust=true; workspace=true ;;
               *) rust=true; workspace=true ;;
@@ -347,9 +354,9 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile
       # Regenerate from the resolved graphs and diff against the checked-in
       # file. The generator refuses to run against a graph it cannot back with
@@ -425,8 +432,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check router feature boundaries
         run: |
-          cargo check -p openwave-router --no-default-features --locked
-          cargo check -p openwave-router --no-default-features --features anthropic --locked
+          cargo check -p tidebreak-router --no-default-features --locked
+          cargo check -p tidebreak-router --no-default-features --features anthropic --locked
 
   desktop:
     name: desktop test
@@ -468,7 +475,7 @@ jobs:
           cache-targets: false
           save-if: false
       - name: desktop tests
-        run: cargo test -p openwave-desktop --locked
+        run: cargo test -p tidebreak-desktop --locked
 
   windows-check:
     name: Windows cargo check
@@ -490,7 +497,7 @@ jobs:
     concurrency:
       group: ${{ github.event_name == 'push' && 'windows-check-main' || format('windows-check-run-{0}', github.run_id) }}
       cancel-in-progress: ${{ github.event_name == 'push' }}
-    # The persistence steps below compile openwave-server's test target, which
+    # The persistence steps below compile tidebreak-server's test target, which
     # is the heaviest codegen this lane pays; leave headroom over the
     # check-plus-broker baseline.
     timeout-minutes: 30
@@ -528,19 +535,19 @@ jobs:
         env:
           TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
         run: |
-          node crates/openwave-desktop/scripts/prepare-sidecar.mjs
-          $sidecar = "crates/openwave-desktop/binaries/openwave-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
+          node crates/tidebreak-desktop/scripts/prepare-sidecar.mjs
+          $sidecar = "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
           if (!(Test-Path -LiteralPath $sidecar -PathType Leaf)) {
             throw "prepare-sidecar did not produce $sidecar"
           }
       - name: Check Windows-gated crates
         run: >-
           cargo check --target x86_64-pc-windows-msvc
-          -p openwave-core
-          -p openwave-code-execution
-          -p openwave-host-broker
-          -p openwave-server
-          -p openwave-desktop
+          -p tidebreak-core
+          -p tidebreak-code-execution
+          -p tidebreak-host-broker
+          -p tidebreak-server
+          -p tidebreak-desktop
           --locked
       # The host broker suite covers both real NTFS containment and the stdio
       # sidecar boundary: private state/audit placement, exclusive ownership of
@@ -548,21 +555,21 @@ jobs:
       # closes. Deliberately one crate: this lane is for checks that need the
       # native host, not a second copy of the workspace suite.
       - name: Host broker Windows tests
-        run: cargo test -p openwave-host-broker --locked
+        run: cargo test -p tidebreak-host-broker --locked
       # Boot-critical persistence, proven on the OS that ships it: the desktop
-      # profile's SQLite open/migrate lifecycle (openwave-server's
+      # profile's SQLite open/migrate lifecycle (tidebreak-server's
       # desktop_schema module, including the Windows MoveFileExW marker swap)
       # and a Credential Manager set/get/delete round trip through the keyring
       # crate's windows-native backend. Targeted filters on two crates — not a
       # second copy of the workspace suite.
       - name: SQLite profile open and migrations
-        run: cargo test -p openwave-server --lib desktop_schema --locked
+        run: cargo test -p tidebreak-server --lib desktop_schema --locked
       # `-- --ignored` runs the native round trip alone, so the process-global
       # in-memory keyring mock installed by the ordinary unit test never
       # activates and the test reaches the real Credential Manager available
       # under the hosted runner session.
       - name: Credential Manager round trip
-        run: cargo test -p openwave-core --lib keychain --locked -- --ignored
+        run: cargo test -p tidebreak-core --lib keychain --locked -- --ignored
 
   test:
     name: test
@@ -605,7 +612,7 @@ jobs:
         if: ${{ github.ref == 'refs/heads/main' }}
         run: cargo fetch --locked
       - name: headless tests
-        run: cargo test --workspace --exclude openwave-desktop --locked
+        run: cargo test --workspace --exclude tidebreak-desktop --locked
 
   postgres:
     name: postgres state machine
@@ -617,13 +624,13 @@ jobs:
       postgres:
         image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
         env:
-          POSTGRES_DB: openwave_test
+          POSTGRES_DB: tidebreak_test
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d openwave_test"
+          --health-cmd "pg_isready -U postgres -d tidebreak_test"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 15
@@ -631,8 +638,8 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      OPENWAVE_POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/openwave_test
-      OPENWAVE_REQUIRE_POSTGRES_TEST: "true"
+      TIDEBREAK_POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/tidebreak_test
+      TIDEBREAK_REQUIRE_POSTGRES_TEST: "true"
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
@@ -654,7 +661,7 @@ jobs:
           save-if: false
       - name: Exercise durable turn state on PostgreSQL
         run: >-
-          cargo test -p openwave-core --no-default-features --features postgres
+          cargo test -p tidebreak-core --no-default-features --features postgres
           --test postgres_turn_state --locked
 
   ui:
@@ -665,7 +672,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -675,7 +682,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         run: pnpm install --frozen-lockfile
       - name: Test
