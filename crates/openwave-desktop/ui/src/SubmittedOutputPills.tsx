@@ -1,6 +1,6 @@
-import { FileText } from "lucide-react";
-
 import type { AgentRun } from "./api";
+import { DocumentIcon } from "./components/document-table/DocumentIcon";
+import { mediaTypeForFileName } from "./mediaTypeForFileName";
 
 /** Beyond this many, the rest collapse into a count rather than wrapping on. */
 const MAX_VISIBLE_OUTPUTS = 6;
@@ -12,6 +12,10 @@ const MAX_VISIBLE_OUTPUTS = 6;
  * writes files under `output/`, the scan publishes them under their own
  * filenames, and `done` submits that set. So this is the whole result surface —
  * one pill per file, each opening the output it names.
+ *
+ * The wire snapshot carries only the filename, so the glyph is guessed from the
+ * extension — same path the import queue uses when the sniffed type is not in
+ * yet. Brand marks for PDF / Word / Excel / PowerPoint, family glyphs otherwise.
  */
 export function SubmittedOutputPills({
   outputs,
@@ -50,7 +54,11 @@ function SubmittedOutputPill({
 }) {
   const body = (
     <>
-      <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <DocumentIcon
+        mediaType={mediaTypeForFileName(filename)}
+        className="size-3.5"
+        aria-hidden="true"
+      />
       <span className="min-w-0 truncate">{filename}</span>
     </>
   );
