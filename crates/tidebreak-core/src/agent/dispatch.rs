@@ -624,6 +624,21 @@ impl Agent {
                 ),
             );
         }
+        // A capture is only useful to a model that can see it. When the
+        // selected model takes no image input, refuse before any work or
+        // approval: the alternative — capturing and publishing the PNG, then
+        // dropping it at the transcript — is the silent degradation the
+        // capability's design forbids, and a text-only model could otherwise
+        // operate the whole control loop blind off the marks table.
+        if !self.config.image_input && call.name == crate::COMPUTER_CAPTURE_SCREEN_TOOL {
+            return ToolOutput::failed(
+                ToolErrorCategory::ConfigurationRequired,
+                "computer_capture_screen needs a model that accepts image input; the selected \
+                 model is text-only. Read the app with computer_read_app_content (which returns \
+                 text) or switch to a model with image input."
+                    .to_owned(),
+            );
+        }
         let kind_for_call = ToolApprovalKind::for_call(&call.name, approval_class);
         // The action a standing grant is matched against, and the one the card
         // shows if this call ends up parking. Built once so a grant can never
