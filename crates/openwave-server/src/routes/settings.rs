@@ -110,10 +110,9 @@ pub struct Settings {
     /// exist yet can show what `POST /chats` will seed.
     #[serde(default)]
     pub chat_defaults: StickyChatDefaults,
-    /// Maximum unsettled depth-one children one origin turn may hold at once.
-    ///
-    /// Bounded by [`AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS`] so spawn admission
-    /// cannot outrun a single `wait_for_agents` call.
+    /// Preferred maximum concurrent background agents. Spawn unsettled
+    /// children on one origin turn are further capped at
+    /// [`AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS`] (wait_for_agents membership).
     pub max_active_background_agents: u32,
     /// Model steps a background agent takes before it must check in.
     ///
@@ -240,10 +239,12 @@ pub async fn put_settings(
         }
     }
     if let Some(limit) = body.max_active_background_agents {
-        if limit == 0 || limit > AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS {
+        // Stored value may exceed the per-turn unsettled wait ceiling; spawn
+        // admission clamps with AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS.
+        if limit == 0 || limit > AgentRun::MAX_CONCURRENCY_LIMIT {
             return Err(ServerError::bad_request(format!(
                 "max_active_background_agents must be in 1..={}",
-                AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS
+                AgentRun::MAX_CONCURRENCY_LIMIT
             )));
         }
         state
@@ -368,13 +369,11 @@ pub(crate) async fn read_model_visibility_overrides(
 pub(crate) async fn read_max_active_background_agents(
     store: &dyn Store,
 ) -> openwave_core::Result<u32> {
-    // Stale values above the wait membership ceiling are ignored so a prior
-    // higher setting cannot reintroduce the spawn/wait mismatch.
     Ok(store
         .get_setting(MAX_ACTIVE_BACKGROUND_AGENTS_SETTING)
         .await?
         .and_then(|value| serde_json::from_value::<u32>(value).ok())
-        .filter(|limit| *limit > 0 && *limit <= AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS)
+        .filter(|limit| *limit > 0 && *limit <= AgentRun::MAX_CONCURRENCY_LIMIT)
         .unwrap_or(AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS))
 }
 

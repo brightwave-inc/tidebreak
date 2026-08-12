@@ -83,7 +83,7 @@ async fn settings_default_then_update_roundtrips() {
                 .body(Body::from(
                     serde_json::json!({
                         "model": "claude-x",
-                        "max_active_background_agents": 3,
+                        "max_active_background_agents": 7,
                         "sandbox_agent_checkin_steps": 250,
                         "sandbox_agent_error_checkin": 3,
                         "compaction": {
@@ -102,7 +102,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(response.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
-    assert_eq!(settings["max_active_background_agents"], 3);
+    assert_eq!(settings["max_active_background_agents"], 7);
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
@@ -123,7 +123,7 @@ async fn settings_default_then_update_roundtrips() {
         .unwrap();
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
-    assert_eq!(settings["max_active_background_agents"], 3);
+    assert_eq!(settings["max_active_background_agents"], 7);
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
@@ -131,10 +131,10 @@ async fn settings_default_then_update_roundtrips() {
 }
 
 #[tokio::test]
-async fn settings_reject_active_background_agents_above_wait_cap() {
+async fn settings_reject_active_background_agents_above_concurrency_limit() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
-    let over_cap = openwave_core::AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS + 1;
+    let over_cap = openwave_core::AgentRun::MAX_CONCURRENCY_LIMIT + 1;
 
     let response = router
         .clone()

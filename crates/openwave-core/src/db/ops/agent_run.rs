@@ -2419,11 +2419,11 @@ fn validate_admission_request(
         ));
     }
     if max_active_background_agents == 0
-        || max_active_background_agents > AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS
+        || max_active_background_agents > AgentRun::MAX_CONCURRENCY_LIMIT
     {
         return Err(AgentError::Store(format!(
             "sandbox active-agent limit must be in 1..={}",
-            AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS
+            AgentRun::MAX_CONCURRENCY_LIMIT
         )));
     }
     let input_len = input.chars().count();
