@@ -191,12 +191,7 @@ async fn completion_fences_needs_input_checkin_without_store_error() {
         Some(SubmitAgentRunResultOutcome::Completed(_))
     ));
     assert_eq!(
-        store
-            .get_agent_run(child.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
+        store.get_agent_run(child.id).await.unwrap().unwrap().status,
         AgentRunStatus::NeedsInput
     );
     let inbox = store
