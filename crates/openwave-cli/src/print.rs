@@ -110,6 +110,7 @@ pub async fn run(
     chat: Option<ChatId>,
     format: OutputFormat,
     permission_mode: Option<String>,
+    model: Option<String>,
     server: crate::connect::Server,
 ) -> Result<i32> {
     // Either binds the engine in-process (the default) or attaches to one that
@@ -126,12 +127,24 @@ pub async fn run(
             client.require_chat(chat).await?;
             chat
         }
-        None => client.create_chat().await?,
+        None => {
+            // stderr, never stdout: text mode's stdout is the answer alone, and
+            // json mode's stdout is the journal. A driving agent still needs
+            // the id to continue with `--chat` on the next turn.
+            let chat = client.create_chat().await?;
+            eprintln!("openwave: chat {chat}");
+            chat
+        }
     };
     if let Some(mode) = permission_mode.as_deref() {
         // Fail before the turn starts: a run that asked for `allow` and got
         // `ask` would quietly do something else.
         client.set_chat_permission_mode(chat, Some(mode)).await?;
+    }
+    if let Some(model) = model.as_deref() {
+        // Same fail-before-turn rule as permission mode: a typo or an
+        // unavailable selection must not silently fall back to the default.
+        client.set_chat_model(chat, Some(model)).await?;
     }
 
     // Driving needs somewhere to put the events and something on the other end

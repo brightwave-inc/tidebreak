@@ -104,10 +104,14 @@ the exit status says how the turn ended.
 cargo run -p openwave-cli -- -p "summarize the CSV in output/"
 cargo run -p openwave-cli -- -p "…" --output-format json
 cargo run -p openwave-cli -- -p "…" --permission-mode allow
+cargo run -p openwave-cli -- -p "…" --model anthropic::claude-haiku-4-5-20251001
 ```
 
 `--output-format json` emits the turn's event stream as NDJSON instead of plain
-text. `--chat <id>` continues an existing conversation.
+text. `--chat <id>` continues an existing conversation. `--model <key>` pins the
+chat's model (a catalog key such as `anthropic::claude-haiku-4-5-20251001`)
+before the turn starts; an unavailable selection fails the process instead of
+falling back silently.
 
 `--permission-mode` sets the chat's permission mode for the run — the same four
 modes the desktop offers, applied before the turn starts:
