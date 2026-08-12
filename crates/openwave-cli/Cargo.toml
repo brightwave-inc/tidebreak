@@ -17,9 +17,11 @@ path = "src/main.rs"
 
 [dependencies]
 # `default-features = false`: the CLI directly needs config/contracts plus the
-# built-in file tools for `openwave mcp`; server persistence features still come
-# through `openwave-server`. This avoids directly enabling unrelated defaults.
-openwave-core = { path = "../openwave-core", default-features = false, features = ["tools"] }
+# built-in file tools for `openwave mcp`. `sqlite` is on so `openwave folder`
+# can open the product store beside a running server without embedding one
+# (and without taking `openwave.lock`). Keychain and blob-fs still come only
+# through `openwave-server`.
+openwave-core = { path = "../openwave-core", default-features = false, features = ["tools", "sqlite"] }
 # `openwave folder …` decides local command reach exactly as the desktop does,
 # so an operator-provisioned folder carries the same grants on the same host.
 openwave-code-execution = { path = "../openwave-code-execution" }
