@@ -1230,6 +1230,7 @@ async fn bind_inner(
         state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
+        Some(code_execution.clone()),
         sandbox_worker_config,
     );
     let sandbox_web_search_worker =

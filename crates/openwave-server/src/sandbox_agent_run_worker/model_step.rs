@@ -78,6 +78,8 @@ pub(super) async fn sandbox_request(
     calls: &[SandboxToolCall],
     store: &dyn Store,
     delegated_file_available: bool,
+    skills: &[openwave_code_execution::SkillPackage],
+    plugins: &[openwave_code_execution::PluginPackage],
 ) -> Result<ChatRequest> {
     // Steps are the one budget this request rides on: each is one model
     // completion, and the whole chain is replayed on every claim, so the
@@ -148,6 +150,8 @@ pub(super) async fn sandbox_request(
             delegated_file_available,
             config.web_search,
             config.tools_supported,
+            skills,
+            plugins,
         )),
         messages,
         // A checkpoint costs one model completion now and one more to consume
