@@ -1,9 +1,8 @@
-import { ChevronRight, Puzzle, Sparkles } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { Puzzle } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import type { PluginInfo, PluginSkillInfo } from "@/api";
-import { PanelSecondaryHeader } from "@/components/PanelHeader";
-import { Badge } from "@/components/ui/badge";
+import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -13,8 +12,9 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
+import { PluginGlyph, SkillGlyph } from "./PluginGlyph";
 import type { PluginsApis } from "./pluginsApis";
-import { capabilityShortLabel, categoryIcon } from "./pluginVocabulary";
 import { SkillDialog } from "./SkillDialog";
 import {
   hostToolProvisioningLabel,
@@ -31,9 +31,10 @@ import type { PluginCatalogState } from "./usePluginCatalog";
  * library. Picking a row opens `plugins.{slug}`: the bundle's description, its
  * badges, and its member skills with their own switches.
  *
- * The origin split is the catalog's own: bundles first, then the skills no
- * bundle claims, with anything the user wrote themselves — bundle or skill —
- * called out as theirs.
+ * Laid out as a scannable instrument shelf: a centered title and search, then
+ * a two-column grid of tiles. The origin split is the catalog's own: bundles
+ * first, then the skills no bundle claims, with anything the user wrote
+ * themselves called out as theirs.
  */
 export function PluginsView({
   state,
@@ -47,15 +48,25 @@ export function PluginsView({
 }) {
   const { catalog, loading, error, reload, setEnabled } = state;
   const provisioning = useHostToolProvisioning();
+  const [query, setQuery] = useState("");
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
-  const yourPlugins = catalog?.plugins.filter((plugin) => plugin.origin === "user") ?? [];
+
+  const filtered = useMemo(() => filterCatalog(catalog, query), [catalog, query]);
+  const yourPlugins = filtered?.plugins.filter((plugin) => plugin.origin === "user") ?? [];
   const otherPlugins =
-    catalog?.plugins.filter((plugin) => plugin.origin !== "user") ?? [];
-  const yourSkills = catalog?.skills.filter((skill) => skill.origin === "user") ?? [];
+    filtered?.plugins.filter((plugin) => plugin.origin !== "user") ?? [];
+  const yourSkills = filtered?.skills.filter((skill) => skill.origin === "user") ?? [];
   const otherSkills =
-    catalog?.skills.filter((skill) => skill.origin !== "user") ?? [];
+    filtered?.skills.filter((skill) => skill.origin !== "user") ?? [];
   const isEmpty =
     catalog !== null && catalog.plugins.length === 0 && catalog.skills.length === 0;
+  const noMatches =
+    catalog !== null &&
+    !isEmpty &&
+    otherPlugins.length === 0 &&
+    yourPlugins.length === 0 &&
+    yourSkills.length === 0 &&
+    otherSkills.length === 0;
   // The dialog re-reads its skill from the fresh catalog, so its switch moves
   // with the toggle round trip instead of freezing at the row that opened it.
   const shownSkill = openSkill
@@ -64,103 +75,125 @@ export function PluginsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <PanelSecondaryHeader showBorder={false} className="pr-1 pl-4">
-        <h1 className="text-lg font-medium">Plugins</h1>
-      </PanelSecondaryHeader>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 pt-10 pb-12">
+          <header className="flex flex-col items-center gap-4 text-center">
+            <div className="flex flex-col gap-1.5">
+              <h1 className="text-2xl font-semibold tracking-tight">Plugins</h1>
+              <p className="text-muted-foreground max-w-md text-sm text-pretty">
+                Skills the agent can use when you turn them on.
+              </p>
+            </div>
+            {catalog && !isEmpty && (
+              <SearchInput
+                value={query}
+                onValueChange={setQuery}
+                placeholder="Search plugins and skills…"
+                aria-label="Search plugins and skills"
+                className="w-full max-w-md rounded-full"
+              />
+            )}
+          </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pt-4 pb-4">
-        {provisioning && (
-          <p className="text-muted-foreground shrink-0 px-4 text-xs" role="status">
-            {hostToolProvisioningLabel(provisioning)}
-          </p>
-        )}
+          {provisioning && (
+            <p className="text-muted-foreground -mt-4 text-center text-xs" role="status">
+              {hostToolProvisioningLabel(provisioning)}
+            </p>
+          )}
 
-        {error && (
-          <div
-            className="mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
-            role="alert"
-          >
-            <span>{error}</span>
-            <Button variant="outline" size="xs" className="shrink-0" onClick={reload}>
-              Try again
-            </Button>
-          </div>
-        )}
+          {error && (
+            <div
+              className="flex shrink-0 items-center justify-between gap-3 rounded-lg bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+              role="alert"
+            >
+              <span>{error}</span>
+              <Button variant="outline" size="xs" className="shrink-0" onClick={reload}>
+                Try again
+              </Button>
+            </div>
+          )}
 
-        {loading && !catalog && (
-          <p className="text-muted-foreground px-4 text-sm" role="status">
-            Loading your plugins…
-          </p>
-        )}
+          {loading && !catalog && (
+            <p className="text-muted-foreground text-center text-sm" role="status">
+              Loading your plugins…
+            </p>
+          )}
 
-        {isEmpty && (
-          <Empty>
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Puzzle />
-              </EmptyMedia>
-              <EmptyTitle>No plugins installed</EmptyTitle>
-              <EmptyDescription>
-                Plugins bundle the skills OpenWave can use in a conversation.
-                This installation has none available — the ones that ship with
-                the app appear here once code execution is set up.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        )}
+          {isEmpty && (
+            <Empty>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Puzzle />
+                </EmptyMedia>
+                <EmptyTitle>No plugins installed</EmptyTitle>
+                <EmptyDescription>
+                  Plugins bundle the skills OpenWave can use in a conversation.
+                  This installation has none available — the ones that ship with
+                  the app appear here once code execution is set up.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          )}
 
-        {otherPlugins.length > 0 && (
-          <Section title="Plugins">
-            <PluginList
-              plugins={otherPlugins}
-              label="Plugins"
-              onOpen={onOpen}
-              setEnabled={setEnabled}
-            />
-          </Section>
-        )}
+          {noMatches && (
+            <p className="text-muted-foreground text-center text-sm" role="status">
+              Nothing matches “{query.trim()}”.
+            </p>
+          )}
 
-        {yourPlugins.length > 0 && (
-          <Section
-            title="Your plugins"
-            description="Plugins you wrote, loaded from your data directory."
-          >
-            <PluginList
-              plugins={yourPlugins}
-              label="Your plugins"
-              onOpen={onOpen}
-              setEnabled={setEnabled}
-            />
-          </Section>
-        )}
+          {otherPlugins.length > 0 && (
+            <Section title="Plugins">
+              <PluginGrid
+                plugins={otherPlugins}
+                label="Plugins"
+                onOpen={onOpen}
+                setEnabled={setEnabled}
+              />
+            </Section>
+          )}
 
-        {yourSkills.length > 0 && (
-          <Section
-            title="Your skills"
-            description="Skills you wrote, loaded from your data directory. They stand on their own rather than belonging to a bundle."
-          >
-            <SkillList
-              skills={yourSkills}
-              setEnabled={setEnabled}
-              label="Your skills"
-              onOpenSkill={setOpenSkill}
-            />
-          </Section>
-        )}
+          {yourPlugins.length > 0 && (
+            <Section
+              title="Your plugins"
+              description="Plugins you wrote, loaded from your data directory."
+            >
+              <PluginGrid
+                plugins={yourPlugins}
+                label="Your plugins"
+                onOpen={onOpen}
+                setEnabled={setEnabled}
+              />
+            </Section>
+          )}
 
-        {otherSkills.length > 0 && (
-          <Section
-            title="Other skills"
-            description="Installed skills that no bundle claims."
-          >
-            <SkillList
-              skills={otherSkills}
-              setEnabled={setEnabled}
-              label="Other skills"
-              onOpenSkill={setOpenSkill}
-            />
-          </Section>
-        )}
+          {yourSkills.length > 0 && (
+            <Section
+              title="Your skills"
+              description="Skills you wrote, loaded from your data directory. They stand on their own rather than belonging to a bundle."
+            >
+              <SkillGrid
+                skills={yourSkills}
+                setEnabled={setEnabled}
+                label="Your skills"
+                onOpenSkill={setOpenSkill}
+              />
+            </Section>
+          )}
+
+          {otherSkills.length > 0 && (
+            <Section
+              title="Other skills"
+              description="Installed skills that no bundle claims."
+            >
+              <SkillGrid
+                skills={otherSkills}
+                setEnabled={setEnabled}
+                label="Other skills"
+                onOpenSkill={setOpenSkill}
+              />
+            </Section>
+          )}
+        </div>
       </div>
 
       <SkillDialog
@@ -188,9 +221,11 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="mx-3 flex flex-col gap-2" aria-label={title}>
+    <section className="flex flex-col gap-3" aria-label={title}>
       <div className="flex flex-col gap-0.5 px-1">
-        <h2 className="text-sm font-medium">{title}</h2>
+        <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+          {title}
+        </h2>
         {description && (
           <p className="text-muted-foreground text-xs">{description}</p>
         )}
@@ -200,7 +235,7 @@ function Section({
   );
 }
 
-function PluginList({
+function PluginGrid({
   plugins,
   label,
   onOpen,
@@ -212,7 +247,10 @@ function PluginList({
   setEnabled: PluginCatalogState["setEnabled"];
 }) {
   return (
-    <ul className="flex flex-col gap-1" aria-label={label}>
+    <ul
+      className="grid grid-cols-1 gap-1 sm:grid-cols-2 sm:gap-x-3 sm:gap-y-1"
+      aria-label={label}
+    >
       {plugins.map((plugin) => (
         <li key={plugin.name}>
           <PluginRow
@@ -229,7 +267,7 @@ function PluginList({
 }
 
 /**
- * A bundle's row: the whole row opens the detail, and the switch — which is
+ * A bundle's tile: the whole row opens the detail, and the switch — which is
  * not inside that button — turns the bundle on and off without leaving the
  * list.
  */
@@ -242,35 +280,24 @@ function PluginRow({
   onOpen: () => void;
   onToggle: (enabled: boolean) => void;
 }) {
-  const Icon = categoryIcon(plugin.category);
   return (
-    <div className="hover:bg-muted flex items-center gap-3 rounded-md p-2 transition-colors">
+    <div
+      className={cn(
+        "hover:bg-muted/70 flex items-center gap-3 rounded-xl px-2.5 py-2.5 transition-colors",
+        !plugin.enabled && "opacity-80",
+      )}
+    >
       <button
         type="button"
-        className="flex min-w-0 flex-1 items-start gap-3 text-left"
+        className="flex min-w-0 flex-1 items-center gap-3 text-left"
         onClick={onOpen}
       >
-        <Icon className="text-muted-foreground mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate text-sm font-medium">{plugin.display_name}</span>
-            <ChevronRight
-              className="text-muted-foreground size-3.5 shrink-0"
-              aria-hidden="true"
-            />
-          </span>
-          <span className="text-muted-foreground line-clamp-2 text-xs">
+        <PluginGlyph pluginName={plugin.name} category={plugin.category} size="md" />
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-sm font-medium">{plugin.display_name}</span>
+          <span className="text-muted-foreground line-clamp-1 text-xs leading-snug">
             {plugin.description}
           </span>
-          {plugin.capabilities.length > 0 && (
-            <span className="flex flex-wrap gap-1 pt-0.5">
-              {plugin.capabilities.map((capability) => (
-                <Badge key={capability} variant="outline" size="sm">
-                  {capabilityShortLabel(capability)}
-                </Badge>
-              ))}
-            </span>
-          )}
         </span>
       </button>
       <Switch
@@ -282,7 +309,7 @@ function PluginRow({
   );
 }
 
-function SkillList({
+function SkillGrid({
   skills,
   setEnabled,
   label,
@@ -294,23 +321,27 @@ function SkillList({
   onOpenSkill: (skill: PluginSkillInfo) => void;
 }) {
   return (
-    <ul className="flex flex-col gap-1" aria-label={label}>
+    <ul
+      className="grid grid-cols-1 gap-1 sm:grid-cols-2 sm:gap-x-3 sm:gap-y-1"
+      aria-label={label}
+    >
       {skills.map((skill) => (
         <li
           key={skill.name}
-          className="hover:bg-muted flex items-center gap-3 rounded-md p-2 transition-colors"
+          className={cn(
+            "hover:bg-muted/70 flex items-center gap-3 rounded-xl px-2.5 py-2.5 transition-colors",
+            !skill.enabled && "opacity-80",
+          )}
         >
           <button
             type="button"
             className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
             onClick={() => onOpenSkill(skill)}
           >
-            <span className="text-muted-foreground grid size-7 shrink-0 place-items-center rounded-md border bg-muted">
-              <Sparkles className="size-3.5" aria-hidden="true" />
-            </span>
+            <SkillGlyph size="md" />
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="truncate text-sm font-medium">{skill.name}</span>
-              <span className="text-muted-foreground line-clamp-2 text-xs">
+              <span className="text-muted-foreground line-clamp-1 text-xs leading-snug">
                 {skill.description}
               </span>
             </span>
@@ -326,4 +357,31 @@ function SkillList({
       ))}
     </ul>
   );
+}
+
+function filterCatalog(
+  catalog: PluginCatalogState["catalog"],
+  query: string,
+): PluginCatalogState["catalog"] {
+  if (!catalog) return null;
+  const needle = query.trim().toLowerCase();
+  if (!needle) return catalog;
+
+  const plugins = catalog.plugins.filter(
+    (plugin) =>
+      plugin.display_name.toLowerCase().includes(needle) ||
+      plugin.name.toLowerCase().includes(needle) ||
+      plugin.description.toLowerCase().includes(needle) ||
+      plugin.skills.some(
+        (skill) =>
+          skill.name.toLowerCase().includes(needle) ||
+          skill.description.toLowerCase().includes(needle),
+      ),
+  );
+  const skills = catalog.skills.filter(
+    (skill) =>
+      skill.name.toLowerCase().includes(needle) ||
+      skill.description.toLowerCase().includes(needle),
+  );
+  return { ...catalog, plugins, skills };
 }
