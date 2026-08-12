@@ -118,6 +118,8 @@ usage: openwave serve
                   [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var>]
                   [--timeout-ms <ms>] [--disabled]
        openwave mcp-server remove <name>
+       openwave chat list
+       openwave chat create
 
        openwave folder connect <path> --chat <id>
        openwave folder list [--chat <id>]
@@ -303,7 +305,8 @@ async fn run() -> Result<i32> {
             if command == OsStr::new("provider")
                 || command == OsStr::new("model")
                 || command == OsStr::new("settings")
-                || command == OsStr::new("mcp-server") =>
+                || command == OsStr::new("mcp-server")
+                || command == OsStr::new("chat") =>
         {
             let family = command.to_string_lossy().into_owned();
             let (command, format) = parse_setup(&family, text_args(args));
@@ -450,11 +453,13 @@ impl Cursor {
     }
 }
 
-/// Parse one `provider`/`model`/`settings`/`mcp-server` invocation.
+/// Parse one `provider`/`model`/`settings`/`mcp-server`/`chat` invocation.
 fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) {
     let mut cursor = Cursor::new(args);
     let verb = cursor.positional(&format!("a {family} subcommand"));
     let command = match (family, verb.as_str()) {
+        ("chat", "list") => SetupCommand::ChatList,
+        ("chat", "create") => SetupCommand::ChatCreate,
         ("provider", "list") => SetupCommand::ProviderList,
         ("provider", "set-key") => SetupCommand::ProviderSetKey {
             kind: cursor.positional("a provider kind"),
