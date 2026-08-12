@@ -53,6 +53,17 @@ enum AXTree {
     private static let maxNodesCap = 2000
     private static let maxStringLen = 500
 
+    /// Bound every AX message to the target app. `AXUIElementCopyAttributeValue`
+    /// blocks indefinitely against a hung app; without a messaging timeout the
+    /// helper never returns a structured error and the broker's stdio loop
+    /// (synchronous, one request at a time) wedges for its full 30s kill
+    /// window. A timed-out read fails as `operation_failed` instead.
+    static func appElement(for pid: pid_t) -> AXUIElement {
+        let element = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(element, 5.0)
+        return element
+    }
+
     static func read(_ request: HelperRequest) throws -> Result {
         // Surface both permission modals (Accessibility + Screen Recording) up
         // front so the user grants everything in one pass instead of hitting a
@@ -77,7 +88,7 @@ enum AXTree {
         let maxDepth = min(request.maxDepth ?? 12, maxDepthCap)
         let maxNodes = min(request.maxNodes ?? 500, maxNodesCap)
 
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        let appElement = appElement(for: app.processIdentifier)
         var budget = maxNodes
         let tree = buildNode(appElement, depth: 0, maxDepth: maxDepth, path: "0", budget: &budget)
         return Result(

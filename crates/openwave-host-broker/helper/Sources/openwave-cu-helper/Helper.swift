@@ -117,6 +117,10 @@ enum HelperErrorCode: String, Encodable {
     /// could drive it). The agent should not retry — the situation is the
     /// user's to resolve.
     case yielded = "yielded"
+    /// A coordinate target falls outside every on-screen window the granted
+    /// app owns — acting there would drive a different app (or OpenWave's own
+    /// consent surface). Refused, not acted on.
+    case targetOutsideApp = "target_outside_app"
     /// The native API failed for some other reason.
     case operationFailed = "operation_failed"
 }

@@ -126,6 +126,9 @@ enum Control {
         guard let point = explicitPoint(request) else {
             throw HelperError(code: .invalidRequest, message: "click requires element_id or x/y")
         }
+        // A raw point is global; confine it to the granted app's windows so a
+        // click cannot land on another app's (or OpenWave's own) surface.
+        try ensurePointInApp(point, app: app)
         try postMouseClick(at: point, button: button, clickCount: count)
         return Result(success: true, usedFallback: true, detail: "synthesized click at point")
     }
@@ -275,13 +278,21 @@ enum Control {
             }
             usedFallback = false
         } else if let point = explicitPoint(request) {
+            // A raw point is global; confine it to the granted app's windows.
+            try ensurePointInApp(point, app: app)
             CGWarpMouseCursorPosition(point)
         }
 
+        // The deltas feed a CGEvent's Int32 wheel fields; a finite but huge
+        // delta (a model asking to "scroll to the bottom" with dy=1e10) would
+        // trap the Int32 conversion and crash the process. Clamp instead of
+        // crashing — an enormous scroll is an enormous scroll.
+        let clampedDy = min(max(dy.rounded(), Double(Int32.min)), Double(Int32.max))
+        let clampedDx = min(max(dx.rounded(), Double(Int32.min)), Double(Int32.max))
         guard
             let event = CGEvent(
                 scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
-                wheel1: Int32(dy.rounded()), wheel2: Int32(dx.rounded()), wheel3: 0)
+                wheel1: Int32(clampedDy), wheel2: Int32(clampedDx), wheel3: 0)
         else {
             throw HelperError(code: .operationFailed, message: "could not synthesize scroll event")
         }
@@ -300,7 +311,7 @@ enum Control {
         // Window-level targeting by CGWindowID is a follow-up (AX windows do not
         // expose CGWindowID); app activation is the robust guarantee.
         // Best-effort: also raise the app's main window.
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        let appElement = AXTree.appElement(for: app.processIdentifier)
         if let mainValue = AXTree.copyAttr(appElement, kAXMainWindowAttribute as CFString),
             CFGetTypeID(mainValue) == AXUIElementGetTypeID()
         {
@@ -326,7 +337,7 @@ enum Control {
         guard components.first == "0" else {
             return DescribeResult(role: nil, label: nil)
         }
-        var current = AXUIElementCreateApplication(app.processIdentifier)
+        var current = AXTree.appElement(for: app.processIdentifier)
         for raw in components.dropFirst() {
             guard let index = Int(raw) else {
                 return DescribeResult(role: nil, label: nil)
@@ -395,7 +406,7 @@ enum Control {
                 code: .invalidRequest, message: "malformed element_id: \(elementId)")
         }
 
-        var current = AXUIElementCreateApplication(app.processIdentifier)
+        var current = AXTree.appElement(for: app.processIdentifier)
         for raw in components.dropFirst() {
             guard let index = Int(raw) else {
                 throw HelperError(
@@ -439,6 +450,43 @@ enum Control {
     private static func explicitPoint(_ request: HelperRequest) -> CGPoint? {
         guard let x = request.x, let y = request.y else { return nil }
         return CGPoint(x: x, y: y)
+    }
+
+    /// Refuse a coordinate target that does not fall inside an on-screen window
+    /// owned by the granted app. A raw point is global; without this check a
+    /// click or scroll could land on another app's window — including OpenWave's
+    /// own consent/Stop/Resume controls — while the broker's audit attributes it
+    /// to the granted app. This is the confinement that makes a coordinate
+    /// target no broader than an element target. AX frames and CGWindowList
+    /// bounds share the global top-left-origin point space, so a point-in-rect
+    /// test is valid.
+    private static func ensurePointInApp(_ point: CGPoint, app: NSRunningApplication) throws {
+        guard
+            let infoList = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]]
+        else {
+            throw HelperError(
+                code: .operationFailed, message: "could not enumerate windows to confine a coordinate")
+        }
+        let pid = app.processIdentifier
+        for info in infoList {
+            guard
+                let ownerPid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                ownerPid == pid,
+                let bounds = info[kCGWindowBounds as String] as? [String: Any]
+            else { continue }
+            let rect = CGRect(
+                x: (bounds["X"] as? NSNumber)?.doubleValue ?? 0,
+                y: (bounds["Y"] as? NSNumber)?.doubleValue ?? 0,
+                width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
+                height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0)
+            if rect.contains(point) { return }
+        }
+        throw HelperError(
+            code: .targetOutsideApp,
+            message:
+                "the target point is not inside any window owned by \(app.bundleIdentifier ?? "the granted app"); refusing to act on a different app")
     }
 
     // MARK: - Activation
@@ -526,9 +574,12 @@ enum Control {
     /// the timeout even after the activation wait.
     private static let maxSynthesizedTypeUnits = 4_000
 
-    /// Type arbitrary text by posting per-character Unicode keystrokes (works
-    /// regardless of keyboard layout). Surrogate pairs are posted as their
-    /// separate UTF-16 units, sufficient for normal text.
+    /// Type arbitrary text by posting per-grapheme Unicode keystrokes (works
+    /// regardless of keyboard layout). Each grapheme cluster — a base character
+    /// plus its combining marks and any surrogate pair — is posted as one event
+    /// carrying all of its UTF-16 units, so a non-BMP character (an emoji, CJK
+    /// ext-B) is never split into a lone, unpaired surrogate that the receiving
+    /// app would drop or replace with U+FFFD.
     private static func typeUnicode(_ text: String) throws {
         let units = Array(text.utf16)
         guard units.count <= maxSynthesizedTypeUnits else {
@@ -541,16 +592,30 @@ enum Control {
         // One event source for the whole burst gives steadier ordering than a
         // fresh nil source per event.
         let source = CGEventSource(stateID: .combinedSessionState)
-        for unit in units {
+        // A long burst can run for seconds; a system security dialog appearing
+        // mid-burst must stop the remaining keystrokes from landing in it, so
+        // re-check the foreground periodically, not only at op start.
+        var sinceYieldCheck = 0
+        for grapheme in text {
+            if sinceYieldCheck >= 64 {
+                try ensureNoSystemDialogFrontmost()
+                sinceYieldCheck = 0
+            }
+            var cluster = Array(grapheme.utf16)
+            sinceYieldCheck += cluster.count
             guard
                 let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                 let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
             else {
                 throw HelperError(code: .operationFailed, message: "could not synthesize keystroke")
             }
-            var u = unit
-            down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &u)
-            up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &u)
+            let length = cluster.count
+            cluster.withUnsafeMutableBufferPointer { buffer in
+                down.keyboardSetUnicodeString(
+                    stringLength: length, unicodeString: buffer.baseAddress!)
+                up.keyboardSetUnicodeString(
+                    stringLength: length, unicodeString: buffer.baseAddress!)
+            }
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
             usleep(perKeystrokeDelayMicros)
