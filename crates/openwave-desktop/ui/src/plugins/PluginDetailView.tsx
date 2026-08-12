@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronLeft, Sparkles } from "lucide-react";
+import { ChevronLeft } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { PluginSkillInfo } from "@/api";
@@ -7,8 +7,10 @@ import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
+import { PluginGlyph, SkillGlyph } from "./PluginGlyph";
 import type { PluginsApis } from "./pluginsApis";
-import { capabilityLabel, categoryIcon, categoryLabel } from "./pluginVocabulary";
+import { capabilityLabel, categoryLabel } from "./pluginVocabulary";
 import { SkillDialog } from "./SkillDialog";
 import type { PluginCatalogState } from "./usePluginCatalog";
 
@@ -39,7 +41,6 @@ export function PluginDetailView({
 }) {
   const { catalog, loading, error, setEnabled } = state;
   const plugin = catalog?.plugins.find((entry) => entry.name === pluginId) ?? null;
-  const Icon = plugin ? categoryIcon(plugin.category) : null;
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
   // The dialog re-reads its skill from the fresh catalog, so its switch moves
   // with the toggle round trip instead of freezing at the row that opened it.
@@ -76,16 +77,20 @@ export function PluginDetailView({
 
           {plugin && (
             <>
-              <section className="flex flex-col gap-3" aria-label="About">
-                {Icon && (
-                  <div className="grid size-14 place-items-center rounded-xl border bg-muted text-muted-foreground">
-                    <Icon className="size-7" aria-hidden="true" />
-                  </div>
-                )}
+              <section className="flex flex-col gap-4" aria-label="About">
+                <PluginGlyph
+                  pluginName={plugin.name}
+                  category={plugin.category}
+                  size="lg"
+                />
                 <div className="flex items-start justify-between gap-4">
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <h1 className="text-xl font-semibold">{plugin.display_name}</h1>
-                    <p className="text-muted-foreground text-sm">{plugin.description}</p>
+                  <div className="flex min-w-0 flex-col gap-1.5">
+                    <h1 className="text-2xl font-semibold tracking-tight">
+                      {plugin.display_name}
+                    </h1>
+                    <p className="text-muted-foreground text-sm text-pretty">
+                      {plugin.description}
+                    </p>
                   </div>
                   <Switch
                     aria-label={`Enable ${plugin.display_name}`}
@@ -93,14 +98,15 @@ export function PluginDetailView({
                     onCheckedChange={(enabled) =>
                       setEnabled({ plugins: { [plugin.name]: enabled }, skills: {} })
                     }
+                    className="mt-1"
                   />
                 </div>
               </section>
 
               <section className="flex flex-col gap-1" aria-label="Skills">
                 <div className="flex items-baseline gap-2 border-b pb-2">
-                  <h2 className="text-base font-semibold">Skills</h2>
-                  <span className="text-muted-foreground text-sm">
+                  <h2 className="text-sm font-semibold">Skills</h2>
+                  <span className="text-muted-foreground text-xs tabular-nums">
                     {plugin.skills.length}
                   </span>
                 </div>
@@ -110,25 +116,27 @@ export function PluginDetailView({
                     available. Your choices are kept while it is off.
                   </p>
                 )}
-                <ul className="flex flex-col" aria-label="Member skills">
+                <ul className="flex flex-col pt-1" aria-label="Member skills">
                   {plugin.skills.map((skill) => (
                     <li
                       key={skill.name}
-                      className="hover:bg-muted/60 -mx-2 flex items-center gap-3 rounded-md px-2 py-2.5 transition-colors"
+                      className={cn(
+                        "hover:bg-muted/60 -mx-2 flex items-center gap-3 rounded-xl px-2 py-2.5 transition-colors",
+                        !plugin.enabled && "opacity-80",
+                      )}
                     >
                       <button
                         type="button"
                         className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
                         onClick={() => setOpenSkill(skill)}
                       >
-                        <span className="grid size-8 shrink-0 place-items-center rounded-lg border bg-muted text-muted-foreground">
-                          <Sparkles className="size-4" aria-hidden="true" />
-                        </span>
+                        <SkillGlyph size="sm" />
                         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                           <span
-                            className={`truncate text-sm font-medium${
-                              plugin.enabled ? "" : " text-muted-foreground"
-                            }`}
+                            className={cn(
+                              "truncate text-sm font-medium",
+                              !plugin.enabled && "text-muted-foreground",
+                            )}
                           >
                             {skill.name}
                           </span>
@@ -156,7 +164,7 @@ export function PluginDetailView({
               </section>
 
               <section className="flex flex-col gap-1" aria-label="Information">
-                <h2 className="border-b pb-2 text-base font-semibold">Information</h2>
+                <h2 className="border-b pb-2 text-sm font-semibold">Information</h2>
                 <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 pt-2 text-sm">
                   <InfoRow label="Category">{categoryLabel(plugin.category)}</InfoRow>
                   <InfoRow label="Capabilities">
