@@ -58,7 +58,9 @@
 //! Every client command above embeds its own server by default. `--server
 //! <url>` (or `OPENWAVE_SERVER_URL`) makes it a pure client of one that is
 //! already running instead, with the bearer token coming from
-//! `OPENWAVE_SERVER_TOKEN` — see [`connect`]. That is how a second process
+//! `OPENWAVE_SERVER_TOKEN` — see [`connect`]. `--attach` is the same attach
+//! using `{OPENWAVE_DATA_DIR}/listen.json` the running server wrote, so the
+//! token never rides argv (desktop or `serve`). That is how a second process
 //! reaches a data directory a desktop app or daemon already owns; two processes
 //! embedding servers over one data directory is refused.
 
@@ -125,10 +127,12 @@ from the environment variable named by --from-env — never from an argument,
 which every process on the machine can read.
 
 tui, -p, output, attach, and the setup commands also take --server <url>
-[--server-token-env <var>], which talks to a server that is already running
-instead of embedding one. The token comes from OPENWAVE_SERVER_TOKEN, or from the named variable;
-it is never an argument either. The folder commands do not: they provision
-local host consent in this machine's own broker state.";
+[--server-token-env <var>] or --attach, which talks to a server that is already
+running instead of embedding one. --attach reads {OPENWAVE_DATA_DIR}/listen.json
+(written by serve and the desktop). With --server the token comes from
+OPENWAVE_SERVER_TOKEN, or from the named variable; it is never an argument
+either. The folder commands do not: they provision local host consent in this
+machine's own broker state.";
 
 #[tokio::main]
 async fn main() {
@@ -310,16 +314,18 @@ async fn run() -> Result<i32> {
     }
 }
 
-/// The `--server` / `--server-token-env` pair, lifted out of the arguments.
+/// The `--server` / `--server-token-env` / `--attach` choice, lifted out of
+/// the arguments.
 struct ServerFlags {
     url: Option<String>,
     token_env: Option<String>,
+    attach: bool,
 }
 
 impl ServerFlags {
     /// Turn the flags plus the environment into the choice to embed or attach.
     fn resolve(self) -> Result<connect::Server> {
-        connect::Server::resolve(self.url, self.token_env)
+        connect::Server::resolve(self.url, self.token_env, self.attach)
     }
 
     /// Refuse the flags on a command that has no client to point elsewhere.
@@ -328,16 +334,17 @@ impl ServerFlags {
     /// a shell that exports it so its `-p` runs attach must still be able to
     /// start a daemon.
     fn refuse(&self, command: &str) {
-        if self.url.is_some() || self.token_env.is_some() {
+        if self.url.is_some() || self.token_env.is_some() || self.attach {
             usage_error(&format!(
-                "{command} runs a server rather than connecting to one, so it takes no --server"
+                "{command} runs a server rather than connecting to one, so it takes no --server/--attach"
             ));
         }
     }
 }
 
-/// Pull `--server <url>` and `--server-token-env <var>` out of the arguments
-/// wherever they appear, leaving the rest for the per-command parsers.
+/// Pull `--server <url>`, `--server-token-env <var>`, and `--attach` out of
+/// the arguments wherever they appear, leaving the rest for the per-command
+/// parsers.
 ///
 /// A pre-pass rather than an option on each parser: the flags apply to every
 /// client command, and no command takes a value beginning with `--` (each
@@ -346,10 +353,18 @@ fn take_server_flags(args: Vec<OsString>) -> (Vec<OsString>, ServerFlags) {
     let mut flags = ServerFlags {
         url: None,
         token_env: None,
+        attach: false,
     };
     let mut rest = Vec::with_capacity(args.len());
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        if arg == OsStr::new("--attach") {
+            if flags.attach {
+                usage_error("--attach given more than once");
+            }
+            flags.attach = true;
+            continue;
+        }
         let slot = if arg == OsStr::new("--server") {
             &mut flags.url
         } else if arg == OsStr::new("--server-token-env") {
@@ -685,7 +700,7 @@ fn usage_error(message: &str) -> ! {
 ///
 /// Debug builds keep their own keychain service, matching the desktop's
 /// dev/release split: a dev daemon must not mutate release secret state.
-fn profile_config() -> Result<Config> {
+pub(crate) fn profile_config() -> Result<Config> {
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut config = Config::from_env()?;
     #[cfg(debug_assertions)]
