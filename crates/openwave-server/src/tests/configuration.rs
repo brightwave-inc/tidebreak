@@ -1270,6 +1270,75 @@ async fn providers_list_and_put_roundtrip() {
     assert_eq!(openai["has_credential"], false);
 }
 
+/// Storing a credential is enough to route: the provider turns on even when
+/// the write omits `enabled`, matching ChatGPT sign-in completion and the
+/// CLI's "set-key enables the provider" contract. An explicit later disable
+/// still leaves the credential in place.
+#[tokio::test]
+async fn writing_a_provider_credential_enables_the_provider() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    // Start disabled with no credential.
+    let disable = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"enabled": false}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disable.status(), StatusCode::OK);
+
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential": {"type": "api_key", "key": "sk-auto-enable"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(put).await;
+    assert_eq!(info["enabled"], true);
+    assert_eq!(info["has_credential"], true);
+    assert_eq!(info["auth_mode"], "api_key");
+
+    // Disable without touching the credential — still credentialed, just off.
+    let off = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"enabled": false}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(off.status(), StatusCode::OK);
+    let off_info: serde_json::Value = json_body(off).await;
+    assert_eq!(off_info["enabled"], false);
+    assert_eq!(off_info["has_credential"], true);
+}
+
 #[tokio::test]
 async fn openai_compatible_requires_base_url_when_enabled() {
     let (router, token, _store, _dir) = test_app().await;
