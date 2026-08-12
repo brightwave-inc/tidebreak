@@ -1005,7 +1005,11 @@ async fn stops_proxying_inference_at_the_runs_spend_budget() {
 /// move forward before the model call is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // This test runs alongside hundreds of server tests, many with their own
+    // multi-thread runtimes and SQLite stores. Keep a hard bound for genuine
+    // transport hangs, but leave enough headroom for the loopback drive to be
+    // scheduled under full-suite CI contention.
+    tokio::time::timeout(Duration::from_secs(90), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "takes a while").await;
 
