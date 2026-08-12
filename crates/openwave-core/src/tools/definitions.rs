@@ -55,21 +55,26 @@ pub(super) fn create_app() -> ToolSpec {
         "Publish a local mini-app the user can reopen from their Apps library: a \
          complete self-contained HTML document plus a manifest naming the app and \
          pinning the exact capabilities it may call through the host. A manifest \
-         binding names either a rest_api connected app by id with the declared \
-         OpenAPI operationIds it may execute (`operation_ids`), or an approved \
-         connected folder by root id with `access: \"read\"` or `\"read_write\"` — \
-         request write access only when the app needs it, since it is a louder \
-         consent. Mounted MCP tools cannot be bound. The available connected apps \
-         and folders and their ids are listed at the end of this description. The \
+         binding names a rest_api connected app by id with the declared OpenAPI \
+         operationIds it may execute (`operation_ids`), a gateway connected app by \
+         its gateway id (`{gateway_app, operation_ids}`), or an approved connected \
+         folder by root id with `access: \"read\"` or `\"read_write\"` — request \
+         write access only when the app needs it, since it is a louder consent. \
+         Mounted MCP tools cannot be bound. The available connected apps and \
+         folders and their ids are listed at the end of this description. The \
          app renders in a sandboxed frame with no network access; pinned \
          capabilities run only after the user grants them. From inside the frame \
          the bundle calls them by posting JSON-RPC 2.0 to its parent window: \
-         `operations/call` with `{operation_id, parameters?, body?}`, whose \
-         result carries the raw response as `{status, content_type, \
-         body_base64}`; or `fs/list`, `fs/read`, and `fs/write` with `{folder, \
-         path?, content_base64?, replace?}`, whose results carry `{entries}`, \
-         `{content_base64}`, or `{replaced}` with file bytes base64-encoded both \
-         ways. Pass the app_id from an earlier create_app result to publish a \
-         new revision of that app — revisions append, never overwrite.",
+         `operations/call` with `{operation_id, parameters?, body?}` for a \
+         rest_api binding, or with `{connected_app_id, operation_id, \
+         path_parameters?, query?, body?}` for a gateway binding — \
+         `connected_app_id` is the bound `gateway_app` id, and a gateway call \
+         without it is refused. Either form's result carries the raw response as \
+         `{status, content_type, body_base64}`. Folder bindings use `fs/list`, \
+         `fs/read`, and `fs/write` with `{folder, path?, content_base64?, \
+         replace?}`, whose results carry `{entries}`, `{content_base64}`, or \
+         `{replaced}` with file bytes base64-encoded both ways. Pass the app_id \
+         from an earlier create_app result to publish a new revision of that app \
+         — revisions append, never overwrite.",
     )
 }
