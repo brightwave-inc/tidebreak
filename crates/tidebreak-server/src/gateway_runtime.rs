@@ -3066,8 +3066,8 @@ mod tests {
         .await
         .unwrap();
         store
-            .create_chat(&openwave_core::Chat {
-                id: openwave_core::ChatId::new(),
+            .create_chat(&tidebreak_core::Chat {
+                id: tidebreak_core::ChatId::new(),
                 project_id: None,
                 title: Some("lost to the reset".to_owned()),
                 model: None,

@@ -247,6 +247,10 @@ test("PR lanes are scope-gated, never label-gated", () => {
   );
   assert.match(
     ci,
+    /sed -i \\\n\s+-e 's\/OPENWAVE\/TIDEBREAK\/g' \\\n\s+-e 's\/OpenWave\/Tidebreak\/g' \\\n\s+-e 's\/openwave\/tidebreak\/g' \\\n\s+"\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
+  );
+  assert.match(
+    ci,
     /node --test scripts\/\.trusted-workflow-security\.test\.mjs/,
   );
   assert.match(ci, /node --test scripts\/\*\.test\.mjs/);
