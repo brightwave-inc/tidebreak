@@ -283,7 +283,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/smol-rs/async-task
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### async-trait 0.1.91
+### async-trait 0.1.92
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/async-trait
@@ -2053,7 +2053,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/chanced/jsonptr
 - License text: `LICENSE-APACHE` ([L-ae8de7e1b783](#l-ae8de7e1b783)), `LICENSE-MIT` ([L-055a17110636](#l-055a17110636))
 
-### jsonschema 0.49.7
+### jsonschema 0.49.8
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -4097,7 +4097,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/thiserror
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### thiserror 2.0.19
+### thiserror 2.0.20
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/thiserror
@@ -4109,7 +4109,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/thiserror
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### thiserror-impl 2.0.19
+### thiserror-impl 2.0.20
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/thiserror

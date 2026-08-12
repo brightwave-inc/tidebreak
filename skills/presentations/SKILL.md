@@ -1,6 +1,6 @@
 ---
 name: presentations
-description: Build PowerPoint (PPTX) decks — new decks with pptxgenjs when Node is present, or python-pptx when it is not; existing decks and templates edited in place through their OOXML — with visual QA before delivery.
+description: Build PowerPoint (PPTX) decks — pptxgenjs when Node is present, python-pptx when not; edit existing decks in place via OOXML — with visual QA before delivery.
 deps: { npm: ["pptxgenjs@4.0.1"], host: ["libreoffice"] }
 ---
 
