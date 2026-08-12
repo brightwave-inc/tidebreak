@@ -53,7 +53,7 @@ use openwave_core::{
 use openwave_host_broker::{
     Broker, BrokerError, Capability, ConsentMethod, ControlEnvelope, ControlRequest, ControlResult,
     GrantStatementSummary, GrantSubject, OperationId, RegisterRootReceipt, RegisterRootRequest,
-    RequestId, Response, RevokeRootRequest, RootAttachmentMutationKind,
+    RequestId, Response, RevokeGrantRequest, RevokeRootRequest, RootAttachmentMutationKind,
     RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootId, RootPolicy, Scope,
     SubjectKind, PROTOCOL_VERSION,
 };
@@ -726,6 +726,53 @@ async fn disconnect(
             "openwave: the folder approval still reaches other subjects and was left in place; \
              see `openwave folder list`"
         );
+    }
+    // `RevokeRoot` drops only root-scoped grants. `ListRoots` is subject-scoped
+    // and would otherwise survive as a dangling list-folders row; the next
+    // connect then mints a second one. Drop it once this subject holds no
+    // root-scoped reach left to list.
+    revoke_orphan_list_roots(data_dir, subject)?;
+    Ok(())
+}
+
+/// Withdraw subject-scoped `ListRoots` when the subject has no root reach left.
+///
+/// Registration always mints a fresh list-folders grant alongside the folder's
+/// read/write/exec. `RevokeRoot` deliberately leaves subject-scoped grants
+/// alone (they are not properties of one folder), so a sole-holder disconnect
+/// used to leave list-folders standing and the next connect stacked another.
+/// When nothing root-scoped remains for the subject, list-folders has nothing
+/// to name and must go with the rest of the withdrawal.
+fn revoke_orphan_list_roots(data_dir: &Path, subject: GrantSubject) -> Result<()> {
+    let ControlResult::ListGrantStatements { grants } =
+        control(data_dir, ControlRequest::ListGrantStatements)?
+    else {
+        return Err(unexpected_broker_response());
+    };
+    let still_holds_root = grants.iter().any(|grant| {
+        grant.subject == subject
+            && matches!(grant.scope, Scope::Root { .. } | Scope::PathSubtree { .. })
+    });
+    if still_holds_root {
+        return Ok(());
+    }
+    for grant in grants {
+        if grant.subject != subject
+            || grant.capability != Capability::ListRoots
+            || !matches!(grant.scope, Scope::Subject)
+        {
+            continue;
+        }
+        match control(
+            data_dir,
+            ControlRequest::RevokeGrant(RevokeGrantRequest {
+                subject,
+                grant_id: grant.grant_id,
+            }),
+        )? {
+            ControlResult::RevokeGrant(_) => {}
+            _ => return Err(unexpected_broker_response()),
+        }
     }
     Ok(())
 }
