@@ -771,6 +771,9 @@ const APPROVABLE_KINDS = {
   external_mcp_may_call_server: true,
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
+  // Approvable once per app; the durable consent is the broker's per-app grant,
+  // not a standing grant here.
+  computer_may_control_app: true,
   unsupported: false,
 } as const satisfies Record<RendererApprovalKind, boolean>;
 
@@ -780,7 +783,14 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
 
 /** Approval kinds whose authority is stable enough to remember by tool name. */
 export function isRememberableKind(kind: RendererApprovalKind): boolean {
-  return isApprovableKind(kind) && kind !== "external_mcp_may_call_server";
+  // Computer-use control is excluded alongside external MCP: its durable
+  // consent is the host broker's per-app grant, so a name-keyed renderer grant
+  // would be a second, drifting spelling of it.
+  return (
+    isApprovableKind(kind) &&
+    kind !== "external_mcp_may_call_server" &&
+    kind !== "computer_may_control_app"
+  );
 }
 
 /** A strict renderer-safe snapshot used to recover a parked approval. */

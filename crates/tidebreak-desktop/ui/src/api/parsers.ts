@@ -1322,6 +1322,7 @@ const RENDERER_APPROVAL_KINDS = {
   external_mcp_may_call_server: true,
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
+  computer_may_control_app: true,
   unsupported: true,
 } as const satisfies Record<RendererApprovalKind, true>;
 
