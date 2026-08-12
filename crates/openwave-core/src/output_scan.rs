@@ -17,6 +17,12 @@
 //! creation that lost that race is told which output won and appends to it,
 //! so a name never ends up on two live records.
 //!
+//! Background runs additionally skip obvious source intermediates under
+//! `output/` (`.py`, `.js`, `.ts`, `.sh`): those belong in the workspace root,
+//! not beside the deliverable. The skip is sandbox-only — foreground turns
+//! keep the previous publish-everything rule — and surfaces a note so the
+//! model can move the script rather than silently losing a file.
+//!
 //! The scan is deliberately non-fatal: a file the host cannot accept (too
 //! large, unreadable, over the revision cap) becomes a note for the model
 //! rather than a failed command.
@@ -106,14 +112,19 @@ pub async fn sync_output_directory(
 ) -> Result<OutputDirectorySync> {
     let mut sync = OutputDirectorySync::default();
 
+    // Background sandbox runs are the path that kept dropping helper scripts
+    // next to real deliverables. Foreground turns keep the older, broader rule.
+    let skip_source_intermediates = matches!(producer, RevisionProducer::Run(_));
+
     // Reading is blocking capability I/O; keep it off the async runtime.
     let read_scratch = workspace
         .try_clone()
         .map_err(|error| AgentError::Store(format!("could not open private scratch: {error}")))?;
-    let (candidates, mut read_notes) =
-        tokio::task::spawn_blocking(move || read_output_candidates(&read_scratch))
-            .await
-            .map_err(|error| AgentError::Store(format!("output scan task failed: {error}")))?;
+    let (candidates, mut read_notes) = tokio::task::spawn_blocking(move || {
+        read_output_candidates(&read_scratch, skip_source_intermediates)
+    })
+    .await
+    .map_err(|error| AgentError::Store(format!("output scan task failed: {error}")))?;
     sync.notes.append(&mut read_notes);
     if candidates.is_empty() {
         return Ok(sync);
@@ -307,11 +318,30 @@ async fn publish_revision_bytes(
     .map_err(|error| AgentError::Store(format!("could not publish output revision: {error}")))
 }
 
+/// Whether a filename is an obvious source intermediate a sandbox agent should
+/// keep outside `output/`.
+///
+/// Only the common script extensions that show up as build helpers next to
+/// real deliverables. Curated text and office/binary formats are never matched.
+#[must_use]
+fn is_source_intermediate_filename(name: &str) -> bool {
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "py" | "js" | "ts" | "sh"
+    )
+}
+
 /// Read and classify the acceptable files directly under `output/`.
 ///
 /// Deterministic (alphabetical) order, bounded at [`MAX_OUTPUT_SCAN_FILES`].
 /// Anything skipped is explained in a note.
-fn read_output_candidates(scratch: &Dir) -> (Vec<ScanCandidate>, Vec<String>) {
+fn read_output_candidates(
+    scratch: &Dir,
+    skip_source_intermediates: bool,
+) -> (Vec<ScanCandidate>, Vec<String>) {
     let mut notes = Vec::new();
 
     // A symlinked `output/` planted by local exec would hand host files from an
@@ -344,6 +374,15 @@ fn read_output_candidates(scratch: &Dir) -> (Vec<ScanCandidate>, Vec<String>) {
         };
         if name.starts_with('.') {
             // Dotfiles are workspace plumbing and never publishable.
+            continue;
+        }
+        if skip_source_intermediates && is_source_intermediate_filename(&name) {
+            // Sandbox-only: helper scripts next to a PPTX/PDF are not
+            // deliverables. Note it so the model moves the script rather than
+            // thinking the file vanished.
+            notes.push(format!(
+                "output/{name} was not published: keep helper scripts in the workspace root, not under output/; only final deliverables belong there"
+            ));
             continue;
         }
         match entry.metadata().map(|metadata| metadata.file_type()) {

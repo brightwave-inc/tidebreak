@@ -36,6 +36,7 @@ function run(status: AgentRun["status"]): AgentRun {
     spawn_call_id: "spawn-call",
     tier: "background",
     execution_location: "in_process",
+    code_execution_provider: "local",
     status,
     task: "Prepare the report",
     started_at: "2026-08-07T11:00:00Z",

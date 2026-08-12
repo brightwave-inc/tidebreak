@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use openwave_core::{AgentError, ChatId, OutputId, OutputRevisionId, Result};
 
 use crate::api::client::Client;
+use crate::api::wire::{OutputPreview, OutputRevisionRow, OutputSummary};
 use crate::connect::{Server, Session};
+use crate::print::OutputFormat;
 
 /// What `openwave output` was asked to do.
 pub enum Command {
@@ -37,17 +39,27 @@ pub enum Command {
     },
 }
 
-pub async fn run(command: Command, server: Server) -> Result<()> {
+pub async fn run(command: Command, format: OutputFormat, server: Server) -> Result<()> {
     let session = Session::open(&server).await?;
-    execute(session.client(), command).await
+    execute(session.client(), command, format).await
 }
 
 /// Make the calls and render them. Split from [`run`] the way [`crate::setup`]
 /// splits its own, so the work is reachable with a client the caller owns.
-async fn execute(client: &Client, command: Command) -> Result<()> {
+async fn execute(client: &Client, command: Command, format: OutputFormat) -> Result<()> {
     match command {
         Command::List { chat } => {
             let catalog = client.list_outputs(chat).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "deliverables": catalog
+                        .deliverables
+                        .iter()
+                        .map(output_summary_json)
+                        .collect::<Vec<_>>(),
+                    "truncated": catalog.truncated,
+                }));
+            }
             if catalog.deliverables.is_empty() {
                 eprintln!("openwave: this conversation has no outputs");
             }
@@ -73,6 +85,12 @@ async fn execute(client: &Client, command: Command) -> Result<()> {
             revision,
         } => {
             let preview = client.read_output(chat, output, revision).await?;
+            if format == OutputFormat::Json {
+                // One object on stdout holds both the preview text and the
+                // metadata text mode splits across stderr and stdout, so a
+                // driver can parse a single value without scraping banners.
+                return emit(&output_preview_json(&preview));
+            }
             if preview.content.is_empty() {
                 return Err(AgentError::msg(format!(
                     "{} is {}, which has no text preview; use `openwave output export`",
@@ -96,6 +114,15 @@ async fn execute(client: &Client, command: Command) -> Result<()> {
         }
         Command::Revisions { chat, output } => {
             let history = client.list_output_revisions(chat, output).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "revisions": history
+                        .revisions
+                        .iter()
+                        .map(output_revision_json)
+                        .collect::<Vec<_>>(),
+                }));
+            }
             for revision in &history.revisions {
                 println!(
                     "{}\tv{}\t{} bytes\t{}\t{}{}",
@@ -118,6 +145,12 @@ async fn execute(client: &Client, command: Command) -> Result<()> {
             let bytes = client.read_output_bytes(chat, output, revision).await?;
             let written = bytes.len();
             write_export(&destination, &bytes)?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "path": destination.display().to_string(),
+                    "bytes": written,
+                }));
+            }
             eprintln!(
                 "openwave: wrote {written} bytes to {}",
                 destination.display()
@@ -125,6 +158,45 @@ async fn execute(client: &Client, command: Command) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn output_summary_json(output: &OutputSummary) -> serde_json::Value {
+    serde_json::json!({
+        "outputId": output.output_id,
+        "filename": output.filename,
+        "mediaType": output.media_type,
+        "sizeBytes": output.size_bytes,
+        "revisionCount": output.revision_count,
+        "updatedAt": output.updated_at,
+    })
+}
+
+fn output_preview_json(preview: &OutputPreview) -> serde_json::Value {
+    serde_json::json!({
+        "filename": preview.filename,
+        "mediaType": preview.media_type,
+        "revisionId": preview.revision_id,
+        "content": preview.content,
+        "truncated": preview.truncated,
+    })
+}
+
+fn output_revision_json(revision: &OutputRevisionRow) -> serde_json::Value {
+    serde_json::json!({
+        "revisionId": revision.revision_id,
+        "ordinal": revision.ordinal,
+        "sizeBytes": revision.size_bytes,
+        "createdAt": revision.created_at,
+        "producedBy": revision.produced_by,
+        "isCurrent": revision.is_current,
+    })
+}
+
+/// Write one JSON object on stdout, matching setup and print mode's shape so
+/// the same consumer can read every CLI surface.
+fn emit(value: &serde_json::Value) -> Result<()> {
+    println!("{value}");
+    Ok(())
 }
 
 /// Write exported bytes, replacing the destination only once the whole file is

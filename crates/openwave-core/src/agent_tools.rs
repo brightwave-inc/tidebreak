@@ -274,17 +274,17 @@ struct SandboxReadDelegatedFileArgs {}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxExecArgs {
-    /// Executable name or path.
+    /// Executable name or path (argv[0] only — no spaces or shell syntax).
     #[schemars(
         length(min = 1, max = MAX_SANDBOX_EXEC_COMMAND_BYTES),
-        description = "Executable name or path."
+        description = "Single executable name or path (argv[0]). No spaces; put flags and operands in args."
     )]
     pub command: String,
     /// Arguments passed directly to the executable, with no shell parsing.
     #[serde(default)]
     #[schemars(
         length(max = MAX_SANDBOX_EXEC_ARGUMENTS),
-        description = "Arguments passed directly to the executable."
+        description = "One argv entry per token, with no shell parsing (e.g. [\"-p\", \"output\"] for mkdir)."
     )]
     pub args: Vec<String>,
     /// Workspace-relative working directory.
@@ -589,14 +589,19 @@ pub fn sandbox_exec_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<SandboxExecArgs>(
         SANDBOX_EXEC_TOOL,
         "Run one executable with an argument vector in this background task's own private \
-         workspace. No shell parses the arguments unless you invoke a shell explicitly (for \
-         example command '/bin/sh' with args ['-c', '…']). The workspace starts empty and is \
-         yours alone: it holds nothing but what your own earlier commands wrote, and you cannot \
-         reach the conversation, the user's files, or any connected folder from it. Save every \
-         deliverable under output/ — each file you write there is published to the user as a \
-         durable output named by its own filename, and writing the same filename again publishes \
-         a new version of that same output. Name those files the way you want the user to see \
-         them. Every command returns bounded stdout and stderr.",
+         workspace. command is argv[0] only — a single binary or path with no spaces (python3, \
+         mkdir, /bin/sh). Put every other token in args: mkdir -p output is command mkdir with \
+         args [\"-p\", \"output\"]; a shell one-liner is command /bin/sh with args [\"-c\", \"…\"]. \
+         No shell parses the arguments unless you invoke a shell that way. The workspace starts \
+         empty and is yours alone: it holds nothing but what your own earlier commands wrote, and \
+         you cannot reach the conversation, the user's files, or any connected folder from it. \
+         Write only under the workspace (relative paths); absolute paths like /tmp are not durable \
+         here. Save only final deliverables under output/ (for example .md, .csv, .xlsx, .pdf, \
+         .pptx, .docx, .chart.json) — each file there is published to the user as a durable output \
+         named by its own filename, and writing the same filename again publishes a new version of \
+         that same output. Keep helper scripts and other intermediates in the workspace root (or \
+         any path outside output/); source files under output/ are not published. Name deliverables \
+         the way you want the user to see them. Every command returns bounded stdout and stderr.",
     )
 }
 
@@ -616,11 +621,11 @@ pub fn validate_sandbox_exec_arguments(arguments: &Value) -> bool {
 pub fn sandbox_done_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<SandboxDoneArgs>(
         SANDBOX_DONE_TOOL,
-        "Finish this background task. List the filenames you wrote under output/ that are the \
-         deliverables the task asked for — those files are what the user receives, named exactly \
-         as you named them — and give a short summary of what you produced. Call this only after \
-         the files exist. If the task genuinely produced no file, submit no filenames and say so \
-         in the summary.",
+        "Finish this background task. List the filenames of final deliverables you wrote under \
+         output/ — not helper scripts — that answer the task; those files are what the user \
+         receives, named exactly as you named them. Give a short summary of what you produced. \
+         Call this only after the files exist. If the task genuinely produced no file, submit no \
+         filenames and say so in the summary.",
     )
 }
 

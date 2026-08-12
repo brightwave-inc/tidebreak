@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ConsentStatementSnapshot } from "../api";
+import type { ConnectedFolder } from "../host";
 import {
   levelLabel,
   PermissionsPanel,
@@ -15,7 +16,18 @@ const listCapabilityConsents = vi.hoisted(() =>
 const revokeCapabilityConsent = vi.hoisted(() =>
   vi.fn<() => Promise<boolean>>(),
 );
-vi.mock("../host", () => ({ listCapabilityConsents, revokeCapabilityConsent }));
+const listConnectedFolders = vi.hoisted(() =>
+  vi.fn<() => Promise<ConnectedFolder[]>>(),
+);
+const grantFolderCapability = vi.hoisted(() =>
+  vi.fn<() => Promise<boolean | null>>(),
+);
+vi.mock("../host", () => ({
+  listCapabilityConsents,
+  revokeCapabilityConsent,
+  listConnectedFolders,
+  grantFolderCapability,
+}));
 
 const execStatement: ConsentStatementSnapshot = {
   handle: {
@@ -50,6 +62,16 @@ const folderWriteStatement: ConsentStatementSnapshot = {
   granted_at: "2026-07-30T12:00:00Z",
 };
 
+const folderReadStatement: ConsentStatementSnapshot = {
+  ...folderWriteStatement,
+  handle: {
+    kind: "capability_grant",
+    grant_id: "66666666-6666-6666-6666-666666666666",
+  },
+  verb: { kind: "capability", capability: "read_files" },
+  method: "permission_dialog",
+};
+
 function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   return {
     listConsentStatements: vi.fn().mockResolvedValue([execStatement]),
@@ -68,6 +90,8 @@ function deferred<T>() {
 
 beforeEach(() => {
   listCapabilityConsents.mockResolvedValue([]);
+  listConnectedFolders.mockResolvedValue([]);
+  grantFolderCapability.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -141,6 +165,44 @@ describe("PermissionsPanel", () => {
       expect(screen.queryByText("Documents")).not.toBeInTheDocument(),
     );
     expect(client.revokeStandingGrant).not.toHaveBeenCalled();
+  });
+
+  it("offers read access back on an attached folder that allows nothing", async () => {
+    // The state a reader can reach and could not leave: read revoked, so the
+    // folder is attached and unusable, and nothing re-grants it on its own.
+    const chatId = "22222222-2222-2222-2222-222222222222";
+    listCapabilityConsents.mockResolvedValue([]);
+    listConnectedFolders.mockResolvedValue([
+      {
+        rootId: "55555555-5555-5555-5555-555555555555",
+        displayName: "Documents",
+        status: "connected",
+      },
+    ]);
+    grantFolderCapability.mockImplementation(() => {
+      listCapabilityConsents.mockResolvedValue([folderReadStatement]);
+      listConnectedFolders.mockResolvedValue([]);
+      return Promise.resolve(true);
+    });
+    const client = api({ listConsentStatements: vi.fn().mockResolvedValue([]) });
+    render(
+      <PermissionsPanel client={client} chat={{ id: chatId, project_id: null }} />,
+    );
+
+    await screen.findByText("Documents");
+    await userEvent.click(screen.getByRole("button", { name: "Grant" }));
+
+    await waitFor(() =>
+      expect(grantFolderCapability).toHaveBeenCalledWith(
+        { id: chatId },
+        "55555555-5555-5555-5555-555555555555",
+        "read_files",
+      ),
+    );
+    // The restored grant is listed as an ordinary revocable statement, and the
+    // offer to restore it is gone.
+    await screen.findByText("Read files");
+    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
   });
 
   it("names a project statement as reaching past the chat that made it", async () => {

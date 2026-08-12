@@ -363,7 +363,17 @@ pub struct InboxItem {
 pub struct AgentRunSnapshot {
     pub id: openwave_core::AgentRunId,
     #[serde(default)]
+    pub parent_id: Option<openwave_core::AgentRunId>,
+    #[serde(default)]
     pub tier: Option<String>,
+    /// Where the agent run loop itself executes (`in_process` / `container`).
+    /// Not the code-exec backend — see [`Self::code_execution_provider`].
+    #[serde(default)]
+    pub execution_location: Option<String>,
+    /// Host code-execution backend for `exec` (`local` / `e2b` / `docker` /
+    /// `daytona` / `off`). Independent of [`Self::execution_location`].
+    #[serde(default)]
+    pub code_execution_provider: Option<String>,
     pub status: String,
     #[serde(default)]
     pub task: Option<String>,
@@ -375,6 +385,9 @@ pub struct AgentRunSnapshot {
     pub last_error_code: Option<String>,
     #[serde(default)]
     pub activity: Option<AgentActivity>,
+    /// Files the run named in its terminal `done` submission.
+    #[serde(default)]
+    pub submitted_outputs: Vec<SubmittedOutput>,
     #[serde(default)]
     pub terminal_text: Option<String>,
     /// The call that spawned this run; lets a transcript attach the run to
@@ -384,6 +397,13 @@ pub struct AgentRunSnapshot {
     pub spawn_call_id: Option<CallId>,
     #[serde(default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One file a background run submitted, as the list route returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubmittedOutput {
+    pub output_id: openwave_core::OutputId,
+    pub filename: String,
 }
 
 /// The live checkpoint of a background run.
@@ -421,6 +441,20 @@ impl AgentActivityKind {
             Self::Other => "a step",
         }
     }
+
+    /// Stable snake_case name for JSON drivers and text listings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::WebSearch => "web_search",
+            Self::ReadDelegatedFile => "read_delegated_file",
+            Self::ListConnectedFolders => "list_connected_folders",
+            Self::ListFolder => "list_folder",
+            Self::ReadConnectedFile => "read_connected_file",
+            Self::ImportConnectedFile => "import_connected_file",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// One history entry in a background run's activity timeline.
@@ -429,6 +463,9 @@ pub struct AgentActivityItem {
     pub kind: AgentActivityKind,
     pub outcome: String,
     pub at: chrono::DateTime<chrono::Utc>,
+    /// Renderer-safe command/query detail when the server supplies it.
+    #[serde(default)]
+    pub detail: Option<serde_json::Value>,
 }
 
 /// One pending approval, from `GET /chats/{id}/approvals`.

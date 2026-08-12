@@ -5,16 +5,49 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use openwave_code_execution::CodeExecutionProviderKind;
 use openwave_core::{
     AgentRun, AgentRunExecutionLocation, AgentRunStatus, AgentRunTier, CallId, ChatId,
     RequestAgentRunCancellationOutcome, SandboxToolCall, SandboxToolCallStatus, ToolCallExecution,
     ToolCallRecord, ToolCallStatus, TurnId,
 };
 
+use crate::code_execution;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::scoped_store::ScopedStore;
 use crate::state::{AppState, SandboxSteerRefusal};
+
+/// Host-selected backend that runs `exec` tool calls.
+///
+/// Distinct from [`AgentRunExecutionLocation`], which names where the agent
+/// *run loop* itself executes (`in_process` vs `container`). A background run
+/// can be in-process while its shell work still lands on e2b, docker, or
+/// daytona — this field is that backend, or `off` when code execution is
+/// disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeExecutionProviderSnapshot {
+    Local,
+    E2b,
+    Daytona,
+    Docker,
+    Off,
+}
+
+impl CodeExecutionProviderSnapshot {
+    fn from_config(provider: Option<CodeExecutionProviderKind>) -> Self {
+        match provider {
+            Some(CodeExecutionProviderKind::Local) => Self::Local,
+            Some(CodeExecutionProviderKind::E2b) => Self::E2b,
+            Some(CodeExecutionProviderKind::Daytona) => Self::Daytona,
+            Some(CodeExecutionProviderKind::Docker) => Self::Docker,
+            // `CodeExecutionProviderKind` is non-exhaustive; an unknown future
+            // variant is not something a renderer can name yet.
+            Some(_) | None => Self::Off,
+        }
+    }
+}
 
 /// Renderer-safe state for one agent run.
 ///
@@ -26,6 +59,11 @@ pub struct AgentRunSnapshot {
     pub parent_id: Option<openwave_core::AgentRunId>,
     pub tier: AgentRunTier,
     pub execution_location: AgentRunExecutionLocation,
+    /// Active host code-execution backend for `exec`, not the run-loop seat.
+    ///
+    /// See [`CodeExecutionProviderSnapshot`]. Read from the current host
+    /// setting at list time — the same selection the next `exec` would use.
+    pub code_execution_provider: CodeExecutionProviderSnapshot,
     pub status: AgentRunStatus,
     /// The exact bounded task delegated by the visible spawn step.
     pub task: Option<String>,
@@ -73,6 +111,7 @@ impl AgentRunSnapshot {
         terminal_text: Option<String>,
         submitted_outputs: Vec<SubmittedOutputSnapshot>,
         task_plan: Option<AgentRunTaskPlanProgress>,
+        code_execution_provider: CodeExecutionProviderSnapshot,
     ) -> Self {
         Self {
             id: run.id,
@@ -80,6 +119,7 @@ impl AgentRunSnapshot {
             spawn_call_id: run.spawn_call_id,
             tier: run.tier,
             execution_location: run.execution_location,
+            code_execution_provider,
             status: run.status,
             task: run.input,
             started_at: run.started_at,
@@ -365,11 +405,18 @@ fn foreground_activity(
 
 /// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
 pub async fn list_agent_runs(
+    State(state): State<AppState>,
     store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<AgentRunSnapshot>>, ServerError> {
     store.require_chat(id).await?;
     let runs = store.list_agent_runs(id).await?;
+    // Host code-exec selection is independent of where the run loop sits.
+    // One read covers every snapshot in the response: the next `exec` uses
+    // the same setting, whether the child is foreground or background.
+    let code_execution_provider = CodeExecutionProviderSnapshot::from_config(
+        code_execution::read_config(&*state.store).await?.provider,
+    );
     // This read model needs only live client checkpoints. Loading the complete
     // tool-call transcript here would needlessly deserialize historical model
     // arguments, results, and local diagnostics just to render current work.
@@ -428,6 +475,7 @@ pub async fn list_agent_runs(
             terminal_text,
             submitted_outputs,
             task_plan,
+            code_execution_provider,
         ));
     }
     Ok(Json(snapshots))

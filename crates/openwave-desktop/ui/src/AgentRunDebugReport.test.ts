@@ -13,6 +13,7 @@ function run(overrides: Partial<AgentRun> = {}): AgentRun {
     parent_id: null,
     tier: "background",
     execution_location: "container",
+    code_execution_provider: "local",
     status: "failed",
     task: "Summarize the quarterly report",
     started_at: "2026-08-01T10:00:00Z",

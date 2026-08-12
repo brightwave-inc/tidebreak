@@ -1,7 +1,7 @@
 //! Durable broker registry and mutation receipts.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -22,7 +22,7 @@ use crate::{
     GrantSubject, OperationId, RootAttachment, RootId, RootPolicy, Scope, UnavailableRootReason,
 };
 
-const STATE_VERSION: u32 = 4;
+const STATE_VERSION: u32 = 5;
 const STATE_FILE_NAME: &str = "host-broker-state.json";
 pub(super) const MAX_STATE_FILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -44,6 +44,20 @@ struct PersistedState {
     grants: Vec<Grant>,
     attachments: Vec<RootAttachment>,
     mutations: Vec<PersistedMutation>,
+    /// Folder positions this install has already settled. Absent in files
+    /// written before version 5, where it is reconstructed from the grants,
+    /// attachments, and registration owners that survive — see
+    /// [`StateFile::load`].
+    #[serde(default)]
+    settled: Vec<PersistedSettledRoot>,
+}
+
+/// One subject's settled position on one folder. See `State::settled`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedSettledRoot {
+    subject: GrantSubject,
+    root_id: RootId,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,7 +130,11 @@ impl StateFile {
             return Err(BrokerError::StateTooLarge);
         }
         let persisted: PersistedState = serde_json::from_slice(&bytes).map_err(invalid_data)?;
-        if !matches!(persisted.version, 2 | 3 | STATE_VERSION) {
+        // Accepted versions widen; they never shift. Dropping the version an
+        // install actually has on disk refuses its file, and a refused file is
+        // a broker that will not start — every folder gone, for everyone, on
+        // upgrade. Add the new version, keep the old ones, and migrate below.
+        if !matches!(persisted.version, 2 | 3 | 4 | STATE_VERSION) {
             return Err(invalid_data(format!(
                 "unsupported broker state version {}",
                 persisted.version
@@ -161,6 +179,59 @@ impl StateFile {
             grants.retain(|grant| grant.capability() != Capability::ExecuteCommands);
         }
         let mut attachments = persisted.attachments;
+        // A file written before this record existed has to have it
+        // reconstructed, and the reconstruction has to accept the same
+        // evidence the validation rules accept — otherwise the loader refuses a
+        // file it wrote itself. Three sources say a position existed and was
+        // answered: a grant the subject still holds, a folder still attached to
+        // a conversation, and a registration still owned by its subject. The
+        // grants alone are not enough, because the install this record exists
+        // for is exactly the one whose grants are gone.
+        //
+        // An attachment names a conversation rather than a subject, so it can
+        // only settle that conversation's own subject; a project chat's
+        // position is recovered from the registration owner instead. A position
+        // none of the three reaches re-mints once on its next arrival and is
+        // settled from then on.
+        //
+        // All three are inferences, and they only apply to a file that predates
+        // the record. A file that carries the record has already said which
+        // positions are settled, and inferring more on top of it would write
+        // back positions the live code never settles — an attachment's own
+        // conversation subject, where the grants sit on the project — turning a
+        // one-time migration into a permanent rewrite. It would also stand in
+        // for the evidence the validation rules below look for, so a row with
+        // neither a grant nor a recorded position would satisfy them by
+        // construction.
+        let mut settled: HashSet<(GrantSubject, RootId)> = HashSet::new();
+        if persisted.version < STATE_VERSION {
+            settled.extend(grants.iter().filter_map(|grant| match grant.scope() {
+                Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => {
+                    Some((grant.subject(), *root_id))
+                }
+                Scope::Subject => None,
+            }));
+            for attachment in &attachments {
+                if let Ok(subject) = GrantSubject::conversation(attachment.conversation_id()) {
+                    settled.insert((subject, attachment.root_id()));
+                }
+            }
+            for (root_id, root) in &roots {
+                settled.insert((root.owner, *root_id));
+            }
+            for root in &unavailable {
+                settled.insert((root.owner, root.id));
+            }
+        }
+        settled.extend(
+            persisted
+                .settled
+                .into_iter()
+                .map(|item| (item.subject, item.root_id)),
+        );
+        settled.retain(|(_, root_id)| {
+            roots.contains_key(root_id) || unavailable.iter().any(|root| root.id == *root_id)
+        });
         for root in &mut unavailable {
             let root_id = root.id;
             root.grants = take_matching(&mut grants, |grant| {
@@ -172,11 +243,29 @@ impl StateFile {
         }
 
         let mut mutations = HashMap::new();
+        let mut receipt_order = VecDeque::new();
         for item in persisted.mutations {
+            // Completed attachment and write records are written after
+            // everything else, oldest first, so file order is the retention
+            // order this rebuilds. A file written before the bound existed
+            // sorted every record by operation identity instead, so the order
+            // recovered from it is arbitrary and the first trim after an
+            // upgrade evicts an arbitrary record rather than the oldest one.
+            // Every save from then on writes the real order.
+            // See `prune_mutation_receipts`.
+            if super::is_prunable_receipt(&item.record) {
+                receipt_order.push_back(item.operation_id);
+            }
             if mutations.insert(item.operation_id, item.record).is_some() {
                 return Err(invalid_data("duplicate persisted operation identity").into());
             }
         }
+        // A state file written before the bound existed can carry more history
+        // than the bound allows. Trimming it here brings such an install back
+        // down instead of letting it climb towards the ceiling — but only while
+        // it is still under it: the size check above runs before parsing, so a
+        // file that already crossed the cap is refused before this can help.
+        super::prune_mutation_receipts(&mut mutations, &mut receipt_order);
         // Version 2 predates write grants. Its read grants migrate as they
         // stand: widening them would hand out authority the user never
         // approved, and the only consent record available to attach to such a
@@ -187,8 +276,10 @@ impl StateFile {
             grants,
             attachments,
             mutations,
+            receipt_order,
             active_mutations: Default::default(),
             unavailable,
+            settled,
         };
         validate_loaded_state(&state)?;
         Ok(state)
@@ -228,15 +319,29 @@ impl StateFile {
             identity: root.identity,
         }));
         roots.sort_by_key(|root| root.id.to_string());
+        // Records the retention bound may drop are written last, oldest first,
+        // so a reload recovers which of them is next to go. Everything else
+        // keeps the deterministic identity order it has always had.
+        let retained = state.receipt_order.iter().copied().collect::<HashSet<_>>();
         let mut mutations = state
             .mutations
             .iter()
+            .filter(|(operation_id, _)| !retained.contains(operation_id))
             .map(|(operation_id, record)| PersistedMutation {
                 operation_id: *operation_id,
                 record: record.clone(),
             })
             .collect::<Vec<_>>();
         mutations.sort_by_key(|item| item.operation_id.to_string());
+        mutations.extend(state.receipt_order.iter().filter_map(|operation_id| {
+            state
+                .mutations
+                .get(operation_id)
+                .map(|record| PersistedMutation {
+                    operation_id: *operation_id,
+                    record: record.clone(),
+                })
+        }));
         let mut grants = state.grants.clone();
         grants.extend(
             state
@@ -257,6 +362,14 @@ impl StateFile {
             grants,
             attachments,
             mutations,
+            settled: state
+                .settled
+                .iter()
+                .map(|(subject, root_id)| PersistedSettledRoot {
+                    subject: *subject,
+                    root_id: *root_id,
+                })
+                .collect(),
         };
         let bytes = serde_json::to_vec_pretty(&persisted).map_err(invalid_data)?;
         if bytes.len() > MAX_STATE_FILE_BYTES {
@@ -393,6 +506,16 @@ fn carry_forward_exec_grants(grants: &mut Vec<Grant>) -> Result<(), BrokerError>
     Ok(())
 }
 
+/// Refuse a state file whose tables disagree with each other.
+///
+/// Three of these rules used a surviving grant as the evidence that a root, an
+/// attachment or a registration receipt was genuine. That was only ever a
+/// stand-in: revoking deletes rows, so a user who narrowed a folder all the way
+/// down on the permissions panel wrote a file the next start refused to load,
+/// and the broker came up with no folders at all. The settled record is the
+/// evidence that was missing — it says the position existed and was answered —
+/// so each of those rules now accepts either. A row backed by neither, which is
+/// what an invented attachment or root looks like, is still refused.
 pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
     for grant in &state.grants {
         let root_id = match grant.scope() {
@@ -420,7 +543,24 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                 }
             }
         });
-        if !has_matching_grant {
+        // An attachment says where a folder may be used; it authorizes
+        // nothing on its own. A folder narrowed all the way down keeps its
+        // attachment and loses every grant, and rejecting that state made the
+        // broker refuse to start for a user who had only used the permissions
+        // panel as documented. The settled record answers for exactly that
+        // case, so a row with neither a grant nor a settled position — which
+        // is what a hand-edited file adding an attachment looks like — is
+        // still refused.
+        let has_settled_position = state.settled.iter().any(|(subject, root_id)| {
+            *root_id == attachment.root_id()
+                && match subject.kind() {
+                    crate::SubjectKind::Project => true,
+                    crate::SubjectKind::Conversation => {
+                        subject.id() == attachment.conversation_id()
+                    }
+                }
+        });
+        if !has_matching_grant && !has_settled_position {
             return Err(invalid_data("attachment has no matching subject grant").into());
         }
         if !attachment_identities.insert((attachment.conversation_id(), attachment.root_id())) {
@@ -439,7 +579,7 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                         } if granted == root_id
                 )
         });
-        if !has_grant {
+        if !has_grant && !state.settled.contains(&(root.owner, *root_id)) {
             return Err(invalid_data("persisted root is missing its grant").into());
         }
     }
@@ -458,7 +598,9 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                                     | Scope::PathSubtree { root_id, .. }
                                     if *root_id == result.root.root_id
                             )
-                    });
+                    }) || state
+                        .settled
+                        .contains(&(request.subject, result.root.root_id));
                     if root.display_name != result.root.display_name || !subject_has_grant {
                         return Err(invalid_data(
                             "successful register receipt does not match authoritative state",

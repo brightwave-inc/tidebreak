@@ -27,12 +27,16 @@ export async function requestUserAttention(): Promise<void> {
 }
 
 /**
- * The folders this conversation can reach, by their safe identities. What
+ * The folders this conversation has attached, by their safe identities. What
  * each folder *allows* is not part of this answer: access is rendered from
  * the same consent statements the Permissions surface shows
- * ([`listCapabilityConsents`]), so both panels are groupings of one model.
+ * ([`listCapabilityConsents`]), so both panels are groupings of one model. A
+ * folder whose access was revoked down to nothing is still listed — it is
+ * still attached, and hiding it would hide the controls that undo that.
  */
-export function listConnectedFolders(chat: Chat): Promise<ConnectedFolder[]> {
+export function listConnectedFolders(chat: {
+  id: string;
+}): Promise<ConnectedFolder[]> {
   return invoke("list_connected_folders", { chatId: chat.id });
 }
 
@@ -117,10 +121,13 @@ export function purgeDeletedConversationSubject(chatId: string): Promise<boolean
   });
 }
 
-/** The reach the folders panel can add to an already-attached folder. Read is
- * absent on purpose: a folder whose read consent was revoked no longer
- * appears in the panel, so its recovery is the re-attach ceremony. */
-export type WidenedFolderCapability = "write_files" | "execute_commands";
+/** The reach a permissions surface can add to an already-attached folder.
+ * Read is included: revoking it leaves the folder attached and allowing
+ * nothing, so asking for it back has to be possible without disconnecting. */
+export type WidenedFolderCapability =
+  | "read_files"
+  | "write_files"
+  | "execute_commands";
 
 /**
  * Ask to add one capability to a folder this chat already has attached. The
@@ -129,7 +136,7 @@ export type WidenedFolderCapability = "write_files" | "execute_commands";
  * as a fresh permission-dialog grant. Resolves `null` when the user cancels.
  */
 export function grantFolderCapability(
-  chat: Chat,
+  chat: { id: string },
   rootId: string,
   capability: WidenedFolderCapability,
 ): Promise<boolean | null> {

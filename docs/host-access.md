@@ -280,11 +280,56 @@ kinds bind a stable operation identity to their original request, including the
 trusted consent method for an attach, so an exact retry is idempotent and
 identity reuse with different inputs is rejected. The broker stamps new
 subject grants with that current attachment consent instead of copying another
-subject's earlier consent record. A read-only attachment receipt lets a
+subject's earlier consent record. It mints those grants once and only once per
+subject and folder: attaching or re-picking a folder says where it may be used,
+not what may be done in it, so a subject that has already been given a folder
+keeps exactly the position it has — including one narrowed by revoking a
+statement, and including one narrowed to nothing — and widening it needs the
+permission-dialog capability grant.
+
+Once is measured against a record the broker keeps of the folder positions each
+subject has already been given, not against the grants that survive. Revocation
+deletes grant rows, so the grant table cannot tell a subject narrowed to nothing
+apart from one that never had anything, and neither can the attachment: grants
+are held by the subject while attachments are held by the conversation, and for
+a chat in a project those are different entities. Without that record a sibling
+chat in the same project connecting the folder for the first time re-minted the
+access its neighbour had just revoked, and a chat that disconnected an emptied
+folder got the full set back when it reconnected. The record is dropped when the
+folder's approval is revoked or the conversation subject is purged, because at
+that point the position itself is gone and picking the folder again is a first
+arrival.
+
+Widening covers reading as well as writing and commands. Revoking read narrows a
+folder to nothing an agent can act on — it takes the folder's command reach with
+it — but the folder stays attached, so the surfaces that list it are what has to
+offer the way back. They list an attached folder by its approval rather than by
+what it currently allows, precisely so a folder narrowed to nothing keeps both
+the control that disconnects it and the one that asks for read again.
+Disconnecting requires no access to the folder at all; a folder that allows
+nothing must still be removable. Asking for access back is always an explicit
+action answered in the host's own dialog, and nothing restores a revoked
+capability as a side effect of attaching, detaching, re-picking, or listing.
+
+A read-only attachment receipt lets a
 recovering native client distinguish unknown, completed, and failed work
 without starting or replaying the mutation. Attachment changes are computed and
 published in one durable state replacement, so they do not expose a recoverable
 intermediate phase.
+
+The state file carries a version, and the set of versions the loader accepts
+only ever widens: adding a version never drops an older one, because refusing a
+file is a broker that will not start and an install whose folders are all gone.
+Version 5 adds the record of settled positions. Files written by versions 2
+through 4 have no such record, so the loader reconstructs it from the evidence
+those files do carry — a surviving grant over the folder, a surviving attachment
+(which can only settle its own conversation's subject), and the subject that
+registered the folder. That last one is what recovers a project chat, whose
+position is held by the registration owner rather than by any one conversation.
+Reconstruction accepts exactly the evidence the loaded-state validation accepts,
+so a file that was consistent under the old rules stays loadable under the new
+ones — including the case the record exists to serve, a folder the user narrowed
+to nothing.
 
 Legacy version-2 state may contain multiple product root IDs for one pinned
 filesystem object. Those IDs remain valid so existing product projections and
@@ -521,7 +566,12 @@ This will land in independently reviewable pieces:
    under a broker-private, exclusively owned state directory. Restart must
    validate the bounded state file and revalidate and descriptor-pin every
    persisted root before advertising it. A mutation with ambiguous publication
-   fails the broker closed until restart.
+   fails the broker closed until restart. Completed attachment and write
+   receipts are retained in a bounded window rather than forever, so the
+   receipts an ordinary working session produces no longer accumulate towards
+   the size the broker will save or load; registration and revocation records
+   are kept, because the loader reads them against each other, and a record
+   still awaiting its outcome is never dropped.
 4. Add bounded audit records for every machine-touching operation, including
    the exact grant that authorized an operation, de-sensitized targets, and
    local two-generation retention.

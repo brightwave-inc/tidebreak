@@ -187,6 +187,19 @@ impl ModelSpec {
         !self.reasoning_efforts.is_empty()
     }
 
+    /// Whether this OpenAI row may run under ChatGPT / Codex subscription auth.
+    ///
+    /// ChatGPT OAuth routes inference through the Codex backend, which rejects
+    /// some API-only model ids (today: `gpt-5.4-nano`) with a 400. Non-OpenAI
+    /// rows return `true` — ChatGPT auth does not apply to them, and callers
+    /// gate on auth mode before consulting this.
+    pub fn supports_chatgpt_auth(&self) -> bool {
+        !matches!(
+            (self.provider, self.id),
+            (ProviderKind::Openai, "gpt-5.4-nano")
+        )
+    }
+
     /// Whether this exact hosted row accepts Chat Completions function tools.
     ///
     /// Native providers and most hosted-compatible rows carry the tool path
@@ -1152,6 +1165,30 @@ mod tests {
         let spec = find_for(ProviderKind::Anthropic, "claude-haiku-4-5-20251001").unwrap();
         assert!(!spec.supports_reasoning);
         assert!(spec.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn openai_chatgpt_auth_excludes_api_only_nano_and_keeps_a_usable_flagship() {
+        let nano = find_for(ProviderKind::Openai, "gpt-5.4-nano").unwrap();
+        assert!(
+            !nano.supports_chatgpt_auth(),
+            "gpt-5.4-nano is API-only; Codex rejects it under a ChatGPT account"
+        );
+        assert!(
+            find_for(ProviderKind::Openai, "gpt-5.6-sol")
+                .unwrap()
+                .supports_chatgpt_auth(),
+            "a ChatGPT-signed-in picker must still have a flagship to offer"
+        );
+        assert!(find_for(ProviderKind::Openai, "gpt-5.4-mini")
+            .unwrap()
+            .supports_chatgpt_auth());
+        // Non-OpenAI rows are not gated by this stance.
+        assert!(
+            find_for(ProviderKind::Anthropic, "claude-haiku-4-5-20251001")
+                .unwrap()
+                .supports_chatgpt_auth()
+        );
     }
 
     #[test]

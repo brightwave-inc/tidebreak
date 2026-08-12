@@ -45,6 +45,8 @@ mod foreground_prompt;
 mod gateway_drafts;
 mod gateway_runtime;
 pub mod host_folders;
+/// Per-launch `{data_dir}/listen.json` so a CLI can attach without argv tokens.
+pub mod listen_endpoint;
 pub mod logging;
 mod managed_policy;
 mod mcp_config;
@@ -751,6 +753,8 @@ pub struct Server {
     _mcp_supervisor: AbortTask,
     _gateway_model_sync: AbortTask,
     _instance_lock: InstanceLock,
+    /// Removes `{data_dir}/listen.json` when this server drops.
+    _listen_endpoint: listen_endpoint::ListenEndpointGuard,
 }
 
 /// The claim one process makes on a data directory for as long as it serves it.
@@ -786,9 +790,10 @@ impl InstanceLock {
             // first rather than a second server.
             Err(TryLockError::WouldBlock) => Err(AgentError::config(format!(
                 "another OpenWave process is already running on the data directory {}. \
-                 Connect to it instead (the CLI's --server <url>, with that server's token \
-                 in OPENWAVE_SERVER_TOKEN), quit the running one, or point \
-                 OPENWAVE_DATA_DIR somewhere else.",
+                 Attach with the CLI's --attach (reads {}/listen.json), or \
+                 --server <url> with OPENWAVE_SERVER_TOKEN; quit the running one, \
+                 or point OPENWAVE_DATA_DIR somewhere else.",
+                config.data_dir.display(),
                 config.data_dir.display()
             ))),
             Err(TryLockError::Error(error)) => Err(AgentError::config(format!(
@@ -1225,6 +1230,7 @@ async fn bind_inner(
         state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
+        Some(code_execution.clone()),
         sandbox_worker_config,
     );
     let sandbox_web_search_worker =
@@ -1285,6 +1291,7 @@ async fn bind_inner(
     };
     drop(queued_turn_promoter);
     let server_store = state.store.clone();
+    let data_dir = state.config.data_dir.clone();
     let mcp_runtime = state.mcp.clone();
     let gateway_runtime = state.gateway.clone();
     let router = app(state);
@@ -1295,6 +1302,14 @@ async fn bind_inner(
     let local_addr = listener
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
+    // Publish before workers start answering so an attach racing boot sees a
+    // file that matches the bound address. Bearer only — never the executor
+    // credential. See docs/decisions/0009-data-dir-listen-endpoint.md.
+    let listen_endpoint = listen_endpoint::ListenEndpointGuard::publish(
+        data_dir,
+        &format!("http://{local_addr}"),
+        token.as_ref(),
+    )?;
 
     let turn_worker = tokio::spawn(turn_worker.run());
     let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
@@ -1337,6 +1352,7 @@ async fn bind_inner(
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _gateway_model_sync: AbortTask(gateway_model_sync),
         _instance_lock: instance_lock,
+        _listen_endpoint: listen_endpoint,
     })
 }
 

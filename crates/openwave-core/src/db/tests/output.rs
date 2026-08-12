@@ -936,6 +936,54 @@ mod output_scan {
         );
         assert!(!workspace.path().join(&relative).exists());
     }
+
+    /// A background agent that builds a deck often leaves the generator script
+    /// next to the PPTX under output/. The scan must publish the deliverable
+    /// and refuse the script with a note — otherwise junk lands in the catalog
+    /// beside the real file. Foreground turns are out of scope for this skip.
+    #[tokio::test]
+    async fn a_sandbox_run_does_not_publish_helper_scripts_beside_deliverables() {
+        let (_dir, store, chat) = store_with_chat().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = open_scratch(scratch.path());
+
+        // Minimal well-formed empty ZIP = valid PPTX signature for the scan.
+        write_output_file(
+            scratch.path(),
+            "deck.pptx",
+            b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        );
+        write_output_file(scratch.path(), "build_deck.py", b"print('hi')\n");
+        write_output_file(scratch.path(), "helper.sh", b"#!/bin/sh\n");
+
+        let scan = sync_output_directory(
+            &store,
+            &dir,
+            &dir,
+            chat.id,
+            CallId::new(),
+            RevisionProducer::Run(crate::AgentRunId::new()),
+            at(0),
+        )
+        .await
+        .unwrap();
+
+        let published: Vec<&str> = scan
+            .entries
+            .iter()
+            .map(|entry| entry.filename.as_str())
+            .collect();
+        assert_eq!(published, ["deck.pptx"]);
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| { note.contains("build_deck.py") && note.contains("workspace root") }));
+        assert!(scan
+            .notes
+            .iter()
+            .any(|note| note.contains("helper.sh") && note.contains("workspace root")));
+        assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
+    }
 }
 
 #[cfg(feature = "tools")]

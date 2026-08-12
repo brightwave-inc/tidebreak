@@ -1474,7 +1474,10 @@ pub async fn collect_routes(
                 kind: route_kind(kind),
                 api_key: String::new(),
                 base_url: Some(crate::connectors::CODEX_BASE_URL.to_string()),
+                // Codex rejects API-only ids; keep the route honest with the
+                // same ChatGPT stance the catalog uses for `available`.
                 curated_models: model_registry::models_for(kind)
+                    .filter(|spec| spec.supports_chatgpt_auth())
                     .map(|spec| spec.id.to_string())
                     .collect(),
                 token_source: Some(source),
@@ -1667,7 +1670,22 @@ pub async fn model_is_usable(
     model: &ResolvedModelPolicy,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<bool> {
-    provider_is_usable(store, secrets, model.provider, policy).await
+    if !provider_is_usable(store, secrets, model.provider, policy).await? {
+        return Ok(false);
+    }
+    // ChatGPT / Codex auth rejects some API-only OpenAI ids. Keep the row in
+    // the catalog (API-key installs still need it) but mark it unusable here.
+    if model.provider == ProviderKind::Openai
+        && matches!(
+            auth_mode_for(secrets, ProviderKind::Openai).await,
+            Some(ProviderAuthMode::Chatgpt)
+        )
+    {
+        let supported = model_registry::find_for(ProviderKind::Openai, &model.id)
+            .is_some_and(model_registry::ModelSpec::supports_chatgpt_auth);
+        return Ok(supported);
+    }
+    Ok(true)
 }
 
 /// Full typed catalog. Unavailable rows remain visible for provider-scoped
@@ -1679,10 +1697,17 @@ pub async fn catalog_models(
 ) -> Result<Vec<CatalogModel>> {
     let mut models = Vec::new();
     for &kind in ProviderKind::ALL {
-        let available = provider_is_usable(store, secrets, kind, policy).await?;
-        models.extend(model_registry::models_for(kind).map(|spec| CatalogModel {
-            policy: ResolvedModelPolicy::curated(spec),
-            available,
+        let provider_usable = provider_is_usable(store, secrets, kind, policy).await?;
+        let chatgpt = matches!(
+            auth_mode_for(secrets, kind).await,
+            Some(ProviderAuthMode::Chatgpt)
+        );
+        models.extend(model_registry::models_for(kind).map(|spec| {
+            let available = provider_usable && (!chatgpt || spec.supports_chatgpt_auth());
+            CatalogModel {
+                policy: ResolvedModelPolicy::curated(spec),
+                available,
+            }
         }));
         // Configured model sets: the compatible endpoint's custom entries,
         // and the managed gateway's entitled snapshot — which is empty on an
@@ -1699,7 +1724,7 @@ pub async fn catalog_models(
                 ProviderKind::ModelGateway => ResolvedModelPolicy::gateway_for(model),
                 _ => ResolvedModelPolicy::custom_for(kind, model),
             },
-            available,
+            available: provider_usable,
         }));
     }
     Ok(models)
