@@ -1494,26 +1494,34 @@ async fn failed_child_result_is_persisted_in_the_resumed_parent_transcript() {
 #[tokio::test]
 async fn live_parent_inbox_candidates_skip_sixteen_obsolete_deliveries() {
     let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
 
+    // Unconsumed terminal deliveries occupy the origin-turn unsettled cap
+    // (shared with wait_for_agents membership). Spread obsolete deliveries
+    // across chats so the fixture can still flood the recovery scan without
+    // fighting that per-turn ceiling.
     for index in 0..16 {
+        let mut obsolete = sample_chat();
+        obsolete.id = ChatId::new();
+        store.create_chat(&obsolete).await.unwrap();
         submit_sandbox_result(
             &store,
-            chat.id,
+            obsolete.id,
             &format!("obsolete task {index}"),
             &format!("obsolete result {index}"),
         )
         .await;
     }
+
+    let live_chat = sample_chat();
+    store.create_chat(&live_chat).await.unwrap();
     let (live_child, _) = submit_sandbox_result(
         &store,
-        chat.id,
+        live_chat.id,
         "the live delegated task",
         "the live result",
     )
     .await;
-    let parked = park_foreground_turn_on_child(&store, chat.id, live_child).await;
+    let parked = park_foreground_turn_on_child(&store, live_chat.id, live_child).await;
     assert_eq!(parked.status, TurnRunStatus::WaitingForAgentRun);
 
     let candidates = store
