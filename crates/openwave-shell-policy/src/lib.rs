@@ -340,13 +340,19 @@ fn substitution_is_a_count(token: &str) -> bool {
 /// `?` or a bracket class is the opposite — a precise one-character disguise,
 /// standing in for a character the author already knows. So a marker counts as
 /// reachable when the token spells it out with any number of single-character
-/// wildcards but **more literal characters than `*` covers**: `.e??` and
-/// `.???/id_???` are refused, `*.pe?` is refused for pinning `.pe`, and
-/// `src/*` is not.
+/// wildcards and **at least as many literal characters as `*` covers**: `.e??`,
+/// `.???/id_???` and `.e*` are refused, `*.pe?` is refused for pinning `.pe`,
+/// and `src/*` is not.
 ///
-/// What that leaves uncovered is a `*` covering most of a marker, which is the
-/// working-directory question this predicate cannot answer anyway — and the
-/// `cd`-then-glob gap below, which it also cannot.
+/// The tie goes to refusing because a `*` that covers no more of a marker than
+/// the token already spells is not a pattern aimed at a directory: `.e*` names
+/// two of the four characters in `.env` and expands onto almost nothing else.
+/// A glob written for ordinary work spells much less of a marker than it
+/// covers, so it stays on the safe side of the tie.
+///
+/// What that leaves uncovered is a `*` covering *most* of a marker, such as
+/// `.*`, which is the working-directory question this predicate cannot answer
+/// anyway — and the `cd`-then-glob gap below, which it also cannot.
 fn could_reach_sensitive(token: &str) -> bool {
     let raw = token.to_lowercase();
     let norm = normpath(token).to_lowercase();
@@ -403,15 +409,15 @@ fn glob_atoms(token: &str) -> Vec<GlobAtom> {
     atoms
 }
 
-/// Whether some expansion of `atoms` contains `marker`, spelling out more of it
-/// than a `*` covers.
+/// Whether some expansion of `atoms` contains `marker`, spelling out at least
+/// as much of it as a `*` covers.
 ///
 /// The marker has to appear contiguously — that is what `hits_sensitive` looks
 /// for — but it may start and end anywhere in the token, since anything outside
 /// it is text the floor does not care about. Scoring a spelled character `+1`,
 /// a `*`-supplied one `-1` and a single-character wildcard `0`, then asking for
-/// a positive total, is the test the doc comment on [`could_reach_sensitive`]
-/// describes.
+/// a non-negative total, is the test the doc comment on
+/// [`could_reach_sensitive`] describes.
 fn spelled_more_than_globbed(atoms: &[GlobAtom], marker: &[char]) -> bool {
     // `best[j]`: the highest score with which the first `j` characters of the
     // marker have been consumed, over every alignment considered so far.
@@ -445,11 +451,11 @@ fn spelled_more_than_globbed(atoms: &[GlobAtom], marker: &[char]) -> bool {
             relax(&mut next[marker.len()], score);
         }
         best = next;
-        if matches!(best[marker.len()], Some(score) if score > 0) {
+        if matches!(best[marker.len()], Some(score) if score >= 0) {
             return true;
         }
     }
-    matches!(best[marker.len()], Some(score) if score > 0)
+    matches!(best[marker.len()], Some(score) if score >= 0)
 }
 
 /// What a program will do with one of its arguments.

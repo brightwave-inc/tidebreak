@@ -428,9 +428,13 @@ const NEVER_ALLOW: &[&str] = &[
     "cp payload .git/hook*/pre-commit",
     // half a marker spelled and half wildcarded. these are the boundary: only
     // `*` is evidence that a pattern is aimed broadly, so a token that reaches
-    // a marker on single-character wildcards alone is still a disguise
+    // a marker on single-character wildcards alone is still a disguise, and a
+    // `*` that covers no more of the marker than the token already spells is
+    // not aimed at a directory either
     "cat .e??",
     "cat .???/id_???",
+    "cat .e*",
+    "cp .np* /tmp/x",
     // every one of the above is reachable by typing a different program, so
     // the operand check has to know which of grep's operands are files
     "grep '' .en?",
