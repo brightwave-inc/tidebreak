@@ -37,29 +37,58 @@ export function ContextUsageIndicator({
 
   const used = contextTokens(usage);
   const level = contextUsageLevel(percent);
-  const cached =
-    usage.cache_read_input_tokens + usage.cache_creation_input_tokens > 0;
+  const parts = [
+    { label: "In", tokens: usage.input_tokens },
+    { label: "Out", tokens: usage.output_tokens },
+    { label: "Cache read", tokens: usage.cache_read_input_tokens },
+    { label: "Cache write", tokens: usage.cache_creation_input_tokens },
+  ].filter((part) => part.tokens > 0);
 
   return (
     <WithTooltip
+      contentClassName="max-w-none px-3.5 py-3"
       label={
-        <div className="space-y-0.5 text-xs">
-          {modelName && <div className="font-medium">{modelName}</div>}
-          <div>
-            {used.toLocaleString()} of {contextWindow.toLocaleString()} tokens (
-            {percent}%)
+        <div className="w-52 space-y-2.5 text-left font-normal">
+          {modelName && (
+            <div className="truncate text-xs font-medium leading-tight">
+              {modelName}
+            </div>
+          )}
+          <div className="flex items-end justify-between gap-3">
+            <div className="font-mono text-2xl leading-none font-semibold tabular-nums tracking-tight">
+              {percent}
+              <span className="ml-0.5 text-sm font-medium opacity-60">%</span>
+            </div>
+            <div className="pb-0.5 text-right font-mono text-[11px] leading-snug tabular-nums opacity-80">
+              <div>
+                {formatTokenCount(used)}
+                <span className="mx-0.5 opacity-50">/</span>
+                {formatTokenCount(contextWindow)}
+              </div>
+              <div className="text-[10px] font-sans opacity-70">context used</div>
+            </div>
           </div>
-          <div className="text-muted-foreground">
-            {usage.input_tokens.toLocaleString()} in ·{" "}
-            {usage.output_tokens.toLocaleString()} out
-            {cached && (
-              <>
-                {" "}
-                · {usage.cache_read_input_tokens.toLocaleString()} cache read ·{" "}
-                {usage.cache_creation_input_tokens.toLocaleString()} cache write
-              </>
-            )}
+          <div
+            className="h-1 w-full overflow-hidden rounded-full bg-primary-foreground/20"
+            aria-hidden="true"
+          >
+            <div
+              className="h-full rounded-full bg-primary-foreground/90"
+              style={{ width: `${percent}%` }}
+            />
           </div>
+          {parts.length > 0 && (
+            <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 border-t border-primary-foreground/15 pt-2 text-[11px] leading-relaxed">
+              {parts.map((part) => (
+                <div key={part.label} className="col-span-2 grid grid-cols-subgrid">
+                  <dt className="opacity-70">{part.label}</dt>
+                  <dd className="font-mono tabular-nums">
+                    {part.tokens.toLocaleString()}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
         </div>
       }
     >
