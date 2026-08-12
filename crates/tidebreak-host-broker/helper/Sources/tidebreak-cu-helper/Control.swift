@@ -47,10 +47,35 @@ enum Control {
         // channel-suffixed variant).
         "io.brightwave.tidebreak",
         "io.brightwave.",
-        // Terminals are arbitrary code execution outside the broker's
-        // confinement.
+        // Terminals, IDEs, editors, and command launchers: a ControlApp grant
+        // over any of these reaches unsandboxed local execution (focus the
+        // integrated shell, type a command, press Return) and would bypass the
+        // sandboxed exec path. A bundle-id list cannot enumerate every app that
+        // embeds a shell; this is the common class. See decision record 0010.
         "com.apple.Terminal",
         "com.googlecode.iterm2",
+        "dev.warp.",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "io.alacritty",
+        "com.github.wez.wezterm",
+        "com.mitchellh.ghostty",
+        "com.microsoft.VSCode",
+        "com.microsoft.VSCodeInsiders",
+        "com.visualstudio.code.oss",
+        // Cursor's stable ToDesktop-issued bundle id (not a com.cursor.* id).
+        "com.todesktop.230313mzl4w4u92",
+        "com.exafunction.windsurf",
+        "com.apple.dt.Xcode",
+        "com.jetbrains.",
+        "com.sublimetext.",
+        "com.panic.Nova",
+        "com.google.android.studio",
+        "dev.zed.Zed",
+        "org.gnu.Emacs",
+        "org.vim.MacVim",
+        "com.runningwithcrayons.Alfred",
+        "com.raycast.macos",
         // Auth / login / credential surfaces — driving these could defeat a
         // human-in-the-loop check.
         "com.apple.loginwindow",
