@@ -138,6 +138,10 @@ pub struct Settings {
     /// valid for existing chats, replay, and explicit selection.
     #[serde(default)]
     pub model_visibility_overrides: BTreeMap<String, ModelVisibility>,
+    /// Whether the computer-use capability (screen capture + app control) is
+    /// enabled. Read at boot; turning it off unregisters the tools on the next
+    /// launch.
+    pub computer_use_enabled: bool,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -181,6 +185,10 @@ pub struct SettingsUpdate {
     /// express a deletion at all.
     #[serde(default)]
     pub model_visibility_overrides: Option<BTreeMap<String, ModelVisibility>>,
+    /// Set the computer-use master switch. Absent leaves it unchanged. Applies
+    /// at the next boot (the tools register or not then).
+    #[serde(default)]
+    pub computer_use_enabled: Option<bool>,
 }
 
 /// Partial update for [`CompactionSettings`]. Absent fields leave the current
@@ -310,6 +318,15 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(enabled) = body.computer_use_enabled {
+        state
+            .store
+            .set_setting(
+                crate::routes::COMPUTER_USE_ENABLED_SETTING,
+                &serde_json::json!(enabled),
+            )
+            .await?;
+    }
     Ok(Json(read_settings(&state).await?))
 }
 
@@ -325,7 +342,18 @@ async fn read_settings(state: &AppState) -> Result<Settings, ServerError> {
         sandbox_agent_error_checkin: read_sandbox_agent_error_checkin(&*state.store).await?,
         compaction: read_compaction_settings(&*state.store).await?,
         model_visibility_overrides: read_model_visibility_overrides(&*state.store).await?,
+        computer_use_enabled: read_computer_use_enabled(&*state.store).await?,
     })
+}
+
+/// Whether computer use is enabled. Default on; an explicit `false` disables
+/// it (the tools unregister at the next boot).
+pub(crate) async fn read_computer_use_enabled(store: &dyn Store) -> openwave_core::Result<bool> {
+    Ok(store
+        .get_setting(crate::routes::COMPUTER_USE_ENABLED_SETTING)
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true))
 }
 
 /// The largest number of stored visibility deviations.

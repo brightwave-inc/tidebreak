@@ -2388,7 +2388,13 @@ compaction: CompactionSettings,
  * and never filters `GET /models` by it. A hidden model remains fully
  * valid for existing chats, replay, and explicit selection.
  */
-model_visibility_overrides: { [key in string]: ModelVisibility }, };
+model_visibility_overrides: { [key in string]: ModelVisibility }, 
+/**
+ * Whether the computer-use capability (screen capture + app control) is
+ * enabled. Read at boot; turning it off unregisters the tools on the next
+ * launch.
+ */
+computer_use_enabled: boolean, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.

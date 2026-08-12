@@ -1157,10 +1157,19 @@ async fn bind_inner(
     let web_extract = web_search::foreground_extract_tool(store.clone(), secrets.clone());
     // Computer use exists only where there is a display to capture and a
     // trusted client to drive it: the desktop profile on macOS, where the
-    // bundled broker has a real computer-use backend. Anywhere else the tools
-    // are simply not registered, so the model never sees them and a
-    // self-host or background surface can never hold them.
-    let computer_use = config.profile == Profile::Desktop && cfg!(target_os = "macos");
+    // bundled broker has a real computer-use backend, AND the user has not
+    // turned the capability off in settings. Anywhere else the tools are
+    // simply not registered, so the model never sees them and a self-host or
+    // background surface can never hold them.
+    let computer_use_enabled = store
+        .get_setting(crate::routes::COMPUTER_USE_ENABLED_SETTING)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let computer_use =
+        computer_use_enabled && config.profile == Profile::Desktop && cfg!(target_os = "macos");
     let (tools, agent_config) = agent_deps(
         code_execution.clone(),
         foreground_web_search,
