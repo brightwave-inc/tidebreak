@@ -52,7 +52,24 @@ const DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES: usize = 20;
 /// re-pulling one. It is rewritten by the pin job in
 /// `.github/workflows/publish-sandbox-image.yml` alongside the shared image
 /// pin in [`crate::sandbox_image`].
-const DOCUMENTS_SNAPSHOT: &str = "openwave-documents-v0.26.0";
+///
+/// The `-exec` suffix marks the entrypoint contract below: older registrations
+/// of the same image version used the image's own agent binary as PID 1, which
+/// is a different tier's protocol and leaves Daytona's toolbox unable to run
+/// commands. A fresh name forces every account to re-register once with the
+/// keepalive entrypoint rather than keep serving a broken snapshot.
+const DOCUMENTS_SNAPSHOT: &str = "openwave-documents-v0.26.0-exec";
+/// PID 1 for sandboxes built from the documents image.
+///
+/// The published image's `ENTRYPOINT` is `openwave-sandbox-agent` — the
+/// sandbox-*resident* run tier. Daytona's toolbox (file + process APIs) is a
+/// sidecar that expects an ordinary long-lived container, the same way the
+/// local Docker exec backend replaces the entrypoint with a bounded `sleep`
+/// and E2B replaces it with `envd`. Without this override the agent becomes
+/// PID 1, nothing dials its reverse channel, and every toolbox call fails —
+/// which is exactly the "command could not be run in this task's workspace"
+/// surface a background run sees when Daytona is selected.
+const DOCUMENTS_SNAPSHOT_ENTRYPOINT: &[&str] = &["sleep", "infinity"];
 /// First registration makes Daytona pull a multi-gigabyte image into its own
 /// infrastructure, so the wait is generous — but still bounded, and it happens
 /// once per organization rather than once per sandbox.
@@ -448,6 +465,9 @@ impl DaytonaExecutionProvider {
                     .json(&CreateSnapshotRequest {
                         name: DOCUMENTS_SNAPSHOT,
                         image_name: DOCUMENTS_IMAGE,
+                        // See [`DOCUMENTS_SNAPSHOT_ENTRYPOINT`]: the image's
+                        // own entrypoint is the wrong tier for toolbox exec.
+                        entrypoint: DOCUMENTS_SNAPSHOT_ENTRYPOINT,
                         cpu: DOCUMENTS_SNAPSHOT_CPU,
                         memory: DOCUMENTS_SNAPSHOT_MEMORY_GB,
                         disk: DOCUMENTS_SNAPSHOT_DISK_GB,
@@ -1034,6 +1054,10 @@ struct CreateSandboxRequest<'a> {
 struct CreateSnapshotRequest<'a> {
     name: &'a str,
     image_name: &'a str,
+    /// Replaces the image's `ENTRYPOINT` for sandboxes created from this
+    /// snapshot. Required for the OpenWave documents image — see
+    /// [`DOCUMENTS_SNAPSHOT_ENTRYPOINT`].
+    entrypoint: &'a [&'a str],
     cpu: u32,
     memory: u32,
     disk: u32,
@@ -1897,6 +1921,13 @@ mod tests {
             request["imageName"].as_str().unwrap().contains("@sha256:"),
             "the registered image must be digest-pinned"
         );
+        // The documents image's own entrypoint is the sandbox-resident agent;
+        // toolbox exec needs a keepalive, the same contract the Docker backend
+        // enforces with `--entrypoint sleep`. Without this every command fails.
+        assert_eq!(
+            request["entrypoint"],
+            serde_json::json!(DOCUMENTS_SNAPSHOT_ENTRYPOINT)
+        );
         assert_eq!(
             created_from(&state),
             [
@@ -1905,6 +1936,19 @@ mod tests {
             ]
         );
         server.abort();
+    }
+
+    /// Snapshot content is fixed at registration. A name that still carries
+    /// the pre-entrypoint-override form would keep serving sandboxes whose
+    /// toolbox cannot run commands; the `-exec` suffix is what forces every
+    /// account past that broken registration.
+    #[test]
+    fn documents_snapshot_name_marks_the_toolbox_entrypoint_contract() {
+        assert!(
+            DOCUMENTS_SNAPSHOT.ends_with("-exec"),
+            "snapshot name must force re-registration after the entrypoint fix: {DOCUMENTS_SNAPSHOT}"
+        );
+        assert_eq!(DOCUMENTS_SNAPSHOT_ENTRYPOINT, &["sleep", "infinity"]);
     }
 
     /// A first run pulls a multi-gigabyte image and returns nothing until it
