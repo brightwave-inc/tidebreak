@@ -6,7 +6,10 @@
 //! directory, which is the right shape for a script or an agent trying things
 //! out in isolation. With `--server <url>` (or `OPENWAVE_SERVER_URL`) it
 //! **attaches** instead, becoming a pure HTTP+WS client of an already-running
-//! `openwave serve` — the same client the desktop webview is.
+//! `openwave serve` — the same client the desktop webview is. `--attach` is
+//! the same attach, but the URL and token come from `{data_dir}/listen.json`
+//! that the running server published (desktop or `serve`), so the token never
+//! rides argv — see [`docs/decisions/0009-data-dir-listen-endpoint.md`].
 //!
 //! Attaching is what a second process on one data directory must do. A data
 //! directory belongs to exactly one server process (`openwave-server` holds an
@@ -14,10 +17,11 @@
 //! embedding CLI at a directory the desktop or a running daemon already owns is
 //! refused rather than allowed to race the database.
 //!
-//! The token never rides argv. It comes from `OPENWAVE_SERVER_TOKEN`, or from
-//! the variable `--server-token-env <var>` names — a command line is readable
-//! by every process on the machine and lands in shell history, and a per-launch
-//! bearer token is full authority over the profile.
+//! The token never rides argv. It comes from `listen.json` under `--attach`,
+//! from `OPENWAVE_SERVER_TOKEN`, or from the variable `--server-token-env`
+//! names — a command line is readable by every process on the machine and lands
+//! in shell history, and a per-launch bearer token is full authority over the
+//! profile.
 
 use openwave_core::{AgentError, Result};
 
@@ -38,10 +42,38 @@ pub enum Server {
 }
 
 impl Server {
-    /// Resolve the choice from the `--server` / `--server-token-env` flags and
-    /// the environment. The flag wins over `OPENWAVE_SERVER_URL`, so a script
-    /// with the variable exported can still target one invocation elsewhere.
-    pub fn resolve(url_flag: Option<String>, token_env: Option<String>) -> Result<Self> {
+    /// Resolve the choice from `--attach` / `--server` / `--server-token-env`
+    /// and the environment. `--server` wins over `OPENWAVE_SERVER_URL`.
+    /// `--attach` and `--server` together are a mistake.
+    pub fn resolve(
+        url_flag: Option<String>,
+        token_env: Option<String>,
+        attach: bool,
+    ) -> Result<Self> {
+        if attach {
+            if url_flag.is_some()
+                || std::env::var(SERVER_URL_ENV).is_ok_and(|v| !v.trim().is_empty())
+            {
+                return Err(AgentError::config(
+                    "--attach reads {data_dir}/listen.json; do not also pass \
+                     --server or set OPENWAVE_SERVER_URL",
+                ));
+            }
+            if token_env.is_some() {
+                return Err(AgentError::config(
+                    "--attach supplies the token from listen.json; \
+                     --server-token-env is only for --server",
+                ));
+            }
+            let config = crate::profile_config()?;
+            let endpoint =
+                openwave_server::listen_endpoint::ListenEndpoint::read(&config.data_dir)?;
+            let base = base_url(&endpoint.base_url)?;
+            return Ok(Self::Attach {
+                base,
+                token: endpoint.token,
+            });
+        }
         let url = match url_flag {
             Some(url) => Some(url),
             None => std::env::var(SERVER_URL_ENV)
@@ -66,7 +98,7 @@ impl Server {
             .ok_or_else(|| {
                 AgentError::config(format!(
                     "{var} is not set; attaching to {base} needs the bearer token that \
-                     server printed at startup"
+                     server printed at startup (or use --attach to read listen.json)"
                 ))
             })?;
         Ok(Self::Attach { base, token })
@@ -129,8 +161,9 @@ impl Session {
                     client_executor_token: Some(client_executor_token),
                 })
             }
-            // Nothing local is touched in attach mode: no data directory, no
-            // log file, no keychain. This process is only a client.
+            // Nothing local is touched in attach mode beyond the optional
+            // listen.json read that produced this choice: no log file, no
+            // keychain. This process is only a client.
             Server::Attach { base, token } => Ok(Self {
                 client: Client::attach(base.clone(), token)?,
                 serve: None,
@@ -149,9 +182,9 @@ impl Session {
     /// Attaching deliberately gets nothing. That credential is the native-only
     /// boundary: it says "I am the trusted surface for this server", and a
     /// client that merely holds a bearer token is not, no matter which process
-    /// started it. The bearer is all `--server` conveys, and there is no flag
-    /// to hand over the executor token — so an attached run cannot execute a
-    /// client tool call on somebody else's server, which is the point.
+    /// started it. The bearer is all `--server` / `--attach` convey, and there
+    /// is no flag to hand over the executor token — so an attached run cannot
+    /// execute a client tool call on somebody else's server, which is the point.
     pub fn client_executor_token(&self) -> Option<&str> {
         self.client_executor_token.as_deref()
     }
@@ -190,12 +223,23 @@ mod tests {
         assert!(base_url("http://host/?a=1").is_err(), "no query string");
 
         std::env::remove_var(SERVER_URL_ENV);
-        let Err(error) = Server::resolve(None, Some("SOME_VAR".to_owned())) else {
+        let Err(error) = Server::resolve(None, Some("SOME_VAR".to_owned()), false) else {
             panic!("a token variable alone is not enough to attach");
         };
         assert!(
             error.to_string().contains("--server"),
             "error should name the missing flag: {error}"
+        );
+    }
+
+    #[test]
+    fn attach_flag_conflicts_with_server_url() {
+        let Err(error) = Server::resolve(Some("http://127.0.0.1:1".into()), None, true) else {
+            panic!("--attach and --server together must fail");
+        };
+        assert!(
+            error.to_string().contains("--attach"),
+            "error should name the conflict: {error}"
         );
     }
 }

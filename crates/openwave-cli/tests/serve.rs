@@ -461,6 +461,43 @@ fn a_setup_command_attaches_to_a_running_server() {
     );
 }
 
+/// `--attach` reads the listen.json the server published into the data
+/// directory — no token on argv, same HTTP client as `--server`.
+#[test]
+fn a_setup_command_attaches_via_listen_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, _url, _token) = spawn_serve(dir.path());
+
+    let listen = dir.path().join("listen.json");
+    assert!(
+        listen.is_file(),
+        "serve must publish listen.json for --attach"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["provider", "list", "--output-format", "json", "--attach"])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SERVER_TOKEN")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run --attach provider list");
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "stderr: {stderr}");
+    let listed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the route's answer on one line");
+    assert!(
+        listed["providers"]
+            .as_array()
+            .is_some_and(|providers| providers
+                .iter()
+                .any(|provider| provider["kind"] == "anthropic")),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 /// The same rule for the families that read and write a conversation's files.
 /// Their failure mode when `--server` is ignored is not a broken flag but a
 /// silently wrong target: the command reads the local data directory while the
