@@ -1325,6 +1325,85 @@ async fn models_catalog_includes_enabled_credentialed_providers() {
     assert!(models
         .iter()
         .any(|m| m["provider"] == "openai" && m["available"] == true));
+    // API-key auth keeps the API-only nano row usable.
+    assert!(models
+        .iter()
+        .any(|m| { m["key"] == "openai::gpt-5.4-nano" && m["available"] == true }));
+}
+
+#[tokio::test]
+async fn chatgpt_auth_marks_api_only_openai_models_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Openai,
+        &providers::ProviderCredential::Oauth {},
+    )
+    .await
+    .unwrap();
+    secrets
+        .set_secret(
+            crate::connectors::CHATGPT_SECRET_KEY,
+            &serde_json::json!({
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "account_id": "acct-test",
+                "expires_at_unix": 4_102_444_800_u64,
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Openai,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let catalog = providers::catalog_models(&*store, &*secrets, &policy)
+        .await
+        .unwrap();
+    let nano = catalog
+        .iter()
+        .find(|m| m.policy.id == "gpt-5.4-nano")
+        .expect("nano stays in the catalog");
+    assert!(
+        !nano.available,
+        "ChatGPT/Codex cannot run gpt-5.4-nano; available must be false"
+    );
+    let sol = catalog
+        .iter()
+        .find(|m| m.policy.id == "gpt-5.6-sol")
+        .expect("sol stays in the catalog");
+    assert!(sol.available, "a ChatGPT flagship must remain selectable");
+
+    // Selection through model_is_usable must agree with the catalog stance.
+    let nano_policy = providers::ResolvedModelPolicy::curated(
+        crate::model_registry::find_for(providers::ProviderKind::Openai, "gpt-5.4-nano").unwrap(),
+    );
+    assert!(
+        !providers::model_is_usable(&*store, &*secrets, &nano_policy, &policy)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
