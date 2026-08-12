@@ -21,6 +21,7 @@ import {
   useFileDownload,
   type FileBytesSource,
 } from "@/document/useFileDownload";
+import { stabilizeMeasuredWidth } from "@/document/pdfLayout";
 import { usePdfPageState } from "@/document/usePdfPageState";
 import { useWheelPageNavigation } from "@/document/useWheelPageNavigation";
 import { useZoom } from "@/document/useZoom";
@@ -28,6 +29,12 @@ import { openExternal } from "@/host";
 import { cn } from "@/lib/utils";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+/** US Letter height ÷ width — only used before the first real page paint. */
+const FALLBACK_PAGE_ASPECT = 11 / 8.5;
+
+/** Paper colour of a typical PDF page. Matches pdf.js's default canvas fill. */
+const PDF_PAPER = "#ffffff";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
   source: FileBytesSource;
@@ -37,14 +44,78 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
   compact?: boolean;
 }
 
+/**
+ * One page, with the last successful paint held on top while pdf.js hides its
+ * canvas to redraw. Without the holdover, every page turn, zoom, and settled
+ * resize blanks the panel for a frame — and the old loading placeholder used
+ * the app background colour, which in dark mode flashed dark against white
+ * paper.
+ */
 function PdfPage({ pageNumber, width }: { pageNumber: number; width: number }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const snapshotRef = useRef<HTMLCanvasElement>(null);
+  const [snapshotSize, setSnapshotSize] = useState<{
+    w: number;
+    h: number;
+  } | null>(null);
+  // Identity of the paint currently mirrored in the snapshot canvas.
+  const [snapshotKey, setSnapshotKey] = useState<string | null>(null);
+  const paintKey = `${pageNumber}:${width}`;
+  const holding = snapshotSize != null && snapshotKey !== paintKey;
+  const snapshotHeight = snapshotSize
+    ? (snapshotSize.h / snapshotSize.w) * width
+    : width * FALLBACK_PAGE_ASPECT;
+
+  const captureSnapshot = () => {
+    const source = wrapRef.current?.querySelector(
+      "canvas.react-pdf__Page__canvas",
+    ) as HTMLCanvasElement | null;
+    const target = snapshotRef.current;
+    if (!source || !target || source.width === 0 || source.height === 0) {
+      setSnapshotKey(paintKey);
+      return;
+    }
+    target.width = source.width;
+    target.height = source.height;
+    const ctx = target.getContext("2d");
+    if (!ctx) {
+      setSnapshotKey(paintKey);
+      return;
+    }
+    ctx.drawImage(source, 0, 0);
+    const cssWidth = parseFloat(source.style.width) || source.width;
+    const cssHeight = parseFloat(source.style.height) || source.height;
+    setSnapshotSize({ w: cssWidth, h: cssHeight });
+    setSnapshotKey(paintKey);
+  };
+
   return (
-    <div style={{ width, display: "inline-block" }}>
+    <div ref={wrapRef} className="relative inline-block" style={{ width }}>
+      <canvas
+        ref={snapshotRef}
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute top-0 left-0 z-10 shadow",
+          holding ? "visible" : "invisible",
+        )}
+        style={{ width, height: snapshotHeight }}
+      />
       <Page
         pageNumber={pageNumber}
         width={width}
         className="shadow"
-        loading={<div className="aspect-4/3 bg-background" style={{ width }} />}
+        canvasBackground={PDF_PAPER}
+        loading={
+          <div
+            className={holding ? undefined : "shadow"}
+            style={{
+              width,
+              height: snapshotHeight,
+              background: holding ? "transparent" : PDF_PAPER,
+            }}
+          />
+        }
+        onRenderSuccess={captureSnapshot}
       />
     </div>
   );
@@ -100,24 +171,32 @@ export function PdfViewer({
   });
 
   // Publish page state to the panel header when a provider is present. Zoom is
-  // an app-wide store, so only the page state needs bridging.
+  // an app-wide store, so only the page state needs bridging. Register on
+  // change and clear only on unmount — clearing in the update effect's cleanup
+  // briefly nulls the header on every page turn.
   const registerPdfControls = useRegisterPdfControls();
   useEffect(() => {
     if (!registerPdfControls) return;
     registerPdfControls(
       numPages > 0 ? { currentPage, numPages, setPage: setCurrentPage } : null,
     );
-    return () => registerPdfControls(null);
   }, [registerPdfControls, currentPage, numPages, setCurrentPage]);
+  useEffect(() => {
+    if (!registerPdfControls) return;
+    return () => registerPdfControls(null);
+  }, [registerPdfControls]);
 
   const [containerRef, setContainerRef] = useState<HTMLElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState<number>(800);
+  const [containerWidth, setContainerWidth] = useState<number | null>(null);
   const cw = useDebouncedValue(containerWidth, 100);
 
-  const pageWidth = (cw * scale) / 100;
+  const pageWidth =
+    cw != null ? Math.max(1, Math.round((cw * scale) / 100)) : null;
 
   useResizeObserver(containerRef, (entry) => {
-    setContainerWidth(entry.contentRect.width);
+    setContainerWidth((prev) =>
+      stabilizeMeasuredWidth(prev, entry.contentRect.width),
+    );
   });
 
   // pdf.js would navigate the webview itself to an external link; hand those to
@@ -279,8 +358,12 @@ export function PdfViewer({
           </Button>
         </div>
       </div>
-      {/* Scrollable page area */}
-      <div className="relative min-h-0 flex-1 overflow-scroll" ref={setContainerRef}>
+      {/* Scrollable page area. Stable gutter keeps scrollbar appearance from
+          changing the measured width and kicking off another rasterise. */}
+      <div
+        className="relative min-h-0 flex-1 overflow-scroll [scrollbar-gutter:stable]"
+        ref={setContainerRef}
+      >
         <Document
           key={fileId}
           file={pdfFile ?? undefined}
@@ -314,12 +397,8 @@ export function PdfViewer({
           }
           className="flex justify-center"
         >
-          {numPages > 0 && (
-            <PdfPage
-              key={`page_${currentPage}`}
-              pageNumber={currentPage}
-              width={pageWidth}
-            />
+          {numPages > 0 && pageWidth != null && (
+            <PdfPage pageNumber={currentPage} width={pageWidth} />
           )}
         </Document>
       </div>
@@ -328,10 +407,18 @@ export function PdfViewer({
 }
 
 /** Re-rendering every page at every intermediate width while dragging a panel
- * divider is what makes resizing feel expensive; settle first, then render. */
+ * divider is what makes resizing feel expensive; settle first, then render.
+ * The first concrete measure paints immediately so open does not sit blank. */
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState<T>(value);
+  const hasConcrete = useRef(value != null);
   useEffect(() => {
+    if (!hasConcrete.current && value != null) {
+      hasConcrete.current = true;
+      setDebounced(value);
+      return;
+    }
+    if (!hasConcrete.current) return;
     const handle = setTimeout(() => setDebounced(value), delay);
     return () => clearTimeout(handle);
   }, [value, delay]);
