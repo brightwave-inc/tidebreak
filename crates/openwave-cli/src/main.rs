@@ -94,10 +94,10 @@ usage: openwave serve
                   [--permission-mode ask|auto|allow|plan]
                   [--model <key>]
 
-       openwave output list <chat>
-       openwave output show <chat> <output> [--revision <id>]
-       openwave output revisions <chat> <output>
-       openwave output export <chat> <output> <path> [--revision <id>]
+       openwave output list <chat> [--output-format text|json]
+       openwave output show <chat> <output> [--revision <id>] [--output-format text|json]
+       openwave output revisions <chat> <output> [--output-format text|json]
+       openwave output export <chat> <output> <path> [--revision <id>] [--output-format text|json]
        openwave attach <chat> <file>
 
        openwave provider list
@@ -125,9 +125,9 @@ usage: openwave serve
        openwave folder list [--chat <id>]
        openwave folder disconnect <path-or-root-id> --chat <id>
 
-The setup commands take --output-format text|json. A key is read from stdin, or
-from the environment variable named by --from-env — never from an argument,
-which every process on the machine can read.
+The setup commands and the output family take --output-format text|json. A key
+is read from stdin, or from the environment variable named by --from-env —
+never from an argument, which every process on the machine can read.
 
 tui, -p, output, attach, and the setup commands also take --server <url>
 [--server-token-env <var>] or --attach, which talks to a server that is already
@@ -630,8 +630,8 @@ fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
 /// Parse and run one `openwave output …` subcommand.
 ///
 /// Positional chat and output ids, matching `openwave attach <chat> <file>`;
-/// the only flag is `--revision <id>`, which names an exact version instead of
-/// the current one.
+/// `--revision <id>` names an exact version instead of the current one, and
+/// `--output-format text|json` is the same opt-in the setup family uses.
 async fn output_command(
     args: &mut impl Iterator<Item = OsString>,
     server: connect::Server,
@@ -646,10 +646,8 @@ async fn output_command(
     };
 
     if subcommand == OsStr::new("list") {
-        if args.next().is_some() {
-            usage_error("output list accepts only a chat id");
-        }
-        return outputs::run(outputs::Command::List { chat }, server).await;
+        let (_, format) = parse_output_trailing_flags(args, /*allow_revision=*/ false);
+        return outputs::run(outputs::Command::List { chat }, format, server).await;
     }
 
     let output = match args.next() {
@@ -671,20 +669,8 @@ async fn output_command(
         None
     };
 
-    let mut revision = None;
-    while let Some(flag) = args.next() {
-        if flag == OsStr::new("--revision") {
-            let Some(id) = args.next() else {
-                usage_error("--revision requires a revision id");
-            };
-            match openwave_core::OutputRevisionId::from_str(&id.to_string_lossy()) {
-                Ok(id) => revision = Some(id),
-                Err(_) => usage_error("--revision expects a revision UUID"),
-            }
-        } else {
-            usage_error(&format!("unknown output argument {flag:?}"));
-        }
-    }
+    let allow_revision = subcommand == OsStr::new("show") || subcommand == OsStr::new("export");
+    let (revision, format) = parse_output_trailing_flags(args, allow_revision);
 
     let command = if subcommand == OsStr::new("show") {
         outputs::Command::Show {
@@ -693,9 +679,6 @@ async fn output_command(
             revision,
         }
     } else if subcommand == OsStr::new("revisions") {
-        if revision.is_some() {
-            usage_error("output revisions lists every version and takes no --revision");
-        }
         outputs::Command::Revisions { chat, output }
     } else if subcommand == OsStr::new("export") {
         outputs::Command::Export {
@@ -707,7 +690,42 @@ async fn output_command(
     } else {
         usage_error("output accepts list, show, revisions, or export");
     };
-    outputs::run(command, server).await
+    outputs::run(command, format, server).await
+}
+
+/// Shared flag loop for the output family: optional `--revision` (show/export)
+/// and the trailing `--output-format` every verb accepts.
+fn parse_output_trailing_flags(
+    args: &mut impl Iterator<Item = OsString>,
+    allow_revision: bool,
+) -> (Option<openwave_core::OutputRevisionId>, OutputFormat) {
+    let mut revision = None;
+    let mut format = OutputFormat::Text;
+    while let Some(flag) = args.next() {
+        if flag == OsStr::new("--revision") {
+            if !allow_revision {
+                usage_error(&format!("unknown output argument {flag:?}"));
+            }
+            let Some(id) = args.next() else {
+                usage_error("--revision requires a revision id");
+            };
+            match openwave_core::OutputRevisionId::from_str(&id.to_string_lossy()) {
+                Ok(id) => revision = Some(id),
+                Err(_) => usage_error("--revision expects a revision UUID"),
+            }
+        } else if flag == OsStr::new("--output-format") {
+            let Some(value) = args.next() else {
+                usage_error("--output-format requires text or json");
+            };
+            match OutputFormat::parse(&value.to_string_lossy()) {
+                Some(value) => format = value,
+                None => usage_error("--output-format expects text or json"),
+            }
+        } else {
+            usage_error(&format!("unknown output argument {flag:?}"));
+        }
+    }
+    (revision, format)
 }
 
 fn usage_error(message: &str) -> ! {
