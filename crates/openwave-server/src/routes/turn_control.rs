@@ -530,6 +530,27 @@ pub async fn put_queue_paused(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /chats/{chat_id}/queued/send-now` — clear this chat's pause so the
+/// promoter's next sweep starts the oldest queued message.
+///
+/// Promotion stays with the sweep: the idempotent try-and-delete in
+/// [`promote_queued_turns`] owns the exact ordering guarantees, and the sweep
+/// runs on a sub-second cadence, so this route only needs to release the
+/// gate. A chat that was not paused is unaffected, making the call safe to
+/// repeat.
+pub async fn post_queue_send_now(
+    State(state): State<AppState>,
+    store: ScopedStore,
+    Path(id): Path<ChatId>,
+) -> Result<StatusCode, ServerError> {
+    store.require_chat(id).await?;
+    state
+        .store
+        .set_setting(&queue_paused_setting(id), &serde_json::json!(false))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Body of `POST /chats/{id}/steer`.
 #[derive(Debug, Deserialize)]
 pub struct SteerBody {

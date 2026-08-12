@@ -70,23 +70,45 @@ export function QueueTray({
   return (
     <section
       aria-label="Queued messages"
-      className="mx-auto mb-2 w-full max-w-3xl rounded-xl border border-border bg-card shadow-sm"
+      className="mx-auto mb-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border/60 bg-card/80 shadow-sm"
     >
-      <header className="flex items-center gap-2 border-b border-border px-3 py-1.5">
-        <span className="text-xs font-semibold">
-          Queued <span className="font-normal text-muted-foreground">{queued.length}</span>
-          {paused && (
-            <span className="ml-2 rounded-full border border-warning-border/45 bg-warning-background px-2 py-px text-[11px] font-medium text-warning-foreground">
-              Paused
-            </span>
-          )}
+      <header className="flex h-8 items-center gap-2 border-b border-border/60 pl-3 pr-1.5">
+        <span className="flex min-w-0 items-baseline gap-1.5 text-xs">
+          <span className="font-medium">Queued</span>
+          <span className="tabular-nums text-muted-foreground">
+            {queued.length}
+          </span>
         </span>
-        <div className="ml-auto">
+        {paused && (
+          <span className="rounded-full border border-warning-border/45 bg-warning-background px-1.5 py-px text-[10px] font-medium leading-4 text-warning-foreground">
+            Paused
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-0.5">
+          {paused && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+              disabled={busy}
+              onClick={() =>
+                void act(
+                  () => client.sendQueuedNow(chatId),
+                  "Could not start the queue",
+                )
+              }
+            >
+              <Play className="size-3" />
+              Send now
+            </Button>
+          )}
           <Button
             type="button"
             variant="ghost"
-            size="sm"
-            className="h-6 gap-1 px-2 text-xs text-muted-foreground"
+            size="icon-xs"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            aria-label={paused ? "Resume queue" : "Pause queue"}
             disabled={busy}
             onClick={() =>
               void act(
@@ -96,17 +118,13 @@ export function QueueTray({
             }
           >
             {paused ? <Play className="size-3" /> : <Pause className="size-3" />}
-            {paused ? "Resume" : "Pause"}
           </Button>
         </div>
       </header>
-      <ul className="flex flex-col gap-px p-1.5">
+      <ul className="divide-y divide-border/60 px-3">
         {queued.map((row, index) => (
-          <li
-            key={row.id}
-            className="group flex items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-accent"
-          >
-            <span className="w-4 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+          <li key={row.id} className="group flex h-8 items-center gap-2">
+            <span className="w-3 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
               {index + 1}
             </span>
             {editing === row.id ? (
@@ -137,12 +155,12 @@ export function QueueTray({
                 {row.content}
               </span>
             )}
-            <span className="hidden shrink-0 items-center group-hover:inline-flex">
+            <span className="hidden shrink-0 items-center gap-0.5 group-hover:inline-flex">
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-8"
-                className="size-6"
+                size="icon-xs"
+                className="size-6 text-muted-foreground hover:text-foreground"
                 aria-label="Move up"
                 disabled={busy || index === 0}
                 onClick={() =>
@@ -157,8 +175,8 @@ export function QueueTray({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-8"
-                className="size-6"
+                size="icon-xs"
+                className="size-6 text-muted-foreground hover:text-foreground"
                 aria-label="Move down"
                 disabled={busy || index === queued.length - 1}
                 onClick={() =>
@@ -173,8 +191,8 @@ export function QueueTray({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-8"
-                className="size-6"
+                size="icon-xs"
+                className="size-6 text-muted-foreground hover:text-foreground"
                 aria-label="Edit queued message"
                 disabled={busy}
                 onClick={() => {
@@ -187,8 +205,8 @@ export function QueueTray({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-8"
-                className="size-6 hover:text-destructive"
+                size="icon-xs"
+                className="size-6 text-muted-foreground hover:text-destructive"
                 aria-label="Delete queued message"
                 disabled={busy}
                 onClick={() =>

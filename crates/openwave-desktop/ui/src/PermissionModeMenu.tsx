@@ -1,10 +1,10 @@
 import {
   Check,
   ChevronDown,
+  Eye,
   Lock,
-  NotebookPen,
   ShieldCheck,
-  Sparkles,
+  ShieldOff,
   Zap,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -49,7 +49,7 @@ const PERMISSION_MODE_SCALE: {
     label: "Plan",
     description:
       "Read-only: the agent explores and proposes a plan. Nothing is edited or run until you switch modes.",
-    icon: NotebookPen,
+    icon: Eye,
     elevated: false,
   },
   ASK_PERMISSION_MODE_OPTION,
@@ -58,14 +58,14 @@ const PERMISSION_MODE_SCALE: {
     label: "Auto",
     description:
       "Workspace edits run on their own; anything that leaves the workspace still asks.",
-    icon: Sparkles,
+    icon: Zap,
     elevated: true,
   },
   {
     value: "allow",
     label: "Allow all",
     description: "Everything runs without asking, in this chat only.",
-    icon: Zap,
+    icon: ShieldOff,
     elevated: true,
   },
 ];
