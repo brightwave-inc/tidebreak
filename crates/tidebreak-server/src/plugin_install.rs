@@ -65,7 +65,7 @@ const MAX_REDIRECTS: usize = 5;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_AGENT: &str =
-    "TidebreakPluginImporter/1.0 (+https://github.com/brightwave-inc/openwave)";
+    "TidebreakPluginImporter/1.0 (+https://github.com/brightwave-inc/tidebreak)";
 
 /// A source whose immutable identity is explicit in the request.
 #[derive(Debug, Clone, Deserialize)]

@@ -44,7 +44,7 @@ pub const MAX_FETCH_REDIRECT_HOPS: usize = 5;
 pub const MAX_EXTRACT_CONTENT_CHARS: usize = 24_000;
 /// The honest, distinct user agent every native page fetch announces.
 pub const NATIVE_FETCH_USER_AGENT: &str =
-    "TidebreakPageExtractor/1.0 (+https://github.com/brightwave-inc/openwave)";
+    "TidebreakPageExtractor/1.0 (+https://github.com/brightwave-inc/tidebreak)";
 
 /// Most document elements the readability pass will parse.
 ///

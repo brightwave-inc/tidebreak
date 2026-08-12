@@ -9,7 +9,7 @@ import { Menu, X } from 'lucide-react';
 import { useState } from 'react';
 
 const PRODUCT_URL = 'https://tidebreak.io';
-const REPO_URL = 'https://github.com/brightwave-inc/openwave';
+const REPO_URL = 'https://github.com/brightwave-inc/tidebreak';
 
 const navLinks = [{ text: 'Product', href: PRODUCT_URL }];
 
