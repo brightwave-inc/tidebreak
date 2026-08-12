@@ -3,7 +3,7 @@
 
 Conversion to PDF is tried in order: a LibreOffice inside this sandbox
 (container images that ship one), then a PDF the host converted after the
-file landed in output/ (staged at .openwave/render/<name>.pdf). When
+file landed in output/ (staged at .tidebreak/render/<name>.pdf). When
 neither exists the error says exactly what to do next.
 """
 
@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from _openwave_preview import (
+from _tidebreak_preview import (
     HelperError,
     ensure_preview_dir,
     existing_file,
@@ -24,7 +24,7 @@ from _openwave_preview import (
 )
 from render_pdf import render_document
 
-HOST_RENDER_DIR = Path(".openwave/render")
+HOST_RENDER_DIR = Path(".tidebreak/render")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -55,7 +55,7 @@ def host_converted_pdf(source: Path) -> Path | None:
     """The host-side conversion of `source`, if one has been staged.
 
     The host mirrors office files under output/ into
-    .openwave/render/<path relative to output>.pdf after each successful
+    .tidebreak/render/<path relative to output>.pdf after each successful
     command; on a managed sandbox that PDF must be listed in a call's
     'files' to appear here.
     """
@@ -104,7 +104,7 @@ def main() -> int:
     libreoffice = shutil.which("libreoffice") or shutil.which("soffice")
 
     if libreoffice is not None:
-        with tempfile.TemporaryDirectory(prefix="openwave-office-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="tidebreak-office-") as temporary:
             converted = convert_with_libreoffice(libreoffice, source, Path(temporary))
             renderer, outputs, count, omitted = render_document(
                 converted,

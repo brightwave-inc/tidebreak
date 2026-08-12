@@ -1,10 +1,10 @@
-# OpenWave documentation
+# Tidebreak documentation
 
 Project documentation, versioned alongside the code.
 
 - [The crates](crates.md) — what each crate in the workspace is and does, and how
   they fit together.
-- [How OpenWave works](how-openwave-works.md) — a plain-language maintainer tour
+- [How Tidebreak works](how-tidebreak-works.md) — a plain-language maintainer tour
   of the product, runtime, state machines, document model, and unfinished edges.
 - [Model providers and cross-provider replay](model-providers.md) — provider
   tiers, mid-conversation switching, and the flatten-on-switch rule.
@@ -35,11 +35,11 @@ Project documentation, versioned alongside the code.
 - [Local apps](local-apps.md) — agent-generated mini-apps in the profile:
   sandboxed frame rendering, manifest-pinned tool invocation with durable
   consent, and how sharing is registered here but published at the gateway.
-- [The OpenWave ↔ model gateway boundary](gateway-boundary.md) — how a profile
+- [The Tidebreak ↔ model gateway boundary](gateway-boundary.md) — how a profile
   becomes gateway-managed (pairing, policy tiers, sessions) and what crosses
   the wire once it is.
 - [OS-managed policy (MDM)](managed-policy.md) — the per-platform artifacts an
-  administrator deploys to point OpenWave at a managed model gateway.
+  administrator deploys to point Tidebreak at a managed model gateway.
 - [Releases and versioning](releases.md) — semantic PR titles, native release
   drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
 - [What comes after v1](deferred.md) — the deliberately parked product scope,

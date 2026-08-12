@@ -1,17 +1,17 @@
 # Host access and connected folders
 
-OpenWave is local-first, but "local" should not mean that every agent can see
+Tidebreak is local-first, but "local" should not mean that every agent can see
 every file on the machine. This document describes the intended boundary between
-OpenWave's product state and user-approved access to the host computer.
+Tidebreak's product state and user-approved access to the host computer.
 
 The design follows the same basic product split as Brightwave web plus desktop.
-The important difference at first is deployment: OpenWave's control plane runs
+The important difference at first is deployment: Tidebreak's control plane runs
 locally. The boundary is still explicit so that a self-hosted or managed control
 plane can use the same contracts later.
 
 ## The product model
 
-OpenWave owns an application data directory. It contains the operational
+Tidebreak owns an application data directory. It contains the operational
 database, retained source blobs, broker state, audit records, and private
 scratch data. It is not a user project and should not appear as the
 one folder all conversations work in.
@@ -24,7 +24,7 @@ exact conversation. Each conversation can contain more than one connected root.
 
 In practical terms:
 
-- OpenWave may always use its own private application data and scratch space.
+- Tidebreak may always use its own private application data and scratch space.
 - Each conversation has its own ordered set of connected folders.
 - A new conversation does not inherit another conversation's roots or fall back
   to a shared workspace.
@@ -172,7 +172,7 @@ the current implementation does not claim that support.
                  product actions
                         |
                         v
-          OpenWave control plane (local first)
+          Tidebreak control plane (local first)
        projects, chats, turns, documents, tools
                         |
              capability-checked operations
@@ -188,7 +188,7 @@ the current implementation does not claim that support.
 ```
 
 The **control plane** owns product meaning. Today it is the loopback
-`openwave-server` embedded in the desktop app or started by `openwave serve`.
+`tidebreak-server` embedded in the desktop app or started by `tidebreak serve`.
 Later it may be self-hosted or managed. Agent turns can request host operations,
 but the control plane cannot turn an agent request into a new grant.
 
@@ -204,7 +204,7 @@ surface than the complete desktop or server. Process separation is useful
 defense in depth, not a substitute for authorization: the broker validates every
 operation even when its caller is local.
 
-The sidecar adapter is a small `openwave-host-broker` process owned by the
+The sidecar adapter is a small `tidebreak-host-broker` process owned by the
 desktop host. The desktop builds and bundles it by default, starts one lazy
 process for the application profile, and restarts it after a bounded transport
 failure. The host supplies absolute app-data and home-directory paths at spawn
@@ -461,7 +461,7 @@ capabilities are:
 
 - discover connected roots;
 - list and read files under a connected root;
-- import selected file bytes into OpenWave's private data plane;
+- import selected file bytes into Tidebreak's private data plane;
 - write under a connected root with an explicit, bounded policy;
 - later, run commands inside an OS-confined environment.
 
@@ -538,7 +538,7 @@ The trust boundary does not move when deployment changes:
 | --- | --- | --- |
 | Local desktop | In-process local server | Tauri host + local broker |
 | Self-hosted | User-operated service | Desktop host + broker on each user's machine |
-| Managed | Hosted OpenWave service | Desktop host + broker on each user's machine |
+| Managed | Hosted Tidebreak service | Desktop host + broker on each user's machine |
 
 Only the transport between the control plane and desktop changes. The broker
 continues to accept the same typed operations, keep grants on the user's
@@ -554,7 +554,7 @@ provisioned grants with clear operator intent.
 
 This will land in independently reviewable pieces:
 
-1. Add `openwave-host-broker` with typed capabilities, grants, access-context and
+1. Add `tidebreak-host-broker` with typed capabilities, grants, access-context and
    root identifiers, authorization value-model/specification tests, and
    descriptor-pinned root policy.
 2. Add the versioned control/operation protocol and an owning in-memory broker
@@ -580,7 +580,7 @@ This will land in independently reviewable pieces:
 6. Add the native Tauri sidecar lifecycle and connected-folder UI. The renderer
    can request only pick/list/revoke for its current conversation; it never
    receives a raw control surface or absolute path. Broker state, audit, and
-   scratch live under the protected OpenWave application-data directory.
+   scratch live under the protected Tidebreak application-data directory.
 7. Add the durable agent-request → native-picker → grant → retry workflow. The
    generic tool-execution foundation is now present: canonical requests are
    immutable, client work is durably discoverable, and per-claim fencing tokens

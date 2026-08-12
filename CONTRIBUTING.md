@@ -1,6 +1,6 @@
-# Contributing to OpenWave
+# Contributing to Tidebreak
 
-Thanks for your interest in OpenWave! It's early — the fastest way to help right
+Thanks for your interest in Tidebreak! It's early — the fastest way to help right
 now is to try the walking skeleton as it lands, file sharp issues, and discuss
 design before large changes.
 
@@ -41,7 +41,7 @@ The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);
 
 ### macOS keychain prompts
 
-OpenWave keeps secrets in the login keychain, and macOS ties keychain approvals
+Tidebreak keeps secrets in the login keychain, and macOS ties keychain approvals
 to the binary's code signature — so unsigned dev builds would re-trigger the
 access prompt on every rebuild. To prevent that, `cargo run` and `cargo test`
 launch through
@@ -58,12 +58,12 @@ Apple documents also needs a team identifier.
 
 So the runner signs with the first of these it finds:
 
-1. `$OPENWAVE_DEV_SIGNING_IDENTITY`, if set — set it empty to opt out
+1. `$TIDEBREAK_DEV_SIGNING_IDENTITY`, if set — set it empty to opt out
 2. an **Apple Development** identity
 3. a **Developer ID Application** identity
-4. an `openwave-dev` certificate already in a searchable keychain
-5. a local-only `openwave-dev` identity it creates in a dedicated keychain
-   under `~/Library/Application Support/OpenWave/dev-signing`
+4. an `tidebreak-dev` certificate already in a searchable keychain
+5. a local-only `tidebreak-dev` identity it creates in a dedicated keychain
+   under `~/Library/Application Support/Tidebreak/dev-signing`
 
 Options 2 and 3 carry a team identifier and are the ones that stop the prompts;
 3 means local development signs with a distribution key, which is the price of
@@ -72,7 +72,7 @@ generated password, so it never asks for your login-keychain password — but
 being self-signed it has no team identifier, so credential prompts will keep
 returning on rebuild. It is a floor, not a fix.
 
-Every binary is signed with the same fixed identifier (`openwave-dev`), so one
+Every binary is signed with the same fixed identifier (`tidebreak-dev`), so one
 approval covers every dev binary — including test executables, whose hashed
 file names change between builds.
 
@@ -84,14 +84,14 @@ away from, including the self-signed fallback — keep prompting. Re-home them
 once, which rewrites each item under the identity in use now:
 
 ```sh
-cargo run -p openwave-cli -- rehome-secrets
+cargo run -p tidebreak-cli -- rehome-secrets
 ```
 
 Run it through Cargo so the signing runner applies. Each credential asks for
 access once or twice more while it is read and its old item removed — plain
 **Allow** is enough — and then stops, including after later rebuilds, provided
 the identity carries a team identifier. `security find-generic-password -s
-openwave.dev` lists what the dev profile has stored.
+tidebreak.dev` lists what the dev profile has stored.
 
 The first build after switching identities may also raise a one-time *codesign
 wants to access key* prompt for the new signing key. **Always Allow** does
@@ -100,9 +100,9 @@ key's partition list to avoid it up front.
 
 ### Desktop UI
 
-See [`crates/openwave-desktop/README.md`](crates/openwave-desktop/README.md).
-Short version: `cd crates/openwave-desktop && pnpm --dir ui install && cargo tauri
-dev`, or run the React UI in a browser against `openwave serve` via
+See [`crates/tidebreak-desktop/README.md`](crates/tidebreak-desktop/README.md).
+Short version: `cd crates/tidebreak-desktop && pnpm --dir ui install && cargo tauri
+dev`, or run the React UI in a browser against `tidebreak serve` via
 `ui/.env.local`.
 
 ## Commit and PR conventions

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from _openwave_preview import (
+from _tidebreak_preview import (
     HelperError,
     ensure_preview_dir,
     existing_file,
@@ -51,7 +51,7 @@ def main() -> int:
         )
 
     remove_matching(preview, ["overview-grid.png", "figure-*.png"])
-    with tempfile.TemporaryDirectory(prefix="openwave-pdf-figures-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="tidebreak-pdf-figures-") as temporary:
         prefix = Path(temporary) / "figure"
         completed = subprocess.run(
             [pdfimages, "-png", str(source), str(prefix)],

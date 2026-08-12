@@ -7,9 +7,9 @@ export async function GET() {
   const basePath = process.env.__NEXT_ROUTER_BASEPATH || '';
 
   const lines = [
-    '# OpenWave Docs',
+    '# Tidebreak Docs',
     '',
-    '> Documentation for OpenWave.',
+    '> Documentation for Tidebreak.',
     '',
     '## Pages',
     '',

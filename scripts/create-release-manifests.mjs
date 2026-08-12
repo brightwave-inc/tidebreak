@@ -160,7 +160,7 @@ export function createReleaseManifests({
   for (const platformDescriptor of RELEASE_PLATFORMS) {
     for (const arch of platformDescriptor.architectures) {
       const directory = path.join(distPath, platformDescriptor.platform, arch);
-      const baseName = `OpenWave_${version}_${arch}`;
+      const baseName = `Tidebreak_${version}_${arch}`;
 
       for (const descriptor of platformDescriptor.formats) {
         const filename = `${baseName}${descriptor.extension}`;

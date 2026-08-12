@@ -3,7 +3,7 @@ import { ImageResponse } from 'next/og';
 
 export const revalidate = false;
 
-// Neutral ramp drawn from the OpenWave palette — the site is deliberately
+// Neutral ramp drawn from the Tidebreak palette — the site is deliberately
 // monochrome, so the card panel is a lightness ramp rather than brand hues.
 const GRID_COLORS = [
   ['#d4d4d8', '#a1a1aa', '#3f3f46', '#52525b'],
@@ -21,7 +21,7 @@ export async function GET(
   const page = getPage(pageSlug.length === 0 ? undefined : pageSlug);
   // Static export only renders the params below, so a miss here means the
   // scaffold has no content yet — fall back to a bare site card.
-  const title = page?.title ?? 'OpenWave Docs';
+  const title = page?.title ?? 'Tidebreak Docs';
   const description = page?.description ?? '';
 
   return new ImageResponse(
@@ -64,7 +64,7 @@ export async function GET(
             <span
               style={{ fontSize: '28px', fontWeight: 700, color: '#000000' }}
             >
-              OpenWave
+              Tidebreak
             </span>
             <span
               style={{ fontSize: '28px', fontWeight: 400, color: '#52525b' }}

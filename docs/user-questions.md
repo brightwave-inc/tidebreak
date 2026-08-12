@@ -14,7 +14,7 @@ foreground coordinator, which decides whether to ask the user.
 
 1. The model emits `ask_user_questions` alone, without assistant text or sibling
    calls.
-2. Under the live turn lease, OpenWave atomically stores the bounded questions,
+2. Under the live turn lease, Tidebreak atomically stores the bounded questions,
    the pending tool call, the client-wait checkpoint, and a renderer refresh
    event. The worker releases its lease in `waiting_for_client`.
 3. The desktop loads the durable card from
@@ -88,4 +88,4 @@ Changes to this path should preserve:
 The SQLite suite exercises restart recovery, answer/cancel and projection races,
 chat deletion, exact retries, and model transcript reconstruction. The
 PostgreSQL state-machine suite repeats answer, worker reclaim, and cancellation
-race coverage when `OPENWAVE_POSTGRES_TEST_URL` is configured.
+race coverage when `TIDEBREAK_POSTGRES_TEST_URL` is configured.

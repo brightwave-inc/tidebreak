@@ -11,12 +11,12 @@ import test from "node:test";
 // stale image to be discovered by a background run.
 
 const dockerfile = readFileSync(
-  new URL("../crates/openwave-sandbox-agent/Dockerfile", import.meta.url),
+  new URL("../crates/tidebreak-sandbox-agent/Dockerfile", import.meta.url),
   "utf8",
 );
 const requirements = readFileSync(
   new URL(
-    "../crates/openwave-sandbox-agent/documents-requirements.txt",
+    "../crates/tidebreak-sandbox-agent/documents-requirements.txt",
     import.meta.url,
   ),
   "utf8",
@@ -24,7 +24,7 @@ const requirements = readFileSync(
 const skillsDirectory = new URL("../skills/", import.meta.url);
 const baselineDeps = readFileSync(
   new URL(
-    "../crates/openwave-code-execution/baseline_python_deps.txt",
+    "../crates/tidebreak-code-execution/baseline_python_deps.txt",
     import.meta.url,
   ),
   "utf8",
@@ -173,7 +173,7 @@ test("the publish workflow rebuilds when any image input changes", () => {
   // input change; these prefixes are that scope. The weekly schedule flushes
   // everything else (base-image patches) through regardless.
   const rebuildScopes = [
-    "crates/openwave-sandbox-agent/*",
+    "crates/tidebreak-sandbox-agent/*",
     "scripts/exec-documents/*",
     ".github/workflows/publish-sandbox-image.yml",
   ];

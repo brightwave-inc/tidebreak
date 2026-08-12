@@ -11,10 +11,10 @@ The TypeScript is now generated from the Rust definitions.
 
 ```sh
 # Rewrite the generated bindings after changing a wire type.
-UPDATE_WIRE_TYPES=1 cargo test -p openwave-server
+UPDATE_WIRE_TYPES=1 cargo test -p tidebreak-server
 ```
 
-Output is checked in under `crates/openwave-desktop/ui/src/generated/`. Without
+Output is checked in under `crates/tidebreak-desktop/ui/src/generated/`. Without
 the environment variable the same test *compares* instead of writing, and fails
 if the checked-in file is stale — so CI fails on a diff.
 

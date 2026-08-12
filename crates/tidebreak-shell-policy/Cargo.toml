@@ -1,0 +1,16 @@
+[package]
+name = "tidebreak-shell-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Deterministic allow/ask/deny analysis for shell commands against standing rules."
+
+[lints]
+workspace = true
+
+[dependencies]
+brush-parser = { workspace = true }
+fancy-regex = { workspace = true }

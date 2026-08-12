@@ -30,10 +30,10 @@ async function runWithIdentities(root, identities) {
     security,
     `#!/usr/bin/env bash
 set -euo pipefail
-printf 'security %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
+printf 'security %s\\n' "$*" >>"$TIDEBREAK_TEST_LOG"
 case "$1" in
   find-identity)
-    printf '%s' "$OPENWAVE_TEST_IDENTITIES"
+    printf '%s' "$TIDEBREAK_TEST_IDENTITIES"
     ;;
   create-keychain)
     keychain="\${!#}"
@@ -46,7 +46,7 @@ case "$1" in
     ;;
   list-keychains)
     if [[ " $* " != *" -s "* ]]; then
-      printf '    "%s"\\n' "$OPENWAVE_TEST_LOGIN_KEYCHAIN"
+      printf '    "%s"\\n' "$TIDEBREAK_TEST_LOGIN_KEYCHAIN"
     fi
     ;;
 esac
@@ -61,14 +61,14 @@ set -euo pipefail
 if [[ "$1" == "--display" ]]; then
   exit 1
 fi
-printf 'codesign %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
+printf 'codesign %s\\n' "$*" >>"$TIDEBREAK_TEST_LOG"
 `,
   );
 
   await writeFile(
     probe,
     `#!/usr/bin/env bash
-printf 'exec %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
+printf 'exec %s\\n' "$*" >>"$TIDEBREAK_TEST_LOG"
 `,
   );
   await Promise.all([
@@ -79,10 +79,10 @@ printf 'exec %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
 
   const env = {
     ...process.env,
-    OPENWAVE_DEV_SIGNING_DIR: join(root, "signing"),
-    OPENWAVE_TEST_LOG: log,
-    OPENWAVE_TEST_IDENTITIES: identities,
-    OPENWAVE_TEST_LOGIN_KEYCHAIN: join(root, "login.keychain-db"),
+    TIDEBREAK_DEV_SIGNING_DIR: join(root, "signing"),
+    TIDEBREAK_TEST_LOG: log,
+    TIDEBREAK_TEST_IDENTITIES: identities,
+    TIDEBREAK_TEST_LOGIN_KEYCHAIN: join(root, "login.keychain-db"),
     PATH: `${binDir}:${process.env.PATH}`,
   };
 
@@ -102,7 +102,7 @@ printf 'exec %s\\n' "$*" >>"$OPENWAVE_TEST_LOG"
 // team-identified certificate has to beat the local-only fallback, even though
 // it means development signs with a distribution key.
 test("prefers a team-identified identity over bootstrapping a local one", async () => {
-  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+  const root = await mkdtemp(join(tmpdir(), "tidebreak-dev-signing-"));
   try {
     const commands = await runWithIdentities(
       root,
@@ -116,7 +116,7 @@ test("prefers a team-identified identity over bootstrapping a local one", async 
       )?.length,
       2,
     );
-    assert.match(commands, /codesign .*--identifier openwave-dev/);
+    assert.match(commands, /codesign .*--identifier tidebreak-dev/);
     assert.match(commands, /exec first/);
     assert.match(commands, /exec second/);
   } finally {
@@ -125,7 +125,7 @@ test("prefers a team-identified identity over bootstrapping a local one", async 
 });
 
 test("prefers Apple Development over Developer ID", async () => {
-  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+  const root = await mkdtemp(join(tmpdir(), "tidebreak-dev-signing-"));
   try {
     const commands = await runWithIdentities(
       root,
@@ -145,14 +145,14 @@ test("prefers Apple Development over Developer ID", async () => {
 });
 
 test("bootstraps local signing when no identity exists", async () => {
-  const root = await mkdtemp(join(tmpdir(), "openwave-dev-signing-"));
+  const root = await mkdtemp(join(tmpdir(), "tidebreak-dev-signing-"));
   try {
     const commands = await runWithIdentities(root, "     0 valid identities found\n");
 
     assert.equal(commands.match(/security create-keychain/g)?.length, 1);
     assert.equal(commands.match(/security import/g)?.length, 1);
     assert.equal(
-      commands.match(/codesign --force --sign openwave-dev/g)?.length,
+      commands.match(/codesign --force --sign tidebreak-dev/g)?.length,
       2,
     );
     assert.match(commands, /exec first/);

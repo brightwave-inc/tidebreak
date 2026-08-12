@@ -3,7 +3,7 @@ title: MCP servers
 description: Connect external Model Context Protocol tool servers over stdio or HTTP.
 ---
 
-OpenWave is an MCP client. Tools from a connected server are advertised to the
+Tidebreak is an MCP client. Tools from a connected server are advertised to the
 agent alongside its own, namespaced as `mcp__<server>__<tool>`.
 
 ## Adding a server
@@ -13,7 +13,7 @@ added and reconnected in place — no shell, no config file, no restart.
 
 Two transports:
 
-**Local process (stdio)** — OpenWave launches the server as a child process.
+**Local process (stdio)** — Tidebreak launches the server as a child process.
 
 | Field | |
 | --- | --- |
@@ -23,7 +23,7 @@ Two transports:
 | **Environment** | Name/value pairs passed to the process. |
 | **Forward environment names** | Variables to pass through from your own environment by name, without copying their values into the config. |
 
-**Remote endpoint (HTTP)** — OpenWave connects to a URL.
+**Remote endpoint (HTTP)** — Tidebreak connects to a URL.
 
 | Field | |
 | --- | --- |
@@ -47,7 +47,7 @@ attention**, **Disabled**, or **Not verified**.
 inspection of what a server's tool claims to do. In Ask and Auto, each call
 asks.
 
-That is deliberate. OpenWave classifies its own tools because it knows what
+That is deliberate. Tidebreak classifies its own tools because it knows what
 they do. It knows nothing about a third-party server's tools beyond the names
 and descriptions the server supplies — and the server wrote those.
 
@@ -58,8 +58,8 @@ reach the model. Connect servers you trust, and read approval cards for
 MCP calls rather than clicking through them.
 </Callout>
 
-## Running OpenWave as an MCP server
+## Running Tidebreak as an MCP server
 
-The reverse direction also exists: `openwave mcp <workspace>` serves
-OpenWave's read-only file tools to another MCP client over stdio. See
+The reverse direction also exists: `tidebreak mcp <workspace>` serves
+Tidebreak's read-only file tools to another MCP client over stdio. See
 [Running headless](/headless).

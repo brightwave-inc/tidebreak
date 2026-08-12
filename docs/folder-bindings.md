@@ -100,7 +100,7 @@ The frame bridge gains `fs/list`, `fs/read`, and `fs/write` verbs
 (capability-by-presence, like `operations/call`), and the invoke body a
 third surface: `{ folder, op, path, ... }`.
 
-Dispatch crosses a new seam, because today **nothing in openwave-server
+Dispatch crosses a new seam, because today **nothing in tidebreak-server
 can reach the broker** — folder tools are client-executed contracts the
 desktop resolves, and the broker is a sidecar only the desktop process
 spawns:
@@ -108,7 +108,7 @@ spawns:
 - `AppState` gains an optional host-folder handle (the
   `ExecFolderGrantResolver` / `rest_dispatch` pattern), injected by the
   desktop over its broker client, `None` in every other embedding.
-- Absent the handle — headless `openwave serve`, generic embeddings — the
+- Absent the handle — headless `tidebreak serve`, generic embeddings — the
   door is honest at every layer, copying the
   `root_attachment_routes_enabled` precedent rather than the folder
   tools' park-forever one: the roster lists no folders, consent on a

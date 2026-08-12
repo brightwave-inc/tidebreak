@@ -1,18 +1,18 @@
-# The OpenWave ↔ model gateway boundary
+# The Tidebreak ↔ model gateway boundary
 
 How the desktop app becomes a client of a model gateway deployment, and what
 crosses the wire once it is one. This page is the design overview; the
 enforcement details live in the module documentation of
-`crates/openwave-server/src/managed_policy.rs`,
-`crates/openwave-server/src/pairing.rs`,
-`crates/openwave-desktop/src/deep_link.rs`, and
-`crates/openwave-server/src/connectors/gateway.rs`. The per-platform MDM artifacts
+`crates/tidebreak-server/src/managed_policy.rs`,
+`crates/tidebreak-server/src/pairing.rs`,
+`crates/tidebreak-desktop/src/deep_link.rs`, and
+`crates/tidebreak-server/src/connectors/gateway.rs`. The per-platform MDM artifacts
 are in [managed-policy.md](managed-policy.md); the MCP transport details are
 in [mcp-servers.md](mcp-servers.md).
 
 ## Posture
 
-OpenWave ships as one artifact. Whether a given profile is gateway-managed is
+Tidebreak ships as one artifact. Whether a given profile is gateway-managed is
 runtime state, not a build flavor, and everything the gateway controls —
 which models exist, which MCP endpoints mount, whether provider keys are
 editable — is enforced twice, with different weight on each side:
@@ -60,7 +60,7 @@ Policy resolution has three tiers, strongest first:
 ## Pairing: the provision link is a proposal, not a command
 
 Pairing starts from the gateway's own web UI: a link of exactly one shape,
-`openwave://provision?gateway=<base url>` (`openwave-dev://` in debug
+`tidebreak://provision?gateway=<base url>` (`tidebreak-dev://` in debug
 builds). A deep link is an unauthenticated remote trigger — any page can
 raise one, and a custom scheme carries no provenance — so the boundary rule
 is that **the link never writes anything**:
@@ -93,8 +93,8 @@ user ignores, or one dialog that defaults to changing nothing.
 
 ## Authentication
 
-OpenWave is a registered first-class OAuth client of the gateway, client id
-`openwave`. Sign-in is an authorization-code + PKCE flow in the user's
+Tidebreak is a registered first-class OAuth client of the gateway, client id
+`tidebreak`. Sign-in is an authorization-code + PKCE flow in the user's
 default browser against the gateway's `/oauth/authorize`, redirecting to a
 single-use loopback listener (`http://127.0.0.1:<random port>/callback`);
 the app never sees credentials, only the code. The requested scope is
@@ -131,7 +131,7 @@ The connector speaks a small, versioned HTTP surface on the gateway:
 - `/api/v1/meta` — unauthenticated deployment identity, shown before and
   during sign-in.
 - `/api/v1/cli/me` — the authenticated user, for the account hint.
-- `/api/v1/cli/models` — the models this user may invoke. OpenWave syncs the
+- `/api/v1/cli/models` — the models this user may invoke. Tidebreak syncs the
   full list and retains each row's `protocol` (`anthropic_messages` or
   `openai_responses`) in a local snapshot stamped with the gateway URL
   after sign-in and on the explicit "Refresh models" affordance; gateways

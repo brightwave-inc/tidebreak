@@ -1,6 +1,6 @@
 # Conversation outputs
 
-OpenWave can turn a conversation into a file without giving the model an
+Tidebreak can turn a conversation into a file without giving the model an
 arbitrary host write path. The first deliverables slice is intentionally small:
 the foreground agent creates bounded UTF-8 files in conversation-private
 scratch, the desktop previews them in **Outputs**, and the user chooses a
@@ -11,7 +11,7 @@ destination through the native **Save As…** dialog.
 1. The user asks for a report, plan, table, data file, or simple web page.
 2. The foreground agent produces the file with code execution, saving it under
    the workspace's `output/` directory.
-3. After each command, OpenWave scans `output/` and publishes what it finds as
+3. After each command, Tidebreak scans `output/` and publishes what it finds as
    durable outputs: a new filename creates an output, and the same filename with
    changed bytes appends a new version of the same output.
 4. The native Outputs view lists safe metadata and returns a bounded preview.

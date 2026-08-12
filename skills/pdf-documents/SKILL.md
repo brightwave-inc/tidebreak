@@ -84,7 +84,7 @@ Rendering catches what code cannot: clipped text, overlapping elements,
 missing glyphs, blank pages. Before presenting the PDF:
 
 1. Render pages to images in `preview/` with the bundled helper:
-   `python3 .openwave/exec-scripts/render_pdf.py output/<file>.pdf`
+   `python3 .tidebreak/exec-scripts/render_pdf.py output/<file>.pdf`
    (at most 3 preview images are returned per exec call; render further
    pages in another call when the document is long).
 2. Inspect the returned images for layout defects and fix the generator

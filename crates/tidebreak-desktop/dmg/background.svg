@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <!--
+    Background art for the macOS disk image window.
+
+    Authored at the 660x400 point size of `bundle.macOS.dmg.windowSize`. Finder
+    draws the two 128pt icons centred on (165, 205) and (495, 205) with their
+    labels underneath, so those regions are left empty here.
+
+    background.tiff is what ships: a multi-representation image carrying both
+    scales, so the window stays crisp on Retina displays. Regenerate the checked
+    in renders after editing this file:
+
+        rsvg-convert -w 660  -h 400 -o background.png    background.svg
+        rsvg-convert -w 1320 -h 800 -o background@2x.png background.svg
+        tiffutil -cathidpicheck background.png background@2x.png \
+          -out background.tiff
+  -->
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FDFDFE"/>
+      <stop offset="0.55" stop-color="#F8F9FB"/>
+      <stop offset="1" stop-color="#EFF1F4"/>
+    </linearGradient>
+    <!-- One arm of the app mark, reused at watermark scale. -->
+    <path id="arm" d="M -26 -52 L 26 0 L -26 52"/>
+  </defs>
+
+  <rect width="660" height="400" fill="url(#paper)"/>
+
+  <!-- Barely-there chevron watermark echoing the app mark. Anchored to the two
+       side edges so it never sits under an icon or its label. -->
+  <g stroke="#2B3440" stroke-opacity="0.022" stroke-width="7" fill="none"
+     stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10">
+    <g transform="translate(-52 200) scale(1.55)">
+      <use href="#arm"/>
+      <use href="#arm" transform="translate(30 0)"/>
+      <use href="#arm" transform="translate(60 0)"/>
+    </g>
+    <g transform="translate(712 200) scale(-1.55 1.55)">
+      <use href="#arm"/>
+      <use href="#arm" transform="translate(30 0)"/>
+      <use href="#arm" transform="translate(60 0)"/>
+    </g>
+  </g>
+
+  <!-- Instruction line. -->
+  <text x="330" y="70" text-anchor="middle" xml:space="preserve"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="18" letter-spacing="0.1">
+    <tspan fill="#6B7076" font-weight="400">To install, drag </tspan><tspan fill="#17181A" font-weight="600">Tidebreak</tspan><tspan fill="#6B7076" font-weight="400"> to </tspan><tspan fill="#17181A" font-weight="600">Applications</tspan>
+  </text>
+
+  <!-- Three chevrons pointing at the Applications folder, the last one darkest. -->
+  <g fill="none" stroke-width="5" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10">
+    <path d="M 297 194 L 308 205 L 297 216" stroke="#CDD2D8"/>
+    <path d="M 321 194 L 332 205 L 321 216" stroke="#ADB3BB"/>
+    <path d="M 345 194 L 356 205 L 345 216" stroke="#7E858E"/>
+  </g>
+</svg>

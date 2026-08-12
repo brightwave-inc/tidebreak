@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Regenerate crates/openwave-sandbox-agent/documents-requirements.txt.
+"""Regenerate crates/tidebreak-sandbox-agent/documents-requirements.txt.
 
 Run from the repository root:
 
     python3 scripts/generate-documents-requirements.py
 
 Reads the top-level pins from the document skills' SKILL.md `deps` manifests
-and from crates/openwave-code-execution/baseline_python_deps.txt (the baseline
+and from crates/tidebreak-code-execution/baseline_python_deps.txt (the baseline
 set every execution backend guarantees), resolves their transitive closure for
 the image's platform (linux cp311) with pip, and records every
 file hash PyPI publishes for each resolved version. It also resolves the skill
@@ -30,9 +30,9 @@ import urllib.request
 
 # The baseline packages guaranteed on every execution backend, declared once
 # for the image, the local offline package cache, and the operating prompt.
-BASELINE = pathlib.Path("crates/openwave-code-execution/baseline_python_deps.txt")
+BASELINE = pathlib.Path("crates/tidebreak-code-execution/baseline_python_deps.txt")
 
-OUTPUT = pathlib.Path("crates/openwave-sandbox-agent/documents-requirements.txt")
+OUTPUT = pathlib.Path("crates/tidebreak-sandbox-agent/documents-requirements.txt")
 LOCAL_SANDBOX_PLATFORM = "macosx_11_0_arm64"
 LOCAL_SANDBOX_PYTHON = "3.10"
 LOCAL_SANDBOX_ABI = "cp310"
@@ -44,7 +44,7 @@ HEADER = """\
 # serves that day; a substituted artifact fails the build.
 #
 # The top-level pins mirror the document skills' SKILL.md `deps` manifests plus
-# the baseline set in crates/openwave-code-execution/baseline_python_deps.txt
+# the baseline set in crates/tidebreak-code-execution/baseline_python_deps.txt
 # (the sandbox-image-pins test enforces both locksteps); the rest is their
 # pinned transitive closure. Each entry lists every file hash PyPI publishes
 # for that version, so one file covers amd64, arm64, and pure wheels alike.

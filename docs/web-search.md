@@ -1,6 +1,6 @@
 # Web search configuration
 
-OpenWave has a bounded web-search module in `openwave-server` (`crates/openwave-server/src/web_search`) for direct search and for
+Tidebreak has a bounded web-search module in `tidebreak-server` (`crates/tidebreak-server/src/web_search`) for direct search and for
 single-page extraction. The crate owns the provider-neutral request/result
 contracts, HTTP adapters, and the foreground `WebSearchTool` and
 `WebExtractTool`; the server supplies current host policy and credentials
@@ -214,11 +214,11 @@ anything else.
 
 ## Current boundary
 
-`openwave-server::web_search::resolve_provider` is the host-only construction
+`tidebreak-server::web_search::resolve_provider` is the host-only construction
 seam. It is inert until a caller invokes `search`; no route invokes it.
 Foreground agents receive a Sensitive `web_search` tool. Each exact call is
 persisted and parked on the durable approval gate before execution; renderer
-copy describes only that the query and explicit filters will leave OpenWave,
+copy describes only that the query and explicit filters will leave Tidebreak,
 without exposing model-authored arguments. Approval resolves the provider from
 current settings, so enabling, disabling, or changing providers takes effect
 without rebuilding the registry. Cancelling the turn races and drops an

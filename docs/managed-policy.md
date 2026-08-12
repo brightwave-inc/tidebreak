@@ -1,10 +1,10 @@
 # OS-managed policy (MDM)
 
-How an organization points OpenWave at its model gateway through device
-management, and what OpenWave reads to honor it. This page describes the
+How an organization points Tidebreak at its model gateway through device
+management, and what Tidebreak reads to honor it. This page describes the
 admin-visible artifacts; the resolution rules (precedence, validation, the
 fail-closed misconfigured state) live in the module documentation of
-`crates/openwave-server/src/managed_policy.rs`.
+`crates/tidebreak-server/src/managed_policy.rs`.
 
 On every platform the asserted value is a gateway **base URL**: `http` or
 `https`, no embedded credentials. A present-but-broken artifact — wrong
@@ -24,13 +24,13 @@ means `false`, and a present-but-broken value fails closed to deny.
 Deploy a configuration profile that forces a preference for the app's bundle
 identifier:
 
-- Domain: `io.brightwave.openwave` (release builds; debug builds read
-  `io.brightwave.openwave.dev`)
+- Domain: `io.brightwave.tidebreak` (release builds; debug builds read
+  `io.brightwave.tidebreak.dev`)
 - Key: `GatewayURL` (string)
 - Key: `AllowLocalMcpServers` (boolean, optional; also accepted as the
   string `true`/`false`)
 
-OpenWave reads the forced-preferences domain that `cfprefsd` materializes
+Tidebreak reads the forced-preferences domain that `cfprefsd` materializes
 under `/Library/Managed Preferences`, honoring the user channel before the
 device channel. Only root-owned files are honored, and a broken channel
 falls through to the next one. User preferences (`defaults write`) are not
@@ -40,7 +40,7 @@ consulted — only MDM-forced values count.
 
 Deploy (GPO or Intune) a machine-scoped registry value:
 
-- Key: `HKLM\Software\Policies\Brightwave\OpenWave`
+- Key: `HKLM\Software\Policies\Brightwave\Tidebreak`
 - Value: `GatewayURL` (`REG_SZ`)
 - Value: `AllowLocalMcpServers` (`REG_SZ`, optional; `true` or `false`)
 
@@ -50,7 +50,7 @@ The native 64-bit view of the hive is read explicitly.
 
 Install a JSON file:
 
-- Path: `/etc/openwave/managed-policy.json`
+- Path: `/etc/tidebreak/managed-policy.json`
 - Schema: `{ "gateway_url": "https://gateway.example.com",
   "allow_local_mcp_servers": false }` (the second key is optional)
 
@@ -71,7 +71,7 @@ sticky provisioned state that deep-link pairing commits when its sign-in
 completes — the `managed_policy_v1` row in the profile database:
 
 ```sh
-sqlite3 "<data dir>/openwave.db" \
+sqlite3 "<data dir>/tidebreak.db" \
   "INSERT INTO setting(key, value_json) VALUES
      ('managed_policy_v1', '{\"gateway_url\":\"http://127.0.0.1:8081\"}')
    ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;"
@@ -83,7 +83,7 @@ and routing all run the genuine managed path against the URL you provided.
 Delete the row to return to the open profile:
 
 ```sh
-sqlite3 "<data dir>/openwave.db" \
+sqlite3 "<data dir>/tidebreak.db" \
   "DELETE FROM setting WHERE key = 'managed_policy_v1';"
 ```
 

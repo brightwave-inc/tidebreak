@@ -137,8 +137,8 @@ while IFS= read -r worktree; do
 
   artifacts=(
     "$worktree/target"
-    "$worktree/crates/openwave-desktop/ui/node_modules"
-    "$worktree/crates/openwave-desktop/ui/dist"
+    "$worktree/crates/tidebreak-desktop/ui/node_modules"
+    "$worktree/crates/tidebreak-desktop/ui/dist"
   )
   if cache_target="$(cargo_cache_target_for_worktree "$worktree")"; then
     artifacts+=("$cache_target")

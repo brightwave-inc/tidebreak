@@ -1,0 +1,206 @@
+//! The in-container agent loop.
+//!
+//! This is the sandbox-resident consumer of the transport: on attach it drives a
+//! bounded agent loop that reuses Tidebreak's [`Tool`](tidebreak_core::Tool)
+//! registry, dials each model step back to the host over reverse RPC, emits the
+//! event stream as it goes, and submits a final result.
+//!
+//! # Scope: the loop's shape, not the host-side `Agent`
+//!
+//! Tidebreak's full host-side [`Agent`](tidebreak_core::Agent) drives its turn from
+//! a durable [`Store`](tidebreak_core::storage) — messages, turns, checkpoints,
+//! approval brokering — which is host-side persistence machinery, not something
+//! the container stands up. This slice therefore reuses the *plain-Rust seams*
+//! the design says the sandbox loop shares — the `Tool` trait and registry, the
+//! `ToolCtx`/`ToolOutput` vocabulary, and host-proxied model inference — and runs
+//! a minimal loop over them to demonstrate the sandbox-resident path end to end.
+//! Swapping this minimal driver for `Agent::run_turn` behind a sandbox-resident
+//! `Store` is the productionization step, and it plugs in exactly here.
+//!
+//! # The demo tool protocol
+//!
+//! To keep the loop model-driven without a full tool-calling transcript, a model
+//! completion is read as a directive: a completion of the form
+//! `use-tool:<name>:<json-args>` runs that tool locally and feeds its result
+//! back for the next step; any other completion is the final answer. The host
+//! (or, in tests, a mock host model) is what decides the directive, so the loop
+//! is genuinely driven from the model over the reverse channel.
+//!
+//! # Steering
+//!
+//! The run is not fire-and-forget once it starts. At every step boundary the
+//! loop takes whatever the host has
+//! [steered](tidebreak_sandbox_protocol::steer) over the live connection and
+//! appends it to the transcript as user-authored guidance, so a mid-run
+//! instruction changes what the next completion is asked for. Guidance that
+//! arrives while a model call is in flight lands on the following step; nothing
+//! interrupts a step already underway.
+
+use std::path::PathBuf;
+
+use tidebreak_core::{ChatId, ToolCtx, ToolRegistry};
+use tidebreak_sandbox_protocol::{ids::OperationId, SandboxRun};
+
+use crate::model::{HostModel, ModelError};
+use crate::tools::sandbox_tool_registry;
+
+/// The prefix a model completion uses to request a local tool call.
+const TOOL_DIRECTIVE: &str = "use-tool:";
+
+/// How a host-sent steering instruction is labelled in the transcript, so the
+/// model reads it as guidance from the user rather than as tool output.
+pub const STEERING_PREFIX: &str = "Steering from the user: ";
+
+/// Bound on model steps, so a model that never finishes cannot loop forever.
+const MAX_STEPS: usize = 8;
+
+/// Why an in-container agent run did not complete.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentRunError {
+    /// A model step failed (the host refused it, or the connection dropped).
+    #[error("model step failed: {0}")]
+    Model(#[from] ModelError),
+    /// The loop hit its step bound without the model submitting a final answer.
+    #[error("the agent loop exceeded {MAX_STEPS} model steps without a result")]
+    StepLimit,
+    /// The agent's workspace directory could not be prepared.
+    #[error("the sandbox workspace directory is unavailable")]
+    Workspace,
+}
+
+/// Run the sandbox-resident agent loop for one `task`, driving it through `run`.
+///
+/// `workspace` is the agent's in-container workspace directory; it is created if
+/// absent and canonicalized, and the sandbox-resident tool registry (`exec`, the
+/// filesystem tools) is scoped to it. Emits progress events as it works and
+/// submits the final answer as the run's terminal
+/// [`Result`](tidebreak_sandbox_protocol::events::EventPayload::Result) event.
+/// Returns the final answer text.
+///
+/// # Errors
+/// [`AgentRunError::Workspace`] if the workspace cannot be prepared,
+/// [`AgentRunError::Model`] if a model step fails, or [`AgentRunError::StepLimit`]
+/// if the model never submits a final answer within the step bound.
+pub async fn run_agent(
+    run: SandboxRun,
+    task: impl Into<String>,
+    workspace: impl Into<PathBuf>,
+) -> Result<String, AgentRunError> {
+    let outcome = run_loop(run.clone(), task.into(), workspace.into()).await;
+    // Every exit from the loop must put a terminal event on the stream. The
+    // supervisor keeps serving the connection after this returns, so a host that
+    // saw neither a result nor a failure would wait on an open socket forever
+    // and leak the sandbox. `run_loop` emits the result on the success path; a
+    // failure is signalled here, once, on every other path.
+    if let Err(error) = &outcome {
+        let _ = run.emit_failed(error.to_string()).await;
+    }
+    outcome
+}
+
+async fn run_loop(
+    run: SandboxRun,
+    task: String,
+    workspace: PathBuf,
+) -> Result<String, AgentRunError> {
+    // The workspace is the tools' root: create it if the host has not, then
+    // canonicalize so path validation compares against the real directory.
+    std::fs::create_dir_all(&workspace).map_err(|_| AgentRunError::Workspace)?;
+    let workspace = std::fs::canonicalize(&workspace).map_err(|_| AgentRunError::Workspace)?;
+    let tools = sandbox_tool_registry(workspace);
+    let model = HostModel::new(run.clone());
+    // The sandbox loop has no host chat identity or filesystem scratch; a fresh
+    // chat id and no private scratch keep the tool context self-contained.
+    let ctx = ToolCtx::without_private_scratch(ChatId::new(), None);
+
+    let _ = run
+        .emit_progress("sandbox agent attached; starting run")
+        .await;
+
+    let mut transcript = format!("Task: {task}\n");
+    for _step in 0..MAX_STEPS {
+        // Fold in whatever the host has steered since the last step. Steering is
+        // applied at the step boundary, as user-authored guidance appended to the
+        // transcript the next completion is asked for — the loop reads it exactly
+        // as it reads the task, so late guidance can redirect the run without
+        // restarting it. Each one is echoed on the event stream so the host's
+        // journal shows when an instruction took effect, not merely that it was
+        // sent.
+        for instruction in run.take_steering() {
+            let _ = run
+                .emit_progress(format!("applying steering: {instruction}"))
+                .await;
+            transcript.push_str(&format!("{STEERING_PREFIX}{instruction}\n"));
+        }
+        // Each model step is its own durable operation, so a re-issue after a
+        // reconnect is answered from the host's recorded outcome.
+        let completion = model
+            .complete(OperationId::new(), transcript.clone())
+            .await?;
+
+        let Some(directive) = parse_tool_directive(&completion) else {
+            // Any non-directive completion is the final answer.
+            let _ = run.emit_result(completion.clone()).await;
+            return Ok(completion);
+        };
+
+        let _ = run
+            .emit_progress(format!("calling tool {}", directive.name))
+            .await;
+        let output = run_tool(&tools, &ctx, directive.name, directive.args).await;
+        let _ = run
+            .emit_progress(format!("tool {} -> {}", directive.name, output))
+            .await;
+        transcript.push_str(&format!("Tool {} result: {output}\n", directive.name));
+    }
+
+    Err(AgentRunError::StepLimit)
+}
+
+/// A parsed `use-tool:<name>:<json-args>` directive.
+struct ToolDirective<'a> {
+    name: &'a str,
+    args: &'a str,
+}
+
+/// Read a completion as a tool directive, or `None` if it is a final answer.
+fn parse_tool_directive(completion: &str) -> Option<ToolDirective<'_>> {
+    let rest = completion.strip_prefix(TOOL_DIRECTIVE)?;
+    let (name, args) = rest.split_once(':')?;
+    (!name.is_empty()).then_some(ToolDirective { name, args })
+}
+
+/// Execute one local tool by name, returning its model-readable result text.
+///
+/// A missing tool or a malformed argument string is reported back to the model
+/// as text rather than aborting the run — the loop treats them the way the model
+/// would treat any tool failure.
+async fn run_tool(tools: &ToolRegistry, ctx: &ToolCtx, name: &str, args: &str) -> String {
+    let Some(tool) = tools.get(name) else {
+        return format!("error: no tool named {name}");
+    };
+    let args = match serde_json::from_str(args) {
+        Ok(args) => args,
+        Err(error) => return format!("error: tool arguments were not valid JSON: {error}"),
+    };
+    match tool.execute(ctx, args).await {
+        Ok(output) => output.content,
+        Err(error) => format!("error: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_tool_directive_and_ignores_a_final_answer() {
+        let directive = parse_tool_directive("use-tool:read_file:{\"path\":\"a.txt\"}").unwrap();
+        assert_eq!(directive.name, "read_file");
+        assert_eq!(directive.args, "{\"path\":\"a.txt\"}");
+
+        assert!(parse_tool_directive("the final answer is 2").is_none());
+        // An empty tool name is not a directive.
+        assert!(parse_tool_directive("use-tool::{}").is_none());
+    }
+}

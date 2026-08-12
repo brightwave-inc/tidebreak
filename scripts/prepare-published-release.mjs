@@ -63,7 +63,7 @@ export function validatePublishedReleaseManifest({
         const filename = path.posix.join(
           platformDescriptor.platform,
           arch,
-          `OpenWave_${version}_${arch}${descriptor.extension}`,
+          `Tidebreak_${version}_${arch}${descriptor.extension}`,
         );
         expected.set(filename, {
           platform: platformDescriptor.platform,

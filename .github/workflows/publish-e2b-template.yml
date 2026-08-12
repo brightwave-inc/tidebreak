@@ -5,13 +5,13 @@ run-name: >-
     && 'Publish E2B template (manual)'
     || 'Publish E2B template' }}
 
-# Builds and publishes the OpenWave documents template on E2B from the
-# definition in crates/openwave-sandbox-agent/e2b/, then proposes the client
-# pin that points OpenWave at it.
+# Builds and publishes the Tidebreak documents template on E2B from the
+# definition in crates/tidebreak-sandbox-agent/e2b/, then proposes the client
+# pin that points Tidebreak at it.
 #
 # Why this exists: E2B provisions sandboxes from account-registered templates,
 # not from arbitrary OCI refs. The documents image reaches E2B only by being
-# built into a template and published (made public) from the OpenWave account,
+# built into a template and published (made public) from the Tidebreak account,
 # and until that happens every E2B user falls back to `code-interpreter-v1`.
 # That publish used to be a manual runbook, which left a window where the
 # `pin` job in publish-sandbox-image.yml had already bumped the alias in
@@ -21,13 +21,13 @@ run-name: >-
 #
 #   1. publish-sandbox-image.yml builds the documents image and its `pin` job
 #      opens a PR bumping `e2b.Dockerfile`'s digest and `e2b.toml`'s alias.
-#   2. Merging that PR touches crates/openwave-sandbox-agent/e2b/, which
+#   2. Merging that PR touches crates/tidebreak-sandbox-agent/e2b/, which
 #      triggers this workflow.
 #   3. This workflow builds the template under the new alias and publishes it.
 #   4. Its `pin` job opens a PR bumping `E2B_TEMPLATE` in e2b.rs to the
 #      *template ID* the alias resolves to. The ID rather than the alias:
 #      E2B resolves a custom template's alias only inside the owning team, so
-#      an alias pin works from the OpenWave account and 404s from every other
+#      an alias pin works from the Tidebreak account and 404s from every other
 #      one (verified 2026-08-04). The pin moves last on purpose: pointing the
 #      client at a template that is not published yet drops every E2B user to
 #      the fallback.
@@ -36,7 +36,7 @@ run-name: >-
 # whose alias is already published is a no-op — re-runs, README edits, and
 # edits to this workflow all cost one API call and exit. See the `resolve` job.
 #
-# Credentials: the run needs an E2B API key for the OpenWave account in the
+# Credentials: the run needs an E2B API key for the Tidebreak account in the
 # `E2B_API_KEY` Actions secret (Settings → Secrets and variables → Actions;
 # the key itself comes from the E2B dashboard's Keys tab). A repository admin
 # has to set it once — nothing else in this repository consumes it. Without it
@@ -55,7 +55,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/openwave-sandbox-agent/e2b/**"
+      - "crates/tidebreak-sandbox-agent/e2b/**"
       - ".github/e2b-cli/**"
       - ".github/workflows/publish-e2b-template.yml"
   workflow_dispatch:
@@ -80,15 +80,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: openwave-e2b-template
+  group: tidebreak-e2b-template
   cancel-in-progress: false
 
 env:
   # The E2B management API the client crate also talks to
-  # (`E2B_API_BASE` in crates/openwave-code-execution/src/e2b.rs).
+  # (`E2B_API_BASE` in crates/tidebreak-code-execution/src/e2b.rs).
   E2B_API_BASE: https://api.e2b.app
-  TEMPLATE_PATH: crates/openwave-sandbox-agent/e2b
-  SOURCE_TEMPLATE_DIR: .release-source/crates/openwave-sandbox-agent/e2b
+  TEMPLATE_PATH: crates/tidebreak-sandbox-agent/e2b
+  SOURCE_TEMPLATE_DIR: .release-source/crates/tidebreak-sandbox-agent/e2b
 
 jobs:
   # Reads the template definition and decides whether anything needs building.
@@ -197,7 +197,7 @@ jobs:
           path: .release-source
           fetch-depth: 1
           sparse-checkout: |
-            crates/openwave-sandbox-agent/e2b
+            crates/tidebreak-sandbox-agent/e2b
           sparse-checkout-cone-mode: false
 
       - name: Require the E2B credential
@@ -206,16 +206,16 @@ jobs:
         run: |
           if [[ -z "$E2B_API_KEY" ]]; then
             cat >&2 <<'MESSAGE'
-          This workflow needs an E2B API key for the OpenWave E2B account.
+          This workflow needs an E2B API key for the Tidebreak E2B account.
 
           A repository admin must add it once, under
             Settings → Secrets and variables → Actions → New repository secret
           with the name
             E2B_API_KEY
           and the value copied from the E2B dashboard's Keys tab
-          (https://e2b.dev/dashboard?tab=keys) for the OpenWave team.
+          (https://e2b.dev/dashboard?tab=keys) for the Tidebreak team.
 
-          Until then the documents template stays unpublished and every OpenWave
+          Until then the documents template stays unpublished and every Tidebreak
           user on E2B falls back to `code-interpreter-v1`.
           MESSAGE
             exit 1
@@ -355,7 +355,7 @@ jobs:
           path: .release-source
           fetch-depth: 1
           sparse-checkout: |
-            crates/openwave-sandbox-agent/e2b
+            crates/tidebreak-sandbox-agent/e2b
           sparse-checkout-cone-mode: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -399,7 +399,7 @@ jobs:
 
       # Makes the template public, which is the entire point: a published
       # template is creatable from any E2B account — by its template ID; the
-      # alias only resolves inside the OpenWave team — so a user who has
+      # alias only resolves inside the Tidebreak team — so a user who has
       # pasted nothing but their own API key gets the documents image.
       - name: Publish the template
         working-directory: ${{ env.SOURCE_TEMPLATE_DIR }}
@@ -450,7 +450,7 @@ jobs:
             echo "- Public: yes"
             echo
             echo "Cross-account resolution is not proven here — see"
-            echo "\`crates/openwave-sandbox-agent/e2b/README.md\` for the one-liner"
+            echo "\`crates/tidebreak-sandbox-agent/e2b/README.md\` for the one-liner"
             echo "that checks it with a second account's key."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -497,7 +497,7 @@ jobs:
           path: .release-source
           fetch-depth: 1
           sparse-checkout: |
-            crates/openwave-sandbox-agent/e2b
+            crates/tidebreak-sandbox-agent/e2b
           sparse-checkout-cone-mode: false
 
       - name: Point the client at the published template
@@ -539,7 +539,7 @@ jobs:
               rf"(?m)^# {re.escape(repository)}:(\S+)\.$", dockerfile, "image tag comment"
           )
 
-          path = "crates/openwave-code-execution/src/e2b.rs"
+          path = "crates/tidebreak-code-execution/src/e2b.rs"
           with open(path) as handle:
               source = handle.read()
 
@@ -550,7 +550,7 @@ jobs:
               # rewrite has one unambiguous target.
               r'(?m)^(/// `)[a-z0-9][a-z0-9._-]*(`)$': alias,
               # The constant carries the template ID — the only form E2B
-              # resolves from outside the OpenWave team.
+              # resolves from outside the Tidebreak team.
               r'(?m)^(const E2B_TEMPLATE: &str = ")[^"\n]*(";)$': template_id,
           }
           for pattern, value in pins.items():
@@ -582,13 +582,13 @@ jobs:
           cat > "$body_file" <<EOF
           Automated follow-up from an E2B template publish: \`$ALIAS\` is now built and
           public on E2B, so \`E2B_TEMPLATE\` in
-          \`crates/openwave-code-execution/src/e2b.rs\` can point at it — by its
+          \`crates/tidebreak-code-execution/src/e2b.rs\` can point at it — by its
           template ID \`$TEMPLATE_ID\`, because E2B resolves a custom template's
           alias only inside the owning team. Until this lands, E2B sandboxes still
           resolve the previous pin.
 
           The doc comment above the constant is refreshed from
-          \`crates/openwave-sandbox-agent/e2b/e2b.Dockerfile\`, so the image tag and
+          \`crates/tidebreak-sandbox-agent/e2b/e2b.Dockerfile\`, so the image tag and
           digest it names stay the ones the template was actually built from.
 
           - Alias: \`$ALIAS\`

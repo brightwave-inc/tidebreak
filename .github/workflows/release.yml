@@ -24,8 +24,8 @@ concurrency:
   # Serialize production builds so two tags cannot race mutable latest.json.
   group: >-
     ${{ github.event_name == 'release'
-      && format('openwave-desktop-release-dispatch-{0}', github.run_id)
-      || 'openwave-desktop-production-release' }}
+      && format('tidebreak-desktop-release-dispatch-{0}', github.run_id)
+      || 'tidebreak-desktop-production-release' }}
   cancel-in-progress: false
 
 jobs:
@@ -120,18 +120,18 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: desktop-production
-      url: https://downloads.brightwave.io/openwave/manifest.json
+      url: https://downloads.brightwave.io/tidebreak/manifest.json
     permissions:
       contents: read
       id-token: write
     outputs:
       exists: ${{ steps.release.outputs.exists }}
     env:
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       RELEASE_SHA: ${{ needs.validate.outputs.sha }}
       RELEASE_PUBLISHED_AT: ${{ needs.validate.outputs.published_at }}
-      RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
+      RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
       AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
       AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
       DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
@@ -156,13 +156,13 @@ jobs:
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
           role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
-          role-session-name: openwave-inspect-${{ github.run_id }}
+          role-session-name: tidebreak-inspect-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Validate any existing immutable release
         id: release
         run: |
-          release_prefix="openwave/releases/v$OPENWAVE_VERSION"
+          release_prefix="tidebreak/releases/v$TIDEBREAK_VERSION"
           manifest_key="$release_prefix/manifest.json"
           head_error="$RUNNER_TEMP/manifest-head-error"
           if ! manifest_head="$(aws s3api head-object \
@@ -188,7 +188,7 @@ jobs:
           node scripts/prepare-published-release.mjs \
             --manifest "$manifest_path" \
             --latest "$latest_path" \
-            --version "$OPENWAVE_VERSION" \
+            --version "$TIDEBREAK_VERSION" \
             --tag "$RELEASE_TAG" \
             --sha "$RELEASE_SHA" \
             --published-at "$RELEASE_PUBLISHED_AT" \
@@ -262,7 +262,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_ONLY
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -286,10 +286,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop
-            target/${{ matrix.target }}/release/openwave-host-broker
-            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
           key: macos-release-prepared-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             macos-release-prepared-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -319,9 +319,9 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile
 
       # The signed bundle ships legal/THIRD-PARTY-NOTICES.md as a resource, so
@@ -336,7 +336,7 @@ jobs:
         continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
-          projectPath: crates/openwave-desktop
+          projectPath: crates/tidebreak-desktop
           args: --target ${{ matrix.target }} --no-bundle --ci
 
       - name: Save release-specific unsigned Rust build cache
@@ -352,10 +352,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop
-            target/${{ matrix.target }}/release/openwave-host-broker
-            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -376,7 +376,7 @@ jobs:
     runs-on: macos-latest
     environment:
       name: desktop-production
-      url: https://downloads.brightwave.io/openwave/manifest.json
+      url: https://downloads.brightwave.io/tidebreak/manifest.json
     strategy:
       fail-fast: false
       matrix:
@@ -394,7 +394,7 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       # Rust code that reports or gates on the product version reads this value.
       # Cargo package versions remain development metadata and are not released.
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
       APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
       APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
@@ -428,10 +428,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop
-            target/${{ matrix.target }}/release/openwave-host-broker
-            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
           key: macos-release-prepared-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             macos-release-prepared-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -449,10 +449,10 @@ jobs:
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
           rm -rf \
-            "target/$RELEASE_TARGET/release/openwave-desktop" \
-            "target/$RELEASE_TARGET/release/openwave-host-broker" \
-            "target/$RELEASE_TARGET/release/"libopenwave_desktop_lib.* \
-            "crates/openwave-desktop/binaries/openwave-host-broker-$RELEASE_TARGET"
+            "target/$RELEASE_TARGET/release/tidebreak-desktop" \
+            "target/$RELEASE_TARGET/release/tidebreak-host-broker" \
+            "target/$RELEASE_TARGET/release/"libtidebreak_desktop_lib.* \
+            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
 
       - name: Validate production signing configuration
         env:
@@ -494,8 +494,8 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          certificate_path="$RUNNER_TEMP/openwave-signing.p12"
-          keychain_path="$RUNNER_TEMP/openwave-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/tidebreak-signing.p12"
+          keychain_path="$RUNNER_TEMP/tidebreak-signing.keychain-db"
           keychain_password="$(openssl rand -base64 32)"
           echo "::add-mask::$keychain_password"
 
@@ -560,30 +560,30 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile
 
       - name: Write tag-derived Tauri configuration
         env:
-          RELEASE_CONFIG: ${{ runner.temp }}/openwave-release.json
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
         run: |
           node -e '
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
-              version: process.env.OPENWAVE_VERSION,
+              version: process.env.TIDEBREAK_VERSION,
               bundle: {
                 targets: ["app", "dmg"],
                 macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
               },
               // Release bundles register only the real scheme. The dev scheme
               // stays in tauri.conf.json for debug bundles, but a release
-              // binary refuses openwave-dev:// links by design — if its
+              // binary refuses tidebreak-dev:// links by design — if its
               // Info.plist also claimed the scheme, Launch Services would
               // route dev pairing links to the installed app, which then
               // drops them, shadowing whatever debug bundle should answer.
-              plugins: { "deep-link": { desktop: { schemes: ["openwave"] } } }
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
             }));
           '
 
@@ -591,10 +591,10 @@ jobs:
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
-          projectPath: crates/openwave-desktop
+          projectPath: crates/tidebreak-desktop
           args: >-
             --target ${{ matrix.target }}
-            --config ${{ runner.temp }}/openwave-release.json
+            --config ${{ runner.temp }}/tidebreak-release.json
             --bundles app,dmg
 
       - name: Notarize and staple the DMG
@@ -712,7 +712,7 @@ jobs:
           }
 
           output_dir="$GITHUB_WORKSPACE/dist/macos/$RELEASE_ARCH"
-          base_name="OpenWave_${OPENWAVE_VERSION}_${RELEASE_ARCH}"
+          base_name="Tidebreak_${TIDEBREAK_VERSION}_${RELEASE_ARCH}"
           mkdir -p "$output_dir"
           cp "$dmg_path" "$output_dir/${base_name}.dmg"
           cp "$updater_path" "$output_dir/${base_name}.app.tar.gz"
@@ -723,7 +723,7 @@ jobs:
       - name: Upload verified macOS artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: openwave-macos-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
+          name: tidebreak-macos-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
           path: dist/macos/${{ matrix.arch }}/
           if-no-files-found: error
           retention-days: 7
@@ -764,7 +764,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_ONLY
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -788,10 +788,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop.exe
-            target/${{ matrix.target }}/release/openwave-host-broker.exe
-            target/${{ matrix.target }}/release/openwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}.exe
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
           key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -821,9 +821,9 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile
 
       - name: Compile without production credentials or bundles
@@ -831,7 +831,7 @@ jobs:
         continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
-          projectPath: crates/openwave-desktop
+          projectPath: crates/tidebreak-desktop
           args: --target ${{ matrix.target }} --no-bundle --ci
 
       - name: Save release-specific unsigned Rust build cache
@@ -847,10 +847,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop.exe
-            target/${{ matrix.target }}/release/openwave-host-broker.exe
-            target/${{ matrix.target }}/release/openwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}.exe
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -873,7 +873,7 @@ jobs:
     timeout-minutes: 90
     environment:
       name: desktop-production
-      url: https://downloads.brightwave.io/openwave/manifest.json
+      url: https://downloads.brightwave.io/tidebreak/manifest.json
     defaults:
       run:
         shell: bash
@@ -894,7 +894,7 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       # Rust code that reports or gates on the product version reads this value.
       # Cargo package versions remain development metadata and are not released.
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -920,10 +920,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop.exe
-            target/${{ matrix.target }}/release/openwave-host-broker.exe
-            target/${{ matrix.target }}/release/openwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}.exe
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
           key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -939,10 +939,10 @@ jobs:
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
           rm -rf \
-            "target/$RELEASE_TARGET/release/openwave-desktop.exe" \
-            "target/$RELEASE_TARGET/release/openwave-host-broker.exe" \
-            "target/$RELEASE_TARGET/release/"openwave_desktop_lib.* \
-            "crates/openwave-desktop/binaries/openwave-host-broker-$RELEASE_TARGET.exe"
+            "target/$RELEASE_TARGET/release/tidebreak-desktop.exe" \
+            "target/$RELEASE_TARGET/release/tidebreak-host-broker.exe" \
+            "target/$RELEASE_TARGET/release/"tidebreak_desktop_lib.* \
+            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
 
       # Authenticode code signing is deliberately absent: v1 Windows releases
       # ship unsigned installers. The Tauri updater key still signs the
@@ -994,27 +994,27 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile
 
       - name: Write tag-derived Tauri configuration
         env:
-          RELEASE_CONFIG: ${{ runner.temp }}/openwave-release.json
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
         run: |
           node -e '
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
-              version: process.env.OPENWAVE_VERSION,
+              version: process.env.TIDEBREAK_VERSION,
               // One installer format for v1: NSIS supports per-user installs
               // without elevation and needs no WiX configuration.
               bundle: { targets: ["nsis"] },
               // Release bundles register only the real scheme, mirroring the
               // macOS release configuration: a release binary refuses
-              // openwave-dev:// links by design, so registering the dev scheme
+              // tidebreak-dev:// links by design, so registering the dev scheme
               // would shadow whatever debug build should answer it.
-              plugins: { "deep-link": { desktop: { schemes: ["openwave"] } } }
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
             }));
           '
 
@@ -1022,10 +1022,10 @@ jobs:
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
-          projectPath: crates/openwave-desktop
+          projectPath: crates/tidebreak-desktop
           args: >-
             --target ${{ matrix.target }}
-            --config ${{ runner.temp }}/openwave-release.json
+            --config ${{ runner.temp }}/tidebreak-release.json
             --bundles nsis
 
       - name: Verify and collect unsigned artifacts
@@ -1046,7 +1046,7 @@ jobs:
 
           # Tauri copies the target-named sidecar into the installer verbatim;
           # require the executable the bundling step consumed.
-          sidecar="crates/openwave-desktop/binaries/openwave-host-broker-$RELEASE_TARGET.exe"
+          sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
           [[ -s "$sidecar" ]] || {
             echo "Missing target-named host broker sidecar: $sidecar" >&2
             exit 1
@@ -1064,7 +1064,7 @@ jobs:
           }
 
           output_dir="dist/windows/$RELEASE_ARCH"
-          base_name="OpenWave_${OPENWAVE_VERSION}_${RELEASE_ARCH}"
+          base_name="Tidebreak_${TIDEBREAK_VERSION}_${RELEASE_ARCH}"
           mkdir -p "$output_dir"
           cp "$setup_path" "$output_dir/${base_name}-setup.exe"
           cp "$signature_path" "$output_dir/${base_name}-setup.exe.sig"
@@ -1073,7 +1073,7 @@ jobs:
       - name: Upload verified Windows artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: openwave-windows-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
+          name: tidebreak-windows-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
           path: dist/windows/${{ matrix.arch }}/
           if-no-files-found: error
           retention-days: 7
@@ -1100,16 +1100,16 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: desktop-production
-      url: https://downloads.brightwave.io/openwave/manifest.json
+      url: https://downloads.brightwave.io/tidebreak/manifest.json
     permissions:
       contents: read
       id-token: write
     env:
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       RELEASE_SHA: ${{ needs.validate.outputs.sha }}
       RELEASE_PUBLISHED_AT: ${{ needs.validate.outputs.published_at }}
-      RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
+      RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
       AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
       AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
       DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID }}
@@ -1139,14 +1139,14 @@ jobs:
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
           role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
-          role-session-name: openwave-${{ github.run_id }}
+          role-session-name: tidebreak-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Download Apple Silicon artifacts
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: openwave-macos-aarch64-${{ needs.validate.outputs.version }}
+          name: tidebreak-macos-aarch64-${{ needs.validate.outputs.version }}
           path: dist/macos/aarch64
 
       # Parked with the Windows build; see docs/deferred.md.
@@ -1154,7 +1154,7 @@ jobs:
         if: ${{ false && needs.inspect_hosted.outputs.exists != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: openwave-windows-x86_64-${{ needs.validate.outputs.version }}
+          name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: dist/windows/x86_64
 
       - name: Create release manifests and checksums
@@ -1162,7 +1162,7 @@ jobs:
         run: >-
           node scripts/create-release-manifests.mjs
           --dist dist
-          --version "$OPENWAVE_VERSION"
+          --version "$TIDEBREAK_VERSION"
           --tag "$RELEASE_TAG"
           --sha "$RELEASE_SHA"
           --published-at "$RELEASE_PUBLISHED_AT"
@@ -1173,12 +1173,12 @@ jobs:
         run: |
           mkdir -p dist
           aws s3 cp \
-            "s3://$DOWNLOADS_S3_BUCKET/openwave/releases/v$OPENWAVE_VERSION/manifest.json" \
+            "s3://$DOWNLOADS_S3_BUCKET/tidebreak/releases/v$TIDEBREAK_VERSION/manifest.json" \
             dist/manifest.json >/dev/null
           node scripts/prepare-published-release.mjs \
             --manifest dist/manifest.json \
             --latest dist/latest.json \
-            --version "$OPENWAVE_VERSION" \
+            --version "$TIDEBREAK_VERSION" \
             --tag "$RELEASE_TAG" \
             --sha "$RELEASE_SHA" \
             --published-at "$RELEASE_PUBLISHED_AT" \
@@ -1189,16 +1189,16 @@ jobs:
           error_file="$RUNNER_TEMP/latest-head-error"
           if aws s3api head-object \
             --bucket "$DOWNLOADS_S3_BUCKET" \
-            --key openwave/latest.json >/dev/null 2>"$error_file"; then
+            --key tidebreak/latest.json >/dev/null 2>"$error_file"; then
             aws s3 cp \
-              "s3://$DOWNLOADS_S3_BUCKET/openwave/latest.json" \
+              "s3://$DOWNLOADS_S3_BUCKET/tidebreak/latest.json" \
               "$RUNNER_TEMP/current-latest.json" >/dev/null
             current_version="$(jq -er .version "$RUNNER_TEMP/current-latest.json")"
-            node scripts/check-release-order.mjs "$current_version" "$OPENWAVE_VERSION"
+            node scripts/check-release-order.mjs "$current_version" "$TIDEBREAK_VERSION"
           else
             error="$(<"$error_file")"
             case "$error" in
-              *404*|*Not\ Found*) echo "No current OpenWave release is hosted yet." ;;
+              *404*|*Not\ Found*) echo "No current Tidebreak release is hosted yet." ;;
               *) printf '%s\n' "$error" >&2; exit 1 ;;
             esac
           fi
@@ -1206,7 +1206,7 @@ jobs:
       - name: Upload immutable release files
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         run: |
-          release_prefix="openwave/releases/v$OPENWAVE_VERSION"
+          release_prefix="tidebreak/releases/v$TIDEBREAK_VERSION"
           head_error="$RUNNER_TEMP/release-head-error"
 
           content_type() {
@@ -1258,11 +1258,11 @@ jobs:
       - name: Publish latest release metadata
         run: |
           aws s3 cp dist/manifest.json \
-            "s3://$DOWNLOADS_S3_BUCKET/openwave/manifest.json" \
+            "s3://$DOWNLOADS_S3_BUCKET/tidebreak/manifest.json" \
             --content-type application/json \
             --cache-control 'no-cache, max-age=0'
           aws s3 cp dist/latest.json \
-            "s3://$DOWNLOADS_S3_BUCKET/openwave/latest.json" \
+            "s3://$DOWNLOADS_S3_BUCKET/tidebreak/latest.json" \
             --content-type application/json \
             --cache-control 'no-cache, max-age=0'
 
@@ -1271,7 +1271,7 @@ jobs:
         run: |
           invalidation_id="$(aws cloudfront create-invalidation \
             --distribution-id "$DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths '/openwave/manifest.json' '/openwave/latest.json' \
+            --paths '/tidebreak/manifest.json' '/tidebreak/latest.json' \
             --query Invalidation.Id \
             --output text)"
           echo "id=$invalidation_id" >> "$GITHUB_OUTPUT"
@@ -1281,7 +1281,7 @@ jobs:
 
       - name: Smoke test hosted release
         run: |
-          cache_bust="release=$OPENWAVE_VERSION-$GITHUB_RUN_ID"
+          cache_bust="release=$TIDEBREAK_VERSION-$GITHUB_RUN_ID"
           curl --fail --silent --show-error \
             "$RELEASE_BASE_URL/latest.json?$cache_bust" \
             --output "$RUNNER_TEMP/hosted-latest.json"
@@ -1313,9 +1313,9 @@ jobs:
     permissions:
       contents: write
     env:
-      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-      RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
+      RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
     steps:
       # The hosted release is the only source of artifact bytes. Re-downloading
       # it here keeps the GitHub assets a verified copy of what the CDN serves,
@@ -1325,13 +1325,13 @@ jobs:
           mkdir -p downloads
           manifest="$RUNNER_TEMP/manifest.json"
           curl --fail --silent --show-error \
-            "$RELEASE_BASE_URL/releases/v$OPENWAVE_VERSION/manifest.json" \
+            "$RELEASE_BASE_URL/releases/v$TIDEBREAK_VERSION/manifest.json" \
             --output "$manifest"
 
           while IFS=$'\t' read -r platform arch url digest; do
             case "$platform/$arch" in
-              macos/aarch64) name="OpenWave-macos-apple-silicon.dmg" ;;
-              windows/x86_64) name="OpenWave-windows-x86_64-setup.exe" ;;
+              macos/aarch64) name="Tidebreak-macos-apple-silicon.dmg" ;;
+              windows/x86_64) name="Tidebreak-windows-x86_64-setup.exe" ;;
               *) echo "Unsupported release platform: $platform/$arch" >&2; exit 1 ;;
             esac
             curl --fail --silent --show-error --location "$url" \

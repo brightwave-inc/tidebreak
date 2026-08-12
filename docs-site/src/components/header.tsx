@@ -1,14 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { OpenWaveLogo } from './logo';
+import { TidebreakLogo } from './logo';
 import { ThemeToggle } from './theme-toggle';
 import { SearchTrigger } from './search-trigger';
 import { Button } from '@/components/ui/button';
 import { Menu, X } from 'lucide-react';
 import { useState } from 'react';
 
-const PRODUCT_URL = 'https://brightwave.io/openwave';
+const PRODUCT_URL = 'https://tidebreak.io';
 const REPO_URL = 'https://github.com/brightwave-inc/openwave';
 
 const navLinks = [{ text: 'Product', href: PRODUCT_URL }];
@@ -28,7 +28,7 @@ export function Header({ onOpenSearch }: { onOpenSearch: () => void }) {
     <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-lg">
       <div className="mx-auto flex h-14 max-w-screen-2xl items-center gap-4 px-4 lg:px-6">
         <Link href="/" className="mr-2 inline-flex items-center gap-2 shrink-0">
-          <OpenWaveLogo />
+          <TidebreakLogo />
         </Link>
 
         <nav className="hidden items-center gap-1 md:flex">

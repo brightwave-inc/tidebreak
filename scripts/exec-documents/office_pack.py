@@ -12,7 +12,7 @@ import argparse
 import zipfile
 from pathlib import Path
 
-from _openwave_preview import HelperError, run_cli
+from _tidebreak_preview import HelperError, run_cli
 
 CONTENT_TYPES = "[Content_Types].xml"
 DROPPINGS = {".DS_Store", "Thumbs.db", "desktop.ini"}

@@ -6,7 +6,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* --- OpenWave palette (oklch, light mode) --- */
+  /* --- Tidebreak palette (oklch, light mode) --- */
   --radius: 0.5rem;
 
   --page-background: oklch(98.2% 0 0);
@@ -46,7 +46,7 @@
 }
 
 .dark {
-  /* --- OpenWave palette (oklch, dark mode) --- */
+  /* --- Tidebreak palette (oklch, dark mode) --- */
   /* Cool near-neutral grays (hue ~262, chroma <= 0.01). Elevation is carried by
      the lightness ramp alone: page chrome 0.12 < popover 0.14 < card 0.16 <
      content surface 0.21. */

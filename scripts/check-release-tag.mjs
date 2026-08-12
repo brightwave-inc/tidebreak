@@ -32,7 +32,7 @@ function main() {
       `version=${parsed.version}\nmajor=${parsed.major}\nminor=${parsed.minor}\npatch=${parsed.patch}\n`,
     );
   }
-  console.log(`release tag ${tag} selects OpenWave ${parsed.version}`);
+  console.log(`release tag ${tag} selects Tidebreak ${parsed.version}`);
 }
 
 if (

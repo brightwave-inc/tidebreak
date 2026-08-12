@@ -15,9 +15,9 @@ cite them and you can read what it read.
 **Your model provider's built-in search.** Anthropic and OpenAI models can run
 a search on the provider's own servers as part of the turn. Nothing leaves
 your machine except the request you were already making, and there is no extra
-key to configure. Gemini models do not offer this in OpenWave today.
+key to configure. Gemini models do not offer this in Tidebreak today.
 
-**A search provider you configure.** OpenWave calls the search API directly
+**A search provider you configure.** Tidebreak calls the search API directly
 from your machine.
 
 | Provider | Notes |
@@ -28,7 +28,7 @@ from your machine.
 | **SearXNG** | Self-hosted. No key — you provide the instance URL. |
 
 When the chosen provider cannot extract a page, `web_extract` falls back to
-OpenWave's own fetch-and-read path rather than failing.
+Tidebreak's own fetch-and-read path rather than failing.
 
 ## Configuring it
 

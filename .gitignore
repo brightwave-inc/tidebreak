@@ -24,8 +24,8 @@ __pycache__/
 *.py[cod]
 
 # Tauri codegen (regenerated on build)
-crates/openwave-desktop/gen/
-crates/openwave-desktop/binaries/openwave-host-broker-*
+crates/tidebreak-desktop/gen/
+crates/tidebreak-desktop/binaries/tidebreak-host-broker-*
 
 # OS / editor cruft
 .DS_Store
@@ -34,6 +34,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
-# Default `openwave serve` data dir when OPENWAVE_DATA_DIR is unset (SQLite +
+# Default `tidebreak serve` data dir when TIDEBREAK_DATA_DIR is unset (SQLite +
 # vector index); created wherever the server is launched from.
-.openwave/
+.tidebreak/

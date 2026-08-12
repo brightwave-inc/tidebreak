@@ -5,7 +5,7 @@
 # macos-dev-sign-runner.sh.
 #
 # The identity lives in a dedicated keychain rather than the login keychain, so
-# OpenWave can unlock it without asking for the login password. Its private key
+# Tidebreak can unlock it without asking for the login password. Its private key
 # has no value outside this machine.
 #
 # Being self-signed, the certificate carries no team identifier, so a keychain
@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-state_dir="${OPENWAVE_DEV_SIGNING_DIR:-${HOME}/Library/Application Support/OpenWave/dev-signing}"
-keychain="$state_dir/openwave-dev.keychain-db"
+state_dir="${TIDEBREAK_DEV_SIGNING_DIR:-${HOME}/Library/Application Support/Tidebreak/dev-signing}"
+keychain="$state_dir/tidebreak-dev.keychain-db"
 password_file="$state_dir/keychain-password"
 lock_dir="$state_dir/setup.lock"
 
@@ -29,8 +29,8 @@ keychain_is_ready() {
   local keychain_password
   keychain_password="$(<"$password_file")"
   security unlock-keychain -p "$keychain_password" "$keychain" >/dev/null 2>&1 &&
-    security find-certificate -c openwave-dev "$keychain" >/dev/null 2>&1 &&
-    security find-key -l openwave-dev -t private -s "$keychain" >/dev/null 2>&1
+    security find-certificate -c tidebreak-dev "$keychain" >/dev/null 2>&1 &&
+    security find-key -l tidebreak-dev -t private -s "$keychain" >/dev/null 2>&1
 }
 
 ensure_searchable() {
@@ -90,8 +90,8 @@ if keychain_is_ready; then
 fi
 
 if [[ -e "$keychain" || -e "$password_file" ]]; then
-  echo "warning: incomplete OpenWave dev-signing state in '$state_dir'" >&2
-  echo "warning: remove that directory to let OpenWave recreate it" >&2
+  echo "warning: incomplete Tidebreak dev-signing state in '$state_dir'" >&2
+  echo "warning: remove that directory to let Tidebreak recreate it" >&2
   exit 1
 fi
 
@@ -105,7 +105,7 @@ printf '%s\n' "$keychain_password" >"$password_file"
   -sha256 \
   -nodes \
   -days 3650 \
-  -subj "/CN=openwave-dev" \
+  -subj "/CN=tidebreak-dev" \
   -addext "basicConstraints=critical,CA:FALSE" \
   -addext "keyUsage=critical,digitalSignature" \
   -addext "extendedKeyUsage=critical,codeSigning" \
@@ -117,7 +117,7 @@ printf '%s\n' "$keychain_password" >"$password_file"
   -export \
   -inkey "$temp_dir/key.pem" \
   -in "$temp_dir/cert.pem" \
-  -name openwave-dev \
+  -name tidebreak-dev \
   -passout "pass:$keychain_password" \
   -out "$temp_dir/identity.p12"
 

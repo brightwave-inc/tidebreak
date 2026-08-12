@@ -18,7 +18,7 @@ permissions:
 concurrency:
   # Let the active main-tip compilation finish so a later release can consume
   # its compiler outputs. GitHub retains at most one newer pending run.
-  group: openwave-macos-release-cache
+  group: tidebreak-macos-release-cache
   cancel-in-progress: false
 
 jobs:
@@ -84,10 +84,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop
-            target/${{ matrix.target }}/release/openwave-host-broker
-            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
           key: macos-release-target-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
             macos-release-target-v3-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
@@ -115,9 +115,9 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
-        working-directory: crates/openwave-desktop/ui
+        working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile
 
       - name: Compile without production credentials or bundles
@@ -125,7 +125,7 @@ jobs:
         continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
-          projectPath: crates/openwave-desktop
+          projectPath: crates/tidebreak-desktop
           args: --target ${{ matrix.target }} --no-bundle --ci
 
       - name: Report unsigned Rust build cache size
@@ -134,10 +134,10 @@ jobs:
           du -ch \
             target/release/{.cargo-lock,.fingerprint,build,deps} \
             target/${{ matrix.target }}/release/{.cargo-lock,.fingerprint,build,deps} \
-            target/${{ matrix.target }}/release/openwave-desktop \
-            target/${{ matrix.target }}/release/openwave-host-broker \
-            target/${{ matrix.target }}/release/libopenwave_desktop_lib.* \
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }} \
+            target/${{ matrix.target }}/release/tidebreak-desktop \
+            target/${{ matrix.target }}/release/tidebreak-host-broker \
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }} \
             2>/dev/null | tail -1 || true
 
       - name: Save unsigned Rust build cache
@@ -153,10 +153,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/openwave-desktop
-            target/${{ matrix.target }}/release/openwave-host-broker
-            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
-            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful cache-warm compilation

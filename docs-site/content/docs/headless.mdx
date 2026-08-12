@@ -1,6 +1,6 @@
 ---
 title: Running headless
-description: The openwave CLI — serve, tui, one-shot prompts, and the MCP stdio server.
+description: The tidebreak CLI — serve, tui, one-shot prompts, and the MCP stdio server.
 ---
 
 The desktop app embeds a local HTTP + WebSocket server. The same server, agent
@@ -9,49 +9,49 @@ loop, and tools run from a command line without the window.
 Build the CLI from a clone of the repository:
 
 ```sh
-cargo build -p openwave-cli --release
+cargo build -p tidebreak-cli --release
 ```
 
-The examples below use `cargo run -p openwave-cli --` for clarity; substitute
+The examples below use `cargo run -p tidebreak-cli --` for clarity; substitute
 the built binary if you have it on your path.
 
 ## Commands
 
 ```text
-openwave serve
-openwave mcp <workspace>
-openwave rehome-secrets
-openwave tui [--chat <id> | --new]
-openwave -p <prompt> [--chat <id>] [--output-format text|json]
+tidebreak serve
+tidebreak mcp <workspace>
+tidebreak rehome-secrets
+tidebreak tui [--chat <id> | --new]
+tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
            [--permission-mode ask|auto|allow|plan]
 
-openwave output list <chat>
-openwave output show <chat> <output> [--revision <id>]
-openwave output revisions <chat> <output>
-openwave output export <chat> <output> <path> [--revision <id>]
-openwave attach <chat> <file>
+tidebreak output list <chat>
+tidebreak output show <chat> <output> [--revision <id>]
+tidebreak output revisions <chat> <output>
+tidebreak output export <chat> <output> <path> [--revision <id>]
+tidebreak attach <chat> <file>
 
-openwave provider list
-openwave provider set-key <kind> [--from-env <var>]
-openwave provider remove-key <kind>
-openwave model list
-openwave model roles
-openwave model select <key|auto> [--role <role>]
-openwave settings show
-openwave settings web-search select <provider|off>
-openwave settings web-search set-key <provider> [--from-env <var>]
-openwave settings web-search remove-key <provider>
-openwave settings exec select <provider|off>
-openwave settings exec set-key <provider> [--from-env <var>]
-openwave settings exec remove-key <provider>
-openwave mcp-server list
-openwave mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
-openwave mcp-server remove <name>
-openwave chat list
-openwave chat create
+tidebreak provider list
+tidebreak provider set-key <kind> [--from-env <var>]
+tidebreak provider remove-key <kind>
+tidebreak model list
+tidebreak model roles
+tidebreak model select <key|auto> [--role <role>]
+tidebreak settings show
+tidebreak settings web-search select <provider|off>
+tidebreak settings web-search set-key <provider> [--from-env <var>]
+tidebreak settings web-search remove-key <provider>
+tidebreak settings exec select <provider|off>
+tidebreak settings exec set-key <provider> [--from-env <var>]
+tidebreak settings exec remove-key <provider>
+tidebreak mcp-server list
+tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
+tidebreak mcp-server remove <name>
+tidebreak chat list
+tidebreak chat create
 ```
 
-A bare `openwave` with no arguments runs `serve`.
+A bare `tidebreak` with no arguments runs `serve`.
 
 `tui`, `-p`, `output`, `attach`, and the setup commands additionally take
 `--server <url>` / `--server-token-env <var>`, or `--attach` — see
@@ -63,19 +63,19 @@ Starts the local API on an ephemeral loopback port and prints the address and a
 freshly minted per-launch bearer token:
 
 ```sh
-ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
+ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 ```
 
 ```text
-openwave: listening on http://127.0.0.1:53421
-openwave: token 7f2c…
+tidebreak: listening on http://127.0.0.1:53421
+tidebreak: token 7f2c…
 ```
 
 The token is a secret. Capture the process's stdout directly rather than
 running it under a logging supervisor.
 
 The API is not exposed on a public interface. There is no generated OpenAPI
-document — the route table and handler documentation in `openwave-server` are
+document — the route table and handler documentation in `tidebreak-server` are
 the specification.
 
 ### `tui`
@@ -84,9 +84,9 @@ An interactive terminal chat. It boots the same in-process server and drives it
 over the loopback API.
 
 ```sh
-cargo run -p openwave-cli -- tui
-cargo run -p openwave-cli -- tui --chat <chat-uuid>
-cargo run -p openwave-cli -- tui --new
+cargo run -p tidebreak-cli -- tui
+cargo run -p tidebreak-cli -- tui --chat <chat-uuid>
+cargo run -p tidebreak-cli -- tui --new
 ```
 
 With no flags it opens a picker over the existing chats — enter resumes the
@@ -103,10 +103,10 @@ Runs a single turn without a terminal. stdout carries the assistant's text, and
 the exit status says how the turn ended.
 
 ```sh
-cargo run -p openwave-cli -- -p "summarize the CSV in output/"
-cargo run -p openwave-cli -- -p "…" --output-format json
-cargo run -p openwave-cli -- -p "…" --permission-mode allow
-cargo run -p openwave-cli -- -p "…" --model anthropic::claude-haiku-4-5-20251001
+cargo run -p tidebreak-cli -- -p "summarize the CSV in output/"
+cargo run -p tidebreak-cli -- -p "…" --output-format json
+cargo run -p tidebreak-cli -- -p "…" --permission-mode allow
+cargo run -p tidebreak-cli -- -p "…" --model anthropic::claude-haiku-4-5-20251001
 ```
 
 `--output-format json` emits the turn's event stream as NDJSON instead of plain
@@ -137,15 +137,15 @@ and it answers them over a line protocol. Driving is on when
 means a person ran the command by hand, and no decision lines are coming.
 
 Requests are emitted on stdout, mixed into the NDJSON event stream. Every line
-the CLI authors carries an `openwave` version tag, which is what tells it apart
+the CLI authors carries an `tidebreak` version tag, which is what tells it apart
 from a journal frame (those carry `seq` and `event`):
 
 ```json
-{"openwave":"v1","type":"approval_request","call_id":"…","action":"exec","approval":"exec_may_run_networked_command","grant_rungs":["exact_action",{"command_prefix":{"tokens":1}}],"preview":{…}}
-{"openwave":"v1","type":"plan_proposal","call_id":"…","title":"Rewrite the importer","plan":"1. …"}
-{"openwave":"v1","type":"questions_asked","call_id":"…","questions":[{"id":"target","question":"Which environment?","header":"","question_type":"single","allow_free_form":true,"options":[{"id":"staging","label":"Staging"}]}]}
-{"openwave":"v1","type":"error","message":"a plan decision does not answer the pending approval request"}
-{"openwave":"v1","type":"halted","reason":"plan_undriven","exit_code":3,"call_id":"…","message":"…"}
+{"tidebreak":"v1","type":"approval_request","call_id":"…","action":"exec","approval":"exec_may_run_networked_command","grant_rungs":["exact_action",{"command_prefix":{"tokens":1}}],"preview":{…}}
+{"tidebreak":"v1","type":"plan_proposal","call_id":"…","title":"Rewrite the importer","plan":"1. …"}
+{"tidebreak":"v1","type":"questions_asked","call_id":"…","questions":[{"id":"target","question":"Which environment?","header":"","question_type":"single","allow_free_form":true,"options":[{"id":"staging","label":"Staging"}]}]}
+{"tidebreak":"v1","type":"error","message":"a plan decision does not answer the pending approval request"}
+{"tidebreak":"v1","type":"halted","reason":"plan_undriven","exit_code":3,"call_id":"…","message":"…"}
 ```
 
 The driver answers by writing one JSON object per line to stdin:
@@ -192,20 +192,20 @@ under text output, so an undriven run is always machine-diagnosable.
 
 #### A dev harness
 
-To drive OpenWave from a script or a coding agent, give it its own data
+To drive Tidebreak from a script or a coding agent, give it its own data
 directory so it cannot touch the desktop's chats, and let it act without
 parking:
 
 ```sh
-export OPENWAVE_DATA_DIR="$(mktemp -d)/openwave"
-export OPENWAVE_KEYCHAIN_MOCK=1   # debug builds only — see below
+export TIDEBREAK_DATA_DIR="$(mktemp -d)/tidebreak"
+export TIDEBREAK_KEYCHAIN_MOCK=1   # debug builds only — see below
 export ANTHROPIC_API_KEY=sk-...
 
-cargo run -p openwave-cli -- -p "run the tests and summarize what failed" \
+cargo run -p tidebreak-cli -- -p "run the tests and summarize what failed" \
   --permission-mode allow --output-format json < /dev/null
 ```
 
-`OPENWAVE_KEYCHAIN_MOCK=1` keeps credentials in memory instead of the OS
+`TIDEBREAK_KEYCHAIN_MOCK=1` keeps credentials in memory instead of the OS
 keychain, which is what stops a headless run prompting for keychain access. It
 is honored by debug builds only; a release binary always uses the real
 keychain. Redirecting stdin from `/dev/null` states plainly that nothing is
@@ -215,7 +215,7 @@ To drive it instead, hold both pipes — read stdout line by line, and write a
 decision line when a request arrives:
 
 ```sh
-cargo run -p openwave-cli -- -p "plan the migration" \
+cargo run -p tidebreak-cli -- -p "plan the migration" \
   --permission-mode plan --output-format json < decisions.pipe
 ```
 
@@ -230,35 +230,35 @@ route's response object on one line.
 
 ```sh
 # Providers and credentials
-cargo run -p openwave-cli -- provider list
-cargo run -p openwave-cli -- provider set-key anthropic < key.txt
-ANTHROPIC_KEY=sk-... cargo run -p openwave-cli -- \
+cargo run -p tidebreak-cli -- provider list
+cargo run -p tidebreak-cli -- provider set-key anthropic < key.txt
+ANTHROPIC_KEY=sk-... cargo run -p tidebreak-cli -- \
   provider set-key anthropic --from-env ANTHROPIC_KEY
-cargo run -p openwave-cli -- provider remove-key anthropic
+cargo run -p tidebreak-cli -- provider remove-key anthropic
 
 # Models
-cargo run -p openwave-cli -- model list
-cargo run -p openwave-cli -- model roles
-cargo run -p openwave-cli -- model select anthropic::claude-opus-5
-cargo run -p openwave-cli -- model select auto --role utility
+cargo run -p tidebreak-cli -- model list
+cargo run -p tidebreak-cli -- model roles
+cargo run -p tidebreak-cli -- model select anthropic::claude-opus-5
+cargo run -p tidebreak-cli -- model select auto --role utility
 
 # Web search and code execution
-cargo run -p openwave-cli -- settings show
-cargo run -p openwave-cli -- settings web-search select exa
-cargo run -p openwave-cli -- settings web-search set-key exa --from-env EXA_KEY
-cargo run -p openwave-cli -- settings exec select e2b
-cargo run -p openwave-cli -- settings exec set-key e2b --from-env E2B_KEY
+cargo run -p tidebreak-cli -- settings show
+cargo run -p tidebreak-cli -- settings web-search select exa
+cargo run -p tidebreak-cli -- settings web-search set-key exa --from-env EXA_KEY
+cargo run -p tidebreak-cli -- settings exec select e2b
+cargo run -p tidebreak-cli -- settings exec set-key e2b --from-env E2B_KEY
 
 # MCP servers
-cargo run -p openwave-cli -- mcp-server list
-cargo run -p openwave-cli -- mcp-server add docs \
+cargo run -p tidebreak-cli -- mcp-server list
+cargo run -p tidebreak-cli -- mcp-server add docs \
   --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
-cargo run -p openwave-cli -- mcp-server remove docs
+cargo run -p tidebreak-cli -- mcp-server remove docs
 
 # Chats
-cargo run -p openwave-cli -- chat list
-CHAT=$(cargo run -p openwave-cli -- chat create)
-cargo run -p openwave-cli -- -p "…" --chat "$CHAT"
+cargo run -p tidebreak-cli -- chat list
+CHAT=$(cargo run -p tidebreak-cli -- chat create)
+cargo run -p tidebreak-cli -- -p "…" --chat "$CHAT"
 ```
 
 **A key is never a command-line argument.** `set-key` reads it from stdin, or
@@ -292,15 +292,15 @@ a path — the same routes the desktop's Outputs panel uses, so a file produced
 in the app is readable here and the other way round.
 
 ```sh
-cargo run -p openwave-cli -- output list <chat-uuid>
-cargo run -p openwave-cli -- output show <chat-uuid> <output-uuid>
-cargo run -p openwave-cli -- output revisions <chat-uuid> <output-uuid>
-cargo run -p openwave-cli -- output export <chat-uuid> <output-uuid> ./report.md
+cargo run -p tidebreak-cli -- output list <chat-uuid>
+cargo run -p tidebreak-cli -- output show <chat-uuid> <output-uuid>
+cargo run -p tidebreak-cli -- output revisions <chat-uuid> <output-uuid>
+cargo run -p tidebreak-cli -- output export <chat-uuid> <output-uuid> ./report.md
 ```
 
 `list` prints one tab-separated row per output, starting with the id the other
 subcommands take. `show` writes the text preview to stdout and names the
-revision it read on stderr, so `openwave output show … > draft.md` is exactly
+revision it read on stderr, so `tidebreak output show … > draft.md` is exactly
 the text. `revisions` lists an output's version history — every version keeps
 its own id and bytes, including after a restore, because history is
 append-only. `export` writes the complete bytes of a revision, which is the
@@ -317,21 +317,21 @@ image attachment, everything else is ingested as a source document. The id it
 prints on stdout is what a later turn references.
 
 ```sh
-cargo run -p openwave-cli -- attach <chat-uuid> ./contract.pdf
+cargo run -p tidebreak-cli -- attach <chat-uuid> ./contract.pdf
 ```
 
 ### `mcp`
 
-Serves OpenWave's own read-only filesystem tools over MCP stdio, confined to
+Serves Tidebreak's own read-only filesystem tools over MCP stdio, confined to
 one explicit workspace directory:
 
 ```sh
-cargo run -p openwave-cli -- mcp /absolute/path/to/workspace
+cargo run -p tidebreak-cli -- mcp /absolute/path/to/workspace
 ```
 
 It exposes `read_file` and `list_dir`, and only after a proper MCP initialize
-handshake. This is OpenWave acting as an MCP *server* for some other client —
-it is unrelated to [connecting MCP servers to OpenWave](/mcp-servers).
+handshake. This is Tidebreak acting as an MCP *server* for some other client —
+it is unrelated to [connecting MCP servers to Tidebreak](/mcp-servers).
 
 ### `rehome-secrets`
 
@@ -340,7 +340,7 @@ stored by an earlier build keep prompting. This rewrites each stored credential
 under the running binary's signature.
 
 ```sh
-cargo run -p openwave-cli -- rehome-secrets
+cargo run -p tidebreak-cli -- rehome-secrets
 ```
 
 ## Attaching to a running server
@@ -352,11 +352,11 @@ because two engines writing one database race each other in ways nothing else
 would catch:
 
 ```text
-openwave: configuration error: another OpenWave process is already running on
-the data directory /Users/me/.openwave. Connect to it instead …
+tidebreak: configuration error: another Tidebreak process is already running on
+the data directory /Users/me/.tidebreak. Connect to it instead …
 ```
 
-The claim is an OS advisory lock on `openwave.lock` inside the directory, so it
+The claim is an OS advisory lock on `tidebreak.lock` inside the directory, so it
 is honest across a crash: a killed process releases it the moment it dies, and
 the leftover file never has to be cleaned up by hand.
 
@@ -367,81 +367,81 @@ bearer only — never the native executor credential):
 
 ```sh
 # Same data directory the desktop or `serve` owns
-export OPENWAVE_DATA_DIR="$HOME/Library/Application Support/io.brightwave.openwave.dev"
-cargo run -p openwave-cli -- --attach provider list
-cargo run -p openwave-cli -- -p "what changed today?" --attach
-cargo run -p openwave-cli -- tui --attach
+export TIDEBREAK_DATA_DIR="$HOME/Library/Application Support/io.brightwave.tidebreak.dev"
+cargo run -p tidebreak-cli -- --attach provider list
+cargo run -p tidebreak-cli -- -p "what changed today?" --attach
+cargo run -p tidebreak-cli -- tui --attach
 ```
 
-On a release desktop build, the directory is `io.brightwave.openwave` (no
+On a release desktop build, the directory is `io.brightwave.tidebreak` (no
 `.dev`). `--attach` and `--server` conflict; pick one.
 
 You can still pass an explicit URL when you already have the pair (for example
 from `serve`'s stdout):
 
 ```sh
-export OPENWAVE_SERVER_TOKEN=<the token that server printed>
-cargo run -p openwave-cli -- --server http://127.0.0.1:53421 provider list
+export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
+cargo run -p tidebreak-cli -- --server http://127.0.0.1:53421 provider list
 ```
 
 `--server` / `--attach` work on `tui`, `-p`, and every setup command.
-`OPENWAVE_SERVER_URL` sets the same thing as `--server` for a whole shell, and
+`TIDEBREAK_SERVER_URL` sets the same thing as `--server` for a whole shell, and
 the flag wins over it. After the endpoint is resolved, an attached command
 writes no log file and touches no keychain — it is only an HTTP+WebSocket
-client. With `--attach`, `OPENWAVE_DATA_DIR` is used solely to find
+client. With `--attach`, `TIDEBREAK_DATA_DIR` is used solely to find
 `listen.json`; with `--server`, the local data directory is ignored.
 
 `serve`, `mcp`, and `rehome-secrets` reject `--server` / `--attach`: the first
 two *are* servers, and the third rewrites local keychain items. (They ignore
-`OPENWAVE_SERVER_URL`, so a shell that exports it can still start a daemon.)
+`TIDEBREAK_SERVER_URL`, so a shell that exports it can still start a daemon.)
 
 ### Getting a token
 
 The bearer token is per-launch and is full authority over the profile, so it is
 never a command-line argument — every process on the machine can read those, and
 they land in shell history. `--attach` loads it from `listen.json`. With
-`--server` it comes from `OPENWAVE_SERVER_TOKEN`, or from the variable
+`--server` it comes from `TIDEBREAK_SERVER_TOKEN`, or from the variable
 `--server-token-env <var>` names.
 
-**From `openwave serve` or the desktop app:** both write
-`{data_dir}/listen.json` on bind. Point `OPENWAVE_DATA_DIR` at that directory
+**From `tidebreak serve` or the desktop app:** both write
+`{data_dir}/listen.json` on bind. Point `TIDEBREAK_DATA_DIR` at that directory
 and use `--attach`. `serve` still prints the URL and token on stdout if you
 prefer to capture them:
 
 ```sh
-cargo run -p openwave-cli -- serve > server.log &
-export OPENWAVE_SERVER_URL=http://$(grep -m1 'listening on http://' server.log | sed 's|.*http://||')
-export OPENWAVE_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
+cargo run -p tidebreak-cli -- serve > server.log &
+export TIDEBREAK_SERVER_URL=http://$(grep -m1 'listening on http://' server.log | sed 's|.*http://||')
+export TIDEBREAK_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
 ```
 
 ## Environment
 
 | Variable | Effect |
 | --- | --- |
-| `OPENWAVE_DATA_DIR` | Where the database, blobs, logs, and `listen.json` live. Defaults to `./.openwave` under the current directory. With `--attach`, used only to locate `listen.json`; with `--server`, ignored. |
-| `OPENWAVE_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it; conflicts with `--attach`. `serve`/`mcp`/`rehome-secrets` ignore it. |
-| `OPENWAVE_SERVER_TOKEN` | Bearer token for `--server`, unless `--server-token-env <var>` names a different variable. Not used with `--attach`. |
-| `OPENWAVE_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
-| `OPENWAVE_DATABASE_URL` | Required for `self_host`. |
-| `OPENWAVE_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
-| `OPENWAVE_MCP_CONFIG` | JSON file of external MCP server definitions to load at boot. |
-| `OPENWAVE_KEYCHAIN_MOCK` | **Debug builds only.** Any non-empty value routes credentials to an in-memory store instead of the OS keychain, so a headless run never triggers a keychain prompt. Secrets do not survive the process. Release binaries ignore it. |
-| `OPENWAVE_MODEL` | Overrides the model the process launches with. |
-| `OPENWAVE_CONTAINER_EXECUTION_ENABLED` | Enables the container execution backend. Default `false`. |
-| `OPENWAVE_CONTAINER_IMAGE` | Overrides the container image. |
+| `TIDEBREAK_DATA_DIR` | Where the database, blobs, logs, and `listen.json` live. Defaults to `./.tidebreak` under the current directory. With `--attach`, used only to locate `listen.json`; with `--server`, ignored. |
+| `TIDEBREAK_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it; conflicts with `--attach`. `serve`/`mcp`/`rehome-secrets` ignore it. |
+| `TIDEBREAK_SERVER_TOKEN` | Bearer token for `--server`, unless `--server-token-env <var>` names a different variable. Not used with `--attach`. |
+| `TIDEBREAK_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
+| `TIDEBREAK_DATABASE_URL` | Required for `self_host`. |
+| `TIDEBREAK_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
+| `TIDEBREAK_MCP_CONFIG` | JSON file of external MCP server definitions to load at boot. |
+| `TIDEBREAK_KEYCHAIN_MOCK` | **Debug builds only.** Any non-empty value routes credentials to an in-memory store instead of the OS keychain, so a headless run never triggers a keychain prompt. Secrets do not survive the process. Release binaries ignore it. |
+| `TIDEBREAK_MODEL` | Overrides the model the process launches with. |
+| `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` | Enables the container execution backend. Default `false`. |
+| `TIDEBREAK_CONTAINER_IMAGE` | Overrides the container image. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | Used as a credential for that provider when nothing is stored in the credential store. |
 
 <Callout>
-`openwave serve` defaults to `./.openwave` in your current directory, which is
-**not** the desktop app's data directory. Point `OPENWAVE_DATA_DIR` at the
+`tidebreak serve` defaults to `./.tidebreak` in your current directory, which is
+**not** the desktop app's data directory. Point `TIDEBREAK_DATA_DIR` at the
 desktop's application data directory (debug:
-`~/Library/Application Support/io.brightwave.openwave.dev`) and use `--attach`
+`~/Library/Application Support/io.brightwave.tidebreak.dev`) and use `--attach`
 to drive the same chats while the app is running. Embedding a second server
 over that directory is still refused. See
 [Attaching to a running server](#attaching-to-a-running-server).
 </Callout>
 
-Logs are written to `logs/openwave.log` under the data directory.
+Logs are written to `logs/tidebreak.log` under the data directory.
 
 ## Self-hosting
 

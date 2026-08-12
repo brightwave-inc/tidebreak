@@ -1,4 +1,4 @@
-# OpenWave self-host: the server plus its PostgreSQL database.
+# Tidebreak self-host: the server plus its PostgreSQL database.
 #
 # THIS STACK BINDS TO LOCALHOST BY DESIGN. The published port below is
 # `127.0.0.1:8080`, and the API it serves is plain HTTP with bearer-token
@@ -17,7 +17,7 @@
 #     docs/self-hosting.md for the format; a file with no admin refuses to boot)
 #   - POSTGRES_PASSWORD set in the environment or a .env file beside this one
 
-name: openwave-self-host
+name: tidebreak-self-host
 
 services:
   postgres:
@@ -27,16 +27,16 @@ services:
     image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     restart: unless-stopped
     environment:
-      POSTGRES_USER: openwave
-      POSTGRES_DB: openwave
+      POSTGRES_USER: tidebreak
+      POSTGRES_DB: tidebreak
       # No default: an unset password would silently produce a trust-auth
       # database. Set it in .env.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       # The one thing to back up. See docs/self-hosting.md.
-      - openwave-postgres:/var/lib/postgresql/data
+      - tidebreak-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openwave -d openwave"]
+      test: ["CMD-SHELL", "pg_isready -U tidebreak -d tidebreak"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -50,20 +50,20 @@ services:
       # The workspace root, so `cargo build --locked` sees the whole workspace.
       context: ../..
       dockerfile: deploy/self-host/Dockerfile
-    image: openwave-self-host:local
+    image: tidebreak-self-host:local
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      OPENWAVE_PROFILE: self_host
-      OPENWAVE_DATABASE_URL: postgres://openwave:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/openwave
-      OPENWAVE_AUTH_TOKENS_FILE: /run/openwave/tokens
-      OPENWAVE_DATA_DIR: /var/lib/openwave
+      TIDEBREAK_PROFILE: self_host
+      TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/tidebreak
+      TIDEBREAK_AUTH_TOKENS_FILE: /run/tidebreak/tokens
+      TIDEBREAK_DATA_DIR: /var/lib/tidebreak
       # All interfaces of the container, published to loopback only below.
-      OPENWAVE_LISTEN_ADDR: 0.0.0.0:8080
+      TIDEBREAK_LISTEN_ADDR: 0.0.0.0:8080
       # Log filter; see the server's `logging` module for the syntax.
-      OPENWAVE_LOG: ${OPENWAVE_LOG:-info}
+      TIDEBREAK_LOG: ${TIDEBREAK_LOG:-info}
       # Model credentials. The container has no OS keychain, so a self-host
       # deployment supplies provider keys through the environment. Only the
       # ones you set are used; unset variables resolve to no credential.
@@ -72,16 +72,16 @@ services:
     volumes:
       # The operator's credential file, read-only to the container. One line
       # per token; keep it 0600 on the host.
-      - ./tokens:/run/openwave/tokens:ro
+      - ./tokens:/run/tidebreak/tokens:ro
       # Instance lock, logs, and per-turn scratch. Durable state lives in
       # PostgreSQL; this volume exists so a restart does not fight itself over
       # the lock file and so logs survive a container replacement.
-      - openwave-data:/var/lib/openwave
+      - tidebreak-data:/var/lib/tidebreak
     ports:
       # Localhost only. Everything about production exposure happens in front
       # of this, not here.
       - "127.0.0.1:8080:8080"
 
 volumes:
-  openwave-postgres:
-  openwave-data:
+  tidebreak-postgres:
+  tidebreak-data:

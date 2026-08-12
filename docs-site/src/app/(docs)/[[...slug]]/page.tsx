@@ -19,7 +19,7 @@ function EmptyState() {
     <main className="min-w-0 flex-1 py-8 lg:py-10">
       <div className="mx-auto max-w-3xl px-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">
-          OpenWave Docs
+          Tidebreak Docs
         </h1>
         <p className="mt-2 text-lg text-muted-foreground">
           No documentation pages have been added yet. Add MDX files under{' '}
@@ -94,8 +94,8 @@ export async function generateMetadata(
   const page = getPage(params.slug);
   if (!page) {
     return {
-      title: { absolute: 'OpenWave Docs' },
-      description: 'Documentation for OpenWave.',
+      title: { absolute: 'Tidebreak Docs' },
+      description: 'Documentation for Tidebreak.',
     };
   }
 

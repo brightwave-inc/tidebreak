@@ -14,7 +14,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(dirname "$script_dir")"
-desktop_dir="$repo_root/crates/openwave-desktop"
+desktop_dir="$repo_root/crates/tidebreak-desktop"
 ui_dir="$desktop_dir/ui"
 
 missing=()

@@ -1,0 +1,67 @@
+[package]
+name = "tidebreak-cli"
+description = "Tidebreak CLI: the headless daemon (`tidebreak serve`) and command-line client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# The binary is `tidebreak` (not `tidebreak-cli`), so `tidebreak serve` is the command.
+[[bin]]
+name = "tidebreak"
+path = "src/main.rs"
+
+[dependencies]
+# `default-features = false`: the CLI directly needs config/contracts plus the
+# built-in file tools for `tidebreak mcp`. `sqlite` is on so `tidebreak folder`
+# can open the product store beside a running server without embedding one
+# (and without taking `tidebreak.lock`). Keychain and blob-fs still come only
+# through `tidebreak-server`.
+tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["tools", "sqlite"] }
+# `tidebreak folder …` decides local command reach exactly as the desktop does,
+# so an operator-provisioned folder carries the same grants on the same host.
+tidebreak-code-execution = { path = "../tidebreak-code-execution" }
+# The capability store behind connected folders. `tidebreak folder …` opens it
+# in-process the way the desktop's sidecar opens it, against the same data dir.
+tidebreak-host-broker = { path = "../tidebreak-host-broker" }
+tidebreak-mcp = { path = "../tidebreak-mcp" }
+tidebreak-server = { path = "../tidebreak-server" }
+# Decoding the broker's binary file reads, whose protocol shape is base64 —
+# `import_connected_file` publishes those bytes as a conversation source.
+base64 = { workspace = true }
+# Timestamps on transcript entries and inbox rows.
+chrono = { workspace = true }
+crossterm = { version = "=0.29.0", features = ["event-stream"] }
+futures = { workspace = true }
+# CommonMark parser for committed assistant text; no default features (the
+# binary and HTML renderer are unneeded).
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+ratatui = "=0.30.2"
+# Syntax highlighting for fenced code blocks. `default-syntaxes` brings the
+# compressed grammar dump; `regex-fancy` is the pure-Rust regex engine — the
+# default `onig` drags in a C build. No themes: the palette comes from
+# `tui::theme`.
+syntect = { version = "=5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-tungstenite = { workspace = true }
+# The connected-folder executor's diagnostics. They belong in the profile's log
+# file: it polls, so stderr would flood a print run and overwrite the TUI.
+tracing = { workspace = true }
+ratatui-textarea = "=0.9.2"
+# Display-width clipping for lines rendered into fixed scrollback/panel buffers.
+unicode-width = "=0.2.2"
+uuid = { workspace = true }
+
+[dev-dependencies]
+# The scripted model provider the end-to-end print-mode test drives the turn
+# with. Enabling it here compiles it into the `tidebreak` binary the test spawns,
+# and only when the tests are built.
+tidebreak-server = { path = "../tidebreak-server", features = ["scripted-provider"] }
+tempfile = { workspace = true }

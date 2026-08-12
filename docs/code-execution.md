@@ -1,6 +1,6 @@
 # Code execution
 
-OpenWave exposes one foreground `exec` tool through a provider-neutral command
+Tidebreak exposes one foreground `exec` tool through a provider-neutral command
 execution contract. The first provider is a native local sandbox. Another
 provider can implement the same contract without changing the model-facing tool
 schema: E2B and Daytona are the managed cloud adapters, and Docker runs the same
@@ -146,7 +146,7 @@ is disclosed honestly as described above.
 
 The `exec` tool remains registered with a stable schema while settings change.
 The host resolves the selected provider immediately before execution, so a
-configuration update takes effect without restarting OpenWave.
+configuration update takes effect without restarting Tidebreak.
 
 ## Desktop setup
 
@@ -162,7 +162,7 @@ not silently change a chat's authority.
 
 ## Provider contract
 
-`openwave-code-execution` owns the normalized boundary:
+`tidebreak-code-execution` owns the normalized boundary:
 
 ```text
 ExecTool
@@ -266,20 +266,20 @@ their existing behavior, and E2B or Daytona cannot access host folders.
 ## Document helpers
 
 Desktop builds ship a network-free Python helper library into every exec
-workspace at `.openwave/exec-scripts`. The sandbox container includes the same
-library at `/opt/openwave/exec-scripts`, exposed through
-`OPENWAVE_EXEC_SCRIPTS`. The helpers print short summaries and write visual
+workspace at `.tidebreak/exec-scripts`. The sandbox container includes the same
+library at `/opt/tidebreak/exec-scripts`, exposed through
+`TIDEBREAK_EXEC_SCRIPTS`. The helpers print short summaries and write visual
 review images into `preview/`, using priority names such as
 `overview-grid.png` before per-page or per-sheet images.
 
 Examples:
 
 ```text
-python3 .openwave/exec-scripts/render_pdf.py documents/report.pdf --pages 1-2
-python3 .openwave/exec-scripts/extract_pdf_figures.py documents/report.pdf
-python3 .openwave/exec-scripts/analyze_xlsx.py documents/model.xlsx
-python3 .openwave/exec-scripts/calc_uno.py set-cell documents/model.xlsx Summary B7 '=SUM(B2:B6)'
-python3 .openwave/exec-scripts/xlsx_recalc.py output/model.xlsx
+python3 .tidebreak/exec-scripts/render_pdf.py documents/report.pdf --pages 1-2
+python3 .tidebreak/exec-scripts/extract_pdf_figures.py documents/report.pdf
+python3 .tidebreak/exec-scripts/analyze_xlsx.py documents/model.xlsx
+python3 .tidebreak/exec-scripts/calc_uno.py set-cell documents/model.xlsx Summary B7 '=SUM(B2:B6)'
+python3 .tidebreak/exec-scripts/xlsx_recalc.py output/model.xlsx
 ```
 
 PDF rendering uses pypdfium2 or pdf2image with Poppler, figure extraction uses
@@ -347,7 +347,7 @@ The initial adapter is deliberately fail-closed and macOS-first:
 - unsupported platforms return unavailable and never fall back to an
   unconfined process.
 
-This is a defense-in-depth boundary for OpenWave's single-user local runtime,
+This is a defense-in-depth boundary for Tidebreak's single-user local runtime,
 not a VM-grade multi-tenant boundary. Hostile or remotely supplied workloads
 should use a managed isolation provider.
 
@@ -395,7 +395,7 @@ explicit, not a mirror:
   visible to a managed command only if listed. The host also stages a fixed
   set of infrastructure on its own: the hidden markers that make `output/` and
   `preview/` exist remotely, and the bundled document helpers under
-  `.openwave/exec-scripts`.
+  `.tidebreak/exec-scripts`.
 - **Failures are loud, never silent.** A listed path that does not exist, is a
   symlink, or expands past the 256-file staging bound fails the call with an
   error naming the path. The local provider validates the listed paths the
