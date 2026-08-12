@@ -10,9 +10,33 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AppInvokeRefusalError, type AppDetail, type AppGrantState } from "@/api";
+import {
+  AppInvokeRefusalError,
+  type AppDetail,
+  type AppGrantState,
+  type ManagedPolicy,
+} from "@/api";
+import { ManagedPolicyContext } from "@/managedPolicy";
 import { AppDetailView } from "./AppDetailView";
 import type { AppsApis } from "./appsApis";
+
+/** A profile paired with a gateway, which is what the Publish affordance needs. */
+const PAIRED: ManagedPolicy = {
+  managed: true,
+  source: "provisioned",
+  misconfigured: false,
+  allow_local_mcp_servers: false,
+  gateway_url: "https://gateway.example.com",
+};
+
+/** Renders the view inside a managed-policy context, as the app tree does. */
+function renderPaired(apis: AppsApis, policy: ManagedPolicy = PAIRED) {
+  return render(
+    <ManagedPolicyContext.Provider value={policy}>
+      <AppDetailView appId="app-1" apis={apis} onBack={() => {}} />
+    </ManagedPolicyContext.Provider>,
+  );
+}
 
 const DETAIL: AppDetail = {
   id: "app-1",
@@ -97,8 +121,10 @@ function apisWith(grant: AppGrantState): AppsApis {
       is_error: false,
     }),
     gatewayBaseUrl: vi.fn().mockResolvedValue("https://gateway.example.com"),
-    publishTeams: vi.fn().mockResolvedValue({ supported: false, teams: [] }),
-    publish: vi.fn().mockResolvedValue({ outcome: "published" }),
+    gatewayPage: vi.fn().mockResolvedValue({
+      outcome: "ready",
+      url: "https://gateway.example.com/shared-apps/sa-1",
+    }),
   };
 }
 
@@ -600,130 +626,74 @@ describe("AppDetailView", () => {
     ],
   };
 
-  it("publishes a gateway-bound app to a team, after saying what publishing means", async () => {
+  it("opens the app's page at the gateway rather than publishing here", async () => {
+    // Decision record 11: publishing mutates entitlement state the gateway
+    // owns, so this host resolves the address and hands the author over. What
+    // it must never do is publish, and there is no longer anything here that
+    // could.
     const apis = apisWith(GATEWAY_BOUND);
-    apis.publishTeams = vi.fn().mockResolvedValue({
-      supported: true,
-      teams: [
-        { id: "team-a", name: "Platform", enabled: true },
-        { id: "team-b", name: "Archived team", enabled: false },
-      ],
-    });
-    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+    const opened = vi.spyOn(window, "open").mockReturnValue(null);
+    renderPaired(apis);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
-
-    // A team switched off at the gateway is shown and refused, never hidden:
-    // an author looking for it deserves to see why it cannot be chosen.
-    const archived = screen.getByRole("radio", { name: /Archived team/ });
-    expect(archived).toBeDisabled();
-    expect(screen.getByText("disabled at your gateway")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("radio", { name: "Platform" }));
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-
-    // The preflight is the point of the flow: reach, and the fact that data
-    // baked into the bundle travels with the app where no manifest can list
-    // it.
-    expect(
-      screen.getByText(/will be able to open/, { exact: false }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Anything built into this app travels with it/),
-    ).toBeInTheDocument();
-    // This app is granted here, so the preflight makes no claim about whether
-    // the author has run it.
-    expect(
-      screen.queryByText(/may never have seen it work/),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Publish to Platform/ }));
-    await waitFor(() =>
-      expect(apis.publish).toHaveBeenCalledWith("app-1", "team-a"),
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Publish at gateway" }),
     );
-    expect(
-      await screen.findByText(/is now available to Platform/),
-    ).toBeInTheDocument();
+
+    await waitFor(() => expect(apis.gatewayPage).toHaveBeenCalledWith("app-1"));
+    await waitFor(() =>
+      expect(opened).toHaveBeenCalledWith(
+        "https://gateway.example.com/shared-apps/sa-1",
+        "_blank",
+        "noreferrer,noopener",
+      ),
+    );
+    opened.mockRestore();
   });
 
-  it("says so in the preflight when the app is not allowed to run here", async () => {
-    // Publishing is not gated on the local grant, so an app can be handed to a
-    // team without ever having been opened on this machine. The preflight says
-    // that plainly rather than letting the copy imply otherwise.
-    const ungranted: AppGrantState = {
-      granted: false,
-      bindings: GATEWAY_BOUND.bindings.map((binding) => ({
-        ...binding,
-        granted: false,
-      })),
-    };
-    const apis = apisWith(ungranted);
-    apis.publishTeams = vi.fn().mockResolvedValue({
-      supported: true,
-      teams: [{ id: "team-a", name: "Platform", enabled: true }],
-    });
-    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Platform" }));
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(
-      screen.getByText(/may never have seen it work/),
-    ).toBeInTheDocument();
-  });
-
-  it("renders a gateway refusal in the gateway's own words", async () => {
+  it("opens nothing when the gateway will not hold the app", async () => {
+    // A refusal carries no address, and sending the author to a page for a
+    // draft the gateway just declined would strand them there.
     const apis = apisWith(GATEWAY_BOUND);
-    apis.publishTeams = vi.fn().mockResolvedValue({
-      supported: true,
-      teams: [{ id: "team-a", name: "Platform", enabled: true }],
-    });
-    apis.publish = vi.fn().mockResolvedValue({
+    apis.gatewayPage = vi.fn().mockResolvedValue({
       outcome: "refused",
-      code: "host_local_bridge_verbs",
       message: "this bundle calls fs/read, which only the OpenWave host serves",
     });
-    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+    const opened = vi.spyOn(window, "open").mockReturnValue(null);
+    renderPaired(apis);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Platform" }));
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    fireEvent.click(screen.getByRole("button", { name: /Publish to Platform/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Publish at gateway" }),
+    );
 
-    // The gateway names the verbs; nothing here could reconstruct that list,
-    // so the message crosses verbatim rather than being summarized.
-    expect(
-      await screen.findByText(
-        "this bundle calls fs/read, which only the OpenWave host serves",
-      ),
-    ).toBeInTheDocument();
+    await waitFor(() => expect(apis.gatewayPage).toHaveBeenCalled());
+    expect(opened).not.toHaveBeenCalled();
+    opened.mockRestore();
   });
 
   // Both halves of the predicate, because either one alone would let the
-  // button appear where publishing cannot work: an app that binds nothing at
-  // the gateway has nothing to publish there, and a profile whose gateway
-  // cannot hold shared apps has nowhere to publish to.
+  // button appear where it cannot work: an app that binds nothing at the
+  // gateway has no page there, and an unpaired profile has no gateway URL to
+  // build one from.
   it.each([
+    ["an app that binds nothing at the gateway", GRANTED, PAIRED],
     [
-      "an app that binds nothing at the gateway",
-      GRANTED,
-      { supported: true, teams: [{ id: "team-a", name: "Platform", enabled: true }] },
-    ],
-    [
-      "a gateway that cannot hold shared apps",
+      "a profile with no gateway to open",
       GATEWAY_BOUND,
-      { supported: false, teams: [] },
+      {
+        managed: false,
+        source: "unmanaged",
+        misconfigured: false,
+        allow_local_mcp_servers: false,
+      } satisfies ManagedPolicy,
     ],
-  ])("offers no publish affordance for %s", async (_name, grant, targets) => {
+  ])("offers no publish affordance for %s", async (_name, grant, policy) => {
     const apis = apisWith(grant);
-    apis.publishTeams = vi.fn().mockResolvedValue(targets);
-    render(<AppDetailView appId="app-1" apis={apis} onBack={() => {}} />);
+    renderPaired(apis, policy);
 
     expect(await screen.findByTitle("App: Fixture app")).toBeInTheDocument();
-    await waitFor(() => expect(apis.publishTeams).toHaveBeenCalled());
     expect(
-      screen.queryByRole("button", { name: "Publish" }),
+      screen.queryByRole("button", { name: "Publish at gateway" }),
     ).not.toBeInTheDocument();
+    expect(apis.gatewayPage).not.toHaveBeenCalled();
   });
 });

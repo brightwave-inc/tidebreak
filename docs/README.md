@@ -34,7 +34,7 @@ Project documentation, versioned alongside the code.
   governed local executor, and the promotion-compatible binding vocabulary.
 - [Local apps](local-apps.md) — agent-generated mini-apps in the profile:
   sandboxed frame rendering, manifest-pinned tool invocation with durable
-  consent, and the planned promotion path to gateway shared apps.
+  consent, and how sharing is registered here but published at the gateway.
 - [The OpenWave ↔ model gateway boundary](gateway-boundary.md) — how a profile
   becomes gateway-managed (pairing, policy tiers, sessions) and what crosses
   the wire once it is.

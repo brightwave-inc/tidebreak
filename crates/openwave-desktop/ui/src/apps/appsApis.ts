@@ -1,13 +1,12 @@
 import type {
   ApiClient,
   AppDetail,
+  AppGatewayPageResult,
   AppGrantState,
   AppLibrary,
-  AppPublishResult,
   AppFolderInvokeResult,
   AppRestInvokeResult,
   AppViewSessionInfo,
-  GatewayTeams,
 } from "@/api";
 
 /**
@@ -58,12 +57,10 @@ export type AppsApis = {
    */
   gatewayBaseUrl(): Promise<string | null>;
   /**
-   * The teams this app could be published to, and whether publishing means
-   * anything on this profile at all.
+   * Where this app's page lives at the gateway — the destination of the
+   * Publish affordance, which opens it rather than publishing here.
    */
-  publishTeams(): Promise<GatewayTeams>;
-  /** Publish the app's current revision to one team. */
-  publish(appId: string, teamId: string): Promise<AppPublishResult>;
+  gatewayPage(appId: string): Promise<AppGatewayPageResult>;
 };
 
 export function appsApisFromClient(client: ApiClient): AppsApis {
@@ -98,7 +95,6 @@ export function appsApisFromClient(client: ApiClient): AppsApis {
       client.invokeAppFolder(appId, folder, op, path, contentBase64, replace),
     gatewayBaseUrl: async () =>
       (await client.getGatewayStatus()).base_url ?? null,
-    publishTeams: () => client.getGatewayTeams(),
-    publish: (appId, teamId) => client.publishApp(appId, teamId),
+    gatewayPage: (appId) => client.appGatewayPage(appId),
   };
 }

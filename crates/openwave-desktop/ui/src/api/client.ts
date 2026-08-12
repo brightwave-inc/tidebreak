@@ -3,10 +3,10 @@ import {
   AppInvokeRefusalError,
   type AppDetail,
   type AppFolderInvokeResult,
+  type AppGatewayPageResult,
   type AppGrantState,
   type AppInvokeRefusalKind,
   type AppLibrary,
-  type AppPublishResult,
   type AppRestInvokeResult,
   type AppViewSession,
   type ApprovalGrantRung,
@@ -26,7 +26,6 @@ import {
   type FileDownloadProgress,
   type GatewayApps,
   type GatewayStatus,
-  type GatewayTeams,
   type ManagedPolicy,
   type McpAppPayload,
   type McpServerDefinition,
@@ -529,15 +528,6 @@ export class ApiClient {
     return this.json("/gateway/apps", { headers: this.headers() });
   }
 
-  /**
-   * The teams a local app may be published to. `supported: false` covers
-   * every state where publishing has no meaning — no gateway, or one that
-   * cannot publish — so the affordance is hidden rather than offered.
-   */
-  getGatewayTeams(): Promise<GatewayTeams> {
-    return this.json("/gateway/teams", { headers: this.headers() });
-  }
-
   syncGatewayModels(): Promise<GatewayStatus> {
     return this.json("/gateway/models/sync", {
       method: "POST",
@@ -633,18 +623,21 @@ export class ApiClient {
   }
 
   /**
-   * Publish one app's current revision to a team, making it reachable to that
-   * team through the gateway.
+   * Where this app's page lives at the gateway, registering it there first if
+   * it has never been registered.
+   *
+   * Publishing itself happens on that page, not here: it mutates entitlement
+   * state the gateway owns, and every other mutation of that state is already
+   * done at the gateway (decision record 11).
    *
    * Every way the gateway can decline is an outcome in the response rather
    * than a thrown error: the author asked a legitimate question and the
    * gateway's answer — including its own words — is what the page renders.
    */
-  publishApp(appId: string, teamId: string): Promise<AppPublishResult> {
-    return this.json(`/apps/${encodeURIComponent(appId)}/publish`, {
+  appGatewayPage(appId: string): Promise<AppGatewayPageResult> {
+    return this.json(`/apps/${encodeURIComponent(appId)}/gateway-page`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ team_id: teamId }),
     });
   }
 

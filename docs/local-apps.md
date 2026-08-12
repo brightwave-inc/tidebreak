@@ -216,28 +216,41 @@ Local apps inherit it knowingly: nothing here adds per-user authorization,
 and #853 remains the recorded gate before any deployment that puts more than
 one person behind one server — apps included.
 
-## Promotion: planned for, not built
+## Sharing: registered here, published at the gateway
 
-A later step can promote a local app to a **shared app** on a model gateway,
-where a team-scoped copy is stored, served, and brokered by the gateway under
-each viewer's own entitlements. Three properties keep that door open without
-building anything now:
+A gateway-bound local app is auto-registered at the model gateway as a
+**draft** — a shared app the author alone reaches — on the first relay or
+consent, and each later local revision is appended lazily, so the gateway's
+history is what was servable when it was used. From there the gateway stores
+everything sharing-related: the draft and its revisions, the published status,
+and the per-team grants that make it openable.
+
+**Publishing is not done here.** Decision record 11 places it on the gateway's
+own web surface, next to the publish state, the grants, and the revocation it
+belongs with. Publishing mutates gateway-owned entitlement state; every other
+mutation of that state already happens at the gateway, and a publish dialog in
+each harness that authors apps is a second interface of record that can only
+drift from the first. So the app page's **Publish at gateway** affordance
+resolves the app's page at the deployment holding it —
+`POST /apps/{id}/gateway-page`, which registers the draft if it never has been
+— and opens that page in the browser. Nothing in OpenWave calls the gateway's
+publish route.
+
+Three properties make the registration a copy rather than a translation:
 
 - **The binding vocabulary maps.** A gateway binding already names what the
-  gateway's own shared-app manifests name, so promotion is a copy rather than
-  a translation — record 7 rejected the translate-at-publish design that this
-  bullet originally assumed, because a manifest that has to be rewritten at
-  share time was never run the way its viewers will run it. An app bound to a
-  purely local API still cannot promote, by construction. (Retiring tool
-  bindings, above, removed the widest class of unpromotable bindings
-  outright.)
+  gateway's own shared-app manifests name — record 7 rejected the
+  translate-at-publish design, because a manifest rewritten at share time was
+  never run the way its viewers will run it. Folder and local `rest_api`
+  bindings are dropped rather than translated: they name capabilities that
+  exist only on this machine. An app bound to nothing at the gateway cannot be
+  shared at all, and is refused with `app_not_gateway_bound` rather than
+  registered as an empty shell.
 - **Revision identity carries.** Digests, ordinals, and producer provenance
   become the published revision's provenance.
 - **Attestation flips from limitation to benefit.** Once the gateway brokers
-  the calls, attested apps become reachable — a concrete reason to promote
+  the calls, attested apps become reachable — a concrete reason to share
   beyond sharing itself.
-
-Nothing in the local design depends on promotion shipping.
 
 ## Non-goals
 

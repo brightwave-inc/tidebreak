@@ -14,10 +14,10 @@ pub(crate) const COMPACTION_PROTECT_RECENT_MESSAGES_SETTING: &str =
 pub(crate) const MODEL_VISIBILITY_OVERRIDES_SETTING: &str = "models.visibility_overrides";
 
 mod agent_runs;
+mod app_gateway_page;
 mod app_grant;
 mod app_invoke;
 mod app_library;
-mod app_publish;
 mod approvals;
 pub(crate) mod client_execution;
 mod compaction;
@@ -40,10 +40,10 @@ mod turn_control;
 mod user_questions;
 
 pub use agent_runs::*;
+pub use app_gateway_page::*;
 pub use app_grant::*;
 pub use app_invoke::*;
 pub use app_library::*;
-pub use app_publish::*;
 pub use approvals::*;
 pub use client_execution::*;
 pub use compaction::*;

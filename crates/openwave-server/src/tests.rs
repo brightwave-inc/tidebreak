@@ -35,10 +35,10 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
+mod app_gateway_page;
 mod app_grant;
 mod app_invoke;
 mod app_library;
-mod app_publish;
 mod chat_titling;
 mod compaction;
 mod configuration;

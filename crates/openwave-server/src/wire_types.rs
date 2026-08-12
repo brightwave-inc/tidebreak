@@ -391,11 +391,9 @@ mod tests {
         generate::collect_from::<crate::gateway_runtime::GatewayStatus>(&cfg, &mut out);
         generate::collect_from::<crate::managed_policy::ManagedPolicy>(&cfg, &mut out);
         generate::collect_from::<crate::gateway_runtime::GatewayApps>(&cfg, &mut out);
-        // The publish flow: the teams a local app may be published to, the
-        // body naming one, and the closed outcome the renderer branches on.
-        generate::collect_from::<crate::gateway_runtime::GatewayTeams>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::AppPublishRequest>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::AppPublishResult>(&cfg, &mut out);
+        // Where a gateway-bound app lives at its gateway: the closed outcome
+        // the renderer branches on, and the address it opens when there is one.
+        generate::collect_from::<crate::routes::AppGatewayPageResult>(&cfg, &mut out);
         generate::collect_from::<openwave_core::Project>(&cfg, &mut out);
         generate::collect_from::<openwave_core::Chat>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunSnapshot>(&cfg, &mut out);
