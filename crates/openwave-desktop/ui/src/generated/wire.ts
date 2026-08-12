@@ -134,7 +134,14 @@ next_sequence: number, };
  * Worker lease tokens, scheduling budgets, and other executor-facing fields
  * intentionally remain inside the server/store boundary.
  */
-export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, status: AgentRunStatus, 
+export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, 
+/**
+ * Active host code-execution backend for `exec`, not the run-loop seat.
+ *
+ * See [`CodeExecutionProviderSnapshot`]. Read from the current host
+ * setting at list time — the same selection the next `exec` would use.
+ */
+code_execution_provider: CodeExecutionProviderSnapshot, status: AgentRunStatus, 
 /**
  * The exact bounded task delegated by the visible spawn step.
  */
@@ -786,6 +793,17 @@ export type CodeExecutionProviderAvailability = { provider: CodeExecutionProvide
  * A configured code-execution backend.
  */
 export type CodeExecutionProviderKind = "local" | "e2b" | "daytona" | "docker";
+
+/**
+ * Host-selected backend that runs `exec` tool calls.
+ *
+ * Distinct from [`AgentRunExecutionLocation`], which names where the agent
+ * *run loop* itself executes (`in_process` vs `container`). A background run
+ * can be in-process while its shell work still lands on e2b, docker, or
+ * daytona — this field is that backend, or `off` when code execution is
+ * disabled.
+ */
+export type CodeExecutionProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off";
 
 /**
  * Why a provider cannot execute anything on this host right now.
