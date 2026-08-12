@@ -4463,6 +4463,7 @@ impl StubCuBackend {
             description: Mutex::new(ElementDescription {
                 role: Some("AXButton".to_owned()),
                 label: Some("Cancel".to_owned()),
+                fingerprint: None,
             }),
             capture_png: vec![0x89, 0x50, 0x4e, 0x47],
             ..Default::default()
@@ -4471,6 +4472,12 @@ impl StubCuBackend {
 
     fn set_label(&self, label: &str) {
         self.description.lock().unwrap().label = Some(label.to_owned());
+    }
+
+    /// Give the described element a fingerprint, as if it resolved to a real
+    /// AX element with a stable identity.
+    fn set_fingerprint(&self, fingerprint: &str) {
+        self.description.lock().unwrap().fingerprint = Some(fingerprint.to_owned());
     }
 
     fn clicks(&self) -> Vec<(String, Option<String>)> {
@@ -4870,6 +4877,32 @@ fn a_confirmation_is_void_when_the_label_changes_under_it() {
     };
     // The UI shifted while the prompt was up: "Send" became something else.
     fixture.backend.set_label("Send invoice");
+    let error = fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StaleElement);
+    assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn a_confirmation_is_void_when_the_element_is_swapped_under_an_identical_label() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+    fixture.backend.set_fingerprint("fp-original");
+
+    let OperationResult::CuNeedsConfirmation(held) = fixture.click("com.example.app").unwrap()
+    else {
+        panic!("expected a confirmation hold")
+    };
+    // The app swapped the button for a different element that happens to carry
+    // the same label — the classic same-label substitution. The label still
+    // matches, but the fingerprint changed, so the confirmation must not act.
+    fixture.backend.set_fingerprint("fp-swapped");
     let error = fixture
         .control(ControlRequest::CuConfirmControlAction(
             CuConfirmControlActionRequest {

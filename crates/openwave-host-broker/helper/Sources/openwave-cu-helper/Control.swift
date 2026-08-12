@@ -27,11 +27,15 @@ enum Control {
 
     /// Returned for `describe_element`: the target element's normalized role +
     /// label, read without acting, for the broker's forced-confirmation
-    /// tripwire. Either may be null (no addressed element, or it no longer
-    /// resolves — the broker treats nulls as benign / fails open).
+    /// tripwire, plus the element's current fingerprint so the broker can bind
+    /// the confirmation to the exact element it showed (a swapped element with
+    /// the same label has a different fingerprint). Any field may be null (no
+    /// addressed element, or it no longer resolves — the broker treats nulls as
+    /// benign / fails open).
     struct DescribeResult: Encodable {
         let role: String?
         let label: String?
+        let fingerprint: String?
     }
 
     // MARK: - Never-automate blocklist (defensive copy; the broker is authoritative)
@@ -331,20 +335,20 @@ enum Control {
     static func describeElement(_ request: HelperRequest) throws -> DescribeResult {
         let app = try requireControllableApp(request)
         guard let elementId = request.elementId, !elementId.isEmpty else {
-            return DescribeResult(role: nil, label: nil)
+            return DescribeResult(role: nil, label: nil, fingerprint: nil)
         }
         let components = elementId.split(separator: ".").map(String.init)
         guard components.first == "0" else {
-            return DescribeResult(role: nil, label: nil)
+            return DescribeResult(role: nil, label: nil, fingerprint: nil)
         }
         var current = AXTree.appElement(for: app.processIdentifier)
         for raw in components.dropFirst() {
             guard let index = Int(raw) else {
-                return DescribeResult(role: nil, label: nil)
+                return DescribeResult(role: nil, label: nil, fingerprint: nil)
             }
             let children = AXTree.copyChildren(current)
             guard index >= 0, index < children.count else {
-                return DescribeResult(role: nil, label: nil)
+                return DescribeResult(role: nil, label: nil, fingerprint: nil)
             }
             current = children[index]
         }
@@ -353,11 +357,18 @@ enum Control {
         let label =
             AXTree.copyString(current, kAXTitleAttribute as CFString)
             ?? AXTree.copyString(current, kAXDescriptionAttribute as CFString)
+        let value = AXTree.copyValueString(current, kAXValueAttribute as CFString)
+        let frame = AXTree.copyFrame(current)
         // Fold subrole into the role string so the cross-platform classifier
         // sees e.g. "AXSecureTextField" whether macOS exposes it as the role or
         // the subrole (the broker matches a "secure" substring).
         let combinedRole = [role, subrole].compactMap { $0 }.joined(separator: " ")
-        return DescribeResult(role: combinedRole.isEmpty ? nil : combinedRole, label: label)
+        // The live fingerprint binds a later confirmation to this exact element;
+        // computed with the same accessors the act path re-checks against.
+        let fingerprint = AXTree.fingerprint(
+            role: role, title: label, hasValue: value != nil, frame: frame)
+        return DescribeResult(
+            role: combinedRole.isEmpty ? nil : combinedRole, label: label, fingerprint: fingerprint)
     }
 
     // MARK: - App resolution + blocklist

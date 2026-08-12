@@ -186,6 +186,10 @@ pub struct ControlMeta {
 pub struct ElementDescription {
     pub role: Option<String>,
     pub label: Option<String>,
+    /// The element's current content fingerprint, so the broker can bind a
+    /// confirmation to the exact element it showed. Absent when the element
+    /// did not resolve.
+    pub fingerprint: Option<String>,
 }
 
 /// The native operations the broker delegates after authorizing. Implementers
@@ -743,6 +747,7 @@ impl ComputerUseBackend for HelperBackend {
         Ok(ElementDescription {
             role: parsed.role,
             label: parsed.label,
+            fingerprint: parsed.fingerprint,
         })
     }
 
@@ -866,6 +871,8 @@ struct DescribeResultJson {
     role: Option<String>,
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    fingerprint: Option<String>,
 }
 
 // Exercises the HelperBackend's spawn / concurrent-drain / bounded-wait

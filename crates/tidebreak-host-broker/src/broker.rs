@@ -288,6 +288,11 @@ struct PendingControlAction {
     /// honored only while the live element still reports this label — a UI
     /// that changed under the prompt voids it.
     expected_label: Option<String>,
+    /// The element's fingerprint read when the confirmation was raised. The
+    /// act-time re-check compares it to the live fingerprint, so an element
+    /// swapped out for another with the same (possibly truncated) label still
+    /// voids the confirmation. Absent for an action with no element.
+    expected_fingerprint: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1914,6 +1919,16 @@ impl Controller {
             if live_label != pending.expected_label {
                 return Err(BrokerError::StaleTarget);
             }
+            // The stronger drift signal: the element's content fingerprint. A
+            // swapped element that kept the same (possibly truncated) label has
+            // a different fingerprint, so this catches a same-label swap the
+            // label check alone would miss. Only compared when the confirmation
+            // recorded one.
+            if let Some(expected) = &pending.expected_fingerprint {
+                if description.fingerprint.as_ref() != Some(expected) {
+                    return Err(BrokerError::StaleTarget);
+                }
+            }
             // Defense in depth: the held label classified as consequential
             // once; if it somehow classifies benign now, the confirmation was
             // answered for a different question.
@@ -2622,7 +2637,14 @@ impl Operator {
             return Ok(None);
         };
         let target_label = description.label.as_deref().map(truncate_label);
-        self.hold_for_confirmation(context, bundle_id, action, target_label, reason)
+        self.hold_for_confirmation(
+            context,
+            bundle_id,
+            action,
+            target_label,
+            description.fingerprint.clone(),
+            reason,
+        )
     }
 
     /// Hold a consequential action for explicit user confirmation, returning
@@ -2635,6 +2657,7 @@ impl Operator {
         bundle_id: &str,
         action: PendingActionKind,
         target_label: Option<String>,
+        expected_fingerprint: Option<String>,
         reason: String,
     ) -> Result<Option<OperationResult>, BrokerError> {
         let confirmation_id = Uuid::new_v4();
@@ -2646,6 +2669,7 @@ impl Operator {
                     context,
                     action,
                     expected_label: target_label.clone(),
+                    expected_fingerprint: expected_fingerprint.clone(),
                 },
             );
             // Enroll in insertion order so the cap below has something to
@@ -2712,6 +2736,8 @@ impl Operator {
                     modifiers: modifiers.clone(),
                 },
                 Some(truncate_label(&label)),
+                // A key press has no element, so no fingerprint to bind.
+                None,
                 format!(
                     "This presses \u{201c}{}\u{201d}, a keyboard shortcut that can commit an action (send, delete, or quit) with no undo.",
                     truncate_label(&label)
