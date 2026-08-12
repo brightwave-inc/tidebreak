@@ -1,4 +1,4 @@
-//! Scriptable setup: `openwave provider|model|settings|mcp-server`.
+//! Scriptable setup: `openwave provider|model|settings|mcp-server|chat`.
 //!
 //! Every command here is a thin client of a route the server already serves —
 //! the same ones the desktop settings pages call — so configuring OpenWave
@@ -98,6 +98,10 @@ pub enum Command {
     McpAdd { definition: serde_json::Value },
     /// Remove one user-configured MCP server by name.
     McpRemove { name: String },
+    /// Every chat, most recently active first.
+    ChatList,
+    /// A fresh chat (server-side defaults seed the rest).
+    ChatCreate,
 }
 
 /// Run one setup command against the profile's server, and shut down anything
@@ -364,6 +368,39 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             }
             println!("openwave: removed the MCP server {name}");
         }
+        Command::ChatList => {
+            let chats = client.list_chats().await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "chats": chats.iter().map(|chat| serde_json::json!({
+                        "id": chat.id,
+                        "title": chat.title,
+                        "model": chat.model,
+                        "permission_mode": chat.permission_mode,
+                        "created_at": chat.created_at,
+                    })).collect::<Vec<_>>(),
+                }));
+            }
+            if chats.is_empty() {
+                eprintln!("openwave: no chats");
+                return Ok(());
+            }
+            for chat in chats {
+                let title = chat.title.as_deref().unwrap_or("(untitled)");
+                let model = chat.model.as_deref().unwrap_or("-");
+                println!("{:<36}  {title:<40}  {model}", chat.id);
+            }
+        }
+        Command::ChatCreate => {
+            let chat = client.create_chat().await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({ "id": chat }));
+            }
+            // stdout is the id alone so a script can capture it; the label
+            // rides stderr the same way `-p` announces a freshly created chat.
+            println!("{chat}");
+            eprintln!("openwave: chat {chat}");
+        }
     }
     Ok(())
 }
@@ -549,6 +586,37 @@ mod tests {
                 .iter()
                 .any(|provider| provider.kind == "anthropic" && provider.has_credential),
             "removing the credential must take it out of the listing"
+        );
+
+        serve.abort();
+    }
+
+    /// `chat create` must return an id that `chat list` (and therefore
+    /// `--chat`) can see on the same profile — otherwise scripts that capture
+    /// the id and continue with `-p --chat` fail for no visible reason.
+    #[tokio::test]
+    async fn a_chat_created_through_the_cli_shows_up_in_the_listing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        openwave_core::KeychainSecretProvider::use_mock();
+        let server = openwave_server::bind_configured(Config::desktop(dir.path()))
+            .await
+            .expect("bind the server");
+        let client = Client::new(server.local_addr(), server.token()).expect("build the client");
+        let serve = tokio::spawn(server.serve());
+
+        assert!(
+            client.list_chats().await.expect("list").is_empty(),
+            "a fresh profile has no chats"
+        );
+
+        execute(&client, Command::ChatCreate, OutputFormat::Text)
+            .await
+            .expect("create a chat");
+        let listed = client.list_chats().await.expect("list after create");
+        assert_eq!(
+            listed.len(),
+            1,
+            "create must leave exactly one chat visible"
         );
 
         serve.abort();

@@ -47,6 +47,8 @@ openwave settings exec remove-key <provider>
 openwave mcp-server list
 openwave mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
 openwave mcp-server remove <name>
+openwave chat list
+openwave chat create
 ```
 
 A bare `openwave` with no arguments runs `serve`.
@@ -219,12 +221,12 @@ cargo run -p openwave-cli -- -p "plan the migration" \
 
 ### Setup commands
 
-`provider`, `model`, `settings`, and `mcp-server` configure a profile without
-the desktop app. Each one boots the same in-process server the other commands
-do, calls the route the desktop's settings pages call, and prints the answer —
-they hold no configuration logic of their own, so both surfaces stay in step.
-All of them accept `--output-format text|json`, and `json` prints the route's
-response object on one line.
+`provider`, `model`, `settings`, `mcp-server`, and `chat` configure a profile
+without the desktop app. Each one boots the same in-process server the other
+commands do, calls the route the desktop's settings pages call, and prints the
+answer — they hold no configuration logic of their own, so both surfaces stay in
+step. All of them accept `--output-format text|json`, and `json` prints the
+route's response object on one line.
 
 ```sh
 # Providers and credentials
@@ -252,6 +254,11 @@ cargo run -p openwave-cli -- mcp-server list
 cargo run -p openwave-cli -- mcp-server add docs \
   --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
 cargo run -p openwave-cli -- mcp-server remove docs
+
+# Chats
+cargo run -p openwave-cli -- chat list
+CHAT=$(cargo run -p openwave-cli -- chat create)
+cargo run -p openwave-cli -- -p "…" --chat "$CHAT"
 ```
 
 **A key is never a command-line argument.** `set-key` reads it from stdin, or
