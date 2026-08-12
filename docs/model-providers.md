@@ -92,6 +92,9 @@ Existing machinery that already follows this:
   adapters and the UI always have.
 - Registry flags such as `supports_vendor_web_search` — honest absence beats
   a half-working path.
+- ChatGPT / Codex subscription auth — `ModelSpec::supports_chatgpt_auth`
+  (and the catalog's per-model `available`) hide API-only OpenAI ids such as
+  `gpt-5.4-nano` that Codex rejects, while API-key installs keep them.
 
 ## Checklist for a new provider-coupled feature
 
