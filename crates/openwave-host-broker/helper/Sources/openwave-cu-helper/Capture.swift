@@ -49,6 +49,7 @@ enum Capture {
         try writePNG(
             image,
             marks: request.marks ?? [],
+            displayFrame: display.map(\.frame),
             screenFrame: display.flatMap(screenFrame),
             to: outPath)
         return Result(
@@ -88,9 +89,24 @@ enum Capture {
             else {
                 throw HelperError(code: .notFound, message: "app \(bundleId) is not running")
             }
-            guard let display = display(for: request.displayId, in: content) else {
-                throw HelperError(code: .notFound, message: "no display available")
-            }
+            // Pick the display the app's windows actually live on, not blindly
+            // the first: a display-scoped filter includes only windows that
+            // intersect it, so an app on a secondary display captured against
+            // the primary would come out blank. An explicit display_id wins;
+            // otherwise use the display intersecting the app's windows,
+            // falling back to the first.
+            let display = try { () throws -> SCDisplay in
+                if let requested = self.display(for: request.displayId, in: content) {
+                    return requested
+                }
+                if let appDisplay = self.display(containing: app, in: content) {
+                    return appDisplay
+                }
+                guard let first = content.displays.first else {
+                    throw HelperError(code: .notFound, message: "no display available")
+                }
+                return first
+            }()
             let filter = SCContentFilter(
                 display: display, including: [app], exceptingWindows: [])
             return (filter, (display.width, display.height), display)
@@ -105,6 +121,21 @@ enum Capture {
         return content.displays.first
     }
 
+    /// The display whose frame intersects any of the app's windows, if one
+    /// exists. `SCWindow.frame` and `SCDisplay.frame` are both in the global
+    /// point space, so an intersection test is valid.
+    private static func display(
+        containing app: SCRunningApplication, in content: SCShareableContent
+    ) -> SCDisplay? {
+        let appWindowIds = Set(
+            content.windows.filter { $0.owningApplication?.processID == app.processID }
+                .map { $0.windowID })
+        let appFrames = content.windows.filter { appWindowIds.contains($0.windowID) }.map(\.frame)
+        return content.displays.first { display in
+            appFrames.contains { $0.intersects(display.frame) }
+        }
+    }
+
     private static func screenFrame(for display: SCDisplay) -> CGRect? {
         NSScreen.screens.first { screen in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
@@ -115,13 +146,14 @@ enum Capture {
     }
 
     private static func writePNG(
-        _ image: CGImage, marks: [CaptureMark], screenFrame: CGRect?, to path: String
+        _ image: CGImage, marks: [CaptureMark], displayFrame: CGRect?, screenFrame: CGRect?,
+        to path: String
     ) throws {
         let rep = NSBitmapImageRep(cgImage: image)
         if !marks.isEmpty {
             drawMarks(
                 marks, on: rep, imageWidth: image.width, imageHeight: image.height,
-                screenFrame: screenFrame)
+                displayFrame: displayFrame, screenFrame: screenFrame)
         }
         guard let data = rep.representation(using: .png, properties: [:]) else {
             throw HelperError(code: .operationFailed, message: "could not encode PNG")
@@ -136,7 +168,7 @@ enum Capture {
 
     private static func drawMarks(
         _ marks: [CaptureMark], on rep: NSBitmapImageRep, imageWidth: Int, imageHeight: Int,
-        screenFrame: CGRect?
+        displayFrame: CGRect?, screenFrame: CGRect?
     ) {
         guard let graphics = NSGraphicsContext(bitmapImageRep: rep) else { return }
         let previous = NSGraphicsContext.current
@@ -154,14 +186,22 @@ enum Capture {
         context.translateBy(x: 0, y: CGFloat(imageHeight))
         context.scaleBy(x: 1, y: -1)
 
-        let frame = screenFrame ?? CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
-        let scaleX = Double(imageWidth) / max(Double(frame.width), 1.0)
-        let scaleY = Double(imageHeight) / max(Double(frame.height), 1.0)
+        // The capture region's origin in the AX (top-left) space. The
+        // SCDisplay frame is already in that global top-left space — the same
+        // space the AX mark frames use — so prefer it. The NSScreen frame is
+        // the fallback for size (Retina scale) only: its y-axis is the Cocoa
+        // bottom-left space and must not be subtracted from a top-left AX y.
+        let originX = displayFrame?.minX ?? screenFrame?.minX ?? 0
+        let originY = displayFrame?.minY ?? 0
+        let referenceSize = screenFrame ?? displayFrame
+            ?? CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
+        let scaleX = Double(imageWidth) / max(Double(referenceSize.width), 1.0)
+        let scaleY = Double(imageHeight) / max(Double(referenceSize.height), 1.0)
 
         for mark in marks {
             let rect = CGRect(
-                x: (mark.frame.x - Double(frame.minX)) * scaleX,
-                y: (mark.frame.y - Double(frame.minY)) * scaleY,
+                x: (mark.frame.x - Double(originX)) * scaleX,
+                y: (mark.frame.y - Double(originY)) * scaleY,
                 width: mark.frame.width * scaleX,
                 height: mark.frame.height * scaleY)
             guard rect.width > 0, rect.height > 0 else { continue }
