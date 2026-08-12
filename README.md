@@ -1,4 +1,5 @@
 <p align="center">
+  <br>
   <img src="assets/tidebreak-mark.svg" alt="Tidebreak mark" width="300">
 </p>
 
