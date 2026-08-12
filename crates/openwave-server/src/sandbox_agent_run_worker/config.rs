@@ -22,10 +22,14 @@ use crate::state::SandboxAttemptGuard;
 /// depth-one child run's authority.
 pub(super) const SANDBOX_PROMPT_PREAMBLE: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain.";
 pub(super) const SANDBOX_DELEGATED_FILE_PROMPT_PREAMBLE: &str = "You are a sandboxed background agent. Work only on the delegated task below. You cannot access the conversation, the user's files, connected folders, or other agents, except for the one exact file explicitly delegated to this run. You do have your own private workspace: use exec to run commands in it, and write every deliverable the task asks for as a file under output/ — each file you write there is published to the user as a durable output named by its own filename, so name those files the way you want the user to see them. Prefer producing a file over describing what a file would contain.";
+/// How to form exec calls. Stress-tested agents routinely waste steps by
+/// stuffing a whole shell line into `command` (which is argv[0] only) or by
+/// writing under `/tmp`, which this workspace cannot keep or publish.
+pub(super) const SANDBOX_PROMPT_EXEC_CLAUSE: &str = "exec with argv form only — command is a single executable (for example python3, mkdir, /bin/sh), and each shell token is its own args entry (mkdir -p output is command mkdir with args [\"-p\", \"output\"]; a one-liner is command /bin/sh with args [\"-c\", \"…\"]). Never put spaces inside command. Stay inside the workspace: create files under output/ or other relative paths, not under /tmp. Install packages with separate exec calls when needed (python3 -m pip install --user <pkg>==<ver>). There is no skills catalog and no shared conversation context — put any library or path detail you need into the commands themselves";
 pub(super) const SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE: &str =
     "read_delegated_file to read that one delegated file";
 pub(super) const SANDBOX_PROMPT_WEB_SEARCH_CLAUSE: &str =
-    "web_search when current public-web information is necessary";
+    "web_search when current public-web information is necessary (prefer it over curl or other network tools from exec — those often fail in the sandbox)";
 pub(super) const SANDBOX_PROMPT_FOLDER_ACCESS_CLAUSE: &str = "request_folder_access only to propose that your foreground parent decide whether to ask the user — the proposal grants no access and cannot open a picker";
 pub(super) const SANDBOX_PROMPT_TASK_PLAN_CLAUSE: &str = "update_task_plan to keep an ordered checklist when the task takes several steps — send the whole list every time, keep exactly one step in_progress, and update it as steps finish rather than all at the end";
 pub(super) const SANDBOX_PROMPT_CLOSING: &str = "Take as many tool steps as the task genuinely needs, then finish by calling done with the filenames you wrote under output/ and a short summary of what you produced.";
@@ -47,7 +51,10 @@ pub(super) fn sandbox_system_prompt(
     if !tools_supported {
         return SANDBOX_CHAT_ONLY_PROMPT.to_owned();
     }
-    let mut clauses = Vec::with_capacity(4);
+    let mut clauses = Vec::with_capacity(5);
+    // Exec is always on a tool-capable route; name its argv contract first so
+    // the model does not burn early steps on malformed command lines.
+    clauses.push(SANDBOX_PROMPT_EXEC_CLAUSE);
     if delegated_file_available {
         clauses.push(SANDBOX_PROMPT_DELEGATED_FILE_CLAUSE);
     }

@@ -1,4 +1,4 @@
-//! Scriptable setup: `openwave provider|model|settings|mcp-server|chat`.
+//! Scriptable setup: `openwave provider|model|settings|mcp-server|chat|agent-run`.
 //!
 //! Every command here is a thin client of a route the server already serves —
 //! the same ones the desktop settings pages call — so configuring OpenWave
@@ -13,7 +13,7 @@
 
 use std::io::Read as _;
 
-use openwave_core::{AgentError, Result};
+use openwave_core::{AgentError, AgentRunId, ChatId, Result};
 
 use crate::api::client::Client;
 use crate::api::wire::{McpServerInfo, McpServersInfo};
@@ -102,6 +102,10 @@ pub enum Command {
     ChatList,
     /// A fresh chat (server-side defaults seed the rest).
     ChatCreate,
+    /// Background (and foreground) agent runs for one chat.
+    AgentRunList { chat: ChatId },
+    /// One run's status plus its ordered activity timeline.
+    AgentRunShow { chat: ChatId, run: AgentRunId },
 }
 
 /// Run one setup command against the profile's server, and shut down anything
@@ -401,8 +405,187 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             println!("{chat}");
             eprintln!("openwave: chat {chat}");
         }
+        Command::AgentRunList { chat } => {
+            let runs = client.list_agent_runs(chat).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "runs": runs.iter().map(agent_run_json).collect::<Vec<_>>(),
+                }));
+            }
+            if runs.is_empty() {
+                eprintln!("openwave: no agent runs in this chat");
+                return Ok(());
+            }
+            for run in runs {
+                let tier = run.tier.as_deref().unwrap_or("-");
+                let task = run
+                    .task
+                    .as_deref()
+                    .map(first_line)
+                    .unwrap_or_else(|| "-".to_owned());
+                let outs: Vec<&str> = run
+                    .submitted_outputs
+                    .iter()
+                    .map(|output| output.filename.as_str())
+                    .collect();
+                let outs = if outs.is_empty() {
+                    "-".to_owned()
+                } else {
+                    outs.join(",")
+                };
+                println!(
+                    "{:<36}  {tier:<10}  {:<12}  outs={outs}  {task}",
+                    run.id, run.status
+                );
+            }
+        }
+        Command::AgentRunShow { chat, run } => {
+            let runs = client.list_agent_runs(chat).await?;
+            let Some(snapshot) = runs.into_iter().find(|entry| entry.id == run) else {
+                return Err(AgentError::msg(format!(
+                    "no agent run {run} in chat {chat}"
+                )));
+            };
+            let activity = client.list_agent_run_activity(chat, run).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "run": agent_run_json(&snapshot),
+                    "activity": activity.iter().map(|item| serde_json::json!({
+                        "kind": item.kind.as_str(),
+                        "outcome": item.outcome,
+                        "at": item.at,
+                        "detail": item.detail,
+                    })).collect::<Vec<_>>(),
+                }));
+            }
+            println!("id                  {}", snapshot.id);
+            if let Some(parent) = snapshot.parent_id {
+                println!("parent              {parent}");
+            }
+            println!(
+                "tier                {}",
+                snapshot.tier.as_deref().unwrap_or("-")
+            );
+            println!(
+                "execution_location  {}",
+                snapshot.execution_location.as_deref().unwrap_or("-")
+            );
+            println!("status              {}", snapshot.status);
+            if let Some(error) = &snapshot.last_error_code {
+                println!("last_error_code     {error}");
+            }
+            if let Some(started) = snapshot.started_at {
+                println!("started_at          {started}");
+            }
+            if let Some(finished) = snapshot.finished_at {
+                println!("finished_at         {finished}");
+            }
+            if !snapshot.submitted_outputs.is_empty() {
+                let names: Vec<_> = snapshot
+                    .submitted_outputs
+                    .iter()
+                    .map(|output| output.filename.as_str())
+                    .collect();
+                println!("submitted_outputs   {}", names.join(", "));
+            }
+            if let Some(task) = &snapshot.task {
+                println!("task\n{task}");
+            }
+            if let Some(terminal) = &snapshot.terminal_text {
+                println!("terminal_text\n{terminal}");
+            }
+            if activity.is_empty() {
+                eprintln!("openwave: no activity recorded for this run");
+            } else {
+                println!("activity ({} steps)", activity.len());
+                for item in activity {
+                    let headline = activity_headline(item.detail.as_ref());
+                    println!(
+                        "  {}  {}  {}{}",
+                        item.at,
+                        item.kind.as_str(),
+                        item.outcome,
+                        headline
+                    );
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// Compact JSON object for one agent-run snapshot — enough for a driver to
+/// branch on status and collect submitted filenames without the full dump.
+fn agent_run_json(run: &crate::api::wire::AgentRunSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "id": run.id,
+        "parent_id": run.parent_id,
+        "tier": run.tier,
+        "execution_location": run.execution_location,
+        "status": run.status,
+        "task": run.task,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "last_error_code": run.last_error_code,
+        "submitted_outputs": run.submitted_outputs.iter().map(|output| serde_json::json!({
+            "output_id": output.output_id,
+            "filename": output.filename,
+        })).collect::<Vec<_>>(),
+        "terminal_text": run.terminal_text,
+        "spawn_call_id": run.spawn_call_id,
+        "created_at": run.created_at,
+    })
+}
+
+/// First line of a multi-line task, truncated for a one-line listing.
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or(text).trim();
+    const LIMIT: usize = 72;
+    if line.chars().count() <= LIMIT {
+        return line.to_owned();
+    }
+    let mut out: String = line.chars().take(LIMIT.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// A short suffix for one activity row: the command or query when present.
+fn activity_headline(detail: Option<&serde_json::Value>) -> String {
+    let Some(detail) = detail else {
+        return String::new();
+    };
+    if let Some(command) = detail.get("command").and_then(|value| value.as_str()) {
+        let args = detail
+            .get("args")
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str())
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        if args.is_empty() {
+            return format!("  {command}");
+        }
+        let clipped = if args.len() > 60 {
+            format!("{}…", &args[..60])
+        } else {
+            args
+        };
+        return format!("  {command} {clipped}");
+    }
+    if let Some(query) = detail.get("query").and_then(|value| value.as_str()) {
+        let clipped = if query.len() > 72 {
+            format!("{}…", &query[..72])
+        } else {
+            query.to_owned()
+        };
+        return format!("  {clipped}");
+    }
+    String::new()
 }
 
 /// Write one JSON object on stdout, matching print mode's one-object-per-line
