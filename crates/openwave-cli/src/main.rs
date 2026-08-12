@@ -121,8 +121,10 @@ usage: openwave serve
        openwave mcp-server remove <name>
        openwave chat list
        openwave chat create
+       openwave chat delete <chat>
        openwave agent-run list <chat>
        openwave agent-run show <chat> <run>
+       openwave agent-run cancel <chat> <run>
 
        openwave folder connect <path> --chat <id>
        openwave folder list [--chat <id>]
@@ -466,6 +468,10 @@ fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) 
     let command = match (family, verb.as_str()) {
         ("chat", "list") => SetupCommand::ChatList,
         ("chat", "create") => SetupCommand::ChatCreate,
+        ("chat", "delete") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            SetupCommand::ChatDelete { chat }
+        }
         ("agent-run", "list") => {
             let chat = parse_chat_id(&cursor.positional("a chat id"));
             SetupCommand::AgentRunList { chat }
@@ -474,6 +480,11 @@ fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) 
             let chat = parse_chat_id(&cursor.positional("a chat id"));
             let run = parse_agent_run_id(&cursor.positional("an agent-run id"));
             SetupCommand::AgentRunShow { chat, run }
+        }
+        ("agent-run", "cancel") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let run = parse_agent_run_id(&cursor.positional("an agent-run id"));
+            SetupCommand::AgentRunCancel { chat, run }
         }
         ("provider", "list") => SetupCommand::ProviderList,
         ("provider", "set-key") => SetupCommand::ProviderSetKey {

@@ -102,10 +102,14 @@ pub enum Command {
     ChatList,
     /// A fresh chat (server-side defaults seed the rest).
     ChatCreate,
+    /// Delete a chat outright.
+    ChatDelete { chat: ChatId },
     /// Background (and foreground) agent runs for one chat.
     AgentRunList { chat: ChatId },
     /// One run's status plus its ordered activity timeline.
     AgentRunShow { chat: ChatId, run: AgentRunId },
+    /// Ask a background run to stop.
+    AgentRunCancel { chat: ChatId, run: AgentRunId },
 }
 
 /// Run one setup command against the profile's server, and shut down anything
@@ -405,6 +409,13 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             println!("{chat}");
             eprintln!("openwave: chat {chat}");
         }
+        Command::ChatDelete { chat } => {
+            client.delete_chat(chat).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({ "id": chat, "deleted": true }));
+            }
+            println!("openwave: deleted chat {chat}");
+        }
         Command::AgentRunList { chat } => {
             let runs = client.list_agent_runs(chat).await?;
             if format == OutputFormat::Json {
@@ -513,6 +524,17 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                     );
                 }
             }
+        }
+        Command::AgentRunCancel { chat, run } => {
+            client.cancel_agent_run(chat, run).await?;
+            if format == OutputFormat::Json {
+                return emit(&serde_json::json!({
+                    "chat": chat,
+                    "run": run,
+                    "cancelled": true,
+                }));
+            }
+            println!("openwave: cancelling agent run {run}");
         }
     }
     Ok(())
@@ -805,6 +827,19 @@ mod tests {
             listed.len(),
             1,
             "create must leave exactly one chat visible"
+        );
+        let chat = listed[0].id;
+
+        execute(&client, Command::ChatDelete { chat }, OutputFormat::Text)
+            .await
+            .expect("delete the chat");
+        assert!(
+            client
+                .list_chats()
+                .await
+                .expect("list after delete")
+                .is_empty(),
+            "delete must take the chat out of the listing"
         );
 
         serve.abort();
