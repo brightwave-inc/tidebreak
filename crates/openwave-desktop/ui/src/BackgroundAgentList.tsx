@@ -165,7 +165,7 @@ export function BackgroundAgentList({
           </button>
         </div>
       ) : (
-        <div className="max-h-48 overflow-y-auto" aria-live="polite">
+        <div aria-live="polite">
           {AGENT_RUN_STATUS_GROUPS.map((group) => {
             const groupRuns = matchedRuns.filter((run) => group.statuses.includes(run.status));
             if (groupRuns.length === 0) return null;
@@ -430,9 +430,7 @@ function BackgroundAgentRow({
             <AgentRunTaskPlanChecklist
               state={taskPlan}
               live={live}
-              // Shallow on purpose: this row already sits inside the list's
-              // own 12rem viewport, so a tall checklist here would nest a
-              // second scrollbar and push its siblings out of reach.
+              // Keep an expanded plan from crowding every sibling row.
               className="max-h-24"
             />
           )}

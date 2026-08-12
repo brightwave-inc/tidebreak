@@ -168,27 +168,30 @@ export function AgentRunProgressStream({
   className?: string;
 }) {
   if (state.entries.length === 0) {
-    // Nothing held: an empty stream is the ordinary case for a run that has
-    // not narrated anything yet, so it does not read as a failure.
+    // An empty stream is ordinary: many runs only leave tool activity, not
+    // free-form narration. Stay quiet so the activity timeline below is not
+    // undercut by a "no progress" line while work is clearly underway.
     if (state.loading && !state.loaded) {
       return (
-        <p className="text-xs text-muted-foreground" role="status">
+        <p
+          className={cn("text-xs text-muted-foreground", className)}
+          role="status"
+        >
           Loading progress…
         </p>
       );
     }
     if (state.error) {
       return (
-        <p className="text-xs text-muted-foreground" role="status">
+        <p
+          className={cn("text-xs text-muted-foreground", className)}
+          role="status"
+        >
           Progress is unavailable.
         </p>
       );
     }
-    return (
-      <p className="text-xs text-muted-foreground" role="status">
-        No progress reported yet.
-      </p>
-    );
+    return null;
   }
 
   return (
