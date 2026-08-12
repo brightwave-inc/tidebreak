@@ -560,6 +560,18 @@ export type ToolResultPreview =
       accepted: boolean;
       /** What the reader asked to change, when they sent it back. */
       feedback: string | null;
+    }
+  | {
+      /** A computer-use screen capture: the image plus how many controls were
+       * marked on it. The pixels live in the blob store, referenced here. */
+      tool: "screen_capture";
+      image: {
+        attachmentId: string;
+        mediaType: string;
+        width: number;
+        height: number;
+      };
+      markCount: number;
     };
 
 /**
