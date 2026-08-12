@@ -1,4 +1,7 @@
-import type { Chat, ConsentStatementSnapshot } from "./api";
+import type { ConsentStatementSnapshot } from "./api";
+
+/** The part of a conversation a folder statement is matched against. */
+export type FolderChatScope = { id: string; project_id: string | null };
 
 /**
  * The broker's capability vocabulary as consent statements carry it. Folder
@@ -15,7 +18,7 @@ export type FolderReach = Extract<
  * project it is filed under. */
 export function statementReachesChat(
   statement: ConsentStatementSnapshot,
-  chat: Chat,
+  chat: FolderChatScope,
 ): boolean {
   return statement.level.level === "chat"
     ? statement.level.chat_id === chat.id
@@ -26,7 +29,7 @@ export function statementReachesChat(
 export function folderStatements(
   statements: readonly ConsentStatementSnapshot[],
   rootId: string,
-  chat: Chat,
+  chat: FolderChatScope,
 ): ConsentStatementSnapshot[] {
   return statements.filter(
     (statement) =>

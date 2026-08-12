@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import type {
   ApiClient,
@@ -7,8 +8,22 @@ import type {
   RendererToolName,
 } from "../api";
 import { useConfirm } from "../components/ConfirmDialog";
-import { listCapabilityConsents, revokeCapabilityConsent } from "../host";
+import {
+  grantFolderCapability,
+  listCapabilityConsents,
+  listConnectedFolders,
+  revokeCapabilityConsent,
+  type ConnectedFolder,
+} from "../host";
+import { folderReach, folderStatements } from "../FolderAccess";
+import {
+  PICKER_BUSY_MESSAGE,
+  PICKER_HOLDERS,
+  useNativePickerLatch,
+} from "../NativePickerLatch";
+import { useRefreshSignals } from "../RefreshSignals";
 import { Button } from "@/components/ui/button";
+import { friendlyErrorMessage } from "@/lib/utils";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 
 // The "what may the agent do without asking" surface, rendered from the
@@ -225,6 +240,12 @@ export function handleKey(statement: ConsentStatementSnapshot): string {
     : `capability_grant:${statement.handle.grant_id}`;
 }
 
+/** A restore row's identity, in the same namespace as revocation handles so
+ * one busy row can be named whichever kind it is. */
+export function restoreKey(folder: { rootId: string }): string {
+  return `restore_read:${folder.rootId}`;
+}
+
 /** Statements in listing order, bucketed by what they reach, order preserved. */
 export function groupByLevel(
   statements: readonly ConsentStatementSnapshot[],
@@ -248,6 +269,34 @@ export function groupByLevel(
   return [...groups.values()];
 }
 
+/** One line of the list: what it reaches, what it allows, and its one action. */
+function AccessRow({
+  title,
+  subtitle,
+  meta,
+  action,
+}: {
+  title: string;
+  subtitle: string;
+  meta?: string;
+  action: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{title}</p>
+        <p className="text-muted-foreground mt-0.5 truncate text-sm">
+          {subtitle}
+        </p>
+        {meta && (
+          <p className="text-muted-foreground mt-1 truncate text-xs">{meta}</p>
+        )}
+      </div>
+      {action}
+    </div>
+  );
+}
+
 function StatementRow({
   statement,
   busy,
@@ -257,26 +306,17 @@ function StatementRow({
   busy: boolean;
   onRevoke: () => void;
 }) {
-  const metadata = grantedAtLabel(statement);
   return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">
-          {resourceLabel(statement)}
-        </p>
-        <p className="text-muted-foreground mt-0.5 truncate text-sm">
-          {verbLabel(statement.verb)}
-        </p>
-        {metadata && (
-          <p className="text-muted-foreground mt-1 truncate text-xs">
-            {metadata}
-          </p>
-        )}
-      </div>
-      <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
-        Revoke
-      </Button>
-    </div>
+    <AccessRow
+      title={resourceLabel(statement)}
+      subtitle={verbLabel(statement.verb)}
+      meta={grantedAtLabel(statement) || undefined}
+      action={
+        <Button variant="ghost" size="sm" disabled={busy} onClick={onRevoke}>
+          Revoke
+        </Button>
+      }
+    />
   );
 }
 
@@ -303,6 +343,19 @@ export function PermissionsPanel({
   const [statements, setStatements] = useState<
     ConsentStatementSnapshot[] | null
   >(null);
+  /**
+   * Folders this chat has attached but cannot read.
+   *
+   * Revoking read leaves the attachment alone, so this is a real state with
+   * no way forward: nothing restores a folder's access on its own, and
+   * attaching it again deliberately does not. The panel promises anything
+   * revoked can be asked for again, and these rows are what makes that true.
+   * Only computed with a chat in hand — a widening is granted to one
+   * conversation's subject, and the settings page has no conversation.
+   */
+  const [unreadableFolders, setUnreadableFolders] = useState<ConnectedFolder[]>(
+    [],
+  );
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
@@ -323,16 +376,25 @@ export function PermissionsPanel({
   const reload = useCallback(async () => {
     const generation = ++reloadGenerationRef.current;
     try {
-      const [tool, capability] = await Promise.all([
+      const chatScope = chatId ? { id: chatId, project_id: chatProjectId } : null;
+      const [tool, capability, folders] = await Promise.all([
         client.listConsentStatements(),
         listCapabilityConsents(),
+        chatScope ? listConnectedFolders(chatScope) : Promise.resolve([]),
       ]);
       if (generation !== reloadGenerationRef.current) return;
       const all = [...tool, ...capability];
-      setStatements(
-        chatId
-          ? statementsForChat(all, { id: chatId, project_id: chatProjectId })
-          : all,
+      setStatements(chatScope ? statementsForChat(all, chatScope) : all);
+      setUnreadableFolders(
+        chatScope
+          ? folders.filter(
+              (folder) =>
+                folder.status === "connected" &&
+                !folderReach(
+                  folderStatements(all, folder.rootId, chatScope),
+                ).includes("read_files"),
+            )
+          : [],
       );
       setError(null);
     } catch {
@@ -343,6 +405,7 @@ export function PermissionsPanel({
 
   useEffect(() => {
     setStatements(null);
+    setUnreadableFolders([]);
     setError(null);
     setBusyId(null);
     void reload();
@@ -350,6 +413,45 @@ export function PermissionsPanel({
       reloadGenerationRef.current += 1;
     };
   }, [reload, scopeKey]);
+
+  /**
+   * Ask for read access back on a folder this chat still has attached.
+   *
+   * The consent ceremony is the host's own dialog, exactly as it is for the
+   * write and command widenings the folders panel offers — this only asks,
+   * and follows the broker's answer. Nothing here mints anything on its own,
+   * and no other surface restores this grant as a side effect.
+   */
+  async function restoreReadAccess(folder: ConnectedFolder) {
+    const startingScope = scopeKey;
+    if (!chatId) return;
+    if (
+      !useNativePickerLatch
+        .getState()
+        .claim(PICKER_HOLDERS.grantFolderCapability)
+    ) {
+      toast.error(PICKER_BUSY_MESSAGE);
+      return;
+    }
+    setBusyId(restoreKey(folder));
+    try {
+      const granted = await grantFolderCapability(
+        { id: chatId },
+        folder.rootId,
+        "read_files",
+      );
+      if (granted) useRefreshSignals.getState().signal("folderAccess");
+      if (scopeKeyRef.current !== startingScope) return;
+      if (granted !== null) await reload();
+    } catch (caught) {
+      toast.error(
+        friendlyErrorMessage(caught, "The folder could not be granted access."),
+      );
+    } finally {
+      useNativePickerLatch.getState().release(PICKER_HOLDERS.grantFolderCapability);
+      if (scopeKeyRef.current === startingScope) setBusyId(null);
+    }
+  }
 
   async function revoke(statement: ConsentStatementSnapshot) {
     const startingScope = scopeKey;
@@ -397,13 +499,16 @@ export function PermissionsPanel({
   const body = (
     <>
       {error && <SettingsError>{error}</SettingsError>}
-      {statements !== null && statements.length === 0 && !error && (
-        <p className="text-sm text-muted-foreground">
-          {chat
-            ? "Nothing saved for this chat yet. When you answer an approval with “always allow” or connect a folder, it appears here."
-            : "Nothing saved yet. When you answer an approval with “always allow” or connect a folder, it appears here."}
-        </p>
-      )}
+      {statements !== null &&
+        statements.length === 0 &&
+        unreadableFolders.length === 0 &&
+        !error && (
+          <p className="text-sm text-muted-foreground">
+            {chat
+              ? "Nothing saved for this chat yet. When you answer an approval with “always allow” or connect a folder, it appears here."
+              : "Nothing saved yet. When you answer an approval with “always allow” or connect a folder, it appears here."}
+          </p>
+        )}
       {statements !== null &&
         groupByLevel(statements, known).map((group) => (
           <SettingsSection key={group.key} title={group.label}>
@@ -419,6 +524,32 @@ export function PermissionsPanel({
             </div>
           </SettingsSection>
         ))}
+      {unreadableFolders.length > 0 && (
+        <SettingsSection
+          title="Revoked folder access"
+          description="These folders are still connected to this chat, but the agent cannot read them. Grant read access to make one usable again — the host asks you to confirm."
+        >
+          <div className="flex flex-col gap-4">
+            {unreadableFolders.map((folder) => (
+              <AccessRow
+                key={restoreKey(folder)}
+                title={folder.displayName}
+                subtitle={CAPABILITY_LABELS.read_files}
+                action={
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busyId === restoreKey(folder)}
+                    onClick={() => void restoreReadAccess(folder)}
+                  >
+                    Grant
+                  </Button>
+                }
+              />
+            ))}
+          </div>
+        </SettingsSection>
+      )}
       {dialog}
     </>
   );

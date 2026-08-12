@@ -7,7 +7,7 @@
 //! operations that were already in flight.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -176,11 +176,32 @@ struct State {
     grants: Vec<Grant>,
     attachments: Vec<RootAttachment>,
     mutations: HashMap<OperationId, MutationRecord>,
+    /// Completed attachment and write records in the order they finished,
+    /// oldest first. This is what makes the mutation table bounded: it names
+    /// which records may be dropped, and which of them is the least useful one
+    /// to drop next. See [`prune_mutation_receipts`].
+    receipt_order: VecDeque<OperationId>,
     active_mutations: HashSet<OperationId>,
     /// Persisted roots whose directory could not be reopened at load. They are
     /// held out of the live tables so the rest of the registry still works, and
     /// written back verbatim so the approval survives the outage.
     unavailable: Vec<UnavailableRoot>,
+    /// Subject/folder pairs whose access the user has already settled once.
+    ///
+    /// Revocation deletes rows, so the grant table cannot tell "narrowed to
+    /// nothing" apart from "never granted" — and every other trace is keyed on
+    /// the wrong entity. Attachments are per conversation while grants are per
+    /// subject, so a chat's own attachment cannot answer for a project subject
+    /// its siblings share, and detaching removes even that. This is the one
+    /// record kept on the same key the grants use, and it only ever answers
+    /// one question: has this subject been given this folder's default access
+    /// before? Once it has, access is the user's to widen through the
+    /// permission dialog, never something an arrival re-mints.
+    ///
+    /// It is dropped when the folder's registration is revoked or the
+    /// conversation subject is purged — the points where the position itself
+    /// stops existing.
+    settled: HashSet<(GrantSubject, RootId)>,
 }
 
 /// A registration that is dormant for the lifetime of this process.
@@ -874,18 +895,22 @@ impl Controller {
             Ok(prepared) => {
                 let existing = preferred_root_alias(&next, &prepared.root);
                 if let Some((root_id, display_name)) = existing {
-                    ensure_subject_grants(
-                        &mut next,
-                        prepared.root.owner,
-                        root_id,
-                        prepared.grants[0].consent().clone(),
-                        self.shared.execute_commands,
-                    )
-                    .map_err(error_response)?;
-                    if !next.attachments.iter().any(|attachment| {
-                        attachment.conversation_id() == prepared.conversation_id
-                            && attachment.root_id() == root_id
-                    }) {
+                    // Picking a folder this conversation already has is the
+                    // same non-event as attaching one it already has: it says
+                    // where the folder may be used, and the chat is already
+                    // there. Only the pick that actually brings the folder into
+                    // a conversation carries the access a pick describes — and
+                    // then only for a subject that holds nothing over the root,
+                    // which is what keeps a narrowed position narrowed.
+                    if !has_root_attachment(&next, prepared.conversation_id, root_id) {
+                        ensure_default_subject_grants(
+                            &mut next,
+                            prepared.root.owner,
+                            root_id,
+                            prepared.grants[0].consent().clone(),
+                            self.shared.execute_commands,
+                        )
+                        .map_err(error_response)?;
                         next.attachments.push(
                             RootAttachment::new(prepared.conversation_id, root_id)
                                 .map_err(BrokerError::from)
@@ -908,6 +933,11 @@ impl Controller {
                     next.roots.insert(prepared.root_id, prepared.root);
                     next.grants.extend(prepared.grants);
                     next.attachments.push(prepared.attachment);
+                    // A first registration is the first mint for this subject,
+                    // so it settles the position too. Without this, revoking
+                    // the whole folder and picking it again would count as a
+                    // first arrival and hand the access back.
+                    next.settled.insert((fingerprint.subject, prepared.root_id));
                     Ok(result)
                 }
             }
@@ -1176,6 +1206,9 @@ impl Controller {
                 .retain(|grant| !scope_targets_root(grant.scope(), request.root_id));
             next.attachments
                 .retain(|attachment| attachment.root_id() != request.root_id);
+            // The approval itself is gone, so there is no position left to
+            // remember. Picking this folder again is a first arrival.
+            next.settled.retain(|(_, root)| *root != request.root_id);
         }
         let result = Ok(RevokeRootResult { revoked });
         complete_revoke(&mut next, operation_id, fingerprint, result.clone())
@@ -1235,6 +1268,10 @@ impl Controller {
         let before = next.grants.len();
         next.grants.retain(|grant| grant.subject() != subject);
         changed |= next.grants.len() != before;
+        // The conversation subject is gone with the chat, so its settled
+        // positions go too. A project subject the chat happened to use is not
+        // this subject and keeps its own.
+        next.settled.retain(|(settled, _)| *settled != subject);
 
         let before = next.attachments.len();
         next.attachments
@@ -1278,6 +1315,7 @@ impl Controller {
                     .retain(|grant| !scope_targets_root(grant.scope(), root_id));
                 next.attachments
                     .retain(|attachment| attachment.root_id() != root_id);
+                next.settled.retain(|(_, settled)| *settled != root_id);
             }
         }
 
@@ -1903,6 +1941,76 @@ fn registration_is_connected(
         })
 }
 
+/// How many completed attachment and write records the broker keeps.
+///
+/// A record earns its place for exactly two readers: a client retrying the
+/// same operation identity with the same content, and a client asking for that
+/// operation's receipt after a crash or a dropped connection. Both are
+/// recovery paths that run within one attempt of the request — the desktop
+/// reconciler and the CLI look the receipt up immediately, or on the next
+/// launch — so nothing consults a record after thousands of later mutations
+/// have gone through. Kept unbounded, the same records are the one part of the
+/// state file that grows with use rather than with what the user has approved,
+/// until it crosses [`state_file::MAX_STATE_FILE_BYTES`] and the broker can
+/// neither save consent nor start.
+///
+/// The bound is a count rather than an age because nothing in a record says
+/// when it was written, and inventing a clock for it would put the retention
+/// of consent receipts at the mercy of the host's wall clock. Two thousand
+/// records is far more than any recovery window needs and roughly two megabytes
+/// at the largest record shape, which leaves the 16 MiB ceiling to the state it
+/// exists for: approved folders, their grants, and their attachments.
+const MAX_RETAINED_MUTATION_RECEIPTS: usize = 2048;
+
+/// Records that may be dropped once they are old enough.
+///
+/// Registration and revocation records stay: the loader reads them against
+/// each other — a registration receipt for a folder that is gone has to find
+/// the revocation that removed it — so dropping one could make the state file
+/// unloadable. They also accrue at the pace of a person choosing folders,
+/// which is not the growth this bound exists for. Attachment and write records
+/// are each validated on their own terms and are the two that a working
+/// session produces continuously.
+///
+/// Only completed records qualify. A pending one is still owed an outcome, so
+/// it is never enrolled and never evicted — which means a write whose dispatch
+/// was abandoned leaves a record behind for good. That leak is one record per
+/// abandoned in-flight write and is not what this bound is for.
+fn is_prunable_receipt(record: &MutationRecord) -> bool {
+    matches!(
+        record,
+        MutationRecord::Attachment {
+            outcome: MutationOutcome::Complete(_),
+            ..
+        } | MutationRecord::Write {
+            outcome: MutationOutcome::Complete(_),
+            ..
+        }
+    )
+}
+
+/// Drop the oldest completed receipts until the retained set is within bounds.
+fn prune_mutation_receipts(
+    mutations: &mut HashMap<OperationId, MutationRecord>,
+    order: &mut VecDeque<OperationId>,
+) {
+    while order.len() > MAX_RETAINED_MUTATION_RECEIPTS {
+        let Some(operation_id) = order.pop_front() else {
+            break;
+        };
+        mutations.remove(&operation_id);
+    }
+}
+
+/// Enrol a just-completed record in the bounded retention set.
+///
+/// Only ever called once per operation identity, from the `Pending` to
+/// `Complete` transition, so an identity cannot appear twice in the queue.
+fn retain_mutation_receipt(state: &mut State, operation_id: OperationId) {
+    state.receipt_order.push_back(operation_id);
+    prune_mutation_receipts(&mut state.mutations, &mut state.receipt_order);
+}
+
 fn claim_register(
     state: &mut State,
     operation_id: OperationId,
@@ -2063,6 +2171,7 @@ fn complete_attachment(
         {
             *outcome = MutationOutcome::Complete(result);
             state.active_mutations.remove(&operation_id);
+            retain_mutation_receipt(state, operation_id);
             Ok(())
         }
         _ => Err(BrokerError::OperationIdConflict),
@@ -2122,6 +2231,7 @@ fn complete_write(
         }) if existing == request && matches!(outcome, MutationOutcome::Pending) => {
             *outcome = MutationOutcome::Complete(result);
             state.active_mutations.remove(&operation_id);
+            retain_mutation_receipt(state, operation_id);
             Ok(())
         }
         _ => Err(BrokerError::OperationIdConflict),
@@ -2299,17 +2409,30 @@ fn apply_root_attachment(
             if matches!(method, ConsentMethod::CarriedForward) {
                 return Err(BrokerError::InvalidConsentMethod);
             }
-            let consent = ConsentRecord::new(method, Utc::now());
-            ensure_subject_grants(
-                state,
-                request.subject,
-                request.root_id,
-                consent,
-                execute_commands,
-            )?;
+            // An attachment that already stands is not a consent interaction:
+            // re-running it — a retry, a reconciler pass, a second dialog for a
+            // folder this chat already has — must leave authority exactly as it
+            // is. Minting here is what let a redundant attach undo a
+            // revocation.
+            //
+            // A genuinely new attachment still only mints for a subject that
+            // has never held this folder. This check is keyed on the
+            // conversation and the grants it guards are keyed on the subject,
+            // and for a project chat those are different entities — a sibling
+            // chat's first attach passes here while pointing at a position its
+            // neighbour already narrowed. `ensure_default_subject_grants` is
+            // where the subject's own history is consulted.
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
             } else {
+                let consent = ConsentRecord::new(method, Utc::now());
+                ensure_default_subject_grants(
+                    state,
+                    request.subject,
+                    request.root_id,
+                    consent,
+                    execute_commands,
+                )?;
                 state.attachments.push(RootAttachment::new(
                     request.conversation_id,
                     request.root_id,
@@ -2321,11 +2444,12 @@ fn apply_root_attachment(
             if request.consent_method.is_some() {
                 return Err(BrokerError::InvalidConsentMethod);
             }
-            if state.roots.contains_key(&request.root_id)
-                && !subject_has_root_grant(state, request.subject, request.root_id)
-            {
-                return Err(BrokerError::Denied);
-            }
+            // Disconnecting a folder is not an exercise of access to it, so it
+            // must not require any. Requiring read here meant that narrowing a
+            // folder to nothing also took away the only way to get rid of it:
+            // the folder stayed attached, allowed nothing, and refused to go.
+            // Detach only ever removes this conversation's own attachment rows,
+            // which is why nothing is being protected by asking.
             let before = state.attachments.len();
             state.attachments.retain(|attachment| {
                 attachment.conversation_id() != request.conversation_id
@@ -2448,6 +2572,59 @@ fn remove_grant_statement(
         }
     }
     true
+}
+
+/// Does this subject already hold any standing authority over this folder?
+///
+/// Any statement scoped to the root counts, whatever the capability. The
+/// question this answers is not "can it read" but "has the user already
+/// settled what this subject may do here" — and the answer has to be
+/// conservative, because a withdrawn grant leaves no trace: `revoke_grant`
+/// removes the row, so "revoked write" and "never had write" are the same
+/// state. Treating any surviving statement as a settled position is the only
+/// reading that cannot silently restore what the user took away.
+fn subject_has_any_root_grant(state: &State, subject: GrantSubject, root_id: RootId) -> bool {
+    state
+        .grants
+        .iter()
+        .any(|grant| grant.subject() == subject && scope_targets_root(grant.scope(), root_id))
+}
+
+/// Give a subject the folder's default access, but only if it has never had it.
+///
+/// Registration mints read, write and exec together because choosing a folder
+/// in the picker is how the user says the agent may work in it. The same set
+/// is right the first time a folder reaches a subject through an attachment or
+/// a re-pick, so a chat that connects a folder can use it the way the product
+/// says it can.
+///
+/// It is not right afterwards, and "afterwards" cannot be read off the grant
+/// table: revoking deletes rows, so a subject narrowed to nothing looks exactly
+/// like a subject that never had anything. Neither can it be read off the
+/// conversation, because grants are keyed on the subject and attachments are
+/// keyed on the conversation — for a project subject those are different
+/// entities, and a sibling chat connecting the folder used to re-mint the
+/// access its neighbour had just revoked. `State::settled` is the record kept
+/// on the grant's own key, and it is what makes this once-only: after the first
+/// mint, widening is a consent decision belonging to
+/// [`Controller::grant_root_capability`] and its permission dialog.
+///
+/// A surviving grant still counts on its own, so an install that predates the
+/// record is not re-minted for folders it can currently reach.
+fn ensure_default_subject_grants(
+    state: &mut State,
+    subject: GrantSubject,
+    root_id: RootId,
+    consent: ConsentRecord,
+    execute_commands: bool,
+) -> Result<(), BrokerError> {
+    let settled = state.settled.contains(&(subject, root_id))
+        || subject_has_any_root_grant(state, subject, root_id);
+    state.settled.insert((subject, root_id));
+    if settled {
+        return Ok(());
+    }
+    ensure_subject_grants(state, subject, root_id, consent, execute_commands)
 }
 
 fn ensure_subject_grants(
