@@ -952,35 +952,39 @@ function OpenAiCredentialSection({
     }
   }
 
-  if (signedInWithChatgpt) {
-    return (
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          variant="destructive"
-          disabled={saving}
-          onClick={() => void signOutChatgpt()}
-        >
-          Sign out of ChatGPT
-        </Button>
-      </div>
-    );
-  }
-
+  // Both auth modes stay reachable at once: signing in with ChatGPT replaces
+  // an API key on the server, and saving a key signs ChatGPT out. Hiding one
+  // path behind the other made "switch mode" look impossible.
   return (
     <>
       <p className="text-xs text-muted-foreground">
         Use a ChatGPT subscription (Plus / Pro) or an OpenAI Platform API key.
+        Saving either one turns OpenAI on.
       </p>
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          disabled={saving}
-          onClick={() => void signInWithChatgpt()}
-        >
-          Sign in with ChatGPT
-        </Button>
-      </div>
+      {signedInWithChatgpt ? (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={saving}
+            onClick={() => void signOutChatgpt()}
+          >
+            Sign out of ChatGPT
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            disabled={saving}
+            onClick={() => void signInWithChatgpt()}
+          >
+            {info.auth_mode === "api_key"
+              ? "Switch to ChatGPT sign-in"
+              : "Sign in with ChatGPT"}
+          </Button>
+        </div>
+      )}
       {pendingUrl && (
         <p className="text-xs text-muted-foreground">
           Waiting for the browser to finish signing in.{" "}
@@ -1003,7 +1007,13 @@ function OpenAiCredentialSection({
       <Input
         ref={apiKeyRef}
         type="password"
-        placeholder="Or paste an API key"
+        placeholder={
+          signedInWithChatgpt
+            ? "Paste an API key to switch from ChatGPT"
+            : info.auth_mode === "api_key"
+              ? "Paste a new API key to replace"
+              : "Or paste an API key"
+        }
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
         autoComplete="off"
@@ -1011,12 +1021,12 @@ function OpenAiCredentialSection({
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
-          disabled={saving || (!info.has_credential && !apiKey.trim())}
+          disabled={saving || !apiKey.trim()}
           onClick={onSaveApiKey}
         >
-          Save configuration
+          {signedInWithChatgpt ? "Switch to API key" : "Save API key"}
         </Button>
-        {info.has_credential && (
+        {info.has_credential && info.auth_mode === "api_key" && (
           <Button
             type="button"
             variant="destructive"

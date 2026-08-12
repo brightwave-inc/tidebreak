@@ -331,6 +331,89 @@ describe("ProvidersPanel", () => {
     expect(
       screen.queryByRole("button", { name: "Sign in with ChatGPT" }),
     ).not.toBeInTheDocument();
+    // API key path stays available so the reader can switch modes without
+    // signing out first.
+    expect(
+      screen.getByRole("button", { name: "Switch to API key" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Paste an API key to switch from ChatGPT"),
+    ).toBeInTheDocument();
+  });
+
+  it("lets an API-key install switch to ChatGPT sign-in", () => {
+    renderPanel(
+      <ProvidersPanel
+        providers={[
+          {
+            kind: "openai",
+            enabled: true,
+            has_credential: true,
+            auth_mode: "api_key",
+            models: [],
+          },
+        ]}
+        client={
+          {
+            getOpenaiChatgptStatus: vi
+              .fn()
+              .mockResolvedValue({ signed_in: false }),
+          } as unknown as ApiClient
+        }
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("API key set")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Switch to ChatGPT sign-in" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save API key" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
+  });
+
+  it("saves an API key while signed in with ChatGPT to switch modes", async () => {
+    const putProvider = vi.fn().mockResolvedValue({
+      kind: "openai",
+      enabled: true,
+      has_credential: true,
+      auth_mode: "api_key",
+      models: [],
+    });
+    const client = {
+      putProvider,
+      getOpenaiChatgptStatus: vi.fn().mockResolvedValue({ signed_in: true }),
+    } as unknown as ApiClient;
+    const user = userEvent.setup();
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[
+          {
+            kind: "openai",
+            enabled: true,
+            has_credential: true,
+            auth_mode: "chatgpt",
+            models: [],
+          },
+        ]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    await user.type(
+      screen.getByPlaceholderText("Paste an API key to switch from ChatGPT"),
+      "sk-switch",
+    );
+    await user.click(screen.getByRole("button", { name: "Switch to API key" }));
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("openai", {
+        enabled: true,
+        credential: { type: "api_key", key: "sk-switch" },
+      }),
+    );
   });
 
   it("offers no credential editing on a managed profile", () => {

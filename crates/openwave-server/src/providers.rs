@@ -1141,6 +1141,12 @@ pub async fn update_provider(
     }
     if let Some(credential) = update.credential {
         write_credential(secrets, kind, &credential).await?;
+        // Storing a credential is an intent to use the provider — same as
+        // ChatGPT sign-in completion and the Anthropic legacy key route.
+        // An explicit Enabled toggle still turns the provider off afterward
+        // without clearing the credential; only a bare enable/disable write
+        // leaves `enabled` alone.
+        config.enabled = true;
     }
 
     write_config(store, kind, &config).await?;
