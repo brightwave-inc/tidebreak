@@ -272,10 +272,8 @@ fn an_operator_grant_is_one_record_both_shells_read_and_either_side_can_revoke()
     assert!(ok, "disconnect failed: {stderr}");
     let statements = desktop_grant_statements(&data_dir);
     assert!(
-        statements
-            .iter()
-            .all(|grant| !matches!(grant.scope, Scope::Root { .. })),
-        "the withdrawn folder still has grants: {statements:?}"
+        statements.is_empty(),
+        "disconnect must withdraw root reach and the chat's list-folders grant: {statements:?}"
     );
 
     // And the other direction: a grant withdrawn on the desktop's Permissions
@@ -291,7 +289,16 @@ fn an_operator_grant_is_one_record_both_shells_read_and_either_side_can_revoke()
         ],
     );
     assert!(ok, "reconnect failed: {stderr}");
-    let read_grant = desktop_grant_statements(&data_dir)
+    let statements = desktop_grant_statements(&data_dir);
+    let list_folders = statements
+        .iter()
+        .filter(|grant| grant.capability == Capability::ListRoots)
+        .count();
+    assert_eq!(
+        list_folders, 1,
+        "reconnect must not stack list-folders grants: {statements:?}"
+    );
+    let read_grant = statements
         .into_iter()
         .find(|grant| {
             grant.capability == Capability::ReadFiles && matches!(grant.scope, Scope::Root { .. })
@@ -303,6 +310,58 @@ fn an_operator_grant_is_one_record_both_shells_read_and_either_side_can_revoke()
     assert!(
         !listed.contains(&read_grant.grant_id.to_string()),
         "a revoked grant is still listed: {listed}"
+    );
+}
+
+/// #1965: disconnect left the subject-scoped list-folders grant standing;
+/// reconnect then minted a second one. After a sole-holder disconnect+reconnect
+/// the chat must hold exactly one list-folders grant.
+#[test]
+fn disconnect_then_reconnect_keeps_a_single_list_folders_grant() {
+    let base = tempfile::tempdir_in(home()).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let data_dir = data.path().join("profile");
+    let reports = base.path().join("reports");
+    std::fs::create_dir_all(&reports).unwrap();
+
+    let chat = create_chat(&data_dir);
+    connect_folder(&data_dir, &reports, &chat);
+
+    let (ok, _, stderr) = run(
+        &data_dir,
+        &[
+            "folder",
+            "disconnect",
+            reports.to_str().unwrap(),
+            "--chat",
+            &chat,
+        ],
+    );
+    assert!(ok, "disconnect failed: {stderr}");
+    let after_disconnect = desktop_grant_statements(&data_dir);
+    assert!(
+        after_disconnect
+            .iter()
+            .all(|grant| grant.capability != Capability::ListRoots),
+        "list-folders must not outlive the last root for the chat: {after_disconnect:?}"
+    );
+
+    connect_folder(&data_dir, &reports, &chat);
+    let after_reconnect = desktop_grant_statements(&data_dir);
+    let list_folders: Vec<_> = after_reconnect
+        .iter()
+        .filter(|grant| grant.capability == Capability::ListRoots)
+        .collect();
+    assert_eq!(
+        list_folders.len(),
+        1,
+        "reconnect stacked list-folders grants: {after_reconnect:?}"
+    );
+    assert!(
+        after_reconnect.iter().any(|grant| {
+            grant.capability == Capability::ReadFiles && matches!(grant.scope, Scope::Root { .. })
+        }),
+        "reconnected folder must carry root reach: {after_reconnect:?}"
     );
 }
 
@@ -712,9 +771,7 @@ fn folder_connect_while_serve_holds_the_data_directory() {
     assert!(ok, "disconnect while serve is up failed: {stderr}");
     let statements = desktop_grant_statements(&data_dir);
     assert!(
-        statements
-            .iter()
-            .all(|grant| !matches!(grant.scope, Scope::Root { .. })),
+        statements.is_empty(),
         "grants left after disconnect while serve held the lock: {statements:?}"
     );
 
