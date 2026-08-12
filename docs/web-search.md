@@ -45,7 +45,7 @@ The loopback API exposes a bearer-protected host policy at `/web-search`.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /web-search` | Read the selected provider, timeout, the SearXNG instance URL, and whether the selection is usable. |
-| `PUT /web-search` | Select `exa`, `tavily`, `brave`, `searxng`, or `null` to disable; optionally set the timeout and the SearXNG instance URL. |
+| `PUT /web-search` | Select `exa`, `tavily`, `brave`, `searxng`, or `null` to disable (clears the host provider and sets mode `off` so turns do not fall back to vendor search); optionally set `mode`, timeout, and the SearXNG instance URL. |
 | `GET /web-search/credentials` | Read readiness for the fixed Exa, Tavily, and Brave key slots. |
 | `PUT /web-search/credentials/{provider}` | Store a key for one of those slots; returns readiness only. |
 | `DELETE /web-search/credentials/{provider}` | Delete that fixed provider key; returns readiness only. |
@@ -70,9 +70,12 @@ scheme or exact authority differs from it before dispatch, on both the `POST`
 and `GET` verbs of the transport seam.
 
 `GET /web-search` reports `has_credential` (a key is stored for the selected
-provider) and `available` (the selected provider has everything it needs). The
-two differ only for SearXNG, which has no key slot at all: `has_credential` is
-always false there and `available` follows the instance URL.
+provider) and `available` (a turn that routes host search here can invoke the
+selected provider). `available` is false when mode is `off` or `vendor`, even
+if a key is still stored — settings and the turn tool surface stay aligned.
+Otherwise the two differ only for SearXNG, which has no key slot at all:
+`has_credential` is always false there and `available` follows the instance
+URL.
 
 No response contains a credential. `/web-search/credentials` reports readiness
 for every fixed key slot; SearXNG is absent from it, exactly as local execution

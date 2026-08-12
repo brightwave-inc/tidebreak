@@ -309,8 +309,18 @@ async fn host_has_credential(config: &WebSearchConfig, secrets: &dyn SecretProvi
     }
 }
 
-/// Whether the selected host provider has everything it needs to be invoked.
+/// Whether the selected host provider has everything it needs to be invoked
+/// on a turn that routes host search here.
+///
+/// Mode is part of that answer: `off` and `vendor` never invoke the host
+/// adapter, so a stored key must not make settings report "available" while
+/// the turn surface withholds search. Credential presence stays on
+/// [`WebSearchConfigInfo::has_credential`] so the operator can still see that
+/// a key is saved for when they turn host search back on.
 fn host_is_available(config: &WebSearchConfig, has_credential: bool) -> bool {
+    if matches!(config.mode, WebSearchMode::Off | WebSearchMode::Vendor) {
+        return false;
+    }
     match config.provider {
         // Nothing to authenticate with; the instance URL is what it needs.
         Some(WebSearchProviderKind::Searxng) => config.searxng_base_url().is_some(),
@@ -445,6 +455,15 @@ pub async fn delete_credential(
 }
 
 /// Apply a non-secret host-policy update and return its public view.
+///
+/// An explicit `provider: null` is the documented disable path (`PUT` body or
+/// `settings web-search select off`). It clears the host selection **and**
+/// turns search off for the turn surface, so the model is not left with a
+/// vendor fallback under a still-`automatic` mode while settings report
+/// "no provider / unavailable". A simultaneous `mode` field still wins, so a
+/// caller can clear the host provider while deliberately choosing automatic or
+/// vendor. Selecting a provider again while mode is `off` restores
+/// `automatic` unless the caller sets mode in the same update.
 pub async fn update_config(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -453,6 +472,17 @@ pub async fn update_config(
     let mut config = read_config(store).await?;
     if let Some(provider) = update.provider {
         config.provider = provider;
+        if update.mode.is_none() {
+            if provider.is_none() {
+                // Documented "null disables web search": not merely "no host
+                // engine while automatic still offers the vendor tool".
+                config.mode = WebSearchMode::Off;
+            } else if config.mode == WebSearchMode::Off {
+                // Re-selecting a provider after disable must make search usable
+                // again without a second round-trip to flip mode.
+                config.mode = WebSearchMode::Automatic;
+            }
+        }
     }
     if let Some(mode) = update.mode {
         config.mode = mode;
@@ -519,14 +549,22 @@ async fn required_credential(
 /// Resolve the explicitly selected provider for host execution. The returned
 /// provider is inert until its `search` method is called.
 ///
-/// Every path fails closed as `Ok(None)`: a missing key for the providers that
-/// need one, and a missing instance URL for the one that does not.
+/// Every path fails closed as `Ok(None)`: mode that never runs on this host
+/// (`off` / `vendor`), a missing key for the providers that need one, and a
+/// missing instance URL for the one that does not. Credentials left in the
+/// keychain after search is turned off must not keep host search live.
 pub async fn resolve_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
 ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, ServerError> {
     let config = read_config(store).await?;
     config.validate()?;
+    // Host adapters only serve Host and Automatic. Vendor search never touches
+    // this path, and Off means no search at all — including when a prior key
+    // is still stored and a stale tool call still reaches the registry.
+    if matches!(config.mode, WebSearchMode::Off | WebSearchMode::Vendor) {
+        return Ok(None);
+    }
     let Some(kind) = config.provider else {
         return Ok(None);
     };
@@ -1016,6 +1054,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolve(true).await.unwrap(), TurnWebSearch::Off);
+    }
+
+    /// `PUT { "provider": null }` is the documented disable and what
+    /// `settings web-search select off` sends. It must turn search off for the
+    /// turn surface, not leave mode automatic so a vendor-capable model still
+    /// gets a working `web_search` while settings report unavailable.
+    #[tokio::test]
+    async fn clearing_the_provider_turns_search_off_for_the_turn_surface() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        write_credential(&secrets, WebSearchProviderKind::Tavily, "still-present")
+            .await
+            .unwrap();
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: Some(Some(WebSearchProviderKind::Tavily)),
+                mode: Some(WebSearchMode::Automatic),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolve_turn_web_search(&store, &secrets, true)
+                .await
+                .unwrap(),
+            TurnWebSearch::Host
+        );
+
+        // Same body the CLI disable path writes: provider null, mode omitted.
+        let info = update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: Some(None),
+                mode: None,
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.provider, None);
+        assert_eq!(info.mode, WebSearchMode::Off);
+        assert!(!info.available);
+        assert_eq!(
+            resolve_turn_web_search(&store, &secrets, true)
+                .await
+                .unwrap(),
+            TurnWebSearch::Off
+        );
+        assert_eq!(
+            resolve_turn_web_search(&store, &secrets, false)
+                .await
+                .unwrap(),
+            TurnWebSearch::Off
+        );
+        // A leftover key must not keep host search live under Off.
+        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+
+        // Selecting a provider again without an explicit mode restores a
+        // usable default rather than leaving Off stuck under a selection.
+        let info = update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: Some(Some(WebSearchProviderKind::Tavily)),
+                mode: None,
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.mode, WebSearchMode::Automatic);
+        assert_eq!(
+            resolve_turn_web_search(&store, &secrets, true)
+                .await
+                .unwrap(),
+            TurnWebSearch::Host
+        );
+    }
+
+    /// Mode Off must refuse host adapters even when a provider and key remain
+    /// configured (the UI Off path keeps the selection so turning search back
+    /// on does not re-ask for the key).
+    #[tokio::test]
+    async fn mode_off_refuses_host_provider_resolution_with_key_still_present() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        write_credential(&secrets, WebSearchProviderKind::Exa, "key")
+            .await
+            .unwrap();
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: Some(Some(WebSearchProviderKind::Exa)),
+                mode: Some(WebSearchMode::Off),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let info = config_info(&store, &secrets).await.unwrap();
+        assert_eq!(info.mode, WebSearchMode::Off);
+        assert_eq!(info.provider, Some(WebSearchProviderKind::Exa));
+        // Key remains for when search is turned back on, but available must
+        // agree with the turn surface: Off means no host search will run.
+        assert!(info.has_credential);
+        assert!(!info.available);
+        assert_eq!(
+            resolve_turn_web_search(&store, &secrets, true)
+                .await
+                .unwrap(),
+            TurnWebSearch::Off
+        );
+        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
     }
 
     /// A configuration written before the mode existed keeps the behavior it
