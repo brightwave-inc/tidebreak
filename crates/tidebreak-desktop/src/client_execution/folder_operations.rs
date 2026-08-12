@@ -559,6 +559,7 @@ fn serialize_result(call: &ToolCallRecord, result: OperationResult) -> StoredRes
         Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => StoredResolution::Completed {
             result,
             rows: Some(serde_json::json!({ "entries": rows })),
+            images: None,
         },
         _ => unavailable(
             "result_too_large",
@@ -585,7 +586,7 @@ pub(super) fn granted_folder_capabilities(
         .collect()
 }
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     if value.len() <= max_bytes {
         return (value.to_owned(), false);
     }
@@ -814,7 +815,7 @@ mod tests {
                 bytes: MAX_FILE_CONTENT_BYTES + 1,
             }),
         );
-        let StoredResolution::Completed { result, rows } = result else {
+        let StoredResolution::Completed { result, rows, .. } = result else {
             panic!("expected bounded result");
         };
         assert!(result.len() <= MAX_RESULT_CONTENT_BYTES);

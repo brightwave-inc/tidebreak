@@ -548,6 +548,16 @@ export function toolApprovalPresentation(
       canRemember: true,
     };
   }
+  if (kind === "computer_may_control_app") {
+    return {
+      summary:
+        "Allow OpenWave to operate this app — click, type, and press keys in its windows? It will capture and read the app's contents first.",
+      canApprove: true,
+      // The durable consent is the host broker's per-app grant, not a
+      // name-keyed standing grant, so there is no renderer "always" to offer.
+      canRemember: false,
+    };
+  }
   return {
     summary: "The exact action cannot be safely described.",
     canApprove: false,

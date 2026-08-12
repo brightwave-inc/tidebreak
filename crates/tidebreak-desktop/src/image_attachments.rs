@@ -67,6 +67,30 @@ pub(crate) struct PublishedImageAttachment {
     byte_len: u64,
 }
 
+impl PublishedImageAttachment {
+    /// The content-addressed blob id, for a publisher building an image
+    /// reference into its own result (the computer-use screenshot path).
+    pub(crate) fn blob_id(&self) -> Uuid {
+        self.attachment_id
+    }
+
+    pub(crate) fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+}
+
 /// The `{ kind, message }` shape every server error uses.
 #[derive(Debug, Deserialize)]
 struct ServerErrorBody {
@@ -174,7 +198,7 @@ fn decode_image_payload(encoded: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Hand one image's bytes to the server and return what it minted for them.
-async fn publish_image_bytes(
+pub(crate) async fn publish_image_bytes(
     app_state: &Arc<AppState>,
     host_access: &HostAccess,
     requested_chat: Uuid,

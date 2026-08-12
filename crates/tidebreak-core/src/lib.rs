@@ -52,6 +52,7 @@ pub mod blob;
 pub mod cancel;
 pub mod citation;
 pub mod client_tools;
+pub mod computer_use;
 pub mod config;
 pub mod connected_app;
 pub mod context;
@@ -143,6 +144,26 @@ pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
     DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
     DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+};
+pub use computer_use::{
+    computer_capture_screen_tool_spec, computer_click_tool_spec, computer_focus_window_tool_spec,
+    computer_key_press_tool_spec, computer_list_windows_tool_spec,
+    computer_read_app_content_tool_spec, computer_return_to_openwave_tool_spec,
+    computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
+    is_computer_use_control_tool, is_computer_use_tool, validate_computer_capture_screen_arguments,
+    validate_computer_click_arguments, validate_computer_focus_window_arguments,
+    validate_computer_key_press_arguments, validate_computer_list_windows_arguments,
+    validate_computer_read_app_content_arguments, validate_computer_return_to_openwave_arguments,
+    validate_computer_scroll_arguments, validate_computer_type_text_arguments,
+    validate_computer_wait_arguments, ClickButton, ComputerCaptureScreenArgs, ComputerClickArgs,
+    ComputerFocusWindowArgs, ComputerKeyPressArgs, ComputerListWindowsArgs,
+    ComputerReadAppContentArgs, ComputerReturnToOpenwaveArgs, ComputerScrollArgs,
+    ComputerTypeTextArgs, ComputerWaitArgs, ElementTargetArgs, KeyModifier,
+    COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_FOCUS_WINDOW_TOOL,
+    COMPUTER_KEY_PRESS_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
+    COMPUTER_RETURN_TO_OPENWAVE_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
+    COMPUTER_USE_CONTROL_TOOLS, COMPUTER_USE_TOOLS, COMPUTER_WAIT_TOOL, MAX_MARK, MAX_READ_DEPTH,
+    MAX_READ_NODES, MAX_TYPE_TEXT_CHARS, MAX_WAIT_SECONDS,
 };
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

@@ -81,7 +81,7 @@ pub enum RequestedFolderHint {
 
 // Unit-variant docs make Schemars prefer `oneOf`; providers already consume
 // these two contracts as compact enum-only schemas.
-fn preserve_enum_wire_shape(schema: &mut schemars::Schema) {
+pub(crate) fn preserve_enum_wire_shape(schema: &mut schemars::Schema) {
     if let Some(Value::Array(variants)) = schema.remove("oneOf") {
         let values = variants
             .iter()

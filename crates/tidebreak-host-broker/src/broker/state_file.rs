@@ -209,7 +209,9 @@ impl StateFile {
                 Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => {
                     Some((grant.subject(), *root_id))
                 }
-                Scope::Subject => None,
+                // Computer-use scopes (an app, the whole display) reference no
+                // root, so they contribute no settled folder position.
+                Scope::Subject | Scope::App { .. } | Scope::Screen => None,
             }));
             for attachment in &attachments {
                 if let Ok(subject) = GrantSubject::conversation(attachment.conversation_id()) {
@@ -280,6 +282,12 @@ impl StateFile {
             active_mutations: Default::default(),
             unavailable,
             settled,
+            // Session-only computer-use tables: a held confirmation or staged
+            // capture never survives a restart.
+            pending_confirmations: Default::default(),
+            confirmation_order: Default::default(),
+            handoffs: Default::default(),
+            handoff_order: Default::default(),
         };
         validate_loaded_state(&state)?;
         Ok(state)
@@ -520,7 +528,10 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
     for grant in &state.grants {
         let root_id = match grant.scope() {
             Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id,
-            Scope::Subject => continue,
+            // Computer-use scopes (an app, the whole display) reference no
+            // registered root, so there is nothing to validate against the
+            // root table.
+            Scope::Subject | Scope::App { .. } | Scope::Screen => continue,
         };
         if !state.roots.contains_key(&root_id) {
             return Err(invalid_data("grant references an unknown root").into());

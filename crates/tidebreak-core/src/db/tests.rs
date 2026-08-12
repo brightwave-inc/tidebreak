@@ -1686,6 +1686,64 @@ async fn an_unreadable_tool_preview_keeps_its_blob_alive() {
     assert_eq!(store.get_blob_retirement(blob_id).await.unwrap(), None);
 }
 
+/// A screen-capture card's image is the same kind of live reference as an
+/// exec card's: the stored preview is the only row pointing at the capture's
+/// blob, so the auditor missing the variant would retire the only copy of a
+/// screenshot the transcript still renders.
+#[tokio::test]
+async fn a_screen_capture_preview_keeps_its_blob_alive() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let blob_id = uuid::Uuid::new_v4();
+
+    let created = DateTime::<Utc>::from_timestamp(1_700_000_030, 0).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "tu_capture".into(),
+        name: "screen_capture".into(),
+        arguments: serde_json::json!({}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: created,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let preview = crate::ToolResultPreview::ScreenCapture {
+        image: crate::ImageRef {
+            blob_id,
+            media_type: crate::ImageMediaType::Png,
+            width: 2056,
+            height: 1329,
+            byte_len: 979_437,
+        },
+        mark_count: 12,
+    };
+    store
+        .resolve_server_tool_call_with_artifacts(
+            call.id,
+            &ToolCallResolution::Completed {
+                result: "captured".into(),
+            },
+            created + chrono::Duration::seconds(1),
+            Some(&preview),
+        )
+        .await
+        .unwrap();
+    assert!(!store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    assert_eq!(store.get_blob_retirement(blob_id).await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn stale_orphan_snapshot_cannot_reset_a_new_worker_lease() {
     let (_dir, store) = temp_store().await;

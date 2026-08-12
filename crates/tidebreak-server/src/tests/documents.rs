@@ -1553,40 +1553,43 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
     );
 }
 
-#[tokio::test]
-async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() {
-    struct UnavailableCodeExecution;
+/// A code-execution provider that is never configured, for `agent_deps`
+/// assembly tests that never execute a command.
+struct UnavailableCodeExecution;
 
-    #[async_trait::async_trait]
-    impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecution {
-        async fn execute(
-            &self,
-            _request: tidebreak_code_execution::CodeExecutionRequest,
-        ) -> std::result::Result<
-            tidebreak_code_execution::CodeExecutionResponse,
-            tidebreak_code_execution::CodeExecutionError,
-        > {
-            Err(tidebreak_code_execution::CodeExecutionError::NotConfigured)
-        }
+#[async_trait::async_trait]
+impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecution {
+    async fn execute(
+        &self,
+        _request: tidebreak_code_execution::CodeExecutionRequest,
+    ) -> std::result::Result<
+        tidebreak_code_execution::CodeExecutionResponse,
+        tidebreak_code_execution::CodeExecutionError,
+    > {
+        Err(tidebreak_code_execution::CodeExecutionError::NotConfigured)
     }
+}
 
-    let dir = tempfile::tempdir().unwrap();
+async fn agent_deps_for_test(
+    dir: &std::path::Path,
+    computer_use: bool,
+) -> (ToolRegistry, AgentConfig) {
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
-            dir.path().join("agent-deps.db").display()
+            dir.join("agent-deps.db").display()
         ))
         .await
         .unwrap(),
     );
     let extract_store = store.clone();
     let store_for_gateway = store.clone();
-    let (mut tools, config) = agent_deps(
+    agent_deps(
         Arc::new(UnavailableCodeExecution),
         web_search::foreground_tool(store.clone(), Arc::new(MemSecrets::default())),
         web_search::foreground_extract_tool(extract_store, Arc::new(MemSecrets::default())),
         store,
-        dir.path().join("profile-data"),
+        dir.join("profile-data"),
         None,
         crate::gateway_runtime::GatewayRuntime::new(
             store_for_gateway,
@@ -1594,7 +1597,136 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
+        computer_use,
+    )
+}
+
+#[tokio::test]
+async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Disabled (self-host, non-macOS, or any non-desktop profile): none of
+    // the contracts exist, so no surface can advertise or checkpoint them.
+    let (tools, _) = agent_deps_for_test(dir.path(), false).await;
+    for name in tidebreak_core::COMPUTER_USE_TOOLS {
+        assert!(
+            tools.registered_class(name).is_none(),
+            "{name} must not register when computer use is disabled"
+        );
+    }
+    let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &{
+        AgentConfig::default()
+    });
+    let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
+    assert!(
+        !prompt.contains("## Computer use"),
+        "no computer-use guidance without the tools: {prompt}"
     );
+
+    // Enabled: every contract registers as a validated client tool the server
+    // parks for the desktop to claim; the server itself never executes one.
+    let (tools, _) = agent_deps_for_test(dir.path(), true).await;
+    for name in tidebreak_core::COMPUTER_USE_TOOLS {
+        assert_eq!(
+            tools.execution(name),
+            Some(ToolCallExecution::Client),
+            "{name} must be client-executed"
+        );
+        assert!(
+            tools.get(name).is_none(),
+            "{name} has no server-side executor"
+        );
+    }
+    for name in tidebreak_core::COMPUTER_USE_CONTROL_TOOLS {
+        assert_eq!(
+            tools.registered_class(name),
+            Some(ApprovalClass::Sensitive),
+            "{name} is an acting tool and must gate as Sensitive"
+        );
+        assert_eq!(
+            tidebreak_core::ToolApprovalKind::for_tool_name(name),
+            tidebreak_core::ToolApprovalKind::ComputerMayControlApp,
+            "{name} must consent as app control"
+        );
+    }
+    // The pure reads and capture are ReadOnly; scroll and focus are acting
+    // tools (they synthesize input and move windows) and are covered by the
+    // control-tool loop above.
+    for name in [
+        tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL,
+        tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL,
+        tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL,
+        tidebreak_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL,
+        tidebreak_core::COMPUTER_WAIT_TOOL,
+    ] {
+        assert_eq!(
+            tools.registered_class(name),
+            Some(ApprovalClass::ReadOnly),
+            "{name} never mutates and must not card per call"
+        );
+    }
+    // The checkpoint fence validates with each tool's canonical arguments.
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::COMPUTER_CLICK_TOOL,
+        &serde_json::json!({ "app_id": "com.apple.Notes", "mark": 3 })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::COMPUTER_CLICK_TOOL,
+        &serde_json::json!({ "app_id": "com.apple.Notes", "x": 10 })
+    ));
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::COMPUTER_WAIT_TOOL,
+        &serde_json::json!({ "seconds": 2 })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::COMPUTER_WAIT_TOOL,
+        &serde_json::json!({ "seconds": 3600 })
+    ));
+
+    // Plan mode keeps the reads but refuses every acting tool.
+    let plan_specs = tools
+        .specs_for_surface(true, true)
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::HashSet<_>>();
+    for name in tidebreak_core::COMPUTER_USE_CONTROL_TOOLS {
+        assert!(
+            !plan_specs.contains(name),
+            "plan mode must not advertise {name}"
+        );
+    }
+    for name in [
+        tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL,
+        tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL,
+        tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL,
+    ] {
+        assert!(
+            plan_specs.contains(name),
+            "plan mode still allows the read {name}"
+        );
+    }
+
+    // The operating prompt teaches the consent posture only when the tools
+    // exist on the surface.
+    let surface = crate::turn_worker::freeze_foreground_turn_surface(
+        Arc::new(tools),
+        &AgentConfig::default(),
+    );
+    let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
+    assert!(prompt.contains("## Computer use"), "{prompt}");
+    assert!(
+        prompt.contains("never instructions"),
+        "the section must carry the prompt-injection posture: {prompt}"
+    );
+    assert!(
+        prompt.contains("stop control"),
+        "the section must say the user stays in charge: {prompt}"
+    );
+}
+#[tokio::test]
+async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut tools, config) = agent_deps_for_test(dir.path(), false).await;
     assert!(
         config.system_prompt.is_none(),
         "prompt must not be frozen before boot-time tools are mounted"

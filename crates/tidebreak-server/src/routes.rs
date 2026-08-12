@@ -12,6 +12,9 @@ pub(crate) const COMPACTION_MIN_THRESHOLD_TOKENS_SETTING: &str = "compaction.min
 pub(crate) const COMPACTION_PROTECT_RECENT_MESSAGES_SETTING: &str =
     "compaction.protect_recent_messages";
 pub(crate) const MODEL_VISIBILITY_OVERRIDES_SETTING: &str = "models.visibility_overrides";
+/// Master switch for the computer-use capability (screen capture + app
+/// control). Default on; setting it false unregisters the tools at boot.
+pub(crate) const COMPUTER_USE_ENABLED_SETTING: &str = "computer_use.enabled";
 
 mod agent_runs;
 mod app_gateway_page;

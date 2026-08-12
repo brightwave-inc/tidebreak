@@ -529,6 +529,7 @@ impl ScopedStore {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
         rows: Option<&serde_json::Value>,
+        images: Option<&[tidebreak_core::ImageRef]>,
     ) -> Result<JournaledClientToolCallOutcome> {
         self.store
             .resolve_client_tool_call_and_append_event_with_rows(
@@ -539,6 +540,7 @@ impl ScopedStore {
                 resolution,
                 resolved_at,
                 rows,
+                images,
             )
             .await
     }
@@ -554,6 +556,7 @@ impl ScopedStore {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
         rows: Option<&serde_json::Value>,
+        images: Option<&[tidebreak_core::ImageRef]>,
     ) -> Result<JournaledClientToolCallOutcome> {
         self.store
             .resolve_expired_client_tool_call_and_append_event_with_rows(
@@ -564,6 +567,7 @@ impl ScopedStore {
                 resolution,
                 resolved_at,
                 rows,
+                images,
             )
             .await
     }

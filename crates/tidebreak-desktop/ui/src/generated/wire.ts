@@ -2388,7 +2388,13 @@ compaction: CompactionSettings,
  * and never filters `GET /models` by it. A hidden model remains fully
  * valid for existing chats, replay, and explicit selection.
  */
-model_visibility_overrides: { [key in string]: ModelVisibility }, };
+model_visibility_overrides: { [key in string]: ModelVisibility }, 
+/**
+ * Whether the computer-use capability (screen capture + app control) is
+ * enabled. Read at boot; turning it off unregisters the tools on the next
+ * launch.
+ */
+computer_use_enabled: boolean, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
@@ -2593,7 +2599,7 @@ network: NetworkPolicy, };
  * arguments. `Unsupported` is the fail-closed default: a Sensitive
  * action the server can only reject, never approve.
  */
-export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "delegate_may_run_background_agent" | "unsupported";
+export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "delegate_may_run_background_agent" | "computer_may_control_app" | "unsupported";
 
 /**
  * What a call produced, in a form a human can read.
@@ -2668,7 +2674,16 @@ accepted: boolean,
 /**
  * What the reader asked to change, when they sent it back.
  */
-feedback?: string, };
+feedback?: string, } | { "tool": "screen_capture", 
+/**
+ * The captured screenshot, content-addressed in the blob store.
+ */
+image: ImageRef, 
+/**
+ * How many interactive elements were marked on the capture, so the
+ * card can say "capture with N controls" without the model's text.
+ */
+mark_count: number, };
 
 /**
  * One renderer-safe source document attached to a historical user message.

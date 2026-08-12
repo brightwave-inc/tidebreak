@@ -367,7 +367,11 @@ fn imported(result: ImportConnectedFileResult) -> StoredResolution {
         _ => None,
     };
     match serde_json::to_string(&result) {
-        Ok(result) => StoredResolution::Completed { result, rows },
+        Ok(result) => StoredResolution::Completed {
+            result,
+            rows,
+            images: None,
+        },
         Err(_) => unavailable("That file could not be added to this conversation."),
     }
 }

@@ -2501,6 +2501,7 @@ pub trait Store: Send + Sync {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
         _rows: Option<&serde_json::Value>,
+        _images: Option<&[crate::ImageRef]>,
     ) -> Result<JournaledClientToolCallOutcome> {
         self.resolve_client_tool_call_and_append_event(
             id,
@@ -2563,6 +2564,7 @@ pub trait Store: Send + Sync {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
         _rows: Option<&serde_json::Value>,
+        _images: Option<&[crate::ImageRef]>,
     ) -> Result<JournaledClientToolCallOutcome> {
         self.resolve_expired_client_tool_call_and_append_event(
             id,

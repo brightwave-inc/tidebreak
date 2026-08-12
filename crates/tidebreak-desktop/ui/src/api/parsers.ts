@@ -1003,6 +1003,39 @@ type UncheckedPlanDecisionResult = Partial<
   Record<keyof Extract<WireToolResultPreview, { tool: "plan_decision" }>, unknown>
 >;
 
+type UncheckedScreenCaptureResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "screen_capture" }>, unknown>
+>;
+
+/** One image reference shared by the exec and screen-capture previews. The
+ * `blob_id` names the pixels in the blob store; `media_type` is the snake_case
+ * variant name the Rust enum serializes to. */
+function parseImageRef(value: unknown): {
+  attachmentId: string;
+  mediaType: string;
+  width: number;
+  height: number;
+} | null {
+  if (!isRecord(value)) return null;
+  const { blob_id, media_type, width, height } = value;
+  if (
+    typeof blob_id !== "string" ||
+    !["png", "jpeg", "webp"].includes(String(media_type)) ||
+    !Number.isInteger(width) ||
+    Number(width) <= 0 ||
+    !Number.isInteger(height) ||
+    Number(height) <= 0
+  ) {
+    return null;
+  }
+  return {
+    attachmentId: blob_id,
+    mediaType: media_type === "jpeg" ? "image/jpeg" : `image/${media_type}`,
+    width: Number(width),
+    height: Number(height),
+  };
+}
+
 type UncheckedAnsweredUserQuestion = Partial<
   Record<keyof WireAnsweredUserQuestion, unknown>
 >;
@@ -1207,6 +1240,16 @@ export function parseToolResultPreview(
       feedback: (feedback as string | undefined) ?? null,
     };
   }
+  if (value.tool === "screen_capture") {
+    const { image, mark_count }: UncheckedScreenCaptureResult = value;
+    // A capture without its image is not a card — the screenshot is the whole
+    // point, so a malformed image takes the card down rather than render an
+    // empty frame.
+    if (!Number.isInteger(mark_count) || Number(mark_count) < 0) return null;
+    const parsedImage = parseImageRef(image);
+    if (parsedImage === null) return null;
+    return { tool: "screen_capture", image: parsedImage, markCount: Number(mark_count) };
+  }
   if (value.tool !== "exec") return null;
   const {
     exit_code,
@@ -1238,26 +1281,7 @@ export function parseToolResultPreview(
     return null;
   }
   const parsedImages = imageValues
-    .map((image) => {
-      if (!isRecord(image)) return null;
-      const { blob_id, media_type, width, height } = image;
-      if (
-        typeof blob_id !== "string" ||
-        !["png", "jpeg", "webp"].includes(String(media_type)) ||
-        !Number.isInteger(width) ||
-        Number(width) <= 0 ||
-        !Number.isInteger(height) ||
-        Number(height) <= 0
-      ) {
-        return null;
-      }
-      return {
-        attachmentId: blob_id,
-        mediaType: media_type === "jpeg" ? "image/jpeg" : `image/${media_type}`,
-        width: Number(width),
-        height: Number(height),
-      };
-    })
+    .map(parseImageRef)
     .filter((image): image is NonNullable<typeof image> => image !== null);
   if (parsedImages.length !== imageValues.length) return null;
   return {
@@ -1322,6 +1346,7 @@ const RENDERER_APPROVAL_KINDS = {
   external_mcp_may_call_server: true,
   workspace_may_modify_files: true,
   delegate_may_run_background_agent: true,
+  computer_may_control_app: true,
   unsupported: true,
 } as const satisfies Record<RendererApprovalKind, true>;
 

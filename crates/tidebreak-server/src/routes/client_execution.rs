@@ -91,6 +91,14 @@ pub enum ClientExecutionResolution {
         /// predate this field, which simply report no rows.
         #[serde(default)]
         rows: Option<serde_json::Value>,
+        /// Images the executor published to the blob store and is returning by
+        /// reference (a computer-use screen capture). Metadata only — the
+        /// pixels never cross this wire; the desktop publishes them through the
+        /// image-attachment path and sends the resulting `ImageRef`s. The store
+        /// projects them into the call's preview so the transcript reattaches
+        /// them, gated on the model's image-input flag.
+        #[serde(default)]
+        images: Option<Vec<tidebreak_core::ImageRef>>,
     },
     Failed {
         result: String,
@@ -109,6 +117,15 @@ impl ClientExecutionResolution {
     fn rows(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Completed { rows, .. } => rows.as_ref(),
+            Self::Failed { .. } | Self::Cancelled { .. } => None,
+        }
+    }
+
+    /// The image references the executor returned, if any. Only a completed
+    /// call has any — a failure describes work that did not happen.
+    fn images(&self) -> Option<&[tidebreak_core::ImageRef]> {
+        match self {
+            Self::Completed { images, .. } => images.as_deref(),
             Self::Failed { .. } | Self::Cancelled { .. } => None,
         }
     }
@@ -356,6 +373,7 @@ pub async fn resolve_client_execution(
     store.require_chat(id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let rows = body.resolution.rows().cloned();
+    let images = body.resolution.images().map(<[_]>::to_vec);
     let resolution = body.resolution.into_core();
     validate_resolution(&resolution)?;
     let now = Utc::now();
@@ -368,6 +386,7 @@ pub async fn resolve_client_execution(
             &resolution,
             now,
             rows.as_ref(),
+            images.as_deref(),
         )
         .await?;
     if resolution_receipt.outcome == ResolveToolCallOutcome::LeaseLost {
@@ -380,6 +399,7 @@ pub async fn resolve_client_execution(
                 &resolution,
                 now,
                 rows.as_ref(),
+                images.as_deref(),
             )
             .await?;
     }
@@ -450,4 +470,59 @@ fn validate_resolution(resolution: &ToolCallResolution) -> Result<(), ServerErro
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A desktop `StoredResolution::Completed` carrying a computer-use
+    /// capture's image references must deserialize into the server's resolution
+    /// shape — same `status`-tagged, snake_case envelope — so the images reach
+    /// the preview projection. A regression here means screenshots publish but
+    /// never materialize as model image blocks.
+    #[test]
+    fn completed_resolution_with_images_round_trips_from_the_desktop_wire() {
+        let blob_id = uuid::Uuid::from_u128(7);
+        // The exact JSON the desktop's `StoredResolution::Completed` serializes
+        // to for a capture. Build it by serializing the real `ImageRef` so the
+        // test tracks the type's wire shape (`media_type` is the snake_case
+        // variant name, not the IANA string).
+        let image = tidebreak_core::ImageRef {
+            blob_id,
+            media_type: tidebreak_core::ImageMediaType::Png,
+            width: 2056,
+            height: 1329,
+            byte_len: 979437,
+        };
+        let wire = serde_json::json!({
+            "status": "completed",
+            "result": "{\"status\":\"ok\"}",
+            "images": [serde_json::to_value(image).unwrap()],
+        });
+        let resolution: ClientExecutionResolution = serde_json::from_value(wire).unwrap();
+        let ClientExecutionResolution::Completed { images, .. } = &resolution else {
+            panic!("expected a completed resolution");
+        };
+        let images = images.as_ref().expect("images survive the wire");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].blob_id, blob_id);
+        assert_eq!(images[0].width, 2056);
+    }
+
+    /// A completed resolution with no images (every other client tool) still
+    /// parses — the field is optional for backward compatibility with executors
+    /// that predate it.
+    #[test]
+    fn completed_resolution_without_images_still_parses() {
+        let wire = serde_json::json!({
+            "status": "completed",
+            "result": "done",
+        });
+        let resolution: ClientExecutionResolution = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            resolution,
+            ClientExecutionResolution::Completed { images: None, .. }
+        ));
+    }
 }

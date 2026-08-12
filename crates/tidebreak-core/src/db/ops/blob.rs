@@ -115,6 +115,7 @@ where
             Ok(crate::ToolResultPreview::Exec { images, .. }) => {
                 images.iter().any(|image| image.blob_id == blob_id)
             }
+            Ok(crate::ToolResultPreview::ScreenCapture { image, .. }) => image.blob_id == blob_id,
             Ok(_) => false,
             Err(_) => true,
         }

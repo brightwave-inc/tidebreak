@@ -84,6 +84,18 @@ pub enum AuditOperation {
     ListAppFolder,
     ReadAppFolderFile,
     WriteAppFolderFile,
+    CuListWindows,
+    CuCaptureScreen,
+    CuReadAppContent,
+    CuClick,
+    CuTypeText,
+    CuKeyPress,
+    CuScroll,
+    CuFocusWindow,
+    CuWait,
+    CuGrantApp,
+    CuRevokeApp,
+    CuConfirmControlAction,
     ProtocolVersionMismatch,
 }
 
@@ -136,6 +148,16 @@ pub enum AuditTarget {
         root_id: RootId,
         relative: RelativePath,
     },
+    /// One application a computer-use op touched, by bundle id. The optional
+    /// element label is the bounded, sanitized title of the addressed control
+    /// — never raw screen text.
+    App {
+        bundle_id: AuditLabel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        element_label: Option<AuditLabel>,
+    },
+    /// The whole display (a full-screen capture).
+    Screen,
 }
 
 /// Bounded picker-result leaf name used in audit and management UI.
@@ -149,6 +171,17 @@ impl AuditLabel {
     }
 
     fn from_leaf(value: &str) -> Self {
+        Self::sanitized(value, "Selected folder")
+    }
+
+    /// Bounded, sanitized form of an attacker-influenceable host string (an
+    /// app bundle id, an element label). Same rules as the picker leaf name:
+    /// no separators or NUL, fixed byte cap, never empty.
+    pub(crate) fn from_host_text(value: &str) -> Self {
+        Self::sanitized(value, "unknown")
+    }
+
+    fn sanitized(value: &str, fallback: &str) -> Self {
         let sanitized = value
             .chars()
             .map(|character| {
@@ -160,7 +193,7 @@ impl AuditLabel {
             })
             .collect::<String>();
         let sanitized = if sanitized.is_empty() {
-            "Selected folder"
+            fallback
         } else {
             &sanitized
         };

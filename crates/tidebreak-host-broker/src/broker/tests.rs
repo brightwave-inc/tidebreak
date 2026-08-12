@@ -737,7 +737,11 @@ fn grant_statements_report_every_minted_consent_with_safe_folder_identity() {
         assert_eq!(grant.subject, subject);
         assert_eq!(grant.consent_method, ConsentMethod::FolderPicker);
         match &grant.scope {
-            Scope::Subject => assert_eq!(grant.root_display_name, None),
+            // This registration mints only folder grants; computer-use scopes
+            // never appear here.
+            Scope::Subject | Scope::App { .. } | Scope::Screen => {
+                assert_eq!(grant.root_display_name, None)
+            }
             Scope::Root { .. } | Scope::PathSubtree { .. } => {
                 // The safe identity is the registered folder's basename, the
                 // same name the approved-roots listing exposes — never a path.
@@ -2170,7 +2174,7 @@ fn hello_negotiates_across_version_skew_but_operations_do_not() {
     assert_eq!(hello.request_id, hello_request_id);
     assert_eq!(
         unwrap_response(hello).unwrap(),
-        ControlResult::Hello(super::hello())
+        ControlResult::Hello(super::hello(false))
     );
 
     let error = broker.operator().handle(OperationEnvelope {
@@ -4427,4 +4431,842 @@ fn completed_receipts_are_bounded_without_breaking_retry_or_receipt_lookup() {
             .receipt,
         RegisterRootReceipt::Completed { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Computer use: blocklist, grant implication at dispatch, the consequential
+// gate, audit-before-act, capture handoff, and the bounded wait.
+// ---------------------------------------------------------------------------
+
+use crate::computer_use::{
+    AxTree, CaptureMeta, ElementDescription, PermissionStatus, WindowFrame, WindowInfo,
+};
+use crate::{CuConfirmControlActionRequest, CuListAppGrantsRequest, CuResolveHandoffRequest};
+
+/// A scripted backend: the broker's policy is what is under test, so the
+/// "native" side records what it was asked to do and answers from canned
+/// state. `describe` is what the target element currently reports.
+#[derive(Default)]
+struct StubCuBackend {
+    available: bool,
+    description: Mutex<ElementDescription>,
+    clicked: Mutex<Vec<(String, Option<String>)>>,
+    typed: Mutex<Vec<String>>,
+    keys: Mutex<Vec<String>>,
+    capture_png: Vec<u8>,
+}
+
+impl StubCuBackend {
+    fn available() -> Arc<Self> {
+        Arc::new(Self {
+            available: true,
+            description: Mutex::new(ElementDescription {
+                role: Some("AXButton".to_owned()),
+                label: Some("Cancel".to_owned()),
+                fingerprint: None,
+            }),
+            capture_png: vec![0x89, 0x50, 0x4e, 0x47],
+            ..Default::default()
+        })
+    }
+
+    fn set_label(&self, label: &str) {
+        self.description.lock().unwrap().label = Some(label.to_owned());
+    }
+
+    /// Give the described element a fingerprint, as if it resolved to a real
+    /// AX element with a stable identity.
+    fn set_fingerprint(&self, fingerprint: &str) {
+        self.description.lock().unwrap().fingerprint = Some(fingerprint.to_owned());
+    }
+
+    fn clicks(&self) -> Vec<(String, Option<String>)> {
+        self.clicked.lock().unwrap().clone()
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.keys.lock().unwrap().clone()
+    }
+
+    /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
+    /// finds exactly one mark.
+    fn ax_tree(&self) -> AxTree {
+        AxTree {
+            app_name: Some("Example".to_owned()),
+            tree: serde_json::json!({
+                "role": "AXWindow",
+                "id": "0",
+                "fingerprint": "fp0",
+                "children": [{
+                    "role": "AXButton",
+                    "id": "0.0",
+                    "fingerprint": "fp1",
+                    "title": "Send",
+                    "frame": { "x": 10.0, "y": 10.0, "width": 60.0, "height": 24.0 },
+                    "children": [],
+                }],
+            }),
+            truncated: false,
+        }
+    }
+}
+
+impl ComputerUseBackend for StubCuBackend {
+    fn permission_status(&self) -> Result<PermissionStatus, BackendError> {
+        Ok(PermissionStatus {
+            screen_recording: true,
+            accessibility: true,
+        })
+    }
+
+    fn request_permissions(&self) -> Result<PermissionStatus, BackendError> {
+        self.permission_status()
+    }
+
+    fn capture(
+        &self,
+        _target: &CaptureTarget,
+        out_path: &Path,
+    ) -> Result<CaptureMeta, BackendError> {
+        std::fs::write(out_path, &self.capture_png).unwrap();
+        Ok(CaptureMeta {
+            width: 800,
+            height: 600,
+            media_type: "image/png".to_owned(),
+        })
+    }
+
+    fn read_ax_tree(
+        &self,
+        _bundle_id: &str,
+        _max_depth: Option<u32>,
+        _max_nodes: Option<u32>,
+    ) -> Result<AxTree, BackendError> {
+        Ok(self.ax_tree())
+    }
+
+    fn list_windows(&self, _bundle_id: Option<&str>) -> Result<Vec<WindowInfo>, BackendError> {
+        Ok(vec![WindowInfo {
+            window_id: 7,
+            title: Some("Inbox".to_owned()),
+            app_name: Some("Example".to_owned()),
+            bundle_id: Some("com.example.app".to_owned()),
+            pid: 4242,
+            frame: WindowFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        }])
+    }
+
+    fn click(
+        &self,
+        bundle_id: &str,
+        target: &ElementTarget,
+        _button: Option<&str>,
+        _click_count: Option<u32>,
+    ) -> Result<ControlMeta, BackendError> {
+        self.clicked
+            .lock()
+            .unwrap()
+            .push((bundle_id.to_owned(), target.element_id.clone()));
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn type_text(
+        &self,
+        _bundle_id: &str,
+        text: &str,
+        _target: &ElementTarget,
+    ) -> Result<ControlMeta, BackendError> {
+        self.typed.lock().unwrap().push(text.to_owned());
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn key_press(
+        &self,
+        _bundle_id: &str,
+        key: &str,
+        _modifiers: Option<&[String]>,
+    ) -> Result<ControlMeta, BackendError> {
+        self.keys.lock().unwrap().push(key.to_owned());
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn scroll(
+        &self,
+        _bundle_id: &str,
+        _target: &ElementTarget,
+        _dx: Option<f64>,
+        _dy: Option<f64>,
+    ) -> Result<ControlMeta, BackendError> {
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn focus_window(
+        &self,
+        _bundle_id: &str,
+        _window_id: Option<u32>,
+    ) -> Result<ControlMeta, BackendError> {
+        Ok(ControlMeta {
+            success: true,
+            used_fallback: false,
+            detail: None,
+        })
+    }
+
+    fn describe_element(
+        &self,
+        _bundle_id: &str,
+        _target: &ElementTarget,
+    ) -> Result<ElementDescription, BackendError> {
+        Ok(self.description.lock().unwrap().clone())
+    }
+
+    fn is_available(&self) -> bool {
+        self.available
+    }
+}
+
+struct CuFixture {
+    _temp: tempfile::TempDir,
+    broker: Broker,
+    backend: Arc<StubCuBackend>,
+    audit: Arc<CollectingAudit>,
+    subject: GrantSubject,
+    context: ExecutionContext,
+}
+
+/// A broker with a stubbed-available backend, a collecting audit sink, and a
+/// staging dir under the test tempdir. No folders are registered: computer
+/// use needs none.
+fn cu_setup() -> CuFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = StubCuBackend::available();
+    let audit = Arc::new(CollectingAudit::default());
+    let broker = Broker::test_with_computer_use(
+        test_policy(&temp),
+        audit.clone(),
+        backend.clone(),
+        temp.path().join("cu-staging"),
+    );
+    let conversation = Uuid::new_v4();
+    CuFixture {
+        _temp: temp,
+        broker,
+        backend,
+        audit,
+        subject: GrantSubject::conversation(conversation).unwrap(),
+        context: ExecutionContext::standalone(conversation).unwrap(),
+    }
+}
+
+impl CuFixture {
+    fn control(&self, request: ControlRequest) -> Result<ControlResult, ErrorResponse> {
+        unwrap_response(self.broker.controller().handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request,
+        }))
+    }
+
+    fn operate(&self, request: OperationRequest) -> Result<OperationResult, ErrorResponse> {
+        operate(&self.broker.operator(), self.context, request)
+    }
+
+    fn grant(&self, capability: Capability, bundle_id: Option<&str>) -> CuGrantAppResult {
+        let result = self
+            .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+                subject: self.subject,
+                capability,
+                bundle_id: bundle_id.map(str::to_owned),
+                consent: ConsentMethod::PermissionDialog,
+            }))
+            .unwrap();
+        let ControlResult::CuGrantApp(result) = result else {
+            panic!("unexpected control result")
+        };
+        result
+    }
+
+    fn click(&self, bundle_id: &str) -> Result<OperationResult, ErrorResponse> {
+        self.operate(OperationRequest::CuClick {
+            bundle_id: bundle_id.to_owned(),
+            target: ElementTargetWire {
+                element_id: Some("0.0".to_owned()),
+                element_fingerprint: Some("fp1".to_owned()),
+                ..Default::default()
+            },
+            button: None,
+            click_count: None,
+        })
+    }
+}
+
+#[test]
+fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
+    let fixture = cu_setup();
+    // The blocklist outranks consent: mint a grant for a blocked bundle by
+    // hand (the control surface refuses it, tested below) and the op still
+    // refuses.
+    for blocked in [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.apple.SecurityAgent",
+        "io.brightwave.openwave",
+        "io.brightwave.anything",
+    ] {
+        fixture.broker.shared.state.lock().unwrap().grants.push(
+            Grant::from_consent(
+                GrantId::new(),
+                fixture.subject,
+                Capability::ControlApp,
+                Scope::App {
+                    bundle_id: blocked.to_owned(),
+                },
+                ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+            )
+            .unwrap(),
+        );
+        let error = fixture.click(blocked).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Denied, "{blocked}");
+        assert!(!error.retryable, "{blocked}");
+
+        let grant_error = fixture
+            .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+                subject: fixture.subject,
+                capability: Capability::ControlApp,
+                bundle_id: Some(blocked.to_owned()),
+                consent: ConsentMethod::PermissionDialog,
+            }))
+            .unwrap_err();
+        assert_eq!(grant_error.code, ErrorCode::Denied, "{blocked}");
+        assert!(!grant_error.retryable, "{blocked}");
+    }
+    assert!(fixture.backend.clicks().is_empty());
+    // A lookalike suffix is not the blocked bundle.
+    fixture.grant(Capability::ControlApp, Some("com.apple.Terminalized"));
+    fixture.click("com.apple.Terminalized").unwrap();
+}
+
+#[test]
+fn consequential_gate_holds_commit_labels_and_confirms_once() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+
+    let result = fixture.click("com.example.app").unwrap();
+    let OperationResult::CuNeedsConfirmation(held) = result else {
+        panic!("expected a confirmation hold, got {result:?}")
+    };
+    assert_eq!(held.target_label.as_deref(), Some("Send"));
+    assert!(fixture.backend.clicks().is_empty());
+
+    // Confirming performs exactly the held action; the agent supplies no
+    // parameters at confirm time.
+    let confirmed = fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap();
+    let ControlResult::CuConfirmControlAction(meta) = confirmed else {
+        panic!("unexpected control result")
+    };
+    assert!(meta.success);
+    assert_eq!(fixture.backend.clicks().len(), 1);
+
+    // The token is single-use.
+    let replay = fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(replay.code, ErrorCode::NotFound);
+    assert_eq!(fixture.backend.clicks().len(), 1);
+}
+
+#[test]
+fn navigation_labels_proceed_without_a_confirmation() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Cancel");
+
+    let result = fixture.click("com.example.app").unwrap();
+    assert!(matches!(result, OperationResult::CuClick(_)));
+    assert_eq!(fixture.backend.clicks().len(), 1);
+}
+
+#[test]
+fn a_commit_shaped_key_press_is_held_for_confirmation() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    // A chorded key (Cmd+Shift+D, "send" in Mail) is commit-shaped: it parks
+    // on a confirmation and nothing is pressed yet.
+    let held = fixture
+        .operate(OperationRequest::CuKeyPress {
+            bundle_id: "com.example.app".to_owned(),
+            key: "d".to_owned(),
+            modifiers: Some(vec!["cmd".to_owned(), "shift".to_owned()]),
+        })
+        .unwrap();
+    let OperationResult::CuNeedsConfirmation(confirmation) = held else {
+        panic!("expected a confirmation hold for a chorded key, got {held:?}")
+    };
+    assert!(fixture.backend.keys().is_empty());
+
+    // Confirming performs exactly the held key press.
+    fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: confirmation.confirmation_id,
+            },
+        ))
+        .unwrap();
+    assert_eq!(fixture.backend.keys(), ["d"]);
+}
+
+#[test]
+fn a_plain_navigation_key_proceeds_without_a_confirmation() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    // An unmodified navigation key is not commit-shaped.
+    let result = fixture
+        .operate(OperationRequest::CuKeyPress {
+            bundle_id: "com.example.app".to_owned(),
+            key: "left".to_owned(),
+            modifiers: None,
+        })
+        .unwrap();
+    assert!(matches!(result, OperationResult::CuKeyPress(_)));
+    assert_eq!(fixture.backend.keys(), ["left"]);
+}
+
+#[test]
+fn a_confirmation_is_void_when_the_label_changes_under_it() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+
+    let OperationResult::CuNeedsConfirmation(held) = fixture.click("com.example.app").unwrap()
+    else {
+        panic!("expected a confirmation hold")
+    };
+    // The UI shifted while the prompt was up: "Send" became something else.
+    fixture.backend.set_label("Send invoice");
+    let error = fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StaleElement);
+    assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn a_confirmation_is_void_when_the_element_is_swapped_under_an_identical_label() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+    fixture.backend.set_fingerprint("fp-original");
+
+    let OperationResult::CuNeedsConfirmation(held) = fixture.click("com.example.app").unwrap()
+    else {
+        panic!("expected a confirmation hold")
+    };
+    // The app swapped the button for a different element that happens to carry
+    // the same label — the classic same-label substitution. The label still
+    // matches, but the fingerprint changed, so the confirmation must not act.
+    fixture.backend.set_fingerprint("fp-swapped");
+    let error = fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StaleElement);
+    assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn control_grants_cover_reads_but_read_grants_never_cover_control() {
+    let fixture = cu_setup();
+    // A ControlApp grant authorizes the read ops for the same app.
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    let read = fixture
+        .operate(OperationRequest::CuReadAppContent {
+            bundle_id: "com.example.app".to_owned(),
+            max_depth: None,
+            max_nodes: None,
+        })
+        .unwrap();
+    assert!(matches!(read, OperationResult::CuReadAppContent(_)));
+
+    // A read-only grant does not authorize input synthesis.
+    let conversation = Uuid::new_v4();
+    let reader = GrantSubject::conversation(conversation).unwrap();
+    let reader_context = ExecutionContext::standalone(conversation).unwrap();
+    let granted = fixture
+        .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject: reader,
+            capability: Capability::ReadAppContent,
+            bundle_id: Some("com.example.app".to_owned()),
+            consent: ConsentMethod::PermissionDialog,
+        }))
+        .unwrap();
+    assert!(matches!(granted, ControlResult::CuGrantApp(_)));
+    let error = operate(
+        &fixture.broker.operator(),
+        reader_context,
+        OperationRequest::CuClick {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire {
+                element_id: Some("0.0".to_owned()),
+                ..Default::default()
+            },
+            button: None,
+            click_count: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn an_unrecordable_control_op_never_reaches_the_backend() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    let broken = Arc::new(BreakableAudit::default());
+    let broker = Broker::test_with_computer_use(
+        test_policy(&fixture._temp),
+        broken.clone(),
+        fixture.backend.clone(),
+        fixture._temp.path().join("cu-staging-broken"),
+    );
+    // Rebuild the grant on the broken-audit broker: the intent record must
+    // still be writable, so grant first, break afterwards.
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let granted = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some("com.example.app".to_owned()),
+            consent: ConsentMethod::PermissionDialog,
+        }),
+    }))
+    .unwrap();
+    assert!(matches!(granted, ControlResult::CuGrantApp(_)));
+
+    broken.broken.store(true, Ordering::SeqCst);
+    let error = operate(
+        &broker.operator(),
+        context,
+        OperationRequest::CuClick {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire {
+                element_id: Some("0.0".to_owned()),
+                ..Default::default()
+            },
+            button: None,
+            click_count: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AuditUnavailable);
+    assert!(error.retryable);
+    assert!(fixture.backend.clicks().is_empty());
+
+    // The confirm path is gated the same way: a held action cannot be
+    // performed while its intent cannot be recorded.
+    broken.broken.store(false, Ordering::SeqCst);
+    fixture.backend.set_label("Send");
+    let held = operate(
+        &broker.operator(),
+        context,
+        OperationRequest::CuClick {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire {
+                element_id: Some("0.0".to_owned()),
+                ..Default::default()
+            },
+            button: None,
+            click_count: None,
+        },
+    )
+    .unwrap();
+    let OperationResult::CuNeedsConfirmation(held) = held else {
+        panic!("expected a confirmation hold")
+    };
+    broken.broken.store(true, Ordering::SeqCst);
+    let error = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::CuConfirmControlAction(CuConfirmControlActionRequest {
+            confirmation_id: held.confirmation_id,
+        }),
+    }))
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AuditUnavailable);
+    assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn captures_cross_the_wire_as_a_single_use_handoff() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::CaptureScreen, Some("com.example.app"));
+
+    let result = fixture
+        .operate(OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::App {
+                bundle_id: "com.example.app".to_owned(),
+            },
+        })
+        .unwrap();
+    let OperationResult::CuCaptureScreen(capture) = result else {
+        panic!("expected a capture result, got {result:?}")
+    };
+    assert_eq!((capture.width, capture.height), (800, 600));
+    // The annotated capture carried the one interactive element as a mark.
+    assert_eq!(capture.marks.len(), 1);
+    assert_eq!(capture.marks[0].label, "Send");
+    // The agent-channel result must not carry the pixels.
+    let wire = serde_json::to_value(&capture).unwrap();
+    assert!(wire.get("content_base64").is_none());
+    assert!(wire.get("bytes").is_none());
+
+    // The trusted desktop redeems the handoff once, getting the exact bytes
+    // the helper wrote.
+    let resolved = fixture
+        .control(ControlRequest::CuResolveHandoff(CuResolveHandoffRequest {
+            handoff_id: capture.handoff_id,
+        }))
+        .unwrap();
+    let ControlResult::CuResolveHandoff(resolved) = resolved else {
+        panic!("unexpected control result")
+    };
+    assert_eq!(
+        BASE64.decode(&resolved.content_base64).unwrap(),
+        vec![0x89, 0x50, 0x4e, 0x47]
+    );
+    assert_eq!(resolved.bytes, 4);
+
+    let second = fixture
+        .control(ControlRequest::CuResolveHandoff(CuResolveHandoffRequest {
+            handoff_id: capture.handoff_id,
+        }))
+        .unwrap_err();
+    assert_eq!(second.code, ErrorCode::NotFound);
+    assert!(!second.retryable);
+}
+
+#[test]
+fn computer_use_grants_list_and_revoke_roundtrip() {
+    let fixture = cu_setup();
+    let granted = fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    assert!(granted.granted);
+    // Re-granting the same tuple is an idempotent no-op naming the same grant.
+    let again = fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    assert!(!again.granted);
+    assert_eq!(again.grant_id, granted.grant_id);
+    // A whole-display grant is capture-only.
+    let screen = fixture.grant(Capability::CaptureScreen, None);
+    assert!(screen.granted);
+
+    let listed = fixture
+        .control(ControlRequest::CuListAppGrants(CuListAppGrantsRequest {
+            subject: fixture.subject,
+        }))
+        .unwrap();
+    let ControlResult::CuListAppGrants { grants } = listed else {
+        panic!("unexpected control result")
+    };
+    assert_eq!(grants.len(), 2);
+    assert!(grants.iter().any(|grant| {
+        grant.capability == Capability::ControlApp
+            && matches!(&grant.scope, Scope::App { bundle_id } if bundle_id == "com.example.app")
+    }));
+    assert!(
+        grants
+            .iter()
+            .any(|grant| grant.capability == Capability::CaptureScreen
+                && grant.scope == Scope::Screen)
+    );
+
+    // A screen grant authorizes a display capture; an app grant cannot.
+    let display = fixture
+        .operate(OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::Display { display_id: None },
+        })
+        .unwrap();
+    assert!(matches!(display, OperationResult::CuCaptureScreen(_)));
+
+    let revoked = fixture
+        .control(ControlRequest::CuRevokeApp(CuRevokeAppRequest {
+            subject: fixture.subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some("com.example.app".to_owned()),
+        }))
+        .unwrap();
+    assert!(matches!(
+        revoked,
+        ControlResult::CuRevokeApp { revoked: true }
+    ));
+    // Idempotent: the same withdrawal reports nothing left to withdraw.
+    let revoked = fixture
+        .control(ControlRequest::CuRevokeApp(CuRevokeAppRequest {
+            subject: fixture.subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some("com.example.app".to_owned()),
+        }))
+        .unwrap();
+    assert!(matches!(
+        revoked,
+        ControlResult::CuRevokeApp { revoked: false }
+    ));
+    // Enforcement follows the withdrawal.
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn wait_is_bounded_and_never_touches_the_backend() {
+    let fixture = cu_setup();
+    // No grant required; a wild value clamps to the cap rather than sleeping
+    // it — assert the clamp itself so the test suite never actually waits.
+    assert_eq!(bounded_wait_seconds(Some(9999.0)), MAX_CU_WAIT_SECONDS);
+    assert_eq!(bounded_wait_seconds(Some(-3.0)), 0.0);
+    assert_eq!(bounded_wait_seconds(Some(f64::NAN)), 0.0);
+    assert_eq!(bounded_wait_seconds(None), 0.0);
+    let result = fixture
+        .operate(OperationRequest::CuWait { seconds: Some(0.0) })
+        .unwrap();
+    let OperationResult::CuWait { seconds } = result else {
+        panic!("expected a wait result")
+    };
+    assert_eq!(seconds, 0.0);
+}
+
+#[test]
+fn hello_advertises_computer_use_only_when_a_backend_is_available() {
+    let fixture = cu_setup();
+    let hello = fixture.control(ControlRequest::Hello).unwrap();
+    let ControlResult::Hello(hello) = hello else {
+        panic!("unexpected control result")
+    };
+    for op in [
+        "cu_list_windows",
+        "cu_capture_screen",
+        "cu_read_app_content",
+        "cu_click",
+        "cu_type_text",
+        "cu_key_press",
+        "cu_scroll",
+        "cu_focus_window",
+        "cu_wait",
+    ] {
+        assert!(
+            hello.operations.iter().any(|advertised| advertised == op),
+            "{op}"
+        );
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let unsupported = Broker::test_with_computer_use(
+        test_policy(&temp),
+        Arc::new(MemoryAuditSink::new()),
+        Arc::new(UnsupportedBackend),
+        temp.path().join("cu-staging"),
+    );
+    let hello = unwrap_response(unsupported.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::Hello,
+    }))
+    .unwrap();
+    let ControlResult::Hello(hello) = hello else {
+        panic!("unexpected control result")
+    };
+    assert!(!hello.operations.iter().any(|op| op.starts_with("cu_")));
+}
+
+#[test]
+fn every_computer_use_op_lands_in_the_audit_trail_desensitized() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Cancel");
+    fixture.click("com.example.app").unwrap();
+    fixture
+        .operate(OperationRequest::CuKeyPress {
+            bundle_id: "com.example.app".to_owned(),
+            key: "return".to_owned(),
+            modifiers: None,
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuCaptureScreen {
+            target: CaptureTargetWire::App {
+                bundle_id: "com.example.app".to_owned(),
+            },
+        })
+        .unwrap();
+
+    let events = fixture.audit.events.lock().unwrap();
+    let click_intent = events
+        .iter()
+        .find(|event| {
+            event.operation == AuditOperation::CuClick && event.outcome == AuditOutcome::Attempted
+        })
+        .expect("a durable intent record precedes input synthesis");
+    let click_completion = events
+        .iter()
+        .find(|event| {
+            event.operation == AuditOperation::CuClick && event.outcome == AuditOutcome::Allowed
+        })
+        .expect("the click records its completion");
+    // Intent precedes completion in the trail, paired by request id.
+    assert_eq!(click_intent.request_id, click_completion.request_id);
+    // The target is the de-sensitized app identity — never screen content.
+    assert!(matches!(
+        &click_completion.target,
+        AuditTarget::App { bundle_id, element_label: None }
+            if bundle_id.as_str() == "com.example.app"
+    ));
+    assert!(events.iter().any(|event| {
+        event.operation == AuditOperation::CuKeyPress && event.outcome == AuditOutcome::Attempted
+    }));
+    assert!(events.iter().any(|event| {
+        event.operation == AuditOperation::CuCaptureScreen && event.outcome == AuditOutcome::Allowed
+    }));
 }

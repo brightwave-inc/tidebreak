@@ -12,11 +12,11 @@ use crate::{
 /// Enough for one base64-encoded maximum output write plus strict envelope overhead.
 pub const MAX_REQUEST_BYTES: usize = 4 * crate::broker::MAX_WRITE_FILE_BYTES / 3 + 128 * 1024;
 
-/// Enough for a base64 [`crate::protocol::MAX_READ_FILE_BINARY_BYTES`] payload
-/// plus envelope overhead. Binary reads are the only response that approaches
-/// this bound; every other one is orders of magnitude smaller.
-pub const MAX_RESPONSE_BYTES: usize =
-    4 * crate::protocol::MAX_READ_FILE_BINARY_BYTES / 3 + 512 * 1024;
+/// Enough for a base64 [`crate::protocol::MAX_HANDOFF_BYTES`] payload plus
+/// strict envelope overhead. Handoff resolutions (staged screenshots) are the
+/// largest responses; binary file reads are smaller, and every other response
+/// is orders of magnitude smaller.
+pub const MAX_RESPONSE_BYTES: usize = 4 * crate::protocol::MAX_HANDOFF_BYTES / 3 + 512 * 1024;
 
 /// One strictly typed request on the desktop-owned sidecar pipe.
 #[derive(Debug, Serialize, Deserialize)]

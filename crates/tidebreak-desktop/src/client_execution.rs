@@ -25,6 +25,7 @@ use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 use self::folder_operations::granted_folder_capabilities;
 
+pub(crate) mod computer_use;
 mod control_plane;
 pub(crate) mod delegated_file_read;
 pub(crate) mod folder_operations;
@@ -38,9 +39,9 @@ pub(crate) use control_plane::ControlPlaneClient;
 use control_plane::ControlPlaneError;
 pub(crate) use receipt_store::ReceiptStore;
 use receipt_store::{
-    delegated_file_content_fits_server, DelegatedFileFailureReason, DelegatedFileReadReceipt,
-    DelegatedFileResolution, DispatchRecovery, FolderAccessIntent, FolderAccessReceipt,
-    FolderOperationPhase, FolderOperationReceipt, ManualFolderConnectReceipt,
+    delegated_file_content_fits_server, ComputerUseReceipt, DelegatedFileFailureReason,
+    DelegatedFileReadReceipt, DelegatedFileResolution, DispatchRecovery, FolderAccessIntent,
+    FolderAccessReceipt, FolderOperationPhase, FolderOperationReceipt, ManualFolderConnectReceipt,
     ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
 };
 pub(crate) use receipt_store::{
@@ -552,6 +553,7 @@ fn connected_resolution_from_capabilities(
         result: serde_json::to_string(&result)
             .map_err(|_| "could not encode folder-access result".to_owned())?,
         rows: None,
+        images: None,
     })
 }
 
@@ -560,6 +562,7 @@ fn declined_resolution() -> Result<StoredResolution, String> {
         result: serde_json::to_string(&RequestFolderAccessResult::Declined)
             .map_err(|_| "could not encode folder-access result".to_owned())?,
         rows: None,
+        images: None,
     })
 }
 

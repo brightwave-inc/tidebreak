@@ -27,13 +27,22 @@ use uuid::Uuid;
 
 use crate::{
     audit::{
-        AuditActor, AuditError, AuditEvent, AuditOperation, AuditOutcome, AuditSink, AuditTarget,
-        JsonlAuditSink, MemoryAuditSink,
+        AuditActor, AuditError, AuditEvent, AuditLabel, AuditOperation, AuditOutcome, AuditSink,
+        AuditTarget, JsonlAuditSink, MemoryAuditSink,
     },
+    blocklist::is_blocked_control_bundle,
+    computer_use::{
+        BackendError, BackendErrorKind, ComputerUseBackend, ControlMeta, HelperBackend,
+        UnsupportedBackend,
+    },
+    consequential::{classify, key_press_needs_confirmation, truncate_label},
     path_policy::RootIdentity,
     protocol::{
-        AppFolderWriteRequest, ControlEnvelope, ControlRequest, ControlResponseEnvelope,
-        ControlResult, DirectoryEntry, EntryKind, ErrorCode, ErrorResponse,
+        AppFolderWriteRequest, CaptureTargetWire, ControlEnvelope, ControlRequest,
+        ControlResponseEnvelope, ControlResult, CuCaptureScreenResult,
+        CuConfirmControlActionRequest, CuGrantAppRequest, CuGrantAppResult,
+        CuNeedsConfirmationResult, CuResolveHandoffRequest, CuResolveHandoffResult,
+        CuRevokeAppRequest, DirectoryEntry, ElementTargetWire, EntryKind, ErrorCode, ErrorResponse,
         GrantRootCapabilityRequest, GrantRootCapabilityResult, GrantStatementSummary, HelloResult,
         LookupRegisterRootReceiptRequest, LookupRegisterRootReceiptResult,
         LookupRootAttachmentReceiptRequest, LookupRootAttachmentReceiptResult, OperationEnvelope,
@@ -44,12 +53,14 @@ use crate::{
         RevokeGrantResult, RevokeRootRequest, RevokeRootResult, RootAccess,
         RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
         RootAttachmentMutationResult, RootSummary, UnavailableRootReason, UnavailableRootSummary,
-        WriteFileMode, WriteFileRequest, WriteFileResult, MAX_READ_FILE_BINARY_BYTES,
-        PROTOCOL_VERSION,
+        WriteFileMode, WriteFileRequest, WriteFileResult, MAX_HANDOFF_BYTES,
+        MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
     },
-    Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
-    GrantSubject, OperationId, RelativePath, RequestId, RootAttachment, RootId, RootPolicy,
-    RootPolicyError, Scope, SubjectKind, ValidatedRoot,
+    set_of_marks::extract_marks,
+    Capability, CaptureTarget, ConsentMethod, ConsentRecord, Consequence, ControlOp, ElementTarget,
+    ExecutionContext, Grant, GrantError, GrantId, GrantSubject, OperationId, RelativePath,
+    RequestId, RootAttachment, RootId, RootPolicy, RootPolicyError, Scope, SubjectKind,
+    ValidatedRoot,
 };
 
 mod state_file;
@@ -62,6 +73,34 @@ const MAX_LIST_ROOTS: usize = 256;
 const MAX_RESOLVE_EXEC_ROOTS: usize = 32;
 const MAX_ROOT_DISPLAY_BYTES: usize = 1024;
 pub(crate) const MAX_WRITE_FILE_BYTES: usize = 512 * 1024;
+
+/// Upper clamp for a `cu_wait` request. The pause is a broker-side sleep on
+/// the synchronous dispatch loop, so an unbounded one would wedge the whole
+/// sidecar; ten seconds covers "wait for the sheet to animate" without
+/// letting a runaway value stall every other request.
+const MAX_CU_WAIT_SECONDS: f64 = 10.0;
+/// Upper clamp on `cu_read_app_content` depth / node budgets. The helper
+/// applies its own bounds; these keep a wild request from reaching it.
+const MAX_CU_AX_DEPTH: u32 = 16;
+const MAX_CU_AX_NODES: u32 = 4_096;
+/// Largest `cu_type_text` payload. Well beyond any realistic field entry.
+const MAX_CU_TYPE_TEXT_BYTES: usize = 8 * 1024;
+/// Bound on the `cu_key_press` vocabulary reaching the helper.
+const MAX_CU_KEY_BYTES: usize = 64;
+const MAX_CU_MODIFIERS: usize = 8;
+/// Cap on Set-of-Marks badges extracted for one annotated capture.
+const MAX_CAPTURE_MARKS: usize = 100;
+/// Pending consequential-action confirmations retained at once, oldest
+/// evicted first. Each is single-use and small; the cap only bounds a client
+/// that never confirms.
+const MAX_PENDING_CONFIRMATIONS: usize = 64;
+/// Staged captures awaiting redemption, oldest evicted (and their staging
+/// files deleted) first.
+const MAX_PENDING_HANDOFFS: usize = 32;
+/// Subdirectory of the broker's durable data directory used for capture
+/// staging, or a unique owner-only directory under the system temp dir for an
+/// ephemeral broker.
+const CU_STAGING_DIR_NAME: &str = "cu-staging";
 
 /// A broker request failed without widening host access.
 #[derive(Debug, Error)]
@@ -116,6 +155,16 @@ pub enum BrokerError {
     AmbiguousWrite,
     #[error("a durable write receipt contains a terminal failure")]
     StoredWriteFailure(ErrorResponse),
+    #[error("this application is on the computer-use blocklist")]
+    BlockedApp,
+    #[error("computer-use backend failed: {}", .0.message)]
+    ComputerUse(BackendError),
+    #[error("no held control action matches this confirmation identity")]
+    UnknownConfirmation,
+    #[error("the target element changed after confirmation")]
+    StaleTarget,
+    #[error("computer-use request parameters are invalid")]
+    InvalidCuRequest,
 }
 
 /// Owner of the shared broker registry.
@@ -143,6 +192,13 @@ struct Shared {
     state_file: Option<StateFile>,
     audit: Arc<dyn AuditSink>,
     failed_closed: AtomicBool,
+    /// The computer-use native backend. Policy lives here in the broker; the
+    /// backend only performs an already-authorized op.
+    computer_use: Arc<dyn ComputerUseBackend>,
+    /// Owner-only directory staged captures are written to before the trusted
+    /// desktop redeems them. `None` only when the host would not provide one;
+    /// capture then refuses as a host I/O failure.
+    cu_staging: Option<PathBuf>,
 }
 
 impl Shared {
@@ -202,6 +258,72 @@ struct State {
     /// conversation subject is purged — the points where the position itself
     /// stops existing.
     settled: HashSet<(GrantSubject, RootId)>,
+    /// Consequential control actions held for explicit user confirmation,
+    /// keyed by their single-use confirmation identity. Session-only: a
+    /// pending confirmation never survives a restart (the desktop re-issues
+    /// the action instead), so this table is deliberately not persisted.
+    pending_confirmations: HashMap<Uuid, PendingControlAction>,
+    /// Insertion order of `pending_confirmations`, for bounded eviction.
+    confirmation_order: VecDeque<Uuid>,
+    /// Captures staged on disk awaiting trusted-desktop redemption, keyed by
+    /// handoff identity. Session-only like the confirmations: the staged file
+    /// is cleared on broker startup, so an identity from a previous run
+    /// resolves to `NotFound` rather than stale pixels.
+    handoffs: HashMap<Uuid, StagedCapture>,
+    /// Insertion order of `handoffs`, for bounded eviction.
+    handoff_order: VecDeque<Uuid>,
+}
+
+/// A consequential control action the consequential gate held back, waiting
+/// on the user's explicit confirmation. The broker owns the parameters: the
+/// agent cannot substitute a different target or text at confirm time, only
+/// redeem the exact held action (or let it lapse).
+#[derive(Clone)]
+struct PendingControlAction {
+    /// Execution authority the original request arrived with; re-authorized
+    /// against the live grants at act time.
+    context: ExecutionContext,
+    action: PendingActionKind,
+    /// The bounded label shown in the confirmation. The held action is
+    /// honored only while the live element still reports this label — a UI
+    /// that changed under the prompt voids it.
+    expected_label: Option<String>,
+    /// The element's fingerprint read when the confirmation was raised. The
+    /// act-time re-check compares it to the live fingerprint, so an element
+    /// swapped out for another with the same (possibly truncated) label still
+    /// voids the confirmation. Absent for an action with no element.
+    expected_fingerprint: Option<String>,
+}
+
+#[derive(Clone)]
+enum PendingActionKind {
+    Click {
+        bundle_id: String,
+        target: ElementTarget,
+        button: Option<String>,
+        click_count: Option<u32>,
+    },
+    TypeText {
+        bundle_id: String,
+        text: String,
+        target: ElementTarget,
+    },
+    /// A key press held for confirmation — a chord or a bare Return, the
+    /// keyboard paths that commit (send / delete / quit) without any element
+    /// label the consequential classifier could read.
+    KeyPress {
+        bundle_id: String,
+        key: String,
+        modifiers: Option<Vec<String>>,
+    },
+}
+
+/// A capture written into the staging directory, awaiting one redemption.
+#[derive(Clone)]
+struct StagedCapture {
+    width: u32,
+    height: u32,
+    media_type: String,
 }
 
 /// A registration that is dormant for the lifetime of this process.
@@ -536,6 +658,45 @@ impl ControlAudit {
                     root_id: request.root_id,
                 },
             }),
+            // Permission preflight / request and the grants listing expose
+            // state the trusted surface already holds; like the other
+            // management listings they are not recorded. Handoff redemption
+            // returns pixels the capture op already recorded staging, and
+            // confirming a held action records its own intent + completion
+            // pair inside the handler — the pending entry, not the request,
+            // carries the actor and target.
+            ControlRequest::CuPermissionStatus
+            | ControlRequest::CuRequestPermissions
+            | ControlRequest::CuListAppGrants(_)
+            | ControlRequest::CuResolveHandoff(_)
+            | ControlRequest::CuConfirmControlAction(_) => None,
+            // Consent mutations: durable intent before the grant store
+            // changes, exactly like the folder grant mutations.
+            ControlRequest::CuGrantApp(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: None,
+                },
+                mutates: true,
+                operation: AuditOperation::CuGrantApp,
+                grant_id: None,
+                operation_id: None,
+                target: cu_scope_audit_target(request.bundle_id.as_deref()),
+            }),
+            ControlRequest::CuRevokeApp(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: None,
+                },
+                mutates: true,
+                operation: AuditOperation::CuRevokeApp,
+                grant_id: None,
+                // Naturally idempotent: the (subject, capability, scope) tuple
+                // names the exact rows, so there is no separate mutation
+                // identity to correlate.
+                operation_id: None,
+                target: cu_scope_audit_target(request.bundle_id.as_deref()),
+            }),
         }
     }
 
@@ -570,7 +731,18 @@ struct OperationAudit {
 
 impl OperationAudit {
     fn from_envelope(envelope: &OperationEnvelope) -> Self {
-        let mutates = matches!(envelope.request, OperationRequest::WriteFile(_));
+        // Input synthesis (click / type / key) is a host mutation: its intent
+        // record must be durable before any event is synthesized, and the op
+        // refuses when the record cannot be made durable. Scroll and focus
+        // are reversible view changes authorized on the read capability, so
+        // like the folder reads they are completion-recorded only.
+        let mutates = matches!(
+            envelope.request,
+            OperationRequest::WriteFile(_)
+                | OperationRequest::CuClick { .. }
+                | OperationRequest::CuTypeText { .. }
+                | OperationRequest::CuKeyPress { .. }
+        );
         let (operation, capability, target) = match &envelope.request {
             OperationRequest::ListRoots => (
                 AuditOperation::ListRoots,
@@ -596,6 +768,54 @@ impl OperationAudit {
                 AuditOperation::WriteFile,
                 Capability::WriteFiles,
                 AuditTarget::path(request.root_id, &request.path),
+            ),
+            OperationRequest::CuListWindows { bundle_id } => (
+                AuditOperation::CuListWindows,
+                cu_list_windows_capability(bundle_id.as_deref()),
+                cu_scope_audit_target(bundle_id.as_deref()),
+            ),
+            OperationRequest::CuCaptureScreen { target } => (
+                AuditOperation::CuCaptureScreen,
+                Capability::CaptureScreen,
+                match target {
+                    CaptureTargetWire::App { bundle_id } => AuditTarget::app(bundle_id),
+                    CaptureTargetWire::Display { .. } => AuditTarget::Screen,
+                },
+            ),
+            OperationRequest::CuReadAppContent { bundle_id, .. } => (
+                AuditOperation::CuReadAppContent,
+                Capability::ReadAppContent,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuClick { bundle_id, .. } => (
+                AuditOperation::CuClick,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuTypeText { bundle_id, .. } => (
+                AuditOperation::CuTypeText,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuKeyPress { bundle_id, .. } => (
+                AuditOperation::CuKeyPress,
+                Capability::ControlApp,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuScroll { bundle_id, .. } => (
+                AuditOperation::CuScroll,
+                Capability::ReadAppContent,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuFocusWindow { bundle_id, .. } => (
+                AuditOperation::CuFocusWindow,
+                Capability::ReadAppContent,
+                AuditTarget::app(bundle_id),
+            ),
+            OperationRequest::CuWait { .. } => (
+                AuditOperation::CuWait,
+                Capability::ListRoots,
+                AuditTarget::Subject,
             ),
         };
         Self {
@@ -628,6 +848,27 @@ impl OperationAudit {
             bytes: None,
         }
     }
+
+    /// Completion record paired with [`OperationAudit::intent`], for paths
+    /// that record both inside one handler (the consequential-action confirm
+    /// path). `error` is the transport error the attempt ended in, if any.
+    fn completion(&self, request_id: RequestId, error: Option<&ErrorResponse>) -> AuditEvent {
+        AuditEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            request_id,
+            operation_id: None,
+            actor: self.actor,
+            operation: self.operation,
+            target: self.target.clone(),
+            outcome: audit_outcome(error),
+            capability: Some(self.capability),
+            grant_id: None,
+            error_code: error.map(|error| error.code),
+            item_count: None,
+            bytes: None,
+        }
+    }
 }
 
 impl Broker {
@@ -638,30 +879,58 @@ impl Broker {
 
     /// Create an empty broker with the host's local command reach declared.
     pub fn new_with_execute_commands(policy: RootPolicy, execute_commands: bool) -> Self {
+        Self::with_components(
+            policy,
+            execute_commands,
+            Arc::new(MemoryAuditSink::new()),
+            default_computer_use_backend(),
+            ephemeral_cu_staging(),
+        )
+    }
+
+    /// Create an ephemeral broker with an embedder-provided audit sink.
+    pub fn with_audit_sink(policy: RootPolicy, audit: Arc<dyn AuditSink>) -> Self {
+        Self::with_components(
+            policy,
+            true,
+            audit,
+            default_computer_use_backend(),
+            ephemeral_cu_staging(),
+        )
+    }
+
+    fn with_components(
+        policy: RootPolicy,
+        execute_commands: bool,
+        audit: Arc<dyn AuditSink>,
+        computer_use: Arc<dyn ComputerUseBackend>,
+        cu_staging: Option<PathBuf>,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 policy,
                 execute_commands,
                 state: Mutex::new(State::default()),
                 state_file: None,
-                audit: Arc::new(MemoryAuditSink::new()),
+                audit,
                 failed_closed: AtomicBool::new(false),
+                computer_use,
+                cu_staging,
             }),
         }
     }
 
-    /// Create an ephemeral broker with an embedder-provided audit sink.
-    pub fn with_audit_sink(policy: RootPolicy, audit: Arc<dyn AuditSink>) -> Self {
-        Self {
-            shared: Arc::new(Shared {
-                policy,
-                execute_commands: true,
-                state: Mutex::new(State::default()),
-                state_file: None,
-                audit,
-                failed_closed: AtomicBool::new(false),
-            }),
-        }
+    /// Test hook: an ephemeral broker with an injected computer-use backend
+    /// (a stub, never the real helper) and a staging dir under the test's
+    /// own tempdir.
+    #[cfg(test)]
+    pub(crate) fn test_with_computer_use(
+        policy: RootPolicy,
+        audit: Arc<dyn AuditSink>,
+        backend: Arc<dyn ComputerUseBackend>,
+        staging: PathBuf,
+    ) -> Self {
+        Self::with_components(policy, true, audit, backend, prepare_cu_staging(staging))
     }
 
     /// Open durable broker state under the application-private data directory.
@@ -697,6 +966,8 @@ impl Broker {
                 state_file: Some(state_file),
                 audit,
                 failed_closed: AtomicBool::new(false),
+                computer_use: default_computer_use_backend(),
+                cu_staging: open_cu_staging(data_dir),
             }),
         };
         for event in &pruned {
@@ -773,11 +1044,11 @@ impl Controller {
 
     fn execute(&self, envelope: ControlEnvelope) -> Result<ControlResult, ErrorResponse> {
         if matches!(envelope.request, ControlRequest::Hello) {
-            return Ok(ControlResult::Hello(hello()));
+            return Ok(ControlResult::Hello(self.hello()));
         }
         require_version(envelope.protocol_version).map_err(error_response)?;
         match envelope.request {
-            ControlRequest::Hello => Ok(ControlResult::Hello(hello())),
+            ControlRequest::Hello => Ok(ControlResult::Hello(self.hello())),
             ControlRequest::ListApprovedRoots => {
                 let state = self.lock_state().map_err(error_response)?;
                 list_approved_roots(&state).map(|roots| ControlResult::ListApprovedRoots { roots })
@@ -856,6 +1127,39 @@ impl Controller {
                 };
                 write_app_folder_file(&root, request).map_err(error_response)
             }
+            ControlRequest::CuPermissionStatus => self
+                .shared
+                .computer_use
+                .permission_status()
+                .map(ControlResult::CuPermissionStatus)
+                .map_err(|error| error_response(BrokerError::ComputerUse(error))),
+            ControlRequest::CuRequestPermissions => self
+                .shared
+                .computer_use
+                .request_permissions()
+                .map(ControlResult::CuRequestPermissions)
+                .map_err(|error| error_response(BrokerError::ComputerUse(error))),
+            ControlRequest::CuGrantApp(request) => self
+                .cu_grant_app(request)
+                .map(ControlResult::CuGrantApp)
+                .map_err(error_response),
+            ControlRequest::CuRevokeApp(request) => self
+                .cu_revoke_app(request)
+                .map(|revoked| ControlResult::CuRevokeApp { revoked })
+                .map_err(error_response),
+            ControlRequest::CuListAppGrants(request) => {
+                let state = self.lock_state().map_err(error_response)?;
+                Ok(ControlResult::CuListAppGrants {
+                    grants: list_cu_app_grants(&state, request.subject),
+                })
+            }
+            ControlRequest::CuResolveHandoff(request) => self
+                .cu_resolve_handoff(request)
+                .map(ControlResult::CuResolveHandoff)
+                .map_err(error_response),
+            ControlRequest::CuConfirmControlAction(request) => self
+                .cu_confirm_control_action(envelope.request_id, request)
+                .map(ControlResult::CuConfirmControlAction),
         }
     }
 
@@ -1402,6 +1706,272 @@ impl Controller {
         Ok(GrantRootCapabilityResult { granted: true })
     }
 
+    /// Record one computer-use consent decision.
+    ///
+    /// The decision comes from the desktop's per-app approval card, so only
+    /// [`ConsentMethod::PermissionDialog`] is accepted — the same discipline
+    /// as [`Controller::grant_root_capability`]. The blocklist outranks
+    /// consent: a blocked bundle can never hold a grant, so no dispatch path
+    /// has to trust the grant table to be clean.
+    fn cu_grant_app(&self, request: CuGrantAppRequest) -> Result<CuGrantAppResult, BrokerError> {
+        if !matches!(request.consent, ConsentMethod::PermissionDialog) {
+            return Err(BrokerError::InvalidConsentMethod);
+        }
+        if let Some(bundle_id) = &request.bundle_id {
+            validate_bundle_id(bundle_id)?;
+            if is_blocked_control_bundle(bundle_id) {
+                return Err(BrokerError::BlockedApp);
+            }
+        }
+        let scope = cu_grant_scope(request.capability, request.bundle_id.as_deref())?;
+        let mut state = self.lock_state()?;
+        let mut next = state.clone();
+        if let Some(existing) = next.grants.iter().find(|grant| {
+            grant.subject() == request.subject
+                && grant.capability() == request.capability
+                && *grant.scope() == scope
+        }) {
+            return Ok(CuGrantAppResult {
+                granted: false,
+                grant_id: existing.id(),
+            });
+        }
+        let grant = Grant::from_consent(
+            GrantId::new(),
+            request.subject,
+            request.capability,
+            scope,
+            ConsentRecord::new(request.consent, Utc::now()),
+        )?;
+        let grant_id = grant.id();
+        next.grants.push(grant);
+        self.commit_state(&mut state, next)?;
+        Ok(CuGrantAppResult {
+            granted: true,
+            grant_id,
+        })
+    }
+
+    /// Withdraw every grant exactly matching one (subject, capability, scope)
+    /// computer-use tuple. Idempotent.
+    fn cu_revoke_app(&self, request: CuRevokeAppRequest) -> Result<bool, BrokerError> {
+        let scope = cu_grant_scope(request.capability, request.bundle_id.as_deref())?;
+        let mut state = self.lock_state()?;
+        let mut next = state.clone();
+        let before = next.grants.len();
+        next.grants.retain(|grant| {
+            !(grant.subject() == request.subject
+                && grant.capability() == request.capability
+                && *grant.scope() == scope)
+        });
+        let revoked = next.grants.len() != before;
+        if revoked {
+            self.commit_state(&mut state, next)?;
+        }
+        Ok(revoked)
+    }
+
+    /// Redeem one staged capture: return the PNG bytes once, then discard
+    /// both the record and the staged file. The single-use property is the
+    /// point — a screenshot's pixels should not be re-readable by whatever
+    /// later gains the identity.
+    fn cu_resolve_handoff(
+        &self,
+        request: CuResolveHandoffRequest,
+    ) -> Result<CuResolveHandoffResult, BrokerError> {
+        let staged = {
+            let mut state = self.lock_state()?;
+            let staged = state.handoffs.remove(&request.handoff_id);
+            if staged.is_some() {
+                state.handoff_order.retain(|id| *id != request.handoff_id);
+            }
+            staged
+        };
+        let Some(staged) = staged else {
+            return Err(BrokerError::DestinationMissing);
+        };
+        let path = self
+            .shared
+            .cu_staging
+            .as_ref()
+            .map(|dir| dir.join(handoff_file_name(request.handoff_id)));
+        let bytes = match path.as_deref() {
+            Some(path) => {
+                let bytes = std::fs::read(path).map_err(BrokerError::Io)?;
+                // Read-then-delete: a host failure deleting leaves an orphaned
+                // file, but the record is already gone, so the bytes still
+                // cannot be redeemed twice through the broker.
+                let _ = std::fs::remove_file(path);
+                bytes
+            }
+            None => return Err(BrokerError::StatePoisoned),
+        };
+        if bytes.len() > MAX_HANDOFF_BYTES {
+            return Err(BrokerError::FileTooLarge {
+                maximum: MAX_HANDOFF_BYTES,
+            });
+        }
+        Ok(CuResolveHandoffResult {
+            handoff_id: request.handoff_id,
+            width: staged.width,
+            height: staged.height,
+            media_type: staged.media_type,
+            bytes: bytes.len(),
+            content_base64: BASE64.encode(bytes),
+        })
+    }
+
+    /// Perform one held consequential control action after the user's
+    /// explicit confirmation.
+    ///
+    /// The intent/completion pair is recorded here rather than by
+    /// [`ControlAudit::from_request`]: the request names only a confirmation
+    /// identity, while the held entry carries the actor and target the record
+    /// must show. As with the operation surface, a control action that cannot
+    /// record its intent does not run.
+    fn cu_confirm_control_action(
+        &self,
+        request_id: RequestId,
+        request: CuConfirmControlActionRequest,
+    ) -> Result<ControlMeta, ErrorResponse> {
+        let pending = (|| -> Result<_, BrokerError> {
+            let mut state = self.lock_state()?;
+            let pending = state.pending_confirmations.remove(&request.confirmation_id);
+            if pending.is_some() {
+                state
+                    .confirmation_order
+                    .retain(|id| *id != request.confirmation_id);
+            }
+            Ok(pending)
+        })()
+        .map_err(error_response)?;
+        let Some(pending) = pending else {
+            return Err(error_response(BrokerError::UnknownConfirmation));
+        };
+        // A held key press has no target element; an owned empty target keeps
+        // the act-time element re-check inert (it only runs when an
+        // `element_id` is present).
+        let empty_target = ElementTarget::default();
+        let (bundle_id, target, op) = match &pending.action {
+            PendingActionKind::Click {
+                bundle_id, target, ..
+            } => (bundle_id, target, ControlOp::Click),
+            PendingActionKind::TypeText {
+                bundle_id, target, ..
+            } => (bundle_id, target, ControlOp::TypeText),
+            PendingActionKind::KeyPress { bundle_id, .. } => {
+                (bundle_id, &empty_target, ControlOp::KeyPress)
+            }
+        };
+        let audit_operation = match op {
+            ControlOp::Click => AuditOperation::CuClick,
+            ControlOp::TypeText => AuditOperation::CuTypeText,
+            ControlOp::KeyPress => AuditOperation::CuKeyPress,
+        };
+        let audit = OperationAudit {
+            actor: AuditActor::Operation {
+                context: pending.context,
+            },
+            operation: audit_operation,
+            capability: Capability::ControlApp,
+            target: cu_element_audit_target(bundle_id, pending.expected_label.as_deref()),
+            mutates: true,
+        };
+        self.shared
+            .record_intent(&audit.intent(request_id))
+            .map_err(|error| error_response(BrokerError::Audit(error)))?;
+        let result = self
+            .perform_confirmed_action(&pending, bundle_id, target, op)
+            .map_err(error_response);
+        self.shared
+            .record_completion(&audit.completion(request_id, result.as_ref().err()));
+        result
+    }
+
+    /// Re-authorize, re-describe, and finally dispatch a confirmed action.
+    /// TOCTOU discipline: everything the original request was gated on is
+    /// re-checked against live state at act time.
+    fn perform_confirmed_action(
+        &self,
+        pending: &PendingControlAction,
+        bundle_id: &str,
+        target: &ElementTarget,
+        op: ControlOp,
+    ) -> Result<ControlMeta, BrokerError> {
+        if is_blocked_control_bundle(bundle_id) {
+            return Err(BrokerError::BlockedApp);
+        }
+        {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, pending.context, Capability::ControlApp, bundle_id)?;
+        }
+        // The confirmation is honored only while the element still
+        // reports the label the user approved. A UI that shifted under
+        // the prompt — or a hijacked page that swapped the button —
+        // refuses as stale, and the agent must restart the flow.
+        if target.element_id.is_some() {
+            let description = self
+                .shared
+                .computer_use
+                .describe_element(bundle_id, target)
+                .map_err(BrokerError::ComputerUse)?;
+            let live_label = description.label.as_deref().map(truncate_label);
+            if live_label != pending.expected_label {
+                return Err(BrokerError::StaleTarget);
+            }
+            // The stronger drift signal: the element's content fingerprint. A
+            // swapped element that kept the same (possibly truncated) label has
+            // a different fingerprint, so this catches a same-label swap the
+            // label check alone would miss. Only compared when the confirmation
+            // recorded one.
+            if let Some(expected) = &pending.expected_fingerprint {
+                if description.fingerprint.as_ref() != Some(expected) {
+                    return Err(BrokerError::StaleTarget);
+                }
+            }
+            // Defense in depth: the held label classified as consequential
+            // once; if it somehow classifies benign now, the confirmation was
+            // answered for a different question.
+            if classify(
+                op,
+                description.role.as_deref(),
+                description.label.as_deref(),
+            ) == Consequence::Benign
+            {
+                return Err(BrokerError::StaleTarget);
+            }
+        }
+        match &pending.action {
+            PendingActionKind::Click {
+                bundle_id,
+                target,
+                button,
+                click_count,
+            } => self
+                .shared
+                .computer_use
+                .click(bundle_id, target, button.as_deref(), *click_count),
+            PendingActionKind::TypeText {
+                bundle_id,
+                text,
+                target,
+            } => self.shared.computer_use.type_text(bundle_id, text, target),
+            PendingActionKind::KeyPress {
+                bundle_id,
+                key,
+                modifiers,
+            } => self
+                .shared
+                .computer_use
+                .key_press(bundle_id, key, modifiers.as_deref()),
+        }
+        .map_err(BrokerError::ComputerUse)
+    }
+
+    fn hello(&self) -> HelloResult {
+        hello(self.shared.computer_use.is_available())
+    }
+
     fn commit_state(
         &self,
         current: &mut MutexGuard<'_, State>,
@@ -1499,6 +2069,80 @@ impl Operator {
                     grant_id = authorized_by;
                     Ok(OperationResult::WriteFile(result))
                 }
+                OperationRequest::CuListWindows { bundle_id } => self
+                    .cu_list_windows(envelope.context, bundle_id)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuCaptureScreen { target } => self
+                    .cu_capture_screen(envelope.context, target)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuReadAppContent {
+                    bundle_id,
+                    max_depth,
+                    max_nodes,
+                } => self
+                    .cu_read_app_content(envelope.context, bundle_id, max_depth, max_nodes)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuClick {
+                    bundle_id,
+                    target,
+                    button,
+                    click_count,
+                } => self
+                    .cu_click(envelope.context, bundle_id, target, button, click_count)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuTypeText {
+                    bundle_id,
+                    text,
+                    target,
+                } => self
+                    .cu_type_text(envelope.context, bundle_id, text, target)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuKeyPress {
+                    bundle_id,
+                    key,
+                    modifiers,
+                } => self
+                    .cu_key_press(envelope.context, bundle_id, key, modifiers)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuScroll {
+                    bundle_id,
+                    target,
+                    dx,
+                    dy,
+                } => self
+                    .cu_scroll(envelope.context, bundle_id, target, dx, dy)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuFocusWindow {
+                    bundle_id,
+                    window_id,
+                } => self
+                    .cu_focus_window(envelope.context, bundle_id, window_id)
+                    .map(|(result, authorized_by)| {
+                        grant_id = authorized_by;
+                        result
+                    }),
+                OperationRequest::CuWait { seconds } => Ok(cu_wait(seconds)),
             }
         })();
         (result, grant_id)
@@ -1523,6 +2167,14 @@ impl Operator {
             Some(OperationResult::ReadFile(result)) => (None, Some(result.bytes)),
             Some(OperationResult::ReadFileBinary(result)) => (None, Some(result.bytes)),
             Some(OperationResult::WriteFile(result)) => (None, Some(result.bytes)),
+            Some(OperationResult::CuListWindows { windows }) => (Some(windows.len()), None),
+            // The capture's bytes never cross this channel (the desktop
+            // redeems them through the handoff), so only the read content
+            // size is worth recording.
+            Some(OperationResult::CuReadAppContent(tree)) => {
+                (None, Some(tree.tree.to_string().len()))
+            }
+            Some(_) => (None, None),
             None => (None, None),
         };
         let event = AuditEvent {
@@ -1712,6 +2364,451 @@ impl Operator {
         Ok(grant_id)
     }
 
+    /// Every computer-use handler below follows the same spine: validate and
+    /// bound the request, hard-refuse a blocked bundle, authorize against the
+    /// live grants (deny-by-default, consent-card signal on a miss), and only
+    /// then dispatch to the backend. The backend performs; it never decides.
+    fn cu_list_windows(
+        &self,
+        context: ExecutionContext,
+        bundle_id: Option<String>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        if let Some(bundle_id) = &bundle_id {
+            validate_bundle_id(bundle_id)?;
+            require_unblocked(bundle_id)?;
+        }
+        let grant_id = {
+            let state = self.lock_state()?;
+            match bundle_id.as_deref() {
+                Some(bundle_id) => Some(authorize_computer_use(
+                    &state,
+                    context,
+                    Capability::ReadAppContent,
+                    bundle_id,
+                )?),
+                // A screen-wide window listing is display-scoped: a
+                // whole-display capture grant covers it, and so does any
+                // read-or-better app grant (its holder may already see one
+                // app's content; the listing adds only other apps' titles,
+                // which the blocklist still protects).
+                None => authorize_cu_screen(&state, context).ok().or_else(|| {
+                    state
+                        .grants
+                        .iter()
+                        .find(|grant| {
+                            context.grant_subject_matches(grant.subject())
+                                && matches!(grant.scope(), Scope::App { .. })
+                                && cu_read_granted(grant.capability())
+                        })
+                        .map(Grant::id)
+                }),
+            }
+            .ok_or(BrokerError::Denied)?
+        };
+        let windows = self
+            .shared
+            .computer_use
+            .list_windows(bundle_id.as_deref())
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuListWindows { windows }, Some(grant_id)))
+    }
+
+    fn cu_capture_screen(
+        &self,
+        context: ExecutionContext,
+        target: CaptureTargetWire,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        let staging = self
+            .shared
+            .cu_staging
+            .clone()
+            .ok_or(BrokerError::StatePoisoned)?;
+        let (backend_target, grant_id) = match &target {
+            CaptureTargetWire::App { bundle_id } => {
+                validate_bundle_id(bundle_id)?;
+                require_unblocked(bundle_id)?;
+                let grant_id = {
+                    let state = self.lock_state()?;
+                    authorize_computer_use(&state, context, Capability::CaptureScreen, bundle_id)?
+                };
+                (
+                    CaptureTarget::App {
+                        bundle_id: bundle_id.clone(),
+                    },
+                    grant_id,
+                )
+            }
+            CaptureTargetWire::Display { display_id } => {
+                let grant_id = {
+                    let state = self.lock_state()?;
+                    authorize_cu_screen(&state, context)?
+                };
+                (
+                    CaptureTarget::Display {
+                        display_id: *display_id,
+                    },
+                    grant_id,
+                )
+            }
+        };
+        let handoff_id = Uuid::new_v4();
+        let out_path = staging.join(handoff_file_name(handoff_id));
+        // An app capture is annotated: re-read the live tree, extract the
+        // numbered interactive marks, and let the helper draw them over the
+        // PNG. Best-effort — capture needs Screen Recording while the tree
+        // needs Accessibility, so a missing AX grant degrades to an
+        // unannotated capture rather than failing one permission with the
+        // other's absence.
+        let marks = match &backend_target {
+            CaptureTarget::App { bundle_id } => self
+                .shared
+                .computer_use
+                .read_ax_tree(bundle_id, Some(MAX_CU_AX_DEPTH), Some(MAX_CU_AX_NODES))
+                .map(|tree| extract_marks(&tree.tree, MAX_CAPTURE_MARKS))
+                .unwrap_or_default(),
+            CaptureTarget::Display { .. } => Vec::new(),
+        };
+        let meta = self
+            .shared
+            .computer_use
+            .capture_with_marks(&backend_target, &out_path, &marks)
+            .map_err(BrokerError::ComputerUse)?;
+        {
+            let mut state = self.lock_state()?;
+            state.handoffs.insert(
+                handoff_id,
+                StagedCapture {
+                    width: meta.width,
+                    height: meta.height,
+                    media_type: meta.media_type.clone(),
+                },
+            );
+            state.handoff_order.push_back(handoff_id);
+            evict_handoffs(&mut state, &staging);
+        }
+        Ok((
+            OperationResult::CuCaptureScreen(CuCaptureScreenResult {
+                handoff_id,
+                width: meta.width,
+                height: meta.height,
+                media_type: meta.media_type,
+                marks,
+            }),
+            Some(grant_id),
+        ))
+    }
+
+    fn cu_read_app_content(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        max_depth: Option<u32>,
+        max_nodes: Option<u32>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ReadAppContent, &bundle_id)?
+        };
+        let tree = self
+            .shared
+            .computer_use
+            .read_ax_tree(
+                &bundle_id,
+                Some(max_depth.map_or(MAX_CU_AX_DEPTH, |depth| depth.min(MAX_CU_AX_DEPTH))),
+                Some(max_nodes.map_or(MAX_CU_AX_NODES, |nodes| nodes.min(MAX_CU_AX_NODES))),
+            )
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuReadAppContent(tree), Some(grant_id)))
+    }
+
+    fn cu_click(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        target: ElementTargetWire,
+        button: Option<String>,
+        click_count: Option<u32>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        if let Some(button) = &button {
+            if !matches!(button.as_str(), "left" | "right") {
+                return Err(BrokerError::InvalidCuRequest);
+            }
+        }
+        let target = ElementTarget::from(target);
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        if let Some(held) = self.consequential_gate(
+            context,
+            ControlOp::Click,
+            &bundle_id,
+            &target,
+            PendingActionKind::Click {
+                bundle_id: bundle_id.clone(),
+                target: target.clone(),
+                button: button.clone(),
+                click_count,
+            },
+        )? {
+            return Ok((held, Some(grant_id)));
+        }
+        let meta = self
+            .shared
+            .computer_use
+            .click(&bundle_id, &target, button.as_deref(), click_count)
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuClick(meta), Some(grant_id)))
+    }
+
+    fn cu_type_text(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        text: String,
+        target: ElementTargetWire,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        if text.len() > MAX_CU_TYPE_TEXT_BYTES {
+            return Err(BrokerError::FileTooLarge {
+                maximum: MAX_CU_TYPE_TEXT_BYTES,
+            });
+        }
+        let target = ElementTarget::from(target);
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        if let Some(held) = self.consequential_gate(
+            context,
+            ControlOp::TypeText,
+            &bundle_id,
+            &target,
+            PendingActionKind::TypeText {
+                bundle_id: bundle_id.clone(),
+                text: text.clone(),
+                target: target.clone(),
+            },
+        )? {
+            return Ok((held, Some(grant_id)));
+        }
+        let meta = self
+            .shared
+            .computer_use
+            .type_text(&bundle_id, &text, &target)
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuTypeText(meta), Some(grant_id)))
+    }
+
+    /// The consequential gate shared by click and type. Returns `Ok(Some(..))`
+    /// with the hold-for-confirmation result when the target's live label
+    /// classifies as consequential — nothing has been acted on in that case —
+    /// and `Ok(None)` when the op may proceed.
+    ///
+    /// Only an element-addressed target is classifiable: a raw coordinate
+    /// point has no label to read, which is exactly why coordinates are the
+    /// documented last resort.
+    fn consequential_gate(
+        &self,
+        context: ExecutionContext,
+        op: ControlOp,
+        bundle_id: &str,
+        target: &ElementTarget,
+        action: PendingActionKind,
+    ) -> Result<Option<OperationResult>, BrokerError> {
+        if target.element_id.is_none() {
+            return Ok(None);
+        }
+        let description = self
+            .shared
+            .computer_use
+            .describe_element(bundle_id, target)
+            .map_err(BrokerError::ComputerUse)?;
+        let Consequence::Consequential { reason } = classify(
+            op,
+            description.role.as_deref(),
+            description.label.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let target_label = description.label.as_deref().map(truncate_label);
+        self.hold_for_confirmation(
+            context,
+            bundle_id,
+            action,
+            target_label,
+            description.fingerprint.clone(),
+            reason,
+        )
+    }
+
+    /// Hold a consequential action for explicit user confirmation, returning
+    /// the single-use confirmation. The broker owns the action's parameters —
+    /// the agent cannot substitute a different target or text at confirm time.
+    /// Returns `Ok(None)` to proceed without a hold.
+    fn hold_for_confirmation(
+        &self,
+        context: ExecutionContext,
+        bundle_id: &str,
+        action: PendingActionKind,
+        target_label: Option<String>,
+        expected_fingerprint: Option<String>,
+        reason: String,
+    ) -> Result<Option<OperationResult>, BrokerError> {
+        let confirmation_id = Uuid::new_v4();
+        {
+            let mut state = self.lock_state()?;
+            state.pending_confirmations.insert(
+                confirmation_id,
+                PendingControlAction {
+                    context,
+                    action,
+                    expected_label: target_label.clone(),
+                    expected_fingerprint: expected_fingerprint.clone(),
+                },
+            );
+            // Enroll in insertion order so the cap below has something to
+            // evict; without this the queue stays empty and the map grows
+            // unboundedly.
+            state.confirmation_order.push_back(confirmation_id);
+            while state.confirmation_order.len() > MAX_PENDING_CONFIRMATIONS {
+                if let Some(evicted) = state.confirmation_order.pop_front() {
+                    state.pending_confirmations.remove(&evicted);
+                }
+            }
+        }
+        Ok(Some(OperationResult::CuNeedsConfirmation(
+            CuNeedsConfirmationResult {
+                confirmation_id,
+                bundle_id: bundle_id.to_owned(),
+                target_label,
+                reason,
+            },
+        )))
+    }
+
+    fn cu_key_press(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        key: String,
+        modifiers: Option<Vec<String>>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        if key.is_empty() || key.len() > MAX_CU_KEY_BYTES {
+            return Err(BrokerError::InvalidCuRequest);
+        }
+        if let Some(modifiers) = &modifiers {
+            if modifiers.len() > MAX_CU_MODIFIERS
+                || modifiers
+                    .iter()
+                    .any(|modifier| modifier.is_empty() || modifier.len() > MAX_CU_KEY_BYTES)
+            {
+                return Err(BrokerError::InvalidCuRequest);
+            }
+        }
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        // A key press has no element label the consequential gate could read,
+        // but chords and bare Return are the commit paths (send / delete /
+        // quit). Confirm those before acting.
+        if key_press_needs_confirmation(&key, modifiers.as_ref().is_some_and(|m| !m.is_empty())) {
+            let label = match &modifiers {
+                Some(modifiers) if !modifiers.is_empty() => {
+                    format!("{}+{}", modifiers.join("+"), key)
+                }
+                _ => key.clone(),
+            };
+            if let Some(held) = self.hold_for_confirmation(
+                context,
+                &bundle_id,
+                PendingActionKind::KeyPress {
+                    bundle_id: bundle_id.clone(),
+                    key: key.clone(),
+                    modifiers: modifiers.clone(),
+                },
+                Some(truncate_label(&label)),
+                // A key press has no element, so no fingerprint to bind.
+                None,
+                format!(
+                    "This presses \u{201c}{}\u{201d}, a keyboard shortcut that can commit an action (send, delete, or quit) with no undo.",
+                    truncate_label(&label)
+                ),
+            )? {
+                return Ok((held, Some(grant_id)));
+            }
+        }
+        let meta = self
+            .shared
+            .computer_use
+            .key_press(&bundle_id, &key, modifiers.as_deref())
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuKeyPress(meta), Some(grant_id)))
+    }
+
+    fn cu_scroll(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        target: ElementTargetWire,
+        dx: Option<f64>,
+        dy: Option<f64>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        if [dx, dy]
+            .into_iter()
+            .flatten()
+            .any(|delta| !delta.is_finite())
+        {
+            return Err(BrokerError::InvalidCuRequest);
+        }
+        let target = ElementTarget::from(target);
+        // Scroll synthesizes a wheel event and warps the cursor to the target —
+        // an input mutation, so it needs the control grant, not merely the
+        // read grant.
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        let meta = self
+            .shared
+            .computer_use
+            .scroll(&bundle_id, &target, dx, dy)
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuScroll(meta), Some(grant_id)))
+    }
+
+    fn cu_focus_window(
+        &self,
+        context: ExecutionContext,
+        bundle_id: String,
+        window_id: Option<u32>,
+    ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+        validate_bundle_id(&bundle_id)?;
+        require_unblocked(&bundle_id)?;
+        // Focus activates and raises another app's window — a visible host
+        // mutation, so it needs the control grant, not merely the read grant.
+        let grant_id = {
+            let state = self.lock_state()?;
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
+        };
+        let meta = self
+            .shared
+            .computer_use
+            .focus_window(&bundle_id, window_id)
+            .map_err(BrokerError::ComputerUse)?;
+        Ok((OperationResult::CuFocusWindow(meta), Some(grant_id)))
+    }
+
     fn commit_state(
         &self,
         current: &mut MutexGuard<'_, State>,
@@ -1745,16 +2842,37 @@ impl Operator {
     }
 }
 
-fn hello() -> HelloResult {
+fn hello(computer_use_available: bool) -> HelloResult {
+    let mut operations = vec![
+        "list_roots".to_owned(),
+        "list_directory".to_owned(),
+        "read_file".to_owned(),
+        "read_file_binary".to_owned(),
+        "write_file".to_owned(),
+    ];
+    // The computer-use ops are advertised only when a backend can actually
+    // perform them (macOS with a resolved helper); an unsupported build keeps
+    // them off the handshake so no client offers a tool that always fails.
+    if computer_use_available {
+        operations.extend(
+            [
+                "cu_list_windows",
+                "cu_capture_screen",
+                "cu_read_app_content",
+                "cu_click",
+                "cu_type_text",
+                "cu_key_press",
+                "cu_scroll",
+                "cu_focus_window",
+                "cu_wait",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+    }
     HelloResult {
         protocol_version: PROTOCOL_VERSION,
-        operations: vec![
-            "list_roots".to_owned(),
-            "list_directory".to_owned(),
-            "read_file".to_owned(),
-            "read_file_binary".to_owned(),
-            "write_file".to_owned(),
-        ],
+        operations,
     }
 }
 
@@ -1766,6 +2884,239 @@ fn require_version(received: u32) -> Result<(), BrokerError> {
             received,
             expected: PROTOCOL_VERSION,
         })
+    }
+}
+
+/// The default computer-use backend: the bundled helper when one resolves on
+/// this host, otherwise the always-refusing backend so the ops stay
+/// unadvertised and harmless.
+fn default_computer_use_backend() -> Arc<dyn ComputerUseBackend> {
+    match HelperBackend::resolve() {
+        Some(helper) => Arc::new(helper),
+        None => Arc::new(UnsupportedBackend),
+    }
+}
+
+/// The durable broker's staging directory, owner-only, cleared of files left
+/// by a previous run (their handoff records died with that process, so the
+/// bytes are unredeemable either way).
+fn open_cu_staging(data_dir: &Path) -> Option<PathBuf> {
+    prepare_cu_staging(data_dir.join(CU_STAGING_DIR_NAME))
+}
+
+/// An ephemeral broker's staging directory: unique per instance under the
+/// system temp dir, still owner-only.
+fn ephemeral_cu_staging() -> Option<PathBuf> {
+    let directory = std::env::temp_dir().join(format!(
+        "openwave-cu-staging-{}-{}",
+        std::process::id(),
+        Uuid::new_v4().as_simple()
+    ));
+    prepare_cu_staging(directory)
+}
+
+fn prepare_cu_staging(directory: PathBuf) -> Option<PathBuf> {
+    if std::fs::create_dir_all(&directory).is_err() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).is_err() {
+            return None;
+        }
+    }
+    // Drop unredeemable leftovers from a previous owner of this directory.
+    if let Ok(entries) = std::fs::read_dir(&directory) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Some(directory)
+}
+
+fn handoff_file_name(handoff_id: Uuid) -> String {
+    format!("{}.png", handoff_id.as_simple())
+}
+
+/// Bounded bundle id check shared by every app-scoped op and by grant
+/// creation: non-empty and short enough to be a real bundle id, so the
+/// blocklist and scope comparisons never see pathological inputs.
+fn validate_bundle_id(bundle_id: &str) -> Result<(), BrokerError> {
+    if bundle_id.trim().is_empty() || bundle_id.len() > 256 {
+        return Err(BrokerError::InvalidCuRequest);
+    }
+    Ok(())
+}
+
+/// The blocklist outranks consent: refuse before any grant lookup, so a
+/// blocked bundle cannot be acted on even if a grant somehow exists.
+fn require_unblocked(bundle_id: &str) -> Result<(), BrokerError> {
+    if is_blocked_control_bundle(bundle_id) {
+        return Err(BrokerError::BlockedApp);
+    }
+    Ok(())
+}
+
+/// The scope a computer-use grant request names: an app scope for a bundle
+/// id, or the whole-display scope (capture only). Any other combination is
+/// not a meaningful grant and is refused.
+fn cu_grant_scope(capability: Capability, bundle_id: Option<&str>) -> Result<Scope, BrokerError> {
+    use Capability::{CaptureScreen, ControlApp, ReadAppContent};
+    match (capability, bundle_id) {
+        (CaptureScreen | ReadAppContent | ControlApp, Some(bundle_id)) => {
+            validate_bundle_id(bundle_id)?;
+            Ok(Scope::App {
+                bundle_id: bundle_id.to_owned(),
+            })
+        }
+        (CaptureScreen, None) => Ok(Scope::Screen),
+        (ReadAppContent | ControlApp, None) => Err(BrokerError::InvalidCuRequest),
+        _ => Err(BrokerError::InvalidCuRequest),
+    }
+}
+
+/// Whether a held capability can read app content or better.
+fn cu_read_granted(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::ReadAppContent | Capability::CaptureScreen | Capability::ControlApp
+    )
+}
+
+/// Authorize one app-scoped computer-use op: the live grants must contain a
+/// grant for this subject whose capability implies the requested one at the
+/// same app scope. `ControlApp` covers the read ops; a read grant never
+/// covers control.
+fn authorize_computer_use(
+    state: &State,
+    context: ExecutionContext,
+    capability: Capability,
+    bundle_id: &str,
+) -> Result<GrantId, BrokerError> {
+    state
+        .grants
+        .iter()
+        .find(|grant| {
+            context.grant_subject_matches(grant.subject())
+                && matches!(
+                    grant.scope(),
+                    Scope::App { bundle_id: granted } if granted == bundle_id
+                )
+                && Capability::implies(grant.capability(), capability)
+        })
+        .map(Grant::id)
+        .ok_or(BrokerError::Denied)
+}
+
+/// Authorize a whole-display capture: an exact `CaptureScreen`@`Screen`
+/// grant. App-scoped grants do not widen to the display.
+fn authorize_cu_screen(state: &State, context: ExecutionContext) -> Result<GrantId, BrokerError> {
+    state
+        .grants
+        .iter()
+        .find(|grant| {
+            context.grant_subject_matches(grant.subject())
+                && matches!(grant.scope(), Scope::Screen)
+                && grant.capability() == Capability::CaptureScreen
+        })
+        .map(Grant::id)
+        .ok_or(BrokerError::Denied)
+}
+
+/// The wait a request is allowed to ask for: an absent, negative, or
+/// non-finite value waits zero; anything above the cap clamps to it.
+fn bounded_wait_seconds(seconds: Option<f64>) -> f64 {
+    seconds
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .unwrap_or(0.0)
+        .min(MAX_CU_WAIT_SECONDS)
+}
+
+/// Broker-side wait: clamp to the bound and sleep. Never reaches the helper.
+fn cu_wait(seconds: Option<f64>) -> OperationResult {
+    let seconds = bounded_wait_seconds(seconds);
+    if seconds > 0.0 {
+        std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    }
+    OperationResult::CuWait { seconds }
+}
+
+/// The capability a window listing needs: app-scoped read when filtered to
+/// one app, whole-display capture otherwise.
+fn cu_list_windows_capability(bundle_id: Option<&str>) -> Capability {
+    match bundle_id {
+        Some(_) => Capability::ReadAppContent,
+        None => Capability::CaptureScreen,
+    }
+}
+
+/// De-sensitized audit target for a computer-use scope: the bundle id, or the
+/// whole display when no app is named.
+fn cu_scope_audit_target(bundle_id: Option<&str>) -> AuditTarget {
+    match bundle_id {
+        Some(bundle_id) => AuditTarget::app(bundle_id),
+        None => AuditTarget::Screen,
+    }
+}
+
+/// Evict the oldest staged captures beyond the retention bound, deleting
+/// their staging files so the bytes do not linger unredeemable on disk.
+fn evict_handoffs(state: &mut State, staging: &Path) {
+    while state.handoff_order.len() > MAX_PENDING_HANDOFFS {
+        if let Some(evicted) = state.handoff_order.pop_front() {
+            state.handoffs.remove(&evicted);
+            let _ = std::fs::remove_file(staging.join(handoff_file_name(evicted)));
+        }
+    }
+}
+
+/// One subject's computer-use grants, newest first, for the management UI.
+/// Folder grants are excluded — they already surface through
+/// [`ControlRequest::ListGrantStatements`].
+fn list_cu_app_grants(state: &State, subject: GrantSubject) -> Vec<GrantStatementSummary> {
+    let mut grants = state
+        .grants
+        .iter()
+        .filter(|grant| {
+            grant.subject() == subject && matches!(grant.scope(), Scope::App { .. } | Scope::Screen)
+        })
+        .map(|grant| GrantStatementSummary {
+            grant_id: grant.id(),
+            subject: grant.subject(),
+            capability: grant.capability(),
+            scope: grant.scope().clone(),
+            root_display_name: None,
+            consent_method: grant.consent().method(),
+            granted_at: grant.consent().granted_at(),
+        })
+        .collect::<Vec<_>>();
+    grants.sort_by(|left, right| {
+        right
+            .granted_at
+            .cmp(&left.granted_at)
+            .then_with(|| left.grant_id.to_string().cmp(&right.grant_id.to_string()))
+    });
+    grants
+}
+
+impl AuditTarget {
+    /// One app touched by a computer-use op, by its (sanitized, bounded)
+    /// bundle id.
+    fn app(bundle_id: &str) -> Self {
+        Self::App {
+            bundle_id: AuditLabel::from_host_text(bundle_id),
+            element_label: None,
+        }
+    }
+}
+
+/// Audit target for one confirmed control action: the app plus the bounded
+/// label the user approved, never raw screen text.
+fn cu_element_audit_target(bundle_id: &str, element_label: Option<&str>) -> AuditTarget {
+    AuditTarget::App {
+        bundle_id: AuditLabel::from_host_text(bundle_id),
+        element_label: element_label.map(AuditLabel::from_host_text),
     }
 }
 
@@ -1860,6 +3211,63 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             false,
         ),
         BrokerError::StoredWriteFailure(error) => return error,
+        BrokerError::BlockedApp => (
+            ErrorCode::Denied,
+            "this application cannot be captured, read, or controlled",
+            false,
+        ),
+        BrokerError::UnknownConfirmation => (
+            ErrorCode::NotFound,
+            "the confirmation is unknown or was already used",
+            false,
+        ),
+        BrokerError::StaleTarget => (
+            ErrorCode::StaleElement,
+            "the target element changed after confirmation; retry the action",
+            true,
+        ),
+        BrokerError::InvalidCuRequest => (
+            ErrorCode::InvalidRequest,
+            "computer-use request parameters are invalid",
+            false,
+        ),
+        BrokerError::ComputerUse(error) => match error.kind {
+            BackendErrorKind::PermissionDenied => (
+                ErrorCode::OsPermissionDenied,
+                "the OS screen-recording or accessibility permission is not granted",
+                true,
+            ),
+            BackendErrorKind::NotFound => (
+                ErrorCode::NotFound,
+                "the target app, window, or display was not found",
+                false,
+            ),
+            BackendErrorKind::InvalidRequest => (
+                ErrorCode::InvalidRequest,
+                "the computer-use request was rejected as malformed",
+                false,
+            ),
+            BackendErrorKind::StaleElement => (
+                ErrorCode::StaleElement,
+                "the target element moved or changed; re-read the accessibility tree",
+                true,
+            ),
+            BackendErrorKind::Yielded => (
+                ErrorCode::Denied,
+                "a system security surface owns the foreground",
+                false,
+            ),
+            BackendErrorKind::OperationFailed => (
+                ErrorCode::Internal,
+                "the computer-use operation failed on the host",
+                true,
+            ),
+            BackendErrorKind::Unsupported => (
+                ErrorCode::Internal,
+                "computer use is not available on this build",
+                false,
+            ),
+        },
         BrokerError::StatePoisoned => (
             ErrorCode::Internal,
             "broker state is unavailable; restart the broker",
@@ -2833,7 +4241,10 @@ fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, Er
     const MAX_LIST_GRANTS: usize = MAX_LIST_ROOTS * 8;
     let scope_display_name = |scope: &Scope, dormant: Option<&UnavailableRoot>| {
         let root_id = match scope {
-            Scope::Subject => return None,
+            // Computer-use scopes (an app, the whole display) name no folder
+            // root; their display identity comes from the bundle id, not a
+            // registered root.
+            Scope::Subject | Scope::App { .. } | Scope::Screen => return None,
             Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id,
         };
         if let Some(root) = state.roots.get(&root_id) {
@@ -3208,7 +4619,7 @@ fn path_starts_with(candidate: &RelativePath, prefix: &RelativePath) -> bool {
 fn scope_targets_root(scope: &Scope, requested: RootId) -> bool {
     match scope {
         Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id == requested,
-        Scope::Subject => false,
+        Scope::Subject | Scope::App { .. } | Scope::Screen => false,
     }
 }
 
