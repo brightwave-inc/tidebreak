@@ -52,21 +52,35 @@ use openwave_core::{
 };
 use openwave_host_broker::{
     Broker, BrokerError, Capability, ConsentMethod, ControlEnvelope, ControlRequest, ControlResult,
-    GrantSubject, OperationId, RegisterRootReceipt, RegisterRootRequest, RequestId, Response,
-    RevokeRootRequest, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
-    RootAttachmentMutationRequest, RootId, RootPolicy, Scope, SubjectKind, PROTOCOL_VERSION,
+    GrantStatementSummary, GrantSubject, OperationId, RegisterRootReceipt, RegisterRootRequest,
+    RequestId, Response, RevokeRootRequest, RootAttachmentMutationKind,
+    RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootId, RootPolicy, Scope,
+    SubjectKind, PROTOCOL_VERSION,
 };
 use uuid::Uuid;
+
+use crate::print::OutputFormat;
 
 /// One parsed `openwave folder` invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Record standing operator consent for one folder, in one chat.
-    Connect { chat: ChatId, path: PathBuf },
+    Connect {
+        chat: ChatId,
+        path: PathBuf,
+        format: OutputFormat,
+    },
     /// Report every capability grant the broker holds, with its provenance.
-    List { chat: Option<ChatId> },
+    List {
+        chat: Option<ChatId>,
+        format: OutputFormat,
+    },
     /// Withdraw one folder from one chat, and the approval it created.
-    Disconnect { chat: ChatId, target: OsString },
+    Disconnect {
+        chat: ChatId,
+        target: OsString,
+        format: OutputFormat,
+    },
 }
 
 /// Hand-rolled argument parsing, matching the rest of the CLI.
@@ -84,6 +98,7 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> std::result::Result<Co
         let noun = if connect { "connect" } else { "disconnect" };
         let mut target = None;
         let mut chat = None;
+        let mut format = None;
         while let Some(argument) = args.next() {
             if argument == OsStr::new("--chat") {
                 let Some(value) = args.next() else {
@@ -93,6 +108,16 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> std::result::Result<Co
                     return Err(format!("folder {noun} accepts one --chat"));
                 }
                 chat = Some(parse_chat(&value)?);
+            } else if argument == OsStr::new("--output-format") {
+                let Some(value) = args.next() else {
+                    return Err(format!(
+                        "folder {noun} --output-format requires text or json"
+                    ));
+                };
+                if format.is_some() {
+                    return Err(format!("folder {noun} accepts one --output-format"));
+                }
+                format = Some(parse_format(&value)?);
             } else if target.is_none() && !starts_with_dash(&argument) {
                 target = Some(argument);
             } else {
@@ -109,17 +134,24 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> std::result::Result<Co
         let Some(chat) = chat else {
             return Err(format!("folder {noun} requires --chat <id>"));
         };
+        let format = format.unwrap_or(OutputFormat::Text);
         return Ok(if connect {
             Command::Connect {
                 chat,
                 path: PathBuf::from(target),
+                format,
             }
         } else {
-            Command::Disconnect { chat, target }
+            Command::Disconnect {
+                chat,
+                target,
+                format,
+            }
         });
     }
     if subcommand == OsStr::new("list") {
         let mut chat = None;
+        let mut format = None;
         while let Some(argument) = args.next() {
             if argument == OsStr::new("--chat") {
                 let Some(value) = args.next() else {
@@ -129,11 +161,22 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> std::result::Result<Co
                     return Err("folder list accepts one --chat".to_owned());
                 }
                 chat = Some(parse_chat(&value)?);
+            } else if argument == OsStr::new("--output-format") {
+                let Some(value) = args.next() else {
+                    return Err("folder list --output-format requires text or json".to_owned());
+                };
+                if format.is_some() {
+                    return Err("folder list accepts one --output-format".to_owned());
+                }
+                format = Some(parse_format(&value)?);
             } else {
                 return Err(format!("unexpected folder list argument {argument:?}"));
             }
         }
-        return Ok(Command::List { chat });
+        return Ok(Command::List {
+            chat,
+            format: format.unwrap_or(OutputFormat::Text),
+        });
     }
     Err(format!("unknown folder subcommand {subcommand:?}"))
 }
@@ -144,6 +187,11 @@ fn starts_with_dash(argument: &OsStr) -> bool {
 
 fn parse_chat(value: &OsStr) -> std::result::Result<ChatId, String> {
     ChatId::from_str(&value.to_string_lossy()).map_err(|_| "--chat expects a chat UUID".to_owned())
+}
+
+fn parse_format(value: &OsStr) -> std::result::Result<OutputFormat, String> {
+    OutputFormat::parse(&value.to_string_lossy())
+        .ok_or_else(|| "--output-format expects text or json".to_owned())
 }
 
 /// Run one folder command against the profile's data directory.
@@ -161,9 +209,15 @@ pub async fn run(command: Command) -> Result<()> {
     let (store, _embedded) = open_product_store(config).await?;
 
     match command {
-        Command::Connect { chat, path } => connect(&store, &data_dir, chat, path).await,
-        Command::List { chat } => list(&store, &data_dir, chat).await,
-        Command::Disconnect { chat, target } => disconnect(&store, &data_dir, chat, &target).await,
+        Command::Connect { chat, path, format } => {
+            connect(&store, &data_dir, chat, path, format).await
+        }
+        Command::List { chat, format } => list(&store, &data_dir, chat, format).await,
+        Command::Disconnect {
+            chat,
+            target,
+            format,
+        } => disconnect(&store, &data_dir, chat, &target, format).await,
     }
 }
 
@@ -331,6 +385,7 @@ async fn connect(
     data_dir: &Path,
     chat_id: ChatId,
     path: PathBuf,
+    format: OutputFormat,
 ) -> Result<()> {
     let path = canonical_folder(&path)?;
     let chat = load_chat(store, chat_id).await?;
@@ -402,6 +457,14 @@ async fn connect(
         });
     }
 
+    if format == OutputFormat::Json {
+        return emit_json(&serde_json::json!({
+            "chat": chat_id,
+            "root_id": root.root_id,
+            "display_name": root.display_name,
+            "consent_method": "operator_config",
+        }));
+    }
     println!(
         "openwave: connected {} to chat {} (root {}, operator configuration)",
         safe_label(&root.display_name),
@@ -434,7 +497,12 @@ fn lookup_registration(
     }
 }
 
-async fn list(store: &Arc<dyn Store>, data_dir: &Path, chat: Option<ChatId>) -> Result<()> {
+async fn list(
+    store: &Arc<dyn Store>,
+    data_dir: &Path,
+    chat: Option<ChatId>,
+    format: OutputFormat,
+) -> Result<()> {
     // `ListGrantStatements` is the same query the desktop's Permissions surface
     // reads (`list_capability_consents`), so the two shells cannot disagree
     // about what is granted or how it was granted.
@@ -447,11 +515,19 @@ async fn list(store: &Arc<dyn Store>, data_dir: &Path, chat: Option<ChatId>) -> 
         Some(chat) => Some(subject_for(&load_chat(store, chat).await?)?),
         None => None,
     };
+    let grants: Vec<_> = grants
+        .into_iter()
+        .filter(|grant| filter.is_none_or(|subject| subject == grant.subject))
+        .collect();
+
+    if format == OutputFormat::Json {
+        return emit_json(&serde_json::json!({
+            "grants": grants.iter().map(grant_json).collect::<Vec<_>>(),
+        }));
+    }
+
     let mut shown = 0usize;
     for grant in grants {
-        if filter.is_some_and(|subject| subject != grant.subject) {
-            continue;
-        }
         let subject = match grant.subject.kind() {
             SubjectKind::Conversation => format!("chat {}", grant.subject.id()),
             SubjectKind::Project => format!("project {}", grant.subject.id()),
@@ -480,6 +556,70 @@ async fn list(store: &Arc<dyn Store>, data_dir: &Path, chat: Option<ChatId>) -> 
     if shown == 0 {
         eprintln!("openwave: no connected-folder grants");
     }
+    Ok(())
+}
+
+/// One grant as a stable driver-facing object: ids, capability, scope, and
+/// consent provenance are structured fields rather than the text table's
+/// columns.
+fn grant_json(grant: &GrantStatementSummary) -> serde_json::Value {
+    serde_json::json!({
+        "grant_id": grant.grant_id,
+        "subject": {
+            "kind": match grant.subject.kind() {
+                SubjectKind::Conversation => "conversation",
+                SubjectKind::Project => "project",
+            },
+            "id": grant.subject.id(),
+        },
+        "capability": capability_json(grant.capability),
+        "scope": scope_json(&grant.scope),
+        "root_display_name": grant.root_display_name,
+        "consent_method": consent_json(grant.consent_method),
+        "granted_at": grant.granted_at,
+    })
+}
+
+fn capability_json(capability: Capability) -> &'static str {
+    match capability {
+        Capability::ListRoots => "list_roots",
+        Capability::ReadFiles => "read_files",
+        Capability::WriteFiles => "write_files",
+        Capability::ExecuteCommands => "execute_commands",
+        _ => "unrecognized",
+    }
+}
+
+fn consent_json(method: ConsentMethod) -> &'static str {
+    match method {
+        ConsentMethod::FolderPicker => "folder_picker",
+        ConsentMethod::PermissionDialog => "permission_dialog",
+        ConsentMethod::OperatorConfig => "operator_config",
+        ConsentMethod::CarriedForward => "carried_forward",
+        _ => "unrecognized",
+    }
+}
+
+fn scope_json(scope: &Scope) -> serde_json::Value {
+    match scope {
+        Scope::Subject => serde_json::json!({ "kind": "subject" }),
+        Scope::Root { root_id } => serde_json::json!({
+            "kind": "root",
+            "root_id": root_id,
+        }),
+        Scope::PathSubtree { root_id, relative } => serde_json::json!({
+            "kind": "path_subtree",
+            "root_id": root_id,
+            "relative": relative.as_str(),
+        }),
+        _ => serde_json::json!({ "kind": "unrecognized" }),
+    }
+}
+
+/// Write one JSON object on stdout, matching setup's one-object shape so a
+/// driver can read either family the same way.
+fn emit_json(value: &serde_json::Value) -> Result<()> {
+    println!("{value}");
     Ok(())
 }
 
@@ -532,6 +672,7 @@ async fn disconnect(
     data_dir: &Path,
     chat_id: ChatId,
     target: &OsStr,
+    format: OutputFormat,
 ) -> Result<()> {
     let chat = load_chat(store, chat_id).await?;
     let subject = subject_for(&chat)?;
@@ -541,13 +682,14 @@ async fn disconnect(
     let root_id = resolve_target(data_dir, &chat, target)?;
 
     detach_from_chat(store, data_dir, &chat, subject, root_id, executor_id).await?;
-    println!("openwave: disconnected {root_id} from chat {chat_id}");
 
     // Detaching leaves the host approval standing, which is right when another
     // conversation still holds it and wrong when nothing does — an operator
     // would have no way to withdraw it. Withdraw it exactly when this chat's
     // subject is the only one with root-scoped grants on the folder, and say
     // so plainly when it is not.
+    let mut approval_revoked = false;
+    let mut approval_shared = false;
     if sole_grant_holder(data_dir, root_id, subject)? {
         match control(
             data_dir,
@@ -558,12 +700,28 @@ async fn disconnect(
             }),
         )? {
             ControlResult::RevokeRoot(result) if result.revoked => {
-                println!("openwave: withdrew the folder approval");
+                approval_revoked = true;
             }
             ControlResult::RevokeRoot(_) => {}
             _ => return Err(unexpected_broker_response()),
         }
     } else {
+        approval_shared = true;
+    }
+
+    if format == OutputFormat::Json {
+        return emit_json(&serde_json::json!({
+            "chat": chat_id,
+            "root_id": root_id,
+            "approval_revoked": approval_revoked,
+            "approval_shared": approval_shared,
+        }));
+    }
+
+    println!("openwave: disconnected {root_id} from chat {chat_id}");
+    if approval_revoked {
+        println!("openwave: withdrew the folder approval");
+    } else if approval_shared {
         eprintln!(
             "openwave: the folder approval still reaches other subjects and was left in place; \
              see `openwave folder list`"
@@ -1054,6 +1212,7 @@ mod tests {
             Command::Connect {
                 chat,
                 path: PathBuf::from("/srv/data"),
+                format: OutputFormat::Text,
             }
         );
         assert!(parse(args(&["connect", "/srv/data"])).is_err());
@@ -1062,8 +1221,76 @@ mod tests {
         assert!(parse(args(&["connect", "--yes", "--chat", &chat.to_string()])).is_err());
         assert_eq!(
             parse(args(&["list"])).unwrap(),
-            Command::List { chat: None }
+            Command::List {
+                chat: None,
+                format: OutputFormat::Text,
+            }
         );
         assert!(parse(args(&["approve"])).is_err());
+    }
+
+    /// Drivers need a stable opt-in on every folder verb. The default stays
+    /// text so interactive use is unchanged; json is accepted anywhere among
+    /// the other flags, once.
+    #[test]
+    fn folder_commands_accept_output_format() {
+        let chat = ChatId::new();
+        let chat_s = chat.to_string();
+        assert_eq!(
+            parse(args(&[
+                "list",
+                "--chat",
+                &chat_s,
+                "--output-format",
+                "json"
+            ]))
+            .unwrap(),
+            Command::List {
+                chat: Some(chat),
+                format: OutputFormat::Json,
+            }
+        );
+        assert_eq!(
+            parse(args(&[
+                "connect",
+                "/srv/data",
+                "--output-format",
+                "json",
+                "--chat",
+                &chat_s,
+            ]))
+            .unwrap(),
+            Command::Connect {
+                chat,
+                path: PathBuf::from("/srv/data"),
+                format: OutputFormat::Json,
+            }
+        );
+        assert_eq!(
+            parse(args(&[
+                "disconnect",
+                "/srv/data",
+                "--chat",
+                &chat_s,
+                "--output-format",
+                "text",
+            ]))
+            .unwrap(),
+            Command::Disconnect {
+                chat,
+                target: OsString::from("/srv/data"),
+                format: OutputFormat::Text,
+            }
+        );
+        assert!(parse(args(&["list", "--output-format"])).is_err());
+        assert!(parse(args(&["list", "--output-format", "yaml"])).is_err());
+        assert!(parse(args(&[
+            "list",
+            "--output-format",
+            "json",
+            "--output-format",
+            "text"
+        ]))
+        .is_err());
     }
 }
