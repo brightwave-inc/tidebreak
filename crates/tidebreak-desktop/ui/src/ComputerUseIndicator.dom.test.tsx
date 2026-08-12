@@ -104,7 +104,12 @@ describe("ComputerUseIndicator", () => {
     ];
     render(<ComputerUseIndicator />);
 
-    expect(screen.getByText(/Allow OpenWave to control Mail/)).toBeTruthy();
+    // The consent card names the grant's real principal — the bundle id — with
+    // the app's self-reported name only as a parenthetical, so a spoofed name
+    // cannot mislabel what is being granted.
+    expect(
+      screen.getByText(/Allow OpenWave to control com\.apple\.mail \(Mail\)/),
+    ).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Once" }));
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "once");
     await userEvent.click(

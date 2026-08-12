@@ -28,6 +28,14 @@ function appLabel(appName: string | null, bundleId: string): string {
   return appName && appName.length > 0 ? appName : bundleId;
 }
 
+function consentLabel(appName: string | null, bundleId: string): string {
+  if (bundleId === "") return "the whole screen";
+  // The bundle id is the principal the grant is actually written for; an app's
+  // self-reported name is attacker-influenceable, so the consent question leads
+  // with the bundle id and shows the name only as a parenthetical.
+  return appName && appName.length > 0 ? `${bundleId} (${appName})` : bundleId;
+}
+
 /**
  * The always-on computer-use surface: a banner while OpenWave is driving an
  * app (with a Stop that halts before the next action), a stopped state with
@@ -151,7 +159,7 @@ export function ComputerUseIndicator() {
             <p className="text-sm font-medium break-words">
               {capabilityAsk(
                 prompt.capability,
-                appLabel(prompt.appName, prompt.bundleId),
+                consentLabel(prompt.appName, prompt.bundleId),
               )}
             </p>
             <div className="flex flex-wrap gap-2">
