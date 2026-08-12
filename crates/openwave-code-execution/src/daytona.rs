@@ -169,8 +169,10 @@ impl Default for DaytonaEndpoints {
 
 /// Why the documents snapshot could not be made ready. Separated from
 /// [`CodeExecutionError`] because the two outcomes differ: a rejected
-/// credential is the user's problem and surfaces, while everything else
-/// degrades to Daytona's default snapshot.
+/// credential (401) is the user's problem and surfaces, while everything
+/// else — including a key that can create sandboxes but not register
+/// snapshots (403) — degrades to Daytona's default snapshot, which still
+/// runs toolbox commands.
 enum SnapshotError {
     Unauthorized,
     Degraded(String),
@@ -1072,17 +1074,32 @@ struct DaytonaSnapshot {
 }
 
 async fn decode_snapshot(response: Response) -> Result<DaytonaSnapshot, SnapshotError> {
-    if matches!(
-        response.status(),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-    ) {
+    // 401 alone means the key itself is bad — sandbox create would fail the
+    // same way, so surface it. 403 is different: Daytona API keys are scoped
+    // per resource (`write:sandboxes` without snapshot-create is a common
+    // developer key). Snapshot registration is optional polish (documents
+    // image); the default snapshot still hosts toolbox exec, so degrade.
+    if response.status() == StatusCode::UNAUTHORIZED {
         return Err(SnapshotError::Unauthorized);
     }
     if !response.status().is_success() {
-        return Err(SnapshotError::Degraded(format!(
-            "Daytona refused the snapshot request with status {}",
-            response.status().as_u16()
-        )));
+        let status = response.status().as_u16();
+        let detail = decode_bounded_json::<DaytonaErrorMessage>(
+            response,
+            "Daytona",
+            MAX_DAYTONA_RESPONSE_BYTES,
+        )
+        .await
+        .ok()
+        .and_then(|body| body.message)
+        .filter(|message| !message.is_empty());
+        let reason = match detail {
+            Some(message) => {
+                format!("Daytona refused the snapshot request with status {status}: {message}")
+            }
+            None => format!("Daytona refused the snapshot request with status {status}"),
+        };
+        return Err(SnapshotError::Degraded(reason));
     }
     decode_bounded_json(response, "Daytona", MAX_DAYTONA_RESPONSE_BYTES)
         .await
@@ -1199,6 +1216,14 @@ struct ExecuteResponse {
 #[derive(Deserialize)]
 struct DaytonaErrorResponse {
     code: Option<String>,
+}
+
+/// Best-effort body on snapshot refusals so the degrade log names the real
+/// cause (missing permission, quota, …) instead of only the status code.
+#[derive(Deserialize)]
+struct DaytonaErrorMessage {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2037,6 +2062,56 @@ mod tests {
             Some(ExecDegradation::SandboxImageUnavailable)
         );
         assert_eq!(second.degraded, None);
+        server.abort();
+    }
+
+    /// Live keys are often scoped to sandboxes only (`write:sandboxes` without
+    /// snapshot-create). Daytona answers snapshot registration with 403 in
+    /// that case. Treating 403 like a dead credential made every tool fail
+    /// with "could not be run in this task's workspace" even though the
+    /// default snapshot runs toolbox commands fine — the post-#1981 e2e.
+    #[tokio::test]
+    async fn daytona_degrades_when_the_key_cannot_register_snapshots() {
+        let (base, state, server) = spawn_mock().await;
+        *state.create_snapshot_status.lock().unwrap() = Some(StatusCode::FORBIDDEN);
+        let provider = mock_provider(&base);
+
+        let response = provider
+            .execute(request_in("chat-sandbox-only-key", "call-one"))
+            .await
+            .expect("sandbox-scoped keys must still execute on the default snapshot");
+
+        assert_eq!(created_from(&state), [None]);
+        assert_eq!(snapshot_calls(&state), ["snapshot-get", "snapshot-create"]);
+        assert_eq!(
+            response.degraded,
+            Some(ExecDegradation::SandboxImageUnavailable)
+        );
+        assert_eq!(response.exit_code, Some(0));
+        server.abort();
+    }
+
+    /// A 401 on the snapshot path is a dead key; do not pretend Daytona's
+    /// default snapshot would accept the same credential.
+    #[tokio::test]
+    async fn daytona_rejects_a_revoked_credential_during_snapshot_lookup() {
+        let (base, state, server) = spawn_mock().await;
+        *state.create_snapshot_status.lock().unwrap() = Some(StatusCode::UNAUTHORIZED);
+        let provider = mock_provider(&base);
+
+        let error = provider
+            .create_workspace(&ExecutionWorkspaceId::parse("chat-bad-key").unwrap())
+            .await
+            .expect_err("401 must surface, not degrade");
+
+        assert!(
+            matches!(
+                error,
+                CodeExecutionError::Unavailable(ref message) if message.contains("credential")
+            ),
+            "expected a credential rejection, got {error:?}"
+        );
+        assert_eq!(created_from(&state), [] as [Option<String>; 0]);
         server.abort();
     }
 
