@@ -33,7 +33,8 @@ use openwave_core::{
 };
 
 use super::config::{
-    sandbox_system_prompt, SandboxAgentRunWorkerOutcome, SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
+    sandbox_skills_summary, sandbox_system_prompt, SandboxAgentRunWorkerOutcome,
+    SANDBOX_PROMPT_EXEC_CLAUSE, SANDBOX_PROMPT_SKILLS_INTRO, SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
 };
 use super::model_step::{
     complete_sandbox_task, delegated_file_admission_matches, sandbox_request, SandboxCompletion,
@@ -666,7 +667,7 @@ async fn completes_a_claimed_run_with_a_no_tools_private_request() {
     );
     assert_eq!(
         requests[0].system.as_deref(),
-        Some(sandbox_system_prompt(false, TurnWebSearch::Host, true).as_str())
+        Some(sandbox_system_prompt(false, TurnWebSearch::Host, true, &[], &[]).as_str())
     );
 }
 
@@ -1876,6 +1877,7 @@ async fn local_signal_drops_resolver_before_durable_cancellation_ack() {
             ..AgentConfig::default()
         },
         None,
+        None,
         SandboxAgentRunWorkerConfig::default(),
     );
     let entered_wait = entered.notified();
@@ -1926,6 +1928,7 @@ async fn local_signal_drops_provider_stream_before_durable_cancellation_ack() {
             model: "m".into(),
             ..AgentConfig::default()
         },
+        None,
         None,
         SandboxAgentRunWorkerConfig::default(),
     );
@@ -2056,12 +2059,14 @@ async fn sandbox_request_does_not_inherit_foreground_system_or_tools() {
         &[],
         &store,
         false,
+        &[],
+        &[],
     )
     .await
     .unwrap();
     assert_eq!(
         request.system.as_deref(),
-        Some(sandbox_system_prompt(false, TurnWebSearch::Host, true).as_str())
+        Some(sandbox_system_prompt(false, TurnWebSearch::Host, true, &[], &[]).as_str())
     );
     assert_eq!(
         request
@@ -2101,6 +2106,8 @@ async fn sandbox_request_withholds_tools_from_a_chat_only_model() {
         &[],
         &store,
         false,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2114,7 +2121,9 @@ async fn sandbox_request_withholds_tools_from_a_chat_only_model() {
             TurnWebSearch::Vendor(openwave_core::VendorWebSearch {
                 max_uses: openwave_core::VendorWebSearch::DEFAULT_MAX_USES,
             }),
-            false
+            false,
+            &[],
+            &[],
         )
     );
     for unavailable in [
@@ -2152,6 +2161,8 @@ async fn one_model_step_never_advertises_unconsumable_web_search_work() {
         &[],
         &store,
         false,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2218,12 +2229,14 @@ async fn desktop_delegation_advertises_one_canonical_file_read() {
         &[],
         &store,
         true,
+        &[],
+        &[],
     )
     .await
     .unwrap();
     assert_eq!(
         request.system.as_deref(),
-        Some(sandbox_system_prompt(true, TurnWebSearch::Host, true).as_str())
+        Some(sandbox_system_prompt(true, TurnWebSearch::Host, true, &[], &[]).as_str())
     );
     assert_eq!(
         request
@@ -2270,7 +2283,13 @@ async fn delegated_file_read_answers_nonempty_arguments_without_parking_work() {
         provider: None,
         model: "m".into(),
         reasoning_model: false,
-        system: Some(sandbox_system_prompt(true, TurnWebSearch::Host, true)),
+        system: Some(sandbox_system_prompt(
+            true,
+            TurnWebSearch::Host,
+            true,
+            &[],
+            &[],
+        )),
         messages: vec![ChatMessage::text(Role::User, "task")],
         tools: vec![sandbox_read_delegated_file_tool_spec()],
         max_tokens: Some(100),
@@ -2654,6 +2673,102 @@ async fn a_vendor_run_on_an_unregistered_model_gets_no_search_at_all() {
         .system
         .as_deref()
         .is_some_and(|system| !system.contains(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE)));
+}
+
+/// Agents that stuff a whole shell line into `command` burn steps and fail
+/// closed; the system prompt must name the argv contract up front.
+#[test]
+fn sandbox_system_prompt_teaches_exec_argv_form() {
+    let prompt = sandbox_system_prompt(false, TurnWebSearch::Host, true, &[], &[]);
+    assert!(
+        prompt.contains(SANDBOX_PROMPT_EXEC_CLAUSE),
+        "tool-capable runs must name the exec argv contract: {prompt}"
+    );
+    assert!(
+        prompt.contains("single executable"),
+        "prompt should spell out that command is argv[0] only: {prompt}"
+    );
+    assert!(
+        prompt.contains("output/"),
+        "prompt must still point deliverables at output/: {prompt}"
+    );
+    // Empty catalog: no skills section and no "there is no skills catalog"
+    // denial that would contradict a later host with skills.
+    assert!(!prompt.contains(SANDBOX_PROMPT_SKILLS_INTRO));
+    assert!(!prompt.contains("no skills catalog"));
+}
+
+/// Tool-capable sandbox prompts carry the host skill catalog (names, one-line
+/// descriptions, install pins) so children do not reinvent openpyxl/fpdf after
+/// failed steps. Chat-only runs stay silent, and full SKILL.md bodies never
+/// enter the prompt.
+#[test]
+fn tool_capable_sandbox_prompt_includes_host_skills_summary() {
+    let skills = vec![
+        openwave_code_execution::SkillPackage {
+            name: "pdf-documents".into(),
+            description: "Generate and manipulate PDF documents.".into(),
+            python_deps: vec!["fpdf2==2.8.3".into(), "pypdf==6.15.0".into()],
+            npm_deps: Vec::new(),
+            host_deps: Vec::new(),
+            origin: openwave_code_execution::SkillOrigin::Builtin,
+        },
+        openwave_code_execution::SkillPackage {
+            name: "spreadsheets".into(),
+            description: "Build Excel workbooks with openpyxl.".into(),
+            python_deps: vec!["openpyxl==3.1.5".into()],
+            npm_deps: Vec::new(),
+            host_deps: vec![openwave_code_execution::HostDep::LibreOffice],
+            origin: openwave_code_execution::SkillOrigin::Builtin,
+        },
+        openwave_code_execution::SkillPackage {
+            name: "presentations".into(),
+            description: "Build PowerPoint decks.".into(),
+            python_deps: Vec::new(),
+            npm_deps: vec!["pptxgenjs@4.0.1".into()],
+            host_deps: vec![openwave_code_execution::HostDep::LibreOffice],
+            origin: openwave_code_execution::SkillOrigin::Builtin,
+        },
+    ];
+    let plugins = vec![openwave_code_execution::PluginPackage {
+        name: "documents".into(),
+        display_name: "Documents".into(),
+        description: "Bundle.".into(),
+        category: openwave_code_execution::PluginCategory::Documents,
+        skills: vec!["pdf-documents".into(), "presentations".into()],
+        prompts: Vec::new(),
+        router_preamble: Some(
+            "Pick by the file: pdf-documents for PDF, presentations for decks.".into(),
+        ),
+        mcp_servers: 0,
+        origin: openwave_code_execution::PluginOrigin::Builtin,
+        compatibility: openwave_code_execution::PluginCompatibility::compatible(),
+    }];
+
+    let summary = sandbox_skills_summary(&skills, &plugins).expect("catalog present");
+    assert!(summary.contains(SANDBOX_PROMPT_SKILLS_INTRO));
+    assert!(summary.contains("- pdf-documents: Generate and manipulate PDF documents."));
+    assert!(summary.contains("pip install --user fpdf2==2.8.3 pypdf==6.15.0"));
+    assert!(summary.contains("npm install --ignore-scripts pptxgenjs@4.0.1"));
+    assert!(summary.contains("- spreadsheets: Build Excel workbooks with openpyxl."));
+    assert!(summary.contains("- Pick by the file: pdf-documents for PDF, presentations for decks."));
+    // Never paste skill bodies.
+    assert!(!summary.contains("# PDF documents"));
+    assert!(!summary.contains("Produce PDF deliverables"));
+
+    let prompt = sandbox_system_prompt(false, TurnWebSearch::Host, true, &skills, &plugins);
+    assert!(
+        prompt.contains(SANDBOX_PROMPT_SKILLS_INTRO),
+        "tool-capable prompt must include the skills summary: {prompt}"
+    );
+    assert!(prompt.contains("openpyxl==3.1.5"));
+    assert!(prompt.contains(".openwave/skills/<name>/SKILL.md"));
+
+    // Chat-only routes never advertise skills or exec install paths.
+    let chat_only = sandbox_system_prompt(false, TurnWebSearch::Off, false, &skills, &plugins);
+    assert_eq!(chat_only, super::config::SANDBOX_CHAT_ONLY_PROMPT);
+    assert!(!chat_only.contains("pdf-documents"));
+    assert!(!chat_only.contains(SANDBOX_PROMPT_SKILLS_INTRO));
 }
 
 fn sandbox_chat() -> Chat {

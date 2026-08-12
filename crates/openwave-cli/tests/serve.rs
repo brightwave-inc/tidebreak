@@ -461,6 +461,43 @@ fn a_setup_command_attaches_to_a_running_server() {
     );
 }
 
+/// `--attach` reads the listen.json the server published into the data
+/// directory — no token on argv, same HTTP client as `--server`.
+#[test]
+fn a_setup_command_attaches_via_listen_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, _url, _token) = spawn_serve(dir.path());
+
+    let listen = dir.path().join("listen.json");
+    assert!(
+        listen.is_file(),
+        "serve must publish listen.json for --attach"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["provider", "list", "--output-format", "json", "--attach"])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SERVER_TOKEN")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run --attach provider list");
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "stderr: {stderr}");
+    let listed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the route's answer on one line");
+    assert!(
+        listed["providers"]
+            .as_array()
+            .is_some_and(|providers| providers
+                .iter()
+                .any(|provider| provider["kind"] == "anthropic")),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 /// The same rule for the families that read and write a conversation's files.
 /// Their failure mode when `--server` is ignored is not a broken flag but a
 /// silently wrong target: the command reads the local data directory while the
@@ -512,6 +549,49 @@ fn the_output_and_attach_families_reach_the_attached_server() {
     assert!(
         stderr.contains("no outputs"),
         "the attached chat exists and has produced nothing yet: {stderr}"
+    );
+}
+
+/// `output list --output-format json` writes one object on stdout — the same
+/// single-value shape setup uses — so a driver never has to scrape TSV or the
+/// empty-catalog banner on stderr.
+#[test]
+fn output_list_json_is_one_object_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, url, token) = spawn_serve(dir.path());
+    let chat = create_chat(&url, &token);
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args([
+            "output",
+            "list",
+            &chat,
+            "--output-format",
+            "json",
+            "--server",
+        ])
+        .arg(&url)
+        .env("OPENWAVE_SERVER_TOKEN", &token)
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run output list --output-format json");
+
+    let stderr = String::from_utf8_lossy(&listed.stderr).into_owned();
+    assert!(listed.status.success(), "stderr: {stderr}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&listed.stdout).expect("one JSON object on stdout");
+    assert_eq!(
+        body,
+        serde_json::json!({ "deliverables": [], "truncated": false }),
+        "stdout: {}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    assert!(
+        stderr.is_empty(),
+        "json mode keeps the empty-catalog note off stderr: {stderr}"
     );
 }
 
@@ -582,4 +662,89 @@ fn a_killed_server_leaves_its_data_directory_usable() {
 
     let (_reclaimed, url, _token) = spawn_serve(dir.path());
     assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
+}
+
+/// A fresh `-p` must name the chat it created on stderr so the next invocation
+/// can pass `--chat` — stdout stays the answer / journal alone.
+#[test]
+fn print_mode_prints_a_new_chat_id_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = serde_json::json!([{"text": "ok"}]);
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["-p", "hi", "--permission-mode", "allow"])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env("OPENWAVE_SCRIPTED_PROVIDER", script.to_string())
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SERVER_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave -p");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(TURN_EXIT_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    let chat = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("openwave: chat "))
+        .unwrap_or_else(|| panic!("new chat id missing from stderr: {stderr}"));
+    assert!(
+        openwave_core::ChatId::from_str(chat).is_ok(),
+        "chat id on stderr: {chat:?}"
+    );
+    assert!(
+        !stdout.contains(chat),
+        "chat id must not leak onto stdout: {stdout}"
+    );
+}
+
+/// `--model` is applied before the turn; a selection the server rejects must
+/// fail the process without writing assistant text to stdout.
+#[test]
+fn print_mode_rejects_an_unknown_model_before_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args([
+            "-p",
+            "hello",
+            "--model",
+            "openai::definitely-not-a-real-model",
+            "--permission-mode",
+            "allow",
+        ])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SERVER_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave -p --model");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.to_lowercase().contains("model") || stderr.to_lowercase().contains("provider"),
+        "stderr: {stderr}"
+    );
 }

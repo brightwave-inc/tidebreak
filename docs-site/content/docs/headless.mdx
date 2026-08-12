@@ -47,12 +47,14 @@ openwave settings exec remove-key <provider>
 openwave mcp-server list
 openwave mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
 openwave mcp-server remove <name>
+openwave chat list
+openwave chat create
 ```
 
 A bare `openwave` with no arguments runs `serve`.
 
 `tui`, `-p`, `output`, `attach`, and the setup commands additionally take
-`--server <url>` and `--server-token-env <var>` — see
+`--server <url>` / `--server-token-env <var>`, or `--attach` — see
 [Attaching to a running server](#attaching-to-a-running-server).
 
 ### `serve`
@@ -104,10 +106,14 @@ the exit status says how the turn ended.
 cargo run -p openwave-cli -- -p "summarize the CSV in output/"
 cargo run -p openwave-cli -- -p "…" --output-format json
 cargo run -p openwave-cli -- -p "…" --permission-mode allow
+cargo run -p openwave-cli -- -p "…" --model anthropic::claude-haiku-4-5-20251001
 ```
 
 `--output-format json` emits the turn's event stream as NDJSON instead of plain
-text. `--chat <id>` continues an existing conversation.
+text. `--chat <id>` continues an existing conversation. `--model <key>` pins the
+chat's model (a catalog key such as `anthropic::claude-haiku-4-5-20251001`)
+before the turn starts; an unavailable selection fails the process instead of
+falling back silently.
 
 `--permission-mode` sets the chat's permission mode for the run — the same four
 modes the desktop offers, applied before the turn starts:
@@ -215,12 +221,12 @@ cargo run -p openwave-cli -- -p "plan the migration" \
 
 ### Setup commands
 
-`provider`, `model`, `settings`, and `mcp-server` configure a profile without
-the desktop app. Each one boots the same in-process server the other commands
-do, calls the route the desktop's settings pages call, and prints the answer —
-they hold no configuration logic of their own, so both surfaces stay in step.
-All of them accept `--output-format text|json`, and `json` prints the route's
-response object on one line.
+`provider`, `model`, `settings`, `mcp-server`, and `chat` configure a profile
+without the desktop app. Each one boots the same in-process server the other
+commands do, calls the route the desktop's settings pages call, and prints the
+answer — they hold no configuration logic of their own, so both surfaces stay in
+step. All of them accept `--output-format text|json`, and `json` prints the
+route's response object on one line.
 
 ```sh
 # Providers and credentials
@@ -248,6 +254,11 @@ cargo run -p openwave-cli -- mcp-server list
 cargo run -p openwave-cli -- mcp-server add docs \
   --command npx --arg -y --arg @acme/docs-mcp --env-from ACME_TOKEN
 cargo run -p openwave-cli -- mcp-server remove docs
+
+# Chats
+cargo run -p openwave-cli -- chat list
+CHAT=$(cargo run -p openwave-cli -- chat create)
+cargo run -p openwave-cli -- -p "…" --chat "$CHAT"
 ```
 
 **A key is never a command-line argument.** `set-key` reads it from stdin, or
@@ -350,34 +361,52 @@ is honest across a crash: a killed process releases it the moment it dies, and
 the leftover file never has to be cleaned up by hand.
 
 The way in is to *attach* — to be a client of the server that is already there
-rather than a second one:
+rather than a second one. Prefer `--attach`, which reads the
+`listen.json` the running server wrote into the data directory (mode `0600`,
+bearer only — never the native executor credential):
+
+```sh
+# Same data directory the desktop or `serve` owns
+export OPENWAVE_DATA_DIR="$HOME/Library/Application Support/io.brightwave.openwave.dev"
+cargo run -p openwave-cli -- --attach provider list
+cargo run -p openwave-cli -- -p "what changed today?" --attach
+cargo run -p openwave-cli -- tui --attach
+```
+
+On a release desktop build, the directory is `io.brightwave.openwave` (no
+`.dev`). `--attach` and `--server` conflict; pick one.
+
+You can still pass an explicit URL when you already have the pair (for example
+from `serve`'s stdout):
 
 ```sh
 export OPENWAVE_SERVER_TOKEN=<the token that server printed>
 cargo run -p openwave-cli -- --server http://127.0.0.1:53421 provider list
-cargo run -p openwave-cli -- -p "what changed today?" --server http://127.0.0.1:53421
-cargo run -p openwave-cli -- tui --server http://127.0.0.1:53421
 ```
 
-`--server` works on `tui`, `-p`, and every setup command. `OPENWAVE_SERVER_URL`
-sets the same thing for a whole shell, and the flag wins over it. An attached
-command reads no local data directory, writes no log file, and touches no
-keychain — it is only an HTTP+WebSocket client, so `OPENWAVE_DATA_DIR` and the
-rest of the profile environment are ignored.
+`--server` / `--attach` work on `tui`, `-p`, and every setup command.
+`OPENWAVE_SERVER_URL` sets the same thing as `--server` for a whole shell, and
+the flag wins over it. After the endpoint is resolved, an attached command
+writes no log file and touches no keychain — it is only an HTTP+WebSocket
+client. With `--attach`, `OPENWAVE_DATA_DIR` is used solely to find
+`listen.json`; with `--server`, the local data directory is ignored.
 
-`serve`, `mcp`, and `rehome-secrets` reject `--server`: the first two *are*
-servers, and the third rewrites local keychain items. (They ignore
+`serve`, `mcp`, and `rehome-secrets` reject `--server` / `--attach`: the first
+two *are* servers, and the third rewrites local keychain items. (They ignore
 `OPENWAVE_SERVER_URL`, so a shell that exports it can still start a daemon.)
 
 ### Getting a token
 
 The bearer token is per-launch and is full authority over the profile, so it is
 never a command-line argument — every process on the machine can read those, and
-they land in shell history. It comes from `OPENWAVE_SERVER_TOKEN`, or from the
-variable `--server-token-env <var>` names.
+they land in shell history. `--attach` loads it from `listen.json`. With
+`--server` it comes from `OPENWAVE_SERVER_TOKEN`, or from the variable
+`--server-token-env <var>` names.
 
-**From `openwave serve`:** the token is the second line it prints. Capture the
-daemon's stdout directly:
+**From `openwave serve` or the desktop app:** both write
+`{data_dir}/listen.json` on bind. Point `OPENWAVE_DATA_DIR` at that directory
+and use `--attach`. `serve` still prints the URL and token on stdout if you
+prefer to capture them:
 
 ```sh
 cargo run -p openwave-cli -- serve > server.log &
@@ -385,20 +414,13 @@ export OPENWAVE_SERVER_URL=http://$(grep -m1 'listening on http://' server.log |
 export OPENWAVE_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||')
 ```
 
-**From the desktop app: not currently possible.** The desktop mints its own
-per-launch token and hands it straight to its webview; nothing displays or
-writes it out, so there is no supported way to attach to a running desktop
-instance today. To drive the desktop's chats from the CLI, quit the app first
-and run `openwave serve` (or the CLI command) against its data directory — while
-the app is running, that directory is claimed.
-
 ## Environment
 
 | Variable | Effect |
 | --- | --- |
-| `OPENWAVE_DATA_DIR` | Where the database, blobs, and logs live. Defaults to `./.openwave` under the current directory. Ignored when attaching to a running server. |
-| `OPENWAVE_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it, and `serve`/`mcp`/`rehome-secrets` ignore it. |
-| `OPENWAVE_SERVER_TOKEN` | Bearer token for that server, unless `--server-token-env <var>` names a different variable. |
+| `OPENWAVE_DATA_DIR` | Where the database, blobs, logs, and `listen.json` live. Defaults to `./.openwave` under the current directory. With `--attach`, used only to locate `listen.json`; with `--server`, ignored. |
+| `OPENWAVE_SERVER_URL` | Attach to the server at this base URL instead of embedding one. `--server <url>` overrides it; conflicts with `--attach`. `serve`/`mcp`/`rehome-secrets` ignore it. |
+| `OPENWAVE_SERVER_TOKEN` | Bearer token for `--server`, unless `--server-token-env <var>` names a different variable. Not used with `--attach`. |
 | `OPENWAVE_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
 | `OPENWAVE_DATABASE_URL` | Required for `self_host`. |
 | `OPENWAVE_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
@@ -412,9 +434,10 @@ the app is running, that directory is claimed.
 <Callout>
 `openwave serve` defaults to `./.openwave` in your current directory, which is
 **not** the desktop app's data directory. Point `OPENWAVE_DATA_DIR` at the
-desktop's application data directory if you want the CLI to see the same chats —
-and quit the app first, since a running desktop instance claims that directory
-and the CLI will refuse to start a second server over it. See
+desktop's application data directory (debug:
+`~/Library/Application Support/io.brightwave.openwave.dev`) and use `--attach`
+to drive the same chats while the app is running. Embedding a second server
+over that directory is still refused. See
 [Attaching to a running server](#attaching-to-a-running-server).
 </Callout>
 

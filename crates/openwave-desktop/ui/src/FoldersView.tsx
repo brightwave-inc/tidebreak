@@ -1,5 +1,6 @@
 import { FolderOpenIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import type { Chat, ConsentStatementSnapshot } from "./api";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
@@ -41,6 +42,7 @@ import {
 } from "./FolderAccess";
 import { verbLabel } from "./settings/PermissionsPanel";
 import { useRefreshSignals } from "./RefreshSignals";
+import { friendlyErrorMessage } from "@/lib/utils";
 
 /**
  * A chat's connected folders: the directories the native host may reach on
@@ -87,7 +89,10 @@ export function FoldersView({ chat }: { chat: Chat }) {
       setConsents(statements);
     } catch (err) {
       if (generation !== refreshGeneration.current) return;
-      setError(String(err));
+      // A panel that could not load is a standing state, not a transient
+      // failure, so it stays on the page. Every action below reports through a
+      // toast instead.
+      setError(friendlyErrorMessage(err, "The folders could not be loaded."));
     }
   }
 
@@ -112,16 +117,15 @@ export function FoldersView({ chat }: { chat: Chat }) {
    */
   async function withPicker(holder: string, open: () => Promise<unknown>) {
     if (!useNativePickerLatch.getState().claim(holder)) {
-      setError(PICKER_BUSY_MESSAGE);
+      toast.error(PICKER_BUSY_MESSAGE);
       return;
     }
     setWorking(true);
-    setError(null);
     try {
       const connected = await open();
       if (connected) useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      setError(String(err));
+      toast.error(friendlyErrorMessage(err, "The folder could not be changed."));
     } finally {
       useNativePickerLatch.getState().release(holder);
       setWorking(false);
@@ -161,12 +165,13 @@ export function FoldersView({ chat }: { chat: Chat }) {
     });
     if (!accepted) return;
     setWorking(true);
-    setError(null);
     try {
       await disconnectFolder(chat, folder.rootId);
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      setError(String(err));
+      toast.error(
+        friendlyErrorMessage(err, "The folder could not be disconnected."),
+      );
     } finally {
       setWorking(false);
     }
@@ -187,12 +192,11 @@ export function FoldersView({ chat }: { chat: Chat }) {
     });
     if (!accepted) return;
     setWorking(true);
-    setError(null);
     try {
       await forgetFolder(folder.rootId);
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      setError(String(err));
+      toast.error(friendlyErrorMessage(err, "The folder could not be forgotten."));
     } finally {
       setWorking(false);
     }
@@ -215,12 +219,11 @@ export function FoldersView({ chat }: { chat: Chat }) {
     });
     if (!accepted) return;
     setWorking(true);
-    setError(null);
     try {
       await revokeCapabilityConsent(statement);
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      setError(String(err));
+      toast.error(friendlyErrorMessage(err, "The access could not be revoked."));
     } finally {
       setWorking(false);
     }
@@ -288,10 +291,12 @@ export function FoldersView({ chat }: { chat: Chat }) {
                   const reach = folderReach(statements);
                   // What the folder does not yet allow is offered next to what
                   // it does, so the recovery for a read-only folder is visible
-                  // before a refused write, not after it. Read is not offered:
-                  // a folder without read consent is not listed here at all.
+                  // before a refused write, not after it. Read is offered on
+                  // the same terms: a folder can be attached with its read
+                  // consent revoked, and asking for it back is how that folder
+                  // becomes usable again short of disconnecting it.
                   const missing = (
-                    ["write_files", "execute_commands"] as const
+                    ["read_files", "write_files", "execute_commands"] as const
                   ).filter((capability) => !reach.includes(capability));
                   return (
                     <FolderCard

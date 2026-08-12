@@ -34,9 +34,9 @@
 //! terminal. stdout carries the assistant's text (or, with
 //! `--output-format json`, the turn's event stream as NDJSON), and the exit
 //! status says whether the turn completed. `--permission-mode` sets the chat's
-//! permission mode for the run, and under `--output-format json` a driving
-//! process answers approvals, plans, and questions over stdin — see
-//! [`print::protocol`].
+//! permission mode for the run, `--model` pins the chat's model selection
+//! before the turn, and under `--output-format json` a driving process answers
+//! approvals, plans, and questions over stdin — see [`print::protocol`].
 //!
 //! `openwave provider|model|settings|mcp-server …` configure the profile the
 //! same way the desktop's settings pages do — over the server's own routes.
@@ -58,7 +58,9 @@
 //! Every client command above embeds its own server by default. `--server
 //! <url>` (or `OPENWAVE_SERVER_URL`) makes it a pure client of one that is
 //! already running instead, with the bearer token coming from
-//! `OPENWAVE_SERVER_TOKEN` — see [`connect`]. That is how a second process
+//! `OPENWAVE_SERVER_TOKEN` — see [`connect`]. `--attach` is the same attach
+//! using `{OPENWAVE_DATA_DIR}/listen.json` the running server wrote, so the
+//! token never rides argv (desktop or `serve`). That is how a second process
 //! reaches a data directory a desktop app or daemon already owns; two processes
 //! embedding servers over one data directory is refused.
 
@@ -90,11 +92,12 @@ usage: openwave serve
        openwave tui [--chat <id> | --new]
        openwave -p <prompt> [--chat <id>] [--output-format text|json]
                   [--permission-mode ask|auto|allow|plan]
+                  [--model <key>]
 
-       openwave output list <chat>
-       openwave output show <chat> <output> [--revision <id>]
-       openwave output revisions <chat> <output>
-       openwave output export <chat> <output> <path> [--revision <id>]
+       openwave output list <chat> [--output-format text|json]
+       openwave output show <chat> <output> [--revision <id>] [--output-format text|json]
+       openwave output revisions <chat> <output> [--output-format text|json]
+       openwave output export <chat> <output> <path> [--revision <id>] [--output-format text|json]
        openwave attach <chat> <file>
 
        openwave provider list
@@ -115,20 +118,26 @@ usage: openwave serve
                   [--env-from <var>]… [--cwd <dir>] [--bearer-token-env <var>]
                   [--timeout-ms <ms>] [--disabled]
        openwave mcp-server remove <name>
+       openwave chat list
+       openwave chat create
+       openwave agent-run list <chat>
+       openwave agent-run show <chat> <run>
 
        openwave folder connect <path> --chat <id>
        openwave folder list [--chat <id>]
        openwave folder disconnect <path-or-root-id> --chat <id>
 
-The setup commands take --output-format text|json. A key is read from stdin, or
-from the environment variable named by --from-env — never from an argument,
-which every process on the machine can read.
+The setup commands and the output family take --output-format text|json. A key
+is read from stdin, or from the environment variable named by --from-env —
+never from an argument, which every process on the machine can read.
 
 tui, -p, output, attach, and the setup commands also take --server <url>
-[--server-token-env <var>], which talks to a server that is already running
-instead of embedding one. The token comes from OPENWAVE_SERVER_TOKEN, or from the named variable;
-it is never an argument either. The folder commands do not: they provision
-local host consent in this machine's own broker state.";
+[--server-token-env <var>] or --attach, which talks to a server that is already
+running instead of embedding one. --attach reads {OPENWAVE_DATA_DIR}/listen.json
+(written by serve and the desktop). With --server the token comes from
+OPENWAVE_SERVER_TOKEN, or from the named variable; it is never an argument
+either. The folder commands do not: they provision local host consent in this
+machine's own broker state.";
 
 #[tokio::main]
 async fn main() {
@@ -239,6 +248,7 @@ async fn run() -> Result<i32> {
             let mut chat = None;
             let mut format = OutputFormat::Text;
             let mut permission_mode = None;
+            let mut model = None;
             while let Some(flag) = args.next() {
                 if flag == OsStr::new("--chat") {
                     let Some(id) = args.next() else {
@@ -268,6 +278,17 @@ async fn run() -> Result<i32> {
                         }
                         _ => usage_error("--permission-mode expects ask, auto, allow, or plan"),
                     }
+                } else if flag == OsStr::new("--model") {
+                    let Some(value) = args.next() else {
+                        usage_error("--model requires a catalog key");
+                    };
+                    let Some(value) = value.to_str().map(str::to_owned) else {
+                        usage_error("--model expects a UTF-8 catalog key");
+                    };
+                    if value.is_empty() || value.starts_with("--") {
+                        usage_error("--model requires a catalog key");
+                    }
+                    model = Some(value);
                 } else {
                     usage_error(&format!("unknown print-mode argument {flag:?}"));
                 }
@@ -277,6 +298,7 @@ async fn run() -> Result<i32> {
                 chat,
                 format,
                 permission_mode,
+                model,
                 server_flags.resolve()?,
             )
             .await
@@ -285,7 +307,9 @@ async fn run() -> Result<i32> {
             if command == OsStr::new("provider")
                 || command == OsStr::new("model")
                 || command == OsStr::new("settings")
-                || command == OsStr::new("mcp-server") =>
+                || command == OsStr::new("mcp-server")
+                || command == OsStr::new("chat")
+                || command == OsStr::new("agent-run") =>
         {
             let family = command.to_string_lossy().into_owned();
             let (command, format) = parse_setup(&family, text_args(args));
@@ -310,16 +334,18 @@ async fn run() -> Result<i32> {
     }
 }
 
-/// The `--server` / `--server-token-env` pair, lifted out of the arguments.
+/// The `--server` / `--server-token-env` / `--attach` choice, lifted out of
+/// the arguments.
 struct ServerFlags {
     url: Option<String>,
     token_env: Option<String>,
+    attach: bool,
 }
 
 impl ServerFlags {
     /// Turn the flags plus the environment into the choice to embed or attach.
     fn resolve(self) -> Result<connect::Server> {
-        connect::Server::resolve(self.url, self.token_env)
+        connect::Server::resolve(self.url, self.token_env, self.attach)
     }
 
     /// Refuse the flags on a command that has no client to point elsewhere.
@@ -328,16 +354,17 @@ impl ServerFlags {
     /// a shell that exports it so its `-p` runs attach must still be able to
     /// start a daemon.
     fn refuse(&self, command: &str) {
-        if self.url.is_some() || self.token_env.is_some() {
+        if self.url.is_some() || self.token_env.is_some() || self.attach {
             usage_error(&format!(
-                "{command} runs a server rather than connecting to one, so it takes no --server"
+                "{command} runs a server rather than connecting to one, so it takes no --server/--attach"
             ));
         }
     }
 }
 
-/// Pull `--server <url>` and `--server-token-env <var>` out of the arguments
-/// wherever they appear, leaving the rest for the per-command parsers.
+/// Pull `--server <url>`, `--server-token-env <var>`, and `--attach` out of
+/// the arguments wherever they appear, leaving the rest for the per-command
+/// parsers.
 ///
 /// A pre-pass rather than an option on each parser: the flags apply to every
 /// client command, and no command takes a value beginning with `--` (each
@@ -346,10 +373,18 @@ fn take_server_flags(args: Vec<OsString>) -> (Vec<OsString>, ServerFlags) {
     let mut flags = ServerFlags {
         url: None,
         token_env: None,
+        attach: false,
     };
     let mut rest = Vec::with_capacity(args.len());
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        if arg == OsStr::new("--attach") {
+            if flags.attach {
+                usage_error("--attach given more than once");
+            }
+            flags.attach = true;
+            continue;
+        }
         let slot = if arg == OsStr::new("--server") {
             &mut flags.url
         } else if arg == OsStr::new("--server-token-env") {
@@ -421,11 +456,23 @@ impl Cursor {
     }
 }
 
-/// Parse one `provider`/`model`/`settings`/`mcp-server` invocation.
+/// Parse one `provider`/`model`/`settings`/`mcp-server`/`chat`/`agent-run`
+/// invocation.
 fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) {
     let mut cursor = Cursor::new(args);
     let verb = cursor.positional(&format!("a {family} subcommand"));
     let command = match (family, verb.as_str()) {
+        ("chat", "list") => SetupCommand::ChatList,
+        ("chat", "create") => SetupCommand::ChatCreate,
+        ("agent-run", "list") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            SetupCommand::AgentRunList { chat }
+        }
+        ("agent-run", "show") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let run = parse_agent_run_id(&cursor.positional("an agent-run id"));
+            SetupCommand::AgentRunShow { chat, run }
+        }
         ("provider", "list") => SetupCommand::ProviderList,
         ("provider", "set-key") => SetupCommand::ProviderSetKey {
             kind: cursor.positional("a provider kind"),
@@ -536,6 +583,15 @@ fn parse_format(value: String) -> OutputFormat {
     }
 }
 
+fn parse_chat_id(value: &str) -> ChatId {
+    ChatId::from_str(value).unwrap_or_else(|_| usage_error("expected a chat UUID"))
+}
+
+fn parse_agent_run_id(value: &str) -> openwave_core::AgentRunId {
+    openwave_core::AgentRunId::from_str(value)
+        .unwrap_or_else(|_| usage_error("expected an agent-run UUID"))
+}
+
 /// Build one MCP server definition from flags, in the shape
 /// `PUT /mcp/servers` takes. Values the server keeps out of its definitions —
 /// environment values, bearer tokens — are named here, never given.
@@ -596,8 +652,8 @@ fn parse_mcp_definition(cursor: &mut Cursor) -> serde_json::Value {
 /// Parse and run one `openwave output …` subcommand.
 ///
 /// Positional chat and output ids, matching `openwave attach <chat> <file>`;
-/// the only flag is `--revision <id>`, which names an exact version instead of
-/// the current one.
+/// `--revision <id>` names an exact version instead of the current one, and
+/// `--output-format text|json` is the same opt-in the setup family uses.
 async fn output_command(
     args: &mut impl Iterator<Item = OsString>,
     server: connect::Server,
@@ -612,10 +668,8 @@ async fn output_command(
     };
 
     if subcommand == OsStr::new("list") {
-        if args.next().is_some() {
-            usage_error("output list accepts only a chat id");
-        }
-        return outputs::run(outputs::Command::List { chat }, server).await;
+        let (_, format) = parse_output_trailing_flags(args, /*allow_revision=*/ false);
+        return outputs::run(outputs::Command::List { chat }, format, server).await;
     }
 
     let output = match args.next() {
@@ -637,20 +691,8 @@ async fn output_command(
         None
     };
 
-    let mut revision = None;
-    while let Some(flag) = args.next() {
-        if flag == OsStr::new("--revision") {
-            let Some(id) = args.next() else {
-                usage_error("--revision requires a revision id");
-            };
-            match openwave_core::OutputRevisionId::from_str(&id.to_string_lossy()) {
-                Ok(id) => revision = Some(id),
-                Err(_) => usage_error("--revision expects a revision UUID"),
-            }
-        } else {
-            usage_error(&format!("unknown output argument {flag:?}"));
-        }
-    }
+    let allow_revision = subcommand == OsStr::new("show") || subcommand == OsStr::new("export");
+    let (revision, format) = parse_output_trailing_flags(args, allow_revision);
 
     let command = if subcommand == OsStr::new("show") {
         outputs::Command::Show {
@@ -659,9 +701,6 @@ async fn output_command(
             revision,
         }
     } else if subcommand == OsStr::new("revisions") {
-        if revision.is_some() {
-            usage_error("output revisions lists every version and takes no --revision");
-        }
         outputs::Command::Revisions { chat, output }
     } else if subcommand == OsStr::new("export") {
         outputs::Command::Export {
@@ -673,7 +712,42 @@ async fn output_command(
     } else {
         usage_error("output accepts list, show, revisions, or export");
     };
-    outputs::run(command, server).await
+    outputs::run(command, format, server).await
+}
+
+/// Shared flag loop for the output family: optional `--revision` (show/export)
+/// and the trailing `--output-format` every verb accepts.
+fn parse_output_trailing_flags(
+    args: &mut impl Iterator<Item = OsString>,
+    allow_revision: bool,
+) -> (Option<openwave_core::OutputRevisionId>, OutputFormat) {
+    let mut revision = None;
+    let mut format = OutputFormat::Text;
+    while let Some(flag) = args.next() {
+        if flag == OsStr::new("--revision") {
+            if !allow_revision {
+                usage_error(&format!("unknown output argument {flag:?}"));
+            }
+            let Some(id) = args.next() else {
+                usage_error("--revision requires a revision id");
+            };
+            match openwave_core::OutputRevisionId::from_str(&id.to_string_lossy()) {
+                Ok(id) => revision = Some(id),
+                Err(_) => usage_error("--revision expects a revision UUID"),
+            }
+        } else if flag == OsStr::new("--output-format") {
+            let Some(value) = args.next() else {
+                usage_error("--output-format requires text or json");
+            };
+            match OutputFormat::parse(&value.to_string_lossy()) {
+                Some(value) => format = value,
+                None => usage_error("--output-format expects text or json"),
+            }
+        } else {
+            usage_error(&format!("unknown output argument {flag:?}"));
+        }
+    }
+    (revision, format)
 }
 
 fn usage_error(message: &str) -> ! {
@@ -685,7 +759,7 @@ fn usage_error(message: &str) -> ! {
 ///
 /// Debug builds keep their own keychain service, matching the desktop's
 /// dev/release split: a dev daemon must not mutate release secret state.
-fn profile_config() -> Result<Config> {
+pub(crate) fn profile_config() -> Result<Config> {
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut config = Config::from_env()?;
     #[cfg(debug_assertions)]

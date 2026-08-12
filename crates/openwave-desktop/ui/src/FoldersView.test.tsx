@@ -189,6 +189,54 @@ describe("FoldersView", () => {
     expect(screen.getAllByRole("button", { name: "Grant" })).toHaveLength(1);
   });
 
+  it("keeps a folder whose access was revoked listed, with read to grant back", async () => {
+    // Revoking read leaves the folder attached and allowing nothing. It used
+    // to disappear from this panel at that point, taking Disconnect and every
+    // way back with it.
+    vi.mocked(host.listConnectedFolders).mockResolvedValue([
+      folder("locked-out", "Archive"),
+    ]);
+    let granted: ConsentStatementSnapshot[] = [];
+    vi.mocked(host.listCapabilityConsents).mockImplementation(
+      async () => granted,
+    );
+    vi.mocked(host.grantFolderCapability).mockImplementation(async () => {
+      granted = [statement("locked-out", "read_files")];
+      return true;
+    });
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    await screen.findByText("Archive");
+    expect(screen.getByText("No access")).toBeInTheDocument();
+
+    // Disconnect has to work from here, not merely be on screen: the broker
+    // used to refuse a detach for a folder the chat could not read, which made
+    // this button a dead control in the one state it exists for.
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    const confirmations = await screen.findAllByRole("button", {
+      name: "Disconnect",
+    });
+    await user.click(confirmations[confirmations.length - 1]);
+    await waitFor(() =>
+      expect(host.disconnectFolder).toHaveBeenCalledWith(chat, "locked-out"),
+    );
+
+    // Read is the first thing offered back, and granting it is an explicit
+    // action answered natively — nothing here restores it on its own.
+    const grants = screen.getAllByRole("button", { name: "Grant" });
+    expect(grants).toHaveLength(3);
+    await user.click(grants[0]);
+    expect(host.grantFolderCapability).toHaveBeenCalledWith(
+      chat,
+      "locked-out",
+      "read_files",
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Read only")).toBeInTheDocument(),
+    );
+  });
+
   it("distinguishes an unavailable folder and lets it be forgotten for good", async () => {
     vi.mocked(host.listConnectedFolders)
       .mockResolvedValueOnce([

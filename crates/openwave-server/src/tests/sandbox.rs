@@ -74,6 +74,22 @@ async fn create_then_get_and_list() {
     assert!(snapshot.get("lease_expires_at").is_none());
     assert!(snapshot.get("input").is_none());
     assert!(snapshot.get("chat_id").is_none());
+    // Default host selection: local where the sandbox exists, otherwise off.
+    // Never confused with execution_location (the run-loop seat).
+    let expected_provider =
+        if openwave_code_execution::LocalExecutionProvider::availability().is_ok() {
+            "local"
+        } else {
+            "off"
+        };
+    assert_eq!(
+        snapshot.get("code_execution_provider"),
+        Some(&serde_json::json!(expected_provider))
+    );
+    assert_eq!(
+        snapshot.get("execution_location"),
+        Some(&serde_json::json!("in_process"))
+    );
 
     let listed: Vec<Chat> = {
         let response = router
@@ -90,6 +106,131 @@ async fn create_then_get_and_list() {
         json_body(response).await
     };
     assert_eq!(listed, vec![created]);
+}
+
+/// `code_execution_provider` is the host `exec` backend, not the run-loop seat.
+/// Selecting e2b must surface on every agent-run snapshot while
+/// `execution_location` stays `in_process` for an ordinary in-process child.
+#[tokio::test]
+async fn agent_run_snapshots_surface_active_code_execution_provider() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat: Chat = {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await
+    };
+    let run = admit_sandbox_for_test(&store, chat.id, "research").await;
+
+    let select_e2b = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "provider": "e2b",
+                        "timeout_ms": crate::code_execution::DEFAULT_TIMEOUT_MS,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(select_e2b.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshots: Vec<serde_json::Value> = json_body(response).await;
+    assert!(
+        !snapshots.is_empty(),
+        "chat always has at least the foreground run"
+    );
+    for snapshot in &snapshots {
+        assert_eq!(
+            snapshot.get("code_execution_provider"),
+            Some(&serde_json::json!("e2b")),
+            "snapshot {} should report the active exec backend",
+            snapshot.get("id").unwrap_or(&serde_json::Value::Null)
+        );
+        // The run loop is still in-process; only the exec backend moved.
+        assert_eq!(
+            snapshot.get("execution_location"),
+            Some(&serde_json::json!("in_process"))
+        );
+    }
+    assert!(
+        snapshots
+            .iter()
+            .any(|snapshot| snapshot.get("id") == Some(&serde_json::json!(run.id))),
+        "background run is listed"
+    );
+
+    let disable = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "provider": null,
+                        "timeout_ms": crate::code_execution::DEFAULT_TIMEOUT_MS,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disable.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshots: Vec<serde_json::Value> = json_body(response).await;
+    for snapshot in &snapshots {
+        assert_eq!(
+            snapshot.get("code_execution_provider"),
+            Some(&serde_json::json!("off"))
+        );
+    }
 }
 
 #[tokio::test]

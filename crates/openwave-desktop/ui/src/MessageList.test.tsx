@@ -22,6 +22,7 @@ function backgroundRun(
     spawn_call_id: spawnCallId,
     tier: "background",
     execution_location: "in_process",
+    code_execution_provider: "local",
     status,
     task: `Task for ${id}`,
     started_at: null,
