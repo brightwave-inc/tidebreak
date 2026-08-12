@@ -5,7 +5,7 @@
 **Please do not report security vulnerabilities through public GitHub issues.**
 
 Instead, report them privately through GitHub's
-[private vulnerability reporting](https://github.com/brightwave-inc/openwave/security/advisories/new)
+[private vulnerability reporting](https://github.com/brightwave-inc/tidebreak/security/advisories/new)
 (**Security** tab → **Report a vulnerability**).
 
 Please include enough detail to reproduce: affected component/version, steps,

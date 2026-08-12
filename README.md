@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="assets/tidebreak-logo.png" alt="Tidebreak" width="380">
+  <img src="assets/tidebreak-mark.svg" alt="Tidebreak mark" width="300">
 </p>
+
+<h1 align="center">Tidebreak</h1>
 
 <p align="center">
   <strong>A private AI coworker that runs on your machine.</strong><br>
@@ -12,11 +14,11 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--1.0-orange.svg" alt="Status: pre-1.0">
   <img src="https://img.shields.io/badge/built%20with-Rust-dea584.svg?logo=rust&logoColor=white" alt="Built with Rust">
-  <a href="https://github.com/brightwave-inc/openwave/releases/latest"><img src="https://img.shields.io/github/v/release/brightwave-inc/openwave?label=release&color=informational" alt="Latest release"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest"><img src="https://img.shields.io/github/v/release/brightwave-inc/tidebreak?label=release&color=informational" alt="Latest release"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/Tidebreak-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
 </p>
 
 ---
@@ -84,7 +86,7 @@ Tidebreak ships as a signed and notarized macOS app for **Apple Silicon**. Intel
 is paused while the product is in active development, and the release pipeline
 publishes one `aarch64` build ([`docs/releases.md`](docs/releases.md)). The
 button above always resolves to the newest release; the
-[releases page](https://github.com/brightwave-inc/openwave/releases) has the
+[releases page](https://github.com/brightwave-inc/tidebreak/releases) has the
 notes and earlier versions.
 
 Every release is also published to the hosted download root, which is the

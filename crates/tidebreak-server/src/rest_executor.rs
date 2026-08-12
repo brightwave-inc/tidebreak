@@ -75,7 +75,7 @@ pub const MAX_REST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_REST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The honest, distinct user agent every executed operation announces.
 pub const REST_EXECUTOR_USER_AGENT: &str =
-    "TidebreakConnectedApp/1.0 (+https://github.com/brightwave-inc/openwave)";
+    "TidebreakConnectedApp/1.0 (+https://github.com/brightwave-inc/tidebreak)";
 
 /// The REST API one operation executes against: where to send the request and
 /// which stored credential (if any) authenticates it.

@@ -164,7 +164,7 @@ automatic.
    `Tidebreak-macos-apple-silicon.dmg`, and it would again include
    `Tidebreak-windows-x86_64-setup.exe` if the Windows lane were unparked. It
    holds no signing or AWS credentials. The names omit the version so that
-   `https://github.com/brightwave-inc/openwave/releases/latest/download/<name>`
+   `https://github.com/brightwave-inc/tidebreak/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
    app's own version string identify which build it is.
 
@@ -315,7 +315,7 @@ Configure these environment variables:
 | `DOWNLOADS_AWS_REGION`                     | AWS region; defaults to `us-east-1` when omitted                   |
 
 The IAM role must trust GitHub's OIDC provider with the environment subject
-`repo:brightwave-inc/openwave:environment:desktop-production`. Grant only the
+`repo:brightwave-inc/tidebreak:environment:desktop-production`. Grant only the
 S3 permissions needed beneath `tidebreak/` and CloudFront invalidation access for
 the configured distribution. No long-lived AWS access key belongs in GitHub.
 
