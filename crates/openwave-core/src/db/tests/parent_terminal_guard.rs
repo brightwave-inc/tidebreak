@@ -1,8 +1,8 @@
 use super::{sample_chat, temp_store};
 use crate::db::tests::agent_run::{admit_sandbox_call_for_test, live_turn_for_sandbox_test};
 use crate::{
-    AgentRunCancellationReason, AgentRunId, AgentRunInboxStatus, AgentRunStatus, CallId,
-    CompleteTurnRunOutcome, Message, MessageId, RecordTurnFailureOutcome,
+    AgentRunCancellationReason, AgentRunCheckInReason, AgentRunId, AgentRunInboxStatus,
+    AgentRunStatus, CallId, CompleteTurnRunOutcome, Message, MessageId, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, Role, Store, SubmitAgentRunResultOutcome, TurnFailureRetry,
     TurnRunStatus, Usage,
 };
@@ -157,6 +157,90 @@ async fn completion_fences_children_in_stable_order_without_writing_output() {
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::Completed(_))
+    ));
+}
+
+#[tokio::test]
+async fn completion_fences_needs_input_checkin_without_store_error() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "check in").await;
+    let child_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(child_lease, Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        child.id
+    );
+    assert!(matches!(
+        store
+            .submit_agent_run_checkin(
+                child.id,
+                child_lease,
+                AgentRunCheckInReason::ConsecutiveToolErrors,
+                3,
+                "tool errors need direction",
+            )
+            .await
+            .unwrap(),
+        Some(SubmitAgentRunResultOutcome::Completed(_))
+    ));
+    assert_eq!(
+        store.get_agent_run(child.id).await.unwrap().unwrap().status,
+        AgentRunStatus::NeedsInput
+    );
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].child_run_id, child.id);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Pending);
+    assert!(matches!(
+        inbox[0].result.payload,
+        crate::AgentRunResultPayload::CheckIn {
+            reason: AgentRunCheckInReason::ConsecutiveToolErrors,
+            ..
+        }
+    ));
+
+    let output = output_for(&turn, chat.id);
+    // The check-in delivery must fence completion as ChildrenOutstanding, not
+    // as a store error the turn worker would retry forever.
+    assert!(matches!(
+        store
+            .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
+            if child_run_ids == vec![child.id]
+    ));
+    assert_eq!(
+        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        TurnRunStatus::Running
+    );
+    assert!(!store
+        .list_messages(chat.id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|message| message.id == output.id));
+
+    // Consuming the check-in does not free the child: it is still paused, so
+    // the parent remains fenced until resume or cancellation settles it.
+    consume_child(&store, chat.id, child.id).await;
+    assert!(matches!(
+        store
+            .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
+            if child_run_ids == vec![child.id]
     ));
 }
 

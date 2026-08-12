@@ -338,7 +338,13 @@ where
 }
 
 /// Validate every child admitted by one exact foreground turn and return the
-/// ones whose terminal delivery is not yet consumed or explicitly retired.
+/// ones the parent must still account for before completing.
+///
+/// Unsettled covers live work, a terminal delivery not yet consumed or
+/// retired, and a check-in pause in `needs_input` (decision 0005): the pause
+/// rides the same inbox machinery as a terminal result, so a pending or
+/// already-consumed check-in still fences completion until the child is
+/// resumed, cancelled, or otherwise leaves the origin turn.
 ///
 /// The caller holds the scheduler, chat, and turn locks in that order. Stable
 /// admission ordering makes the typed completion fence deterministic across
@@ -392,6 +398,45 @@ where
 
         let status = agent_run_status_from_db(&child.status)?;
         if !status.is_terminal() {
+            // Check-ins deliberately park a nonterminal child with an inbox
+            // delivery the parent's wait can consume. That is not corruption:
+            // validate the check-in receipt and keep the child unsettled so
+            // completion returns ChildrenOutstanding instead of spinning on a
+            // store error.
+            if status == AgentRunStatus::NeedsInput {
+                let inbox = load_agent_run_inbox_by_ids_on(conn, parent_id, child_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AgentError::Store(format!(
+                            "needs_input sandbox child {child_id} is missing its check-in delivery"
+                        ))
+                    })?;
+                let check_in_lease = inbox.result.lease_token;
+                let result_claim = entities::agent_run_claim::Entity::find_by_id(check_in_lease)
+                    .one(conn)
+                    .await
+                    .map_err(store_err)?
+                    .ok_or_else(|| {
+                        AgentError::Store(format!(
+                            "needs_input sandbox child {child_id} check-in is missing claim provenance",
+                        ))
+                    })?;
+                if inbox.chat_id != ChatId(turn.chat_id)
+                    || inbox.result.agent_run_id != child_id
+                    || !matches!(inbox.result.payload, AgentRunResultPayload::CheckIn { .. })
+                    || inbox.result.attempt_count != child.attempt_count
+                    || inbox.result.claim_count != child.claim_count
+                    || result_claim.agent_run_id != Some(child.id)
+                    || result_claim.attempt_count != Some(child.attempt_count)
+                    || result_claim.claim_count != Some(child.claim_count)
+                {
+                    return Err(AgentError::Store(format!(
+                        "needs_input sandbox child {child_id} has mismatched check-in provenance"
+                    )));
+                }
+                unsettled.push(child_id);
+                continue;
+            }
             if find_agent_run_inbox_on(conn, parent_id, child_id)
                 .await?
                 .is_some()
