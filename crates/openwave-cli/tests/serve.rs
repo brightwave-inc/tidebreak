@@ -552,6 +552,49 @@ fn the_output_and_attach_families_reach_the_attached_server() {
     );
 }
 
+/// `output list --output-format json` writes one object on stdout — the same
+/// single-value shape setup uses — so a driver never has to scrape TSV or the
+/// empty-catalog banner on stderr.
+#[test]
+fn output_list_json_is_one_object_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, url, token) = spawn_serve(dir.path());
+    let chat = create_chat(&url, &token);
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args([
+            "output",
+            "list",
+            &chat,
+            "--output-format",
+            "json",
+            "--server",
+        ])
+        .arg(&url)
+        .env("OPENWAVE_SERVER_TOKEN", &token)
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run output list --output-format json");
+
+    let stderr = String::from_utf8_lossy(&listed.stderr).into_owned();
+    assert!(listed.status.success(), "stderr: {stderr}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&listed.stdout).expect("one JSON object on stdout");
+    assert_eq!(
+        body,
+        serde_json::json!({ "deliverables": [], "truncated": false }),
+        "stdout: {}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    assert!(
+        stderr.is_empty(),
+        "json mode keeps the empty-catalog note off stderr: {stderr}"
+    );
+}
+
 /// Create a chat on the running server and return its id, so a command under
 /// test has something on the *server's* side to name.
 fn create_chat(url: &str, token: &str) -> String {
