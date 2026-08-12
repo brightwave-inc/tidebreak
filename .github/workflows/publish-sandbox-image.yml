@@ -440,8 +440,13 @@ jobs:
                       f"{os.environ['DOCUMENTS_REPOSITORY']}@{digest}",
               },
               "crates/openwave-code-execution/src/daytona.rs": {
+                  # The -exec suffix marks the toolbox keepalive entrypoint
+                  # contract (see DOCUMENTS_SNAPSHOT_ENTRYPOINT in daytona.rs).
+                  # Keep it when the image version moves so accounts never
+                  # silently re-adopt a pre-override registration of the
+                  # same name shape.
                   r'(const DOCUMENTS_SNAPSHOT: &str = ")[^"]*(";)':
-                      f"openwave-documents-{os.environ['IMAGE_TAG']}",
+                      f"openwave-documents-{os.environ['IMAGE_TAG']}-exec",
               },
           }
           for path, pins in crate_pins.items():
