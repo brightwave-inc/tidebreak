@@ -2759,6 +2759,55 @@ mod committed_event_drain_tests {
         }
     }
 
+    /// Host policy `TurnWebSearch::Off` must keep `web_search` out of the
+    /// operating prompt even while the process-wide registry still holds the
+    /// inert tool. Advertisement and prompt are the turn surface; the registry
+    /// alone must not describe a capability the operator turned off.
+    #[test]
+    fn web_search_off_keeps_the_tool_out_of_the_turn_prompt() {
+        let mut registry = ToolRegistry::new();
+        registry.register_client(
+            openwave_core::web_search_tool_spec(),
+            openwave_core::ApprovalClass::Sensitive,
+        );
+        registry.register_client(
+            openwave_core::ToolSpec {
+                name: "exec".into(),
+                description: "run a command".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            openwave_core::ApprovalClass::Sensitive,
+        );
+        let surface = freeze_foreground_turn_surface_with_folders(
+            Arc::new(registry),
+            &AgentConfig::default(),
+            &[],
+            &[],
+            &[],
+            &openwave_core::NetworkPolicy::default(),
+            crate::code_execution::DEFAULT_TIMEOUT_MS,
+            false,
+            None,
+            None,
+            false,
+            openwave_core::TurnWebSearch::Off,
+        );
+
+        assert_eq!(
+            surface.agent_config.web_search,
+            openwave_core::TurnWebSearch::Off
+        );
+        let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
+        assert!(
+            !prompt.contains(openwave_core::WEB_SEARCH_TOOL),
+            "off turn still described web_search: {prompt}"
+        );
+        assert!(
+            prompt.contains("exec"),
+            "off must not empty the rest of the tool surface: {prompt}"
+        );
+    }
+
     #[test]
     fn mcp_refresh_keeps_prompt_and_tools_on_one_immutable_snapshot() {
         let mut original_registry = ToolRegistry::new();
