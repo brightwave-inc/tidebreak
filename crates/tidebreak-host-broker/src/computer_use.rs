@@ -123,7 +123,7 @@ impl BackendError {
 /// The macOS TCC grants computer use needs, as reported by the native helper's
 /// preflight (`permission_status`) or after a request (`request_permissions`).
 /// Both read `false` on a backend with no working helper.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionStatus {
     /// Screen Recording — required for `capture_screen`.
     pub screen_recording: bool,
@@ -145,7 +145,7 @@ pub struct CaptureMeta {
 /// A bounded accessibility-tree read. `tree` is opaque nested JSON the helper
 /// produced under its node / depth / string caps; the broker passes it through
 /// without interpreting it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AxTree {
     pub app_name: Option<String>,
     pub tree: Value,
@@ -169,7 +169,7 @@ pub struct ElementTarget {
 /// Outcome of a control op (click/type/key/scroll/focus). `used_fallback` is
 /// true when AX targeting was not available and a coordinate/keystroke
 /// synthesis was used instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlMeta {
     pub success: bool,
     pub used_fallback: bool,
@@ -189,8 +189,9 @@ pub struct ElementDescription {
 }
 
 /// The native operations the broker delegates after authorizing. Implementers
-/// do no policy.
-pub trait ComputerUseBackend: Send {
+/// do no policy. `Sync` because the broker shares one backend across its
+/// cloned handles.
+pub trait ComputerUseBackend: Send + Sync {
     /// Report the macOS TCC permissions computer use needs (Screen Recording,
     /// Accessibility) without prompting — the preflight the desktop
     /// permission-checklist polls. Carries no policy: it reflects the OS grant
@@ -259,8 +260,11 @@ pub trait ComputerUseBackend: Send {
         dy: Option<f64>,
     ) -> Result<ControlMeta, BackendError>;
     /// Bring an app (optionally a specific window) to the front.
-    fn focus_window(&self, bundle_id: &str, window_id: Option<u32>)
-        -> Result<ControlMeta, BackendError>;
+    fn focus_window(
+        &self,
+        bundle_id: &str,
+        window_id: Option<u32>,
+    ) -> Result<ControlMeta, BackendError>;
     /// Read the target element's normalized `{role, label}` without acting —
     /// the trust-independent signal the broker's forced-confirmation tripwire
     /// classifies before a control op runs. Resolves the same element the op
@@ -300,7 +304,12 @@ impl ComputerUseBackend for UnsupportedBackend {
     fn capture(&self, _: &CaptureTarget, _: &Path) -> Result<CaptureMeta, BackendError> {
         Self::refuse()
     }
-    fn read_ax_tree(&self, _: &str, _: Option<u32>, _: Option<u32>) -> Result<AxTree, BackendError> {
+    fn read_ax_tree(
+        &self,
+        _: &str,
+        _: Option<u32>,
+        _: Option<u32>,
+    ) -> Result<AxTree, BackendError> {
         Self::refuse()
     }
     fn list_windows(&self, _: Option<&str>) -> Result<Vec<WindowInfo>, BackendError> {
@@ -318,7 +327,12 @@ impl ComputerUseBackend for UnsupportedBackend {
     fn type_text(&self, _: &str, _: &str, _: &ElementTarget) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
-    fn key_press(&self, _: &str, _: &str, _: Option<&[String]>) -> Result<ControlMeta, BackendError> {
+    fn key_press(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&[String]>,
+    ) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
     fn scroll(
@@ -333,7 +347,11 @@ impl ComputerUseBackend for UnsupportedBackend {
     fn focus_window(&self, _: &str, _: Option<u32>) -> Result<ControlMeta, BackendError> {
         Self::refuse()
     }
-    fn describe_element(&self, _: &str, _: &ElementTarget) -> Result<ElementDescription, BackendError> {
+    fn describe_element(
+        &self,
+        _: &str,
+        _: &ElementTarget,
+    ) -> Result<ElementDescription, BackendError> {
         Self::refuse()
     }
     fn is_available(&self) -> bool {
@@ -458,7 +476,10 @@ impl HelperBackend {
         if stdout.is_empty() {
             return Err(BackendError::new(
                 BackendErrorKind::OperationFailed,
-                format!("helper produced no output: {}", String::from_utf8_lossy(&stderr)),
+                format!(
+                    "helper produced no output: {}",
+                    String::from_utf8_lossy(&stderr)
+                ),
             ));
         }
 
@@ -858,7 +879,8 @@ mod tests {
     /// Write an executable `/bin/sh` script to a temp path and return it. The
     /// body is the fake helper.
     fn fake_helper(tag: &str, body: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("openwave-cu-fake-{tag}-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("openwave-cu-fake-{tag}-{}", std::process::id()));
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path

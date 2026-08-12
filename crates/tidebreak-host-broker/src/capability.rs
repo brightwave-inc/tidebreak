@@ -60,7 +60,6 @@ impl Capability {
     /// This is the seam the broker's operation dispatch consults when it
     /// authorizes a computer-use request against the live grants; the folder
     /// `authorize` path matches capabilities exactly and does not use it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn implies(granted: Capability, requested: Capability) -> bool {
         use Capability::{CaptureScreen, ControlApp, ReadAppContent};
         if granted == requested {
@@ -735,7 +734,9 @@ mod tests {
                 },
             ),
         ] {
-            assert!(Grant::from_consent(GrantId::new(), subject, capability, scope, consent()).is_err());
+            assert!(
+                Grant::from_consent(GrantId::new(), subject, capability, scope, consent()).is_err()
+            );
         }
     }
 }

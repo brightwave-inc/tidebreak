@@ -282,6 +282,12 @@ impl StateFile {
             active_mutations: Default::default(),
             unavailable,
             settled,
+            // Session-only computer-use tables: a held confirmation or staged
+            // capture never survives a restart.
+            pending_confirmations: Default::default(),
+            confirmation_order: Default::default(),
+            handoffs: Default::default(),
+            handoff_order: Default::default(),
         };
         validate_loaded_state(&state)?;
         Ok(state)

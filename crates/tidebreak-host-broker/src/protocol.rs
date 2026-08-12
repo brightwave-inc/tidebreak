@@ -10,12 +10,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    computer_use::{
+        AxTree, CaptureTarget, ControlMeta, ElementTarget, PermissionStatus, WindowInfo,
+    },
+    set_of_marks::Mark,
     AppId, Capability, ConsentMethod, ExecutionContext, GrantId, GrantSubject, OperationId,
     RelativePath, RequestId, RootId, Scope,
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Largest file the broker returns as opaque bytes.
 ///
@@ -25,6 +29,17 @@ pub const PROTOCOL_VERSION: u32 = 10;
 /// transport, so [`crate::sidecar::MAX_RESPONSE_BYTES`] is derived from this
 /// bound rather than chosen independently.
 pub const MAX_READ_FILE_BINARY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Largest staged capture the broker hands back through
+/// [`ControlRequest::CuResolveHandoff`].
+///
+/// Screenshots are written by the native helper to a broker-owned staging path
+/// and cross the transport only when the trusted desktop redeems the handoff —
+/// base64-encoded, exactly once. The bound is larger than
+/// [`MAX_READ_FILE_BINARY_BYTES`] because a full-resolution display PNG does
+/// not fit in the document bound, and [`crate::sidecar::MAX_RESPONSE_BYTES`]
+/// is derived from it.
+pub const MAX_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
 
 /// Host-originated request envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +54,7 @@ pub struct ControlEnvelope {
 ///
 /// `context` comes from trusted conversation execution state. It is not a
 /// model-generated tool argument.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationEnvelope {
     pub protocol_version: u32,
@@ -154,6 +169,82 @@ pub enum ControlRequest {
     /// folder granularity, checked server-side before dispatch. See
     /// [`ControlRequest::ListAppFolder`].
     WriteAppFolderFile(AppFolderWriteRequest),
+    /// Report the OS screen-recording / accessibility permission state without
+    /// prompting. Polls the native helper; no consent is recorded.
+    CuPermissionStatus,
+    /// Actively request the OS screen-recording / accessibility permissions,
+    /// surfacing the native prompts. Driven only by the user pressing enable
+    /// in the trusted permission checklist, never by the agent.
+    CuRequestPermissions,
+    /// Record the user's consent decision for one computer-use capability
+    /// over one app (or, for [`Capability::CaptureScreen`] with no bundle id,
+    /// the whole display). A blocked bundle id is refused outright.
+    CuGrantApp(CuGrantAppRequest),
+    /// Withdraw one subject's computer-use grant for one exact capability and
+    /// scope. Idempotent: nothing matching reports `revoked: false`.
+    CuRevokeApp(CuRevokeAppRequest),
+    /// List one subject's standing computer-use grants with their consent
+    /// provenance, for the management UI.
+    CuListAppGrants(CuListAppGrantsRequest),
+    /// Redeem a staged capture by its handoff identity: the PNG bytes are
+    /// returned once, base64-encoded, and then discarded from the broker's
+    /// staging area. A second resolve of the same identity fails.
+    CuResolveHandoff(CuResolveHandoffRequest),
+    /// Confirm one gated consequential control action by its single-use
+    /// confirmation identity, minted by
+    /// [`OperationResult::CuNeedsConfirmation`]. The broker re-reads the
+    /// target element at act time and refuses if its label no longer matches
+    /// what the user was shown.
+    CuConfirmControlAction(CuConfirmControlActionRequest),
+}
+
+/// Trusted consent decision for one computer-use capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuGrantAppRequest {
+    pub subject: GrantSubject,
+    /// One of the computer-use capabilities: `capture_screen`,
+    /// `read_app_content`, or `control_app`.
+    pub capability: Capability,
+    /// The app the grant covers. `None` scopes a `capture_screen` grant to
+    /// the whole display; reads and control are never display-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    /// The trusted interaction that produced this decision. Only
+    /// [`crate::ConsentMethod::PermissionDialog`] is accepted, matching the
+    /// per-app approval card.
+    pub consent: ConsentMethod,
+}
+
+/// Idempotent computer-use grant withdrawal for one exact capability + scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuRevokeAppRequest {
+    pub subject: GrantSubject,
+    pub capability: Capability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+}
+
+/// One subject whose computer-use grants the management UI lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuListAppGrantsRequest {
+    pub subject: GrantSubject,
+}
+
+/// Redemption of one staged capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuResolveHandoffRequest {
+    pub handoff_id: Uuid,
+}
+
+/// Confirmation of one gated consequential control action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuConfirmControlActionRequest {
+    pub confirmation_id: Uuid,
 }
 
 /// Strict payload for a native-picker root registration.
@@ -313,7 +404,7 @@ pub struct GrantRootCapabilityRequest {
 }
 
 /// Capability-checked agent operations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "operation",
     content = "payload",
@@ -341,6 +432,127 @@ pub enum OperationRequest {
     /// Only the trusted native output executor constructs this request. The
     /// model supplies an output identity, never these bytes or approval data.
     WriteFile(WriteFileRequest),
+    /// List on-screen windows, optionally filtered to one app.
+    ///
+    /// Requires [`Capability::ReadAppContent`] scoped to the named app, or
+    /// [`Capability::CaptureScreen`] scoped to the whole display when no app
+    /// is named.
+    CuListWindows {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bundle_id: Option<String>,
+    },
+    /// Capture the screen or one app's windows.
+    ///
+    /// The PNG never crosses this channel: the broker stages it and answers
+    /// with a handoff identity the trusted desktop redeems through
+    /// [`ControlRequest::CuResolveHandoff`].
+    CuCaptureScreen { target: CaptureTargetWire },
+    /// Read one app's bounded accessibility tree.
+    CuReadAppContent {
+        bundle_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_depth: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_nodes: Option<u32>,
+    },
+    /// Click an element or point in one app. A target whose live label
+    /// classifies as consequential does not act; it answers
+    /// [`OperationResult::CuNeedsConfirmation`] instead.
+    CuClick {
+        bundle_id: String,
+        target: ElementTargetWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        button: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        click_count: Option<u32>,
+    },
+    /// Type text into the targeted element (or the app's focused field).
+    /// Gated like [`OperationRequest::CuClick`].
+    CuTypeText {
+        bundle_id: String,
+        text: String,
+        target: ElementTargetWire,
+    },
+    /// Press a key, optionally with chord modifiers, in one app.
+    CuKeyPress {
+        bundle_id: String,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<Vec<String>>,
+    },
+    /// Scroll the targeted element or point by a pixel delta.
+    CuScroll {
+        bundle_id: String,
+        target: ElementTargetWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dx: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dy: Option<f64>,
+    },
+    /// Bring an app (optionally one window of it) to the front.
+    CuFocusWindow {
+        bundle_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<u32>,
+    },
+    /// Pause the agent's loop, bounded by the broker. Never reaches the
+    /// native helper.
+    CuWait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seconds: Option<f64>,
+    },
+}
+
+/// An element address on the wire: the AX index-path id plus fingerprint from
+/// a prior tree read or Set-of-Marks badge, or a raw coordinate point for apps
+/// with no usable accessibility surface. Mirrors [`ElementTarget`]; kept as a
+/// separate strict type so the wire shape does not drift with backend
+/// internals.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElementTargetWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+}
+
+impl From<ElementTargetWire> for ElementTarget {
+    fn from(wire: ElementTargetWire) -> Self {
+        Self {
+            element_id: wire.element_id,
+            element_fingerprint: wire.element_fingerprint,
+            x: wire.x,
+            y: wire.y,
+        }
+    }
+}
+
+/// A capture target on the wire: one whole display, or every window of one
+/// app. Mirrors [`CaptureTarget`] with the protocol's strict-field discipline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CaptureTargetWire {
+    Display {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_id: Option<u32>,
+    },
+    App {
+        bundle_id: String,
+    },
+}
+
+impl From<CaptureTargetWire> for CaptureTarget {
+    fn from(wire: CaptureTargetWire) -> Self {
+        match wire {
+            CaptureTargetWire::Display { display_id } => Self::Display { display_id },
+            CaptureTargetWire::App { bundle_id } => Self::App { bundle_id },
+        }
+    }
 }
 
 /// Strict root-relative payload shared by list and read operations.
@@ -437,6 +649,14 @@ pub enum ErrorCode {
     /// was changed, and the same request may be re-issued once the audit log is
     /// writable again.
     AuditUnavailable,
+    /// The OS has not granted this host Screen Recording or Accessibility.
+    /// Distinct from [`ErrorCode::Denied`]: the remedy is the trusted
+    /// permission checklist (and retrying), not a per-app consent card.
+    OsPermissionDenied,
+    /// A control op's target element no longer resolves, or its fingerprint or
+    /// label changed since it was read. Retryable: re-read the accessibility
+    /// tree and re-issue against the fresh element.
+    StaleElement,
 }
 
 /// Safe error payload; it never embeds an absolute path or raw OS error text.
@@ -473,6 +693,60 @@ pub enum ControlResult {
     ListAppFolder { entries: Vec<DirectoryEntry> },
     ReadAppFolderFile(ReadFileBinaryResult),
     WriteAppFolderFile { bytes: usize, replaced: bool },
+    CuPermissionStatus(CuPermissionStatusResult),
+    CuRequestPermissions(CuPermissionStatusResult),
+    CuGrantApp(CuGrantAppResult),
+    CuRevokeApp { revoked: bool },
+    CuListAppGrants { grants: Vec<GrantStatementSummary> },
+    CuResolveHandoff(CuResolveHandoffResult),
+    CuConfirmControlAction(ControlMeta),
+}
+
+/// The OS permission state computer use needs, mirrored from the native
+/// helper's preflight.
+pub type CuPermissionStatusResult = PermissionStatus;
+
+/// Outcome of recording a computer-use consent decision.
+///
+/// `granted` is `false` when an equivalent live grant already covers the
+/// request — a retry after a lost response. Either way `grant_id` names the
+/// covering grant and the subject holds the capability afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuGrantAppResult {
+    pub granted: bool,
+    pub grant_id: GrantId,
+}
+
+/// The staged capture a handoff identity redeemed. Bytes cross the transport
+/// base64-encoded, exactly once; the broker discards the staged file as part
+/// of this answer.
+///
+/// `bytes` is the decoded length, so a caller can bound its own work before
+/// decoding. Content is deliberately not logged or `Debug`-printed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuResolveHandoffResult {
+    pub handoff_id: Uuid,
+    pub width: u32,
+    pub height: u32,
+    pub media_type: String,
+    pub bytes: usize,
+    pub content_base64: String,
+}
+
+impl std::fmt::Debug for CuResolveHandoffResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CuResolveHandoffResult")
+            .field("handoff_id", &self.handoff_id)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("media_type", &self.media_type)
+            .field("bytes", &self.bytes)
+            .field("content_base64", &"[redacted]")
+            .finish()
+    }
 }
 
 /// One currently authorized host root for native local execution.
@@ -489,15 +763,68 @@ pub struct ResolvedExecRoot {
 }
 
 /// Successful response to an agent operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OperationResult {
-    ListRoots { roots: Vec<RootAccess> },
-    ListDirectory { entries: Vec<DirectoryEntry> },
+    ListRoots {
+        roots: Vec<RootAccess>,
+    },
+    ListDirectory {
+        entries: Vec<DirectoryEntry>,
+    },
     ReadFile(ReadFileResult),
     ReadFileBinary(ReadFileBinaryResult),
     WriteFile(WriteFileResult),
+    CuListWindows {
+        windows: Vec<WindowInfo>,
+    },
+    CuCaptureScreen(CuCaptureScreenResult),
+    CuReadAppContent(AxTree),
+    CuClick(ControlMeta),
+    CuTypeText(ControlMeta),
+    CuKeyPress(ControlMeta),
+    CuScroll(ControlMeta),
+    CuFocusWindow(ControlMeta),
+    /// How long the broker actually paused, after clamping.
+    CuWait {
+        seconds: f64,
+    },
+    /// A control op's live target classified as consequential, so the broker
+    /// did not act. The trusted desktop shows `reason`, and on approval
+    /// confirms through [`ControlRequest::CuConfirmControlAction`].
+    CuNeedsConfirmation(CuNeedsConfirmationResult),
+}
+
+/// A staged screen capture: the PNG waits at a broker-owned staging path and
+/// only this reference crosses the agent channel. The trusted desktop redeems
+/// `handoff_id` through [`ControlRequest::CuResolveHandoff`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuCaptureScreenResult {
+    pub handoff_id: Uuid,
+    pub width: u32,
+    pub height: u32,
+    pub media_type: String,
+    /// The numbered Set-of-Marks badges drawn over the capture, so a later
+    /// control op can resolve "mark N" back to an element address.
+    pub marks: Vec<Mark>,
+}
+
+/// A consequential control op held for explicit user confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CuNeedsConfirmationResult {
+    /// Single-use identity the trusted desktop confirms against. The broker
+    /// re-reads the target at act time and refuses if it has drifted.
+    pub confirmation_id: Uuid,
+    pub bundle_id: String,
+    /// The bounded, sanitized element label the confirmation surfaces. The
+    /// confirm path honors the approval only while the live label still
+    /// matches this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_label: Option<String>,
+    pub reason: String,
 }
 
 /// Durable terminal receipt for one exact connected-root write.
