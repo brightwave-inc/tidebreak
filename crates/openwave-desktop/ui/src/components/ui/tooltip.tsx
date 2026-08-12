@@ -37,18 +37,21 @@ export function WithTooltip({
   label,
   side = "top",
   align = "center",
+  contentClassName,
   children,
 }: {
   label: React.ReactNode;
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
+  /** Extra classes on the floating content — use for wider structured tips. */
+  contentClassName?: string;
   children: React.ReactNode;
 }) {
   return (
     <TooltipProvider delayDuration={300} skipDelayDuration={150}>
       <Tooltip>
         <TooltipTrigger asChild>{children}</TooltipTrigger>
-        <TooltipContent side={side} align={align}>
+        <TooltipContent side={side} align={align} className={contentClassName}>
           {label}
         </TooltipContent>
       </Tooltip>
