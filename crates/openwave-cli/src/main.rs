@@ -120,6 +120,8 @@ usage: openwave serve
        openwave mcp-server remove <name>
        openwave chat list
        openwave chat create
+       openwave agent-run list <chat>
+       openwave agent-run show <chat> <run>
 
        openwave folder connect <path> --chat <id>
        openwave folder list [--chat <id>]
@@ -306,7 +308,8 @@ async fn run() -> Result<i32> {
                 || command == OsStr::new("model")
                 || command == OsStr::new("settings")
                 || command == OsStr::new("mcp-server")
-                || command == OsStr::new("chat") =>
+                || command == OsStr::new("chat")
+                || command == OsStr::new("agent-run") =>
         {
             let family = command.to_string_lossy().into_owned();
             let (command, format) = parse_setup(&family, text_args(args));
@@ -453,13 +456,23 @@ impl Cursor {
     }
 }
 
-/// Parse one `provider`/`model`/`settings`/`mcp-server`/`chat` invocation.
+/// Parse one `provider`/`model`/`settings`/`mcp-server`/`chat`/`agent-run`
+/// invocation.
 fn parse_setup(family: &str, args: Vec<String>) -> (SetupCommand, OutputFormat) {
     let mut cursor = Cursor::new(args);
     let verb = cursor.positional(&format!("a {family} subcommand"));
     let command = match (family, verb.as_str()) {
         ("chat", "list") => SetupCommand::ChatList,
         ("chat", "create") => SetupCommand::ChatCreate,
+        ("agent-run", "list") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            SetupCommand::AgentRunList { chat }
+        }
+        ("agent-run", "show") => {
+            let chat = parse_chat_id(&cursor.positional("a chat id"));
+            let run = parse_agent_run_id(&cursor.positional("an agent-run id"));
+            SetupCommand::AgentRunShow { chat, run }
+        }
         ("provider", "list") => SetupCommand::ProviderList,
         ("provider", "set-key") => SetupCommand::ProviderSetKey {
             kind: cursor.positional("a provider kind"),
@@ -568,6 +581,15 @@ fn parse_format(value: String) -> OutputFormat {
         Some(format) => format,
         None => usage_error("--output-format expects text or json"),
     }
+}
+
+fn parse_chat_id(value: &str) -> ChatId {
+    ChatId::from_str(value).unwrap_or_else(|_| usage_error("expected a chat UUID"))
+}
+
+fn parse_agent_run_id(value: &str) -> openwave_core::AgentRunId {
+    openwave_core::AgentRunId::from_str(value)
+        .unwrap_or_else(|_| usage_error("expected an agent-run UUID"))
 }
 
 /// Build one MCP server definition from flags, in the shape

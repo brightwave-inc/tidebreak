@@ -33,7 +33,8 @@ use openwave_core::{
 };
 
 use super::config::{
-    sandbox_system_prompt, SandboxAgentRunWorkerOutcome, SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
+    sandbox_system_prompt, SandboxAgentRunWorkerOutcome, SANDBOX_PROMPT_EXEC_CLAUSE,
+    SANDBOX_PROMPT_WEB_SEARCH_CLAUSE,
 };
 use super::model_step::{
     complete_sandbox_task, delegated_file_admission_matches, sandbox_request, SandboxCompletion,
@@ -2654,6 +2655,25 @@ async fn a_vendor_run_on_an_unregistered_model_gets_no_search_at_all() {
         .system
         .as_deref()
         .is_some_and(|system| !system.contains(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE)));
+}
+
+/// Agents that stuff a whole shell line into `command` burn steps and fail
+/// closed; the system prompt must name the argv contract up front.
+#[test]
+fn sandbox_system_prompt_teaches_exec_argv_form() {
+    let prompt = sandbox_system_prompt(false, TurnWebSearch::Host, true);
+    assert!(
+        prompt.contains(SANDBOX_PROMPT_EXEC_CLAUSE),
+        "tool-capable runs must name the exec argv contract: {prompt}"
+    );
+    assert!(
+        prompt.contains("single executable"),
+        "prompt should spell out that command is argv[0] only: {prompt}"
+    );
+    assert!(
+        prompt.contains("output/"),
+        "prompt must still point deliverables at output/: {prompt}"
+    );
 }
 
 fn sandbox_chat() -> Chat {
