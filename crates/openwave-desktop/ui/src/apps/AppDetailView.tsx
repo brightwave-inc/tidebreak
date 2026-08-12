@@ -7,7 +7,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
 import { useManagedPolicy } from "@/managedPolicy";
-import { openSignInPage } from "@/openSignInPage";
+import { openInBrowser } from "@/openInBrowser";
 import { AppConsentSheet } from "./AppConsentSheet";
 import { AppFrame } from "./AppFrame";
 import { friendlyAppsError, updatedLabel } from "./AppsView";
@@ -235,7 +235,7 @@ export function AppDetailView({
         toast.error("This profile is not paired with a model gateway.");
         return;
       }
-      await openSignInPage(baseUrl);
+      await openInBrowser(baseUrl);
       setConnectPrompt(null);
     } catch (caught) {
       toast.error(friendlyAppsError(caught, "Could not open your gateway."));
@@ -252,7 +252,7 @@ export function AppDetailView({
     try {
       const page = await apis.gatewayPage(targetAppId);
       if (page.outcome === "ready" && page.url) {
-        await openSignInPage(page.url);
+        await openInBrowser(page.url);
         return;
       }
       // The gateway's own words wherever it had any: a bundle it will not

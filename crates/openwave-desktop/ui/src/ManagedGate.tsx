@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { onPairingChanged } from "./host";
-import { openSignInPage } from "./openSignInPage";
+import { openInBrowser } from "./openInBrowser";
 import { WindowDragStrip } from "./WindowDragStrip";
 
 /** While the browser flow is pending the exchange lands out of band, so the
@@ -262,7 +262,7 @@ export function ManagedGate({
       // shell registered — and the retired provider row is not writable at
       // all.
       const started = await client.gatewaySignIn();
-      await openSignInPage(started.authorization_url);
+      await openInBrowser(started.authorization_url);
       await reload();
     } catch (err) {
       setActionError(String(err));
@@ -417,7 +417,7 @@ export function ManagedGate({
               // which doubled this one. Route through the native opener and
               // keep the href for hover/copy.
               event.preventDefault();
-              void openSignInPage(pendingUrl);
+              void openInBrowser(pendingUrl);
             }}
           >
             Open the sign-in page again
