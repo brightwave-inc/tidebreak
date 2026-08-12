@@ -57,30 +57,35 @@ const EMPTY: ComputerUseSnapshot = {
 
 /**
  * The live computer-use surface: which app OpenWave is driving, whether the
- * user stopped it, and the asks waiting on a decision. The initial read is a
- * query so prompts raised before the listener attaches are not lost; changes
- * arrive on the native state event afterwards.
+ * user stopped it, and the asks waiting on a decision. The listener attaches
+ * before the snapshot query runs, so a state change emitted while the query
+ * is in flight is delivered to the handler rather than lost; a query that
+ * resolves after an event would be older state and must not overwrite it.
  */
 export function useComputerUseState(): ComputerUseSnapshot {
   const [snapshot, setSnapshot] = useState<ComputerUseSnapshot>(EMPTY);
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
+    let sawEvent = false;
     let unlisten: UnlistenFn | undefined;
-    invoke<ComputerUseSnapshot>("computer_use_state")
-      .then((initial) => {
-        if (!cancelled) setSnapshot(initial);
+    listen<ComputerUseSnapshot>(STATE_EVENT, (event) => {
+      sawEvent = true;
+      setSnapshot(event.payload);
+    })
+      .then((stop) => {
+        if (cancelled) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+        invoke<ComputerUseSnapshot>("computer_use_state")
+          .then((initial) => {
+            if (!cancelled && !sawEvent) setSnapshot(initial);
+          })
+          .catch(() => {});
       })
       .catch(() => {});
-    listen<ComputerUseSnapshot>(STATE_EVENT, (event) => {
-      setSnapshot(event.payload);
-    }).then((stop) => {
-      if (cancelled) {
-        stop();
-      } else {
-        unlisten = stop;
-      }
-    });
     return () => {
       cancelled = true;
       unlisten?.();

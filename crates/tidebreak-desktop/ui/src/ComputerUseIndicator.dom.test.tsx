@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,10 +28,12 @@ const mocks = vi.hoisted(() => ({
       reason: string;
     }>,
   },
-  stop: vi.fn(),
-  resume: vi.fn(),
-  consent: vi.fn(),
-  confirmation: vi.fn(),
+  stop: vi.fn(() => Promise.resolve()),
+  resume: vi.fn(() => Promise.resolve()),
+  consent: vi.fn((_callId: string, _decision: string) => Promise.resolve()),
+  confirmation: vi.fn((_callId: string, _confirmed: boolean) =>
+    Promise.resolve(),
+  ),
 }));
 
 vi.mock("./computerUse", () => ({
@@ -103,12 +105,70 @@ describe("ComputerUseIndicator", () => {
     render(<ComputerUseIndicator />);
 
     expect(screen.getByText(/Allow OpenWave to control Mail/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Once" }));
+    expect(mocks.consent).toHaveBeenCalledWith("call-1", "once");
     await userEvent.click(
       screen.getByRole("button", { name: "Always for this chat" }),
     );
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "chat");
+    await userEvent.click(screen.getByRole("button", { name: "Always" }));
+    expect(mocks.consent).toHaveBeenCalledWith("call-1", "always");
     await userEvent.click(screen.getByRole("button", { name: "Decline" }));
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "decline");
+  });
+
+  it("ignores a second decision while the first is still in flight", async () => {
+    let resolveDecision: () => void = () => {};
+    mocks.consent.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (resolveDecision = resolve)),
+    );
+    mocks.snapshot.pendingConsents = [
+      {
+        callId: "call-1",
+        chatId: "chat-1",
+        bundleId: "com.apple.mail",
+        appName: "Mail",
+        capability: "control_app",
+      },
+    ];
+    render(<ComputerUseIndicator />);
+
+    const once = screen.getByRole("button", { name: "Once" });
+    await userEvent.click(once);
+    await userEvent.click(screen.getByRole("button", { name: "Always" }));
+    expect(mocks.consent).toHaveBeenCalledOnce();
+
+    resolveDecision();
+    await waitFor(() => expect(once).not.toBeDisabled());
+    await userEvent.click(screen.getByRole("button", { name: "Always" }));
+    expect(mocks.consent).toHaveBeenCalledTimes(2);
+    expect(mocks.consent).toHaveBeenLastCalledWith("call-1", "always");
+  });
+
+  it("surfaces a failed decision on the card and lets it be retried", async () => {
+    mocks.consent.mockRejectedValueOnce(new Error("broker went away"));
+    mocks.snapshot.pendingConsents = [
+      {
+        callId: "call-1",
+        chatId: "chat-1",
+        bundleId: "com.apple.mail",
+        appName: "Mail",
+        capability: "control_app",
+      },
+    ];
+    render(<ComputerUseIndicator />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Once" }));
+    expect(
+      await screen.findByRole("alert"),
+    ).toHaveTextContent(/Could not send your decision/);
+    expect(
+      screen.getByRole("button", { name: "Once" }),
+    ).not.toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Once" }));
+    expect(mocks.consent).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("confirms a broker-held consequential action", async () => {
@@ -127,5 +187,27 @@ describe("ComputerUseIndicator", () => {
     expect(screen.getByText(/“Send”/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(mocks.confirmation).toHaveBeenCalledWith("call-9", true);
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(mocks.confirmation).toHaveBeenCalledWith("call-9", false);
+  });
+
+  it("surfaces a failed confirmation on the card", async () => {
+    mocks.confirmation.mockRejectedValueOnce(new Error("broker went away"));
+    mocks.snapshot.pendingConfirmations = [
+      {
+        callId: "call-9",
+        chatId: "chat-1",
+        bundleId: "com.apple.mail",
+        appName: "Mail",
+        targetLabel: "Send",
+        reason: "send a message",
+      },
+    ];
+    render(<ComputerUseIndicator />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Could not send your decision/,
+    );
   });
 });

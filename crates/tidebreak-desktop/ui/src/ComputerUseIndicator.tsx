@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   resolveComputerUseConfirmation,
@@ -45,6 +45,36 @@ export function ComputerUseIndicator() {
     return () => clearInterval(timer);
   }, []);
 
+  // In-flight invokes, keyed per card (or "control" for Stop/Resume). The
+  // ref is the guard against a second click landing while the first is
+  // pending; the state mirrors it so the buttons can disable. A failure
+  // stays on the card that raised it, the way ApprovalCard surfaces errors.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+  const busyRef = useRef(new Set<string>());
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  function run(key: string, failure: string, action: () => Promise<void>) {
+    if (busyRef.current.has(key)) return;
+    busyRef.current.add(key);
+    setBusy(new Set(busyRef.current));
+    setErrors((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    void action()
+      .catch((err: unknown) => {
+        setErrors((current) => ({
+          ...current,
+          [key]: `${failure}: ${String(err)}`,
+        }));
+      })
+      .finally(() => {
+        busyRef.current.delete(key);
+        setBusy(new Set(busyRef.current));
+      });
+  }
+
   const showActive =
     snapshot.active !== null && now < snapshot.active.visibleUntilMillis;
   if (
@@ -64,7 +94,16 @@ export function ComputerUseIndicator() {
           role="status"
         >
           <span>Computer control is stopped.</span>
-          <Button size="sm" variant="outline" onClick={() => void resumeComputerUseControl()}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy.has("control")}
+            onClick={() =>
+              run("control", "Could not resume control", () =>
+                resumeComputerUseControl(),
+              )
+            }
+          >
             Resume
           </Button>
         </div>
@@ -82,96 +121,144 @@ export function ComputerUseIndicator() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => void stopComputerUseControl()}
+              disabled={busy.has("control")}
+              onClick={() =>
+                run("control", "Could not stop control", () =>
+                  stopComputerUseControl(),
+                )
+              }
             >
               Stop
             </Button>
           </div>
         )
       )}
-      {snapshot.pendingConsents.map((prompt) => (
-        <section
-          key={prompt.callId}
-          className="flex max-w-prose flex-col gap-2 rounded-lg border p-3"
-          aria-label="Computer use permission"
-        >
-          <p className="text-sm font-medium break-words">
-            {capabilityAsk(
-              prompt.capability,
-              appLabel(prompt.appName, prompt.bundleId),
+      {errors.control && (
+        <p className="text-destructive text-xs break-words" role="alert">
+          {errors.control}
+        </p>
+      )}
+      {snapshot.pendingConsents.map((prompt) => {
+        const key = `consent:${prompt.callId}`;
+        const deciding = busy.has(key);
+        return (
+          <section
+            key={prompt.callId}
+            className="flex max-w-prose flex-col gap-2 rounded-lg border p-3"
+            aria-label="Computer use permission"
+            aria-busy={deciding}
+          >
+            <p className="text-sm font-medium break-words">
+              {capabilityAsk(
+                prompt.capability,
+                appLabel(prompt.appName, prompt.bundleId),
+              )}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                disabled={deciding}
+                onClick={() =>
+                  run(key, "Could not send your decision", () =>
+                    resolveComputerUseConsent(prompt.callId, "once"),
+                  )
+                }
+              >
+                Once
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={deciding}
+                onClick={() =>
+                  run(key, "Could not send your decision", () =>
+                    resolveComputerUseConsent(prompt.callId, "chat"),
+                  )
+                }
+              >
+                Always for this chat
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={deciding}
+                onClick={() =>
+                  run(key, "Could not send your decision", () =>
+                    resolveComputerUseConsent(prompt.callId, "always"),
+                  )
+                }
+              >
+                Always
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={deciding}
+                onClick={() =>
+                  run(key, "Could not send your decision", () =>
+                    resolveComputerUseConsent(prompt.callId, "decline"),
+                  )
+                }
+              >
+                Decline
+              </Button>
+            </div>
+            {errors[key] && (
+              <p className="text-destructive text-xs break-words" role="alert">
+                {errors[key]}
+              </p>
             )}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              onClick={() =>
-                void resolveComputerUseConsent(prompt.callId, "once")
-              }
-            >
-              Once
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                void resolveComputerUseConsent(prompt.callId, "chat")
-              }
-            >
-              Always for this chat
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                void resolveComputerUseConsent(prompt.callId, "always")
-              }
-            >
-              Always
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() =>
-                void resolveComputerUseConsent(prompt.callId, "decline")
-              }
-            >
-              Decline
-            </Button>
-          </div>
-        </section>
-      ))}
-      {snapshot.pendingConfirmations.map((prompt) => (
-        <section
-          key={prompt.callId}
-          className="flex max-w-prose flex-col gap-2 rounded-lg border p-3"
-          aria-label="Confirm action"
-        >
-          <p className="text-sm font-medium break-words">
-            OpenWave wants to {prompt.reason}
-            {prompt.targetLabel ? ` — “${prompt.targetLabel}”` : ""} in{" "}
-            {appLabel(prompt.appName, prompt.bundleId)}.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              onClick={() =>
-                void resolveComputerUseConfirmation(prompt.callId, true)
-              }
-            >
-              Confirm
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() =>
-                void resolveComputerUseConfirmation(prompt.callId, false)
-              }
-            >
-              Deny
-            </Button>
-          </div>
-        </section>
-      ))}
+          </section>
+        );
+      })}
+      {snapshot.pendingConfirmations.map((prompt) => {
+        const key = `confirmation:${prompt.callId}`;
+        const deciding = busy.has(key);
+        return (
+          <section
+            key={prompt.callId}
+            className="flex max-w-prose flex-col gap-2 rounded-lg border p-3"
+            aria-label="Confirm action"
+            aria-busy={deciding}
+          >
+            <p className="text-sm font-medium break-words">
+              OpenWave wants to {prompt.reason}
+              {prompt.targetLabel ? ` — “${prompt.targetLabel}”` : ""} in{" "}
+              {appLabel(prompt.appName, prompt.bundleId)}.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                disabled={deciding}
+                onClick={() =>
+                  run(key, "Could not send your decision", () =>
+                    resolveComputerUseConfirmation(prompt.callId, true),
+                  )
+                }
+              >
+                Confirm
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={deciding}
+                onClick={() =>
+                  run(key, "Could not send your decision", () =>
+                    resolveComputerUseConfirmation(prompt.callId, false),
+                  )
+                }
+              >
+                Deny
+              </Button>
+            </div>
+            {errors[key] && (
+              <p className="text-destructive text-xs break-words" role="alert">
+                {errors[key]}
+              </p>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }
