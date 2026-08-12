@@ -1444,7 +1444,7 @@ mod tests {
                 },
                 {
                     "id": "sample-coder",
-                    "protocol": "openai_chat_completions",
+                    "protocol": "openai_responses",
                     "name": "Sample Coder",
                     "context_window": null,
                     "max_output_tokens": null,
@@ -1634,7 +1634,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.model_protocols.get("sample-coder"),
-            Some(&providers::GatewayModelProtocol::OpenaiChatCompletions)
+            Some(&providers::GatewayModelProtocol::OpenaiResponses)
         );
 
         // The synced snapshot resolves as a model policy under the gateway key.

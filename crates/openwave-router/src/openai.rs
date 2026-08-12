@@ -100,6 +100,7 @@ pub struct OpenAiProvider {
     /// `originator` header value when [`Self::chatgpt_account_id`] is set.
     chatgpt_originator: String,
     profile: ResponsesProfile,
+    conversation_attribution: bool,
 }
 
 impl OpenAiProvider {
@@ -113,6 +114,7 @@ impl OpenAiProvider {
             chatgpt_account_id: None,
             chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
             profile: ResponsesProfile::OpenAi,
+            conversation_attribution: false,
         }
     }
 
@@ -130,6 +132,7 @@ impl OpenAiProvider {
             chatgpt_account_id: None,
             chatgpt_originator: DEFAULT_CHATGPT_ORIGINATOR.to_string(),
             profile,
+            conversation_attribution: false,
         }
     }
 
@@ -167,6 +170,25 @@ impl OpenAiProvider {
         self.chatgpt_originator = originator.into();
         self
     }
+
+    /// Override the reported provider id and error-message label.
+    #[must_use]
+    pub fn with_provider_label(mut self, label: &'static str) -> Self {
+        self.provider_label = label;
+        self
+    }
+
+    /// Declare each request's conversation to the gateway this provider points
+    /// at, so its usage views can group inference the way the app does.
+    ///
+    /// Only for a model-gateway base URL. OpenAI's own API is not a party to
+    /// how the host organizes conversations, and the header would be sent to
+    /// whatever `base_url` names.
+    #[must_use]
+    pub fn with_conversation_attribution(mut self) -> Self {
+        self.conversation_attribution = true;
+        self
+    }
 }
 
 #[async_trait]
@@ -176,7 +198,12 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let mut body = build_request_json_for(&req, self.profile)?;
+        let mut body = build_request_json_for(&req, self.profile).map_err(|error| match error {
+            AgentError::Provider(message) => {
+                AgentError::Provider(format!("{} {message}", self.provider_label))
+            }
+            other => other,
+        })?;
         if self.chatgpt_account_id.is_some() {
             // The ChatGPT Codex backend rejects `max_output_tokens` outright
             // ("Unsupported parameter"); only Platform API requests may carry it.
@@ -204,6 +231,15 @@ impl ModelProvider for OpenAiProvider {
                 .header("ChatGPT-Account-ID", account_id)
                 .header("OpenAI-Beta", CHATGPT_BETA_HEADER)
                 .header("originator", &self.chatgpt_originator);
+        }
+        // A conversation is declared only where one is configured to be read.
+        // The id is a UUID, so it satisfies the gateway's bound on the value
+        // (1-256 ASCII graphic bytes) by construction.
+        if let (true, Some(conversation)) = (self.conversation_attribution, req.conversation) {
+            request = request.header(
+                crate::router::GATEWAY_CONVERSATION_HEADER,
+                conversation.to_string(),
+            );
         }
         let response = request
             .body(body)

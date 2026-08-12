@@ -127,7 +127,7 @@ The connector speaks a small, versioned HTTP surface on the gateway:
 - `/api/v1/cli/me` — the authenticated user, for the account hint.
 - `/api/v1/cli/models` — the models this user may invoke. OpenWave syncs the
   full list and retains each row's `protocol` (`anthropic_messages` or
-  `openai_chat_completions`) in a local snapshot stamped with the gateway URL
+  `openai_responses`) in a local snapshot stamped with the gateway URL
   after sign-in and on the explicit "Refresh models" affordance; gateways
   predating the field are treated as Anthropic-only. The snapshot is what the
   model picker offers, and sign-out empties it. A stamp that no longer matches
@@ -146,7 +146,8 @@ The connector speaks a small, versioned HTTP surface on the gateway:
   chat content and is meaningless outside the session it is pinned to.
 - Inference itself — invoked with `llm`-audience bearers through the matching
   gateway surface: Anthropic Messages at `/compat/anthropic/v1/messages`, or
-  OpenAI Chat Completions at `/compat/openai/v1/chat/completions`. Both use
+  OpenAI Responses at `/compat/openai/v1/responses` — the only two surfaces
+  a gateway serves northbound; it has no Chat Completions route. Both use
   the same provider machinery as their direct counterparts and fetch the
   rotating bearer per request. A turn also declares which conversation it
   belongs to, as an `x-model-gateway-conversation-id` header carrying the
