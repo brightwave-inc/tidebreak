@@ -224,6 +224,42 @@ impl Shared {
             eprintln!("tidebreak host broker could not persist audit event: {error}");
         }
     }
+
+    /// Drop a one-shot grant after the operation it authorized finished.
+    /// Missing or standing grants are no-ops. Persistence failure is
+    /// reported but must not rewrite the operation's own result: the host
+    /// effect already happened.
+    fn consume_single_use_grant(&self, grant_id: Option<GrantId>) -> Result<(), BrokerError> {
+        let Some(grant_id) = grant_id else {
+            return Ok(());
+        };
+        if self.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        let mut current = self.state.lock().map_err(|_| BrokerError::StatePoisoned)?;
+        if self.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        let matches_shot = current
+            .grants
+            .iter()
+            .any(|grant| grant.id() == grant_id && grant.is_single_use());
+        if !matches_shot {
+            return Ok(());
+        }
+        let mut next = current.clone();
+        next.grants.retain(|grant| grant.id() != grant_id);
+        if let Some(state_file) = &self.state_file {
+            if let Err(error) = state_file.save(&next) {
+                if matches!(error, BrokerError::PersistenceAmbiguous) {
+                    self.failed_closed.store(true, Ordering::SeqCst);
+                }
+                return Err(error);
+            }
+        }
+        *current = next;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1726,11 +1762,32 @@ impl Controller {
         let scope = cu_grant_scope(request.capability, request.bundle_id.as_deref())?;
         let mut state = self.lock_state()?;
         let mut next = state.clone();
-        if let Some(existing) = next.grants.iter().find(|grant| {
+        let same_tuple = |grant: &Grant| {
             grant.subject() == request.subject
                 && grant.capability() == request.capability
                 && *grant.scope() == scope
-        }) {
+        };
+        // A standing grant already covers this tuple. Once is weaker: reuse
+        // the standing row rather than stacking a one-shot beside it.
+        if let Some(existing) = next
+            .grants
+            .iter()
+            .find(|grant| same_tuple(grant) && !grant.is_single_use())
+        {
+            return Ok(CuGrantAppResult {
+                granted: false,
+                grant_id: existing.id(),
+            });
+        }
+        if !request.single_use {
+            // Standing consent replaces any leftover one-shot at this tuple.
+            next.grants
+                .retain(|grant| !(same_tuple(grant) && grant.is_single_use()));
+        } else if let Some(existing) = next
+            .grants
+            .iter()
+            .find(|grant| same_tuple(grant) && grant.is_single_use())
+        {
             return Ok(CuGrantAppResult {
                 granted: false,
                 grant_id: existing.id(),
@@ -1743,6 +1800,11 @@ impl Controller {
             scope,
             ConsentRecord::new(request.consent, Utc::now()),
         )?;
+        let grant = if request.single_use {
+            grant.into_single_use()
+        } else {
+            grant
+        };
         let grant_id = grant.id();
         next.grants.push(grant);
         self.commit_state(&mut state, next)?;
@@ -1883,9 +1945,12 @@ impl Controller {
         let result = self
             .perform_confirmed_action(&pending, bundle_id, target, op)
             .map_err(error_response);
+        if let Ok((_, grant_id)) = &result {
+            let _ = self.shared.consume_single_use_grant(Some(*grant_id));
+        }
         self.shared
             .record_completion(&audit.completion(request_id, result.as_ref().err()));
-        result
+        result.map(|(meta, _)| meta)
     }
 
     /// Re-authorize, re-describe, and finally dispatch a confirmed action.
@@ -1897,14 +1962,14 @@ impl Controller {
         bundle_id: &str,
         target: &ElementTarget,
         op: ControlOp,
-    ) -> Result<ControlMeta, BrokerError> {
+    ) -> Result<(ControlMeta, GrantId), BrokerError> {
         if is_blocked_control_bundle(bundle_id) {
             return Err(BrokerError::BlockedApp);
         }
-        {
+        let grant_id = {
             let state = self.lock_state()?;
-            authorize_computer_use(&state, pending.context, Capability::ControlApp, bundle_id)?;
-        }
+            authorize_computer_use(&state, pending.context, Capability::ControlApp, bundle_id)?
+        };
         // The confirmation is honored only while the element still
         // reports the label the user approved. A UI that shifted under
         // the prompt — or a hijacked page that swapped the button —
@@ -1966,6 +2031,7 @@ impl Controller {
                 .key_press(bundle_id, key, modifiers.as_deref()),
         }
         .map_err(BrokerError::ComputerUse)
+        .map(|meta| (meta, grant_id))
     }
 
     fn hello(&self) -> HelloResult {
@@ -2020,6 +2086,11 @@ impl Operator {
             }
         }
         let (result, grant_id) = self.execute(envelope);
+        // A confirmation hold is not terminal: the one-shot must cover the
+        // confirm that follows. Any other outcome spends it.
+        if !matches!(result, Ok(OperationResult::CuNeedsConfirmation(_))) {
+            let _ = self.shared.consume_single_use_grant(grant_id);
+        }
         let result = result.map_err(error_response);
         self.record_completion(request_id, audit, grant_id, &result);
         response_envelope(request_id, result)
@@ -3079,7 +3150,9 @@ fn list_cu_app_grants(state: &State, subject: GrantSubject) -> Vec<GrantStatemen
         .grants
         .iter()
         .filter(|grant| {
-            grant.subject() == subject && matches!(grant.scope(), Scope::App { .. } | Scope::Screen)
+            !grant.is_single_use()
+                && grant.subject() == subject
+                && matches!(grant.scope(), Scope::App { .. } | Scope::Screen)
         })
         .map(|grant| GrantStatementSummary {
             grant_id: grant.id(),
@@ -4258,6 +4331,7 @@ fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, Er
     let live = state
         .grants
         .iter()
+        .filter(|grant| !grant.is_single_use())
         .map(|grant| (grant, None::<&UnavailableRoot>));
     let dormant = state
         .unavailable

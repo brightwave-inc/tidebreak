@@ -4693,12 +4693,26 @@ impl CuFixture {
     }
 
     fn grant(&self, capability: Capability, bundle_id: Option<&str>) -> CuGrantAppResult {
+        self.grant_with(capability, bundle_id, false)
+    }
+
+    fn grant_once(&self, capability: Capability, bundle_id: Option<&str>) -> CuGrantAppResult {
+        self.grant_with(capability, bundle_id, true)
+    }
+
+    fn grant_with(
+        &self,
+        capability: Capability,
+        bundle_id: Option<&str>,
+        single_use: bool,
+    ) -> CuGrantAppResult {
         let result = self
             .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
                 subject: self.subject,
                 capability,
                 bundle_id: bundle_id.map(str::to_owned),
                 consent: ConsentMethod::PermissionDialog,
+                single_use,
             }))
             .unwrap();
         let ControlResult::CuGrantApp(result) = result else {
@@ -4756,6 +4770,7 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
                 capability: Capability::ControlApp,
                 bundle_id: Some(blocked.to_owned()),
                 consent: ConsentMethod::PermissionDialog,
+                single_use: false,
             }))
             .unwrap_err();
         assert_eq!(grant_error.code, ErrorCode::Denied, "{blocked}");
@@ -4938,6 +4953,7 @@ fn control_grants_cover_reads_but_read_grants_never_cover_control() {
             capability: Capability::ReadAppContent,
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
+            single_use: false,
         }))
         .unwrap();
     assert!(matches!(granted, ControlResult::CuGrantApp(_)));
@@ -4984,6 +5000,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             capability: Capability::ControlApp,
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
+            single_use: false,
         }),
     }))
     .unwrap();
@@ -5269,4 +5286,123 @@ fn every_computer_use_op_lands_in_the_audit_trail_desensitized() {
     assert!(events.iter().any(|event| {
         event.operation == AuditOperation::CuCaptureScreen && event.outcome == AuditOutcome::Allowed
     }));
+}
+
+#[test]
+fn a_once_grant_authorizes_exactly_one_terminal_op() {
+    let fixture = cu_setup();
+    assert!(
+        fixture
+            .grant_once(Capability::ControlApp, Some("com.example.app"))
+            .granted
+    );
+    // Default stub label is "Cancel" — benign, so the click fires now.
+    fixture.click("com.example.app").unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.clicks().len() == 1);
+}
+
+#[test]
+fn a_once_grant_covers_a_confirmation_hold_then_is_consumed() {
+    let fixture = cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+    fixture.backend.set_fingerprint("fp1");
+
+    let OperationResult::CuNeedsConfirmation(held) = fixture.click("com.example.app").unwrap()
+    else {
+        panic!("expected a confirmation hold")
+    };
+    // One-shots stay out of the management listing even while they still
+    // authorize the held confirm.
+    let listed = fixture
+        .control(ControlRequest::CuListAppGrants(CuListAppGrantsRequest {
+            subject: fixture.subject,
+        }))
+        .unwrap();
+    let ControlResult::CuListAppGrants { grants } = listed else {
+        panic!("unexpected control result")
+    };
+    assert!(grants.is_empty());
+
+    fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn a_standing_grant_replaces_a_leftover_once_grant() {
+    let fixture = cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    let standing = fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    assert!(standing.granted);
+    let listed = fixture
+        .control(ControlRequest::CuListAppGrants(CuListAppGrantsRequest {
+            subject: fixture.subject,
+        }))
+        .unwrap();
+    let ControlResult::CuListAppGrants { grants } = listed else {
+        panic!("unexpected control result")
+    };
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].grant_id, standing.grant_id);
+    fixture.click("com.example.app").unwrap();
+    fixture.click("com.example.app").unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 2);
+}
+
+#[test]
+fn a_once_grant_does_not_survive_broker_reload() {
+    let (temp, broker, _, state_dir) = durable_setup();
+    let subject = GrantSubject::conversation(Uuid::new_v4()).unwrap();
+    let standing = Grant::from_consent(
+        GrantId::new(),
+        subject,
+        Capability::ControlApp,
+        Scope::App {
+            bundle_id: "com.example.mail".to_owned(),
+        },
+        ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+    )
+    .unwrap();
+    let once = Grant::from_consent(
+        GrantId::new(),
+        subject,
+        Capability::ControlApp,
+        Scope::App {
+            bundle_id: "com.example.notes".to_owned(),
+        },
+        ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+    )
+    .unwrap()
+    .into_single_use();
+    let standing_id = standing.id();
+    {
+        let mut state = broker.shared.state.lock().unwrap();
+        state.grants.push(standing);
+        state.grants.push(once);
+        broker
+            .shared
+            .state_file
+            .as_ref()
+            .expect("durable broker")
+            .save(&state)
+            .unwrap();
+    }
+    drop(broker);
+    let reloaded = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let grants = reloaded.shared.state.lock().unwrap().grants.clone();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].id(), standing_id);
+    assert!(!grants[0].is_single_use());
 }

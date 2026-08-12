@@ -96,18 +96,31 @@ action passes are:
 1. OS TCC grants (Screen Recording + Accessibility), requested together on
    first use with a status checklist in settings.
 2. A per-app grant, asked once per app through the normal in-chat approval
-   card ("Allow OpenWave to control Mail — once / always for this chat /
+   card ("Allow Tidebreak to control Mail — once / always for this chat /
    always"). The card decision is written into the broker's grant store; the
    broker enforces, the card is the only place the question is asked. Grants
    are listed and revocable in settings. Whole-screen capture gets the same
-   treatment as one standing grant.
+   treatment as one standing grant. **Once is not a standing grant that the
+   desktop later revokes.** It is a broker-native `single_use` grant:
+   session-only (never written to the durable grant table), hidden from the
+   grants listing, and consumed when the operation it authorized reaches a
+   terminal result. A confirmation hold is not terminal — the same one-shot
+   covers the confirm. A crash or a failed revoke therefore cannot promote
+   once into a durable per-conversation grant. Chat and Always remain
+   persisted standing grants.
 3. An act-time confirmation only for consequential actions: before clicking,
    the broker re-reads the target element and classifies it; labels that
    commit an external effect (send, pay, buy, delete, submit, sign,
    transfer, post) or credential fields force a single non-activating
    confirmation, honored only if the label still matches at act time. The
-   classifier's word list is deliberately short — navigation-shaped words
-   (cancel, back, close, decline) do not trip it.
+   classifier's word list is deliberately short and **English-only** —
+   navigation-shaped words (cancel, back, close, decline) do not trip it.
+   Localized commit verbs ("Envoyer", "Senden") are an accepted miss of the
+   same calibration: a translation dictionary would over-ask in those
+   locales the way a longer English list over-asks here. An activatable
+   control (button / menu item / link) with no accessible label cannot be
+   classified as navigation and is treated as consequential. Icon-only
+   chrome that is not an activatable role stays benign.
 
 Within a granted app, individual clicks, keystrokes, and scrolls do not
 generate approval cards — in any permission mode. Plan mode refuses control
@@ -120,9 +133,14 @@ in the loop for control actions.
 before the next broker round-trip and tells the agent not to retry; an
 auto-yield that aborts any control operation while a security surface
 (login window, authentication prompt) is frontmost, as a non-retryable
-error; and a hard app blocklist — OpenWave itself, terminals, System
-Settings, keychain and security agents — enforced in the broker and
-mirrored defensively in the helper.
+error, carried as a structured `ErrorCode::Yielded` (never a `Denied`
+that the desktop could mistake for a grant miss); and a hard app
+blocklist — Tidebreak itself, terminals, IDEs and editors with an
+integrated shell, command launchers (Alfred, Raycast), System Settings,
+keychain and security agents — enforced in the broker and mirrored
+defensively in the helper. A bundle-id list cannot enumerate every app
+that embeds a shell; the listed class is the known high-traffic set, not
+a proof of completeness.
 
 **App knowledge lives in plugins, not code.** No per-app drivers. App-specific
 guidance (how an app's UI is laid out, preferred flows, what to avoid) ships
@@ -167,6 +185,13 @@ content redaction, and any auto-approval of control actions.
 - **Do nothing / wait for the managed browser surface.** Rejected: most of the
   value (seeing the screen, operating native apps) is orthogonal to the
   browser plan and blocked on nothing.
+- **Persist a once grant and best-effort revoke it after the op.** Rejected:
+  a crash or a failed revoke between write and revoke leaves a standing
+  per-conversation grant the user approved as one-time-only. A broker-native
+  session-only one-shot has no revoke to lose.
+- **Match the security-surface yield by comparing the broker's English error
+  message.** Rejected: any wording edit silently converts a hard-stop yield
+  into a consent prompt. The transport carries `ErrorCode::Yielded`.
 
 ## Consequences
 
@@ -209,3 +234,7 @@ content redaction, and any auto-approval of control actions.
   with the typed error; nothing silently drops the image.
 - Grant-store test: a card decision at each scope produces exactly one broker
   grant, revocation removes it, and no control op proceeds without one.
+- Once-grant test: a `single_use` grant authorizes exactly one terminal
+  operation (including a held confirm), does not appear in the grants
+  listing, and is absent after a broker reload. A standing grant at the
+  same tuple replaces a leftover one-shot.

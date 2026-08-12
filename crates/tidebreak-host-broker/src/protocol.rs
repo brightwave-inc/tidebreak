@@ -214,6 +214,11 @@ pub struct CuGrantAppRequest {
     /// [`crate::ConsentMethod::PermissionDialog`] is accepted, matching the
     /// per-app approval card.
     pub consent: ConsentMethod,
+    /// One-shot consent: authorize the next matching operation, then forget
+    /// the grant. Session-only — never persisted — so a crash cannot promote
+    /// it into a standing grant. Absent on the wire means standing (`false`).
+    #[serde(default)]
+    pub single_use: bool,
 }
 
 /// Idempotent computer-use grant withdrawal for one exact capability + scope.

@@ -1088,6 +1088,7 @@ async fn dispatch_consent(
         capability,
         bundle_id: bundle_id.clone(),
         consent: ConsentMethod::PermissionDialog,
+        single_use: decision == ConsentDecision::Once,
     });
     if let Err(error) = state.broker.control(grant).await {
         return map_control_error(&error);
@@ -1132,10 +1133,10 @@ async fn dispatch_consent(
     resolution
 }
 
-/// A `once` consent wrote a conversation grant so the broker would authorize;
-/// take it back so nothing is remembered. Best-effort: a failed revoke is
-/// reported in the log, not to the model, and the grant remains listed in
-/// Settings where the user can withdraw it.
+/// A `once` consent wrote a session-only grant so the broker would authorize.
+/// The broker also consumes that grant when the authorizing op finishes;
+/// this revoke is the halt / abandoned-hold cleanup so a leftover one-shot
+/// cannot authorize a later op in the same session. Best-effort.
 async fn revoke_once_grant(
     state: &HostAccess,
     decision: ConsentDecision,
