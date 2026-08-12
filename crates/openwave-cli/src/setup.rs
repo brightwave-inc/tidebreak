@@ -470,6 +470,10 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 "execution_location  {}",
                 snapshot.execution_location.as_deref().unwrap_or("-")
             );
+            println!(
+                "code_execution_provider  {}",
+                snapshot.code_execution_provider.as_deref().unwrap_or("-")
+            );
             println!("status              {}", snapshot.status);
             if let Some(error) = &snapshot.last_error_code {
                 println!("last_error_code     {error}");
@@ -522,6 +526,7 @@ fn agent_run_json(run: &crate::api::wire::AgentRunSnapshot) -> serde_json::Value
         "parent_id": run.parent_id,
         "tier": run.tier,
         "execution_location": run.execution_location,
+        "code_execution_provider": run.code_execution_provider,
         "status": run.status,
         "task": run.task,
         "started_at": run.started_at,

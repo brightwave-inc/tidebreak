@@ -366,8 +366,14 @@ pub struct AgentRunSnapshot {
     pub parent_id: Option<openwave_core::AgentRunId>,
     #[serde(default)]
     pub tier: Option<String>,
+    /// Where the agent run loop itself executes (`in_process` / `container`).
+    /// Not the code-exec backend — see [`Self::code_execution_provider`].
     #[serde(default)]
     pub execution_location: Option<String>,
+    /// Host code-execution backend for `exec` (`local` / `e2b` / `docker` /
+    /// `daytona` / `off`). Independent of [`Self::execution_location`].
+    #[serde(default)]
+    pub code_execution_provider: Option<String>,
     pub status: String,
     #[serde(default)]
     pub task: Option<String>,
