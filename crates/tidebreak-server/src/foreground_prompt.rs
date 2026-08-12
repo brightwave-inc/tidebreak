@@ -1451,11 +1451,10 @@ mod tests {
             false,
         );
 
-        // Re-pinned for the document tool rename and the project files the
-        // source guidance now describes.
+        // Re-pinned for the Tidebreak product identity carried by the prompt.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:29d371c329153041be14b07d0af9dced4702a863f8d54fc7f063c5d51dfbba9b"
+            "foreground-v2:sha256:bd94bfb43109fe62a8b7cdef406aaff57dd8bbb8af215535f4196f8dbca77077"
         );
     }
 }
