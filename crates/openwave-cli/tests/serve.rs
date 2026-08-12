@@ -584,6 +584,50 @@ fn a_killed_server_leaves_its_data_directory_usable() {
     assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
 }
 
+/// A fresh `-p` must name the chat it created on stderr so the next invocation
+/// can pass `--chat` — stdout stays the answer / journal alone.
+#[test]
+fn print_mode_prints_a_new_chat_id_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = serde_json::json!([{"text": "ok"}]);
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .args(["-p", "hi", "--permission-mode", "allow"])
+        .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env("OPENWAVE_SCRIPTED_PROVIDER", script.to_string())
+        .env_remove("OPENWAVE_MCP_CONFIG")
+        .env_remove("OPENWAVE_SERVER_URL")
+        .env_remove("OPENWAVE_SERVER_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave -p");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(TURN_EXIT_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    let chat = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("openwave: chat "))
+        .unwrap_or_else(|| panic!("new chat id missing from stderr: {stderr}"));
+    assert!(
+        openwave_core::ChatId::from_str(chat).is_ok(),
+        "chat id on stderr: {chat:?}"
+    );
+    assert!(
+        !stdout.contains(chat),
+        "chat id must not leak onto stdout: {stdout}"
+    );
+}
+
 /// `--model` is applied before the turn; a selection the server rejects must
 /// fail the process without writing assistant text to stdout.
 #[test]
