@@ -1000,9 +1000,9 @@ async fn stops_proxying_inference_at_the_runs_spend_budget() {
 /// The driver keeps the run's lease live while the container works, so a run that
 /// outlives one lease period is not reaped mid-flight.
 ///
-/// The lease here is deliberately short and the heartbeat shorter: the drive is
-/// held open past several lease periods, and the run must still be `running` with
-/// a lease extended beyond its original expiry rather than terminalized.
+/// The provider gate holds the real sandbox in a live model call while the test
+/// observes the durable lease. The run must remain `running` and its expiry must
+/// move forward before the model call is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1010,14 +1010,17 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
         let run_id = admit_container_run(&store, chat.id, "takes a while").await;
 
         let backend = MockBackend::spawning();
-        // A provider that stalls each completion keeps the container working, so
-        // the drive stays open across several lease periods.
-        let provider = Arc::new(ScriptedProvider::slow(
+        let gate = Arc::new(StepGate::default());
+        // Hold the first completion until the durable heartbeat is visible.
+        // This proves the same contract without making the assertion depend on
+        // several seconds of wall-clock sleeps while the full test binary is
+        // competing for CI runtime threads.
+        let provider = Arc::new(ScriptedProvider::gated(
             vec![
                 "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a b\"}".to_owned(),
                 "done".to_owned(),
             ],
-            Duration::from_millis(700),
+            gate.clone(),
         ));
         let resolver = Arc::new(FixedResolver(provider.clone()));
 
@@ -1032,41 +1035,44 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             },
         );
 
-        // Observe the lease while the drive runs: it must be extended past the
-        // original 2s expiry rather than left to lapse.
-        let observer = {
-            let store = store.clone();
-            tokio::spawn(async move {
-                let mut seen: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
-                for _ in 0..30 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    if let Ok(Some(run)) = store.get_agent_run(run_id).await {
-                        if let Some(expiry) = run.lease_expires_at {
-                            seen.push(expiry);
-                        }
-                        if run.status != AgentRunStatus::Running {
-                            break;
-                        }
-                    }
-                }
-                seen
-            })
-        };
+        let drive = tokio::spawn(async move { runner.drive(run_id).await });
 
-        let outcome = runner
-            .drive(run_id)
+        gate.started.notified().await;
+        let initial = store
+            .get_agent_run(run_id)
             .await
+            .unwrap()
+            .unwrap()
+            .lease_expires_at
+            .expect("a claimed run has a lease expiry");
+
+        let extended = loop {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+            assert_eq!(
+                run.status,
+                AgentRunStatus::Running,
+                "the run must stay live while its model call is held"
+            );
+            let expiry = run
+                .lease_expires_at
+                .expect("a running claimed run keeps a lease expiry");
+            if expiry > initial {
+                break expiry;
+            }
+        };
+        assert!(extended > initial);
+
+        gate.release.notify_one();
+
+        let outcome = drive
+            .await
+            .unwrap()
             .expect("driving succeeds")
             .expect("the container run is claimable");
         // The run completed normally rather than being reaped out from under the
         // still-working container.
         assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
-
-        let seen = observer.await.unwrap();
-        assert!(
-            seen.windows(2).any(|pair| pair[1] > pair[0]),
-            "the lease must be extended while the container works, saw: {seen:?}"
-        );
     })
     .await
     .expect("test completed within its time bound");
