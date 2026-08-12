@@ -104,6 +104,14 @@ pub enum ToolApprovalKind {
     /// or chat attachments — so the card names the network policy the child
     /// inherits.
     DelegateMayRunBackgroundAgent,
+    /// The agent may drive a specific native app — click, type, press keys —
+    /// after the user grants control of that app. Consent is per app and the
+    /// card decision is written to the host broker's grant store; standing
+    /// grants let "always for this app" be remembered. The act-time
+    /// consequential gate backstops sends/purchases/deletes, so individual
+    /// control calls within a granted app do not each card. Never auto-judgeable
+    /// — no LLM judge approves control of the user's apps.
+    ComputerMayControlApp,
     /// A Sensitive action with no presentable consent semantics: rejectable but
     /// not approvable from the renderer.
     Unsupported,
@@ -124,6 +132,7 @@ impl ToolApprovalKind {
             // card the renderer presents and then 409s the approval itself.
             "create_app" => Self::WorkspaceMayModifyFiles,
             crate::SPAWN_SANDBOX_AGENT_TOOL => Self::DelegateMayRunBackgroundAgent,
+            name if crate::is_computer_use_control_tool(name) => Self::ComputerMayControlApp,
             name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
         }
@@ -174,6 +183,10 @@ impl ToolApprovalKind {
             // Same closed-constraint fold. `approval_from_model` recovers the
             // delegation kind from the exact tool name stored beside it.
             Self::DelegateMayRunBackgroundAgent => "unsupported",
+            // Same closed-constraint fold: stored as the legacy spelling, and
+            // the exact computer-use tool name stored beside it recovers the
+            // control kind on read (the same recovery `for_tool_name` performs).
+            Self::ComputerMayControlApp => "unsupported",
             Self::Unsupported => "unsupported",
         }
     }
@@ -195,6 +208,7 @@ impl ToolApprovalKind {
             Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
             Self::WorkspaceMayModifyFiles => "workspace_may_modify_files",
             Self::DelegateMayRunBackgroundAgent => "delegate_may_run_background_agent",
+            Self::ComputerMayControlApp => "computer_may_control_app",
             Self::Unsupported => "unsupported",
         }
     }
@@ -210,6 +224,7 @@ impl ToolApprovalKind {
             "external_mcp_may_call_server" => Some(Self::ExternalMcpMayCallServer),
             "workspace_may_modify_files" => Some(Self::WorkspaceMayModifyFiles),
             "delegate_may_run_background_agent" => Some(Self::DelegateMayRunBackgroundAgent),
+            "computer_may_control_app" => Some(Self::ComputerMayControlApp),
             "unsupported" => Some(Self::Unsupported),
             _ => None,
         }
@@ -226,6 +241,7 @@ impl ToolApprovalKind {
                 | Self::ExternalMcpMayCallServer
                 | Self::WorkspaceMayModifyFiles
                 | Self::DelegateMayRunBackgroundAgent
+                | Self::ComputerMayControlApp
         )
     }
 
@@ -262,10 +278,18 @@ impl ToolApprovalKind {
     /// about a place ([`GrantScope::PathSubtree`], enforced by
     /// [`Self::grantable_at`]): their whole-tool "yes" already exists as the
     /// chat's `Auto` permission mode, and a second spelling of the same
-    /// consent would drift from the first.
+    /// consent would drift from the first. Computer-use control is one-shot
+    /// here too: its standing consent is the per-app grant recorded in the
+    /// host broker's store (scoped to a bundle id), which the generic
+    /// whole-tool standing grant cannot express — two spellings of that
+    /// consent would drift.
     #[must_use]
     pub const fn is_standing_grantable(self) -> bool {
-        self.is_approvable() && !matches!(self, Self::ExternalMcpMayCallServer)
+        self.is_approvable()
+            && !matches!(
+                self,
+                Self::ExternalMcpMayCallServer | Self::ComputerMayControlApp
+            )
     }
 
     /// Whether a standing grant of `scope` may exist for this kind.

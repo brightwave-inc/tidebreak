@@ -943,6 +943,10 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
             ToolApprovalKind::DelegateMayRunBackgroundAgent => {
                 ToolApprovalKind::DelegateMayRunBackgroundAgent
             }
+            // A parked computer-use control call folds to the legacy spelling
+            // too; the exact tool name recovers the control kind so a restarted
+            // card still presents "control this app" rather than a bare reject.
+            ToolApprovalKind::ComputerMayControlApp => ToolApprovalKind::ComputerMayControlApp,
             _ => ToolApprovalKind::Unsupported,
         },
         _ => {
