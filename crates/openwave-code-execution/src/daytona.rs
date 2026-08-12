@@ -1094,9 +1094,9 @@ async fn decode_snapshot(response: Response) -> Result<DaytonaSnapshot, Snapshot
         .and_then(|body| body.message)
         .filter(|message| !message.is_empty());
         let reason = match detail {
-            Some(message) => format!(
-                "Daytona refused the snapshot request with status {status}: {message}"
-            ),
+            Some(message) => {
+                format!("Daytona refused the snapshot request with status {status}: {message}")
+            }
             None => format!("Daytona refused the snapshot request with status {status}"),
         };
         return Err(SnapshotError::Degraded(reason));
