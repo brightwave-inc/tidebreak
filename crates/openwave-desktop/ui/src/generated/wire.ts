@@ -2386,7 +2386,9 @@ has_api_key: boolean,
  */
 chat_defaults: StickyChatDefaults, 
 /**
- * Maximum nonterminal spawned agents allowed in one chat.
+ * Preferred maximum concurrent background agents. Spawn unsettled
+ * children on one origin turn are further capped at
+ * [`AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS`] (wait_for_agents membership).
  */
 max_active_background_agents: number, 
 /**
