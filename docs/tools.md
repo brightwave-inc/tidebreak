@@ -214,12 +214,14 @@ completion, applies model usage once, and moves the foreground turn to
 child runs independently. The notification that wakes each worker is only a
 latency hint; the committed state is sufficient after a restart.
 
-One foreground turn may have at most four unsettled children. A child remains
-unsettled while it is still running or while its terminal delivery is waiting
-to be consumed. The model can launch independent tasks one at a time, retaining
-each returned ID, and then make one ordered `wait_for_agents` call. That call
-uses `All` semantics: it atomically records the pending tool call and exact
-ordered child set, applies progress once, and releases the foreground lease.
+One foreground turn may have at most four unsettled children — the same ceiling
+as `wait_for_agents` membership and the `max_active_background_agents` setting
+— so every admitted child can join one ordered wait. A child remains unsettled
+while it is still running or while its terminal delivery is waiting to be
+consumed. The model can launch independent tasks one at a time, retaining each
+returned ID, and then make one ordered `wait_for_agents` call. That call uses
+`All` semantics: it atomically records the pending tool call and exact ordered
+child set, applies progress once, and releases the foreground lease.
 After every child has a terminal delivery, recovery consumes all deliveries,
 completes the same tool call with results in request order, journals the exact
 completion event, and moves the turn to `resuming`.

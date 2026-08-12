@@ -77,4 +77,19 @@ mod tests {
         assert!(TurnRunStatus::Completed.is_terminal());
         assert!(!TurnRunStatus::Running.is_terminal());
     }
+
+    #[test]
+    fn spawn_unsettled_cap_matches_wait_for_agents_membership() {
+        // Spawn admission, settings, and wait_for_agents share one ceiling so a
+        // turn cannot hold more unsettled children than one wait can consume.
+        assert_eq!(
+            AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS as usize,
+            TurnAgentRunWaitSet::MAX_CHILDREN
+        );
+        assert_eq!(
+            AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
+            AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS
+        );
+        assert_eq!(TurnAgentRunWaitSet::MAX_CHILDREN, 4);
+    }
 }

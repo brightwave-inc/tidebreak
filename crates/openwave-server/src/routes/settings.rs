@@ -110,7 +110,9 @@ pub struct Settings {
     /// exist yet can show what `POST /chats` will seed.
     #[serde(default)]
     pub chat_defaults: StickyChatDefaults,
-    /// Maximum nonterminal spawned agents allowed in one chat.
+    /// Preferred maximum concurrent background agents. Spawn unsettled
+    /// children on one origin turn are further capped at
+    /// [`AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS`] (wait_for_agents membership).
     pub max_active_background_agents: u32,
     /// Model steps a background agent takes before it must check in.
     ///
@@ -237,6 +239,8 @@ pub async fn put_settings(
         }
     }
     if let Some(limit) = body.max_active_background_agents {
+        // Stored value may exceed the per-turn unsettled wait ceiling; spawn
+        // admission clamps with AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS.
         if limit == 0 || limit > AgentRun::MAX_CONCURRENCY_LIMIT {
             return Err(ServerError::bad_request(format!(
                 "max_active_background_agents must be in 1..={}",

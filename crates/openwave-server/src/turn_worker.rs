@@ -1736,10 +1736,12 @@ impl TurnWorker {
                                 break;
                             }
                             Ok(Some(CheckpointSandboxSpawnOutcome::AtCapacity)) => {
+                                let cap = checkpoint
+                                    .max_active_background_agents
+                                    .min(openwave_core::AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS);
                                 continuation_instruction = Some(
                                     format!(
-                                        "The per-chat background-agent cap is {} active agents. This spawn was not run. Call wait_for_agents with previously returned agent IDs, then try again after one finishes.",
-                                        checkpoint.max_active_background_agents
+                                        "The per-turn unsettled background-agent cap is {cap} agents. This spawn was not run. Call wait_for_agents with previously returned agent IDs, then try again after one finishes."
                                     ),
                                 );
                                 pending_sandbox_spawns.clear();

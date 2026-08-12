@@ -506,9 +506,14 @@ where
     // children release their slot before their result is safely incorporated,
     // so churn could orphan completed work. The provenance-validating
     // unsettled classifier deliberately fails closed when a terminal child is
-    // missing its delivery.
+    // missing its delivery. Never admit more unsettled children than one
+    // wait_for_agents call can take, even if a stale setting asks for more.
     let unsettled = unsettled_sandbox_children_for_origin_turn_on(conn, turn).await?;
-    if unsettled.len() >= max_active_background_agents as usize {
+    let admission_cap = std::cmp::min(
+        max_active_background_agents,
+        AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS,
+    );
+    if unsettled.len() >= admission_cap as usize {
         return Ok(AdmitSandboxAgentRunOutcome::AtCapacity);
     }
 

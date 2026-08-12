@@ -275,9 +275,11 @@ pub struct AgentRunWaitSetCandidate {
 }
 
 impl TurnAgentRunWaitSet {
-    /// Keep one ordered wait within the durable result-envelope budget. This
-    /// bound is independent of the configurable admission cap; larger caps are
-    /// consumed in groups as children settle.
+    /// Keep one ordered wait within the durable result-envelope budget.
+    ///
+    /// Spawn admission and `max_active_background_agents` share this ceiling
+    /// ([`super::runs::AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS`]) so a turn
+    /// cannot hold more unsettled children than one wait can consume.
     pub const MAX_CHILDREN: usize = 4;
 }
 

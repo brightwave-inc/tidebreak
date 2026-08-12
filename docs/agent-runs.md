@@ -10,8 +10,12 @@ The initial design is deliberately bounded:
 - the foreground agent may start background agents;
 - every background agent runs in a sandbox;
 - background agents cannot start more agents (`depth <= 1`);
-- at most four children from one foreground turn may remain unsettled;
-- configurable global and per-chat limits bound actively running agents.
+- at most four children from one foreground turn may remain unsettled
+  (`wait_for_agents` membership, spawn admission, and
+  `max_active_background_agents` share that ceiling so a turn cannot hold more
+  unsettled children than one wait can consume);
+- configurable global and per-chat scheduler limits bound agents that are
+  actually running.
 
 This is enough for useful parallel research and production work without needing
 a recursive fleet scheduler.
@@ -96,12 +100,13 @@ it only makes the argument-free desktop read described below eligible while
 the same attachment remains current.
 
 Each spawn call is made alone and returns one ID for the foreground agent to
-retain. Up to four children from the exact origin turn may be unsettled at once.
-"Unsettled" includes both live work and a terminal result that has not yet been
-consumed, so finishing quickly does not accidentally open an unbounded queue.
-A consumed result, or one explicitly retired by cancellation, releases its
-slot. Sandbox workers never receive either orchestration tool, and storage also
-enforces depth one.
+retain. Up to four children from the exact origin turn may be unsettled at once
+— the same bound `wait_for_agents` accepts and the default
+`max_active_background_agents` setting. "Unsettled" includes both live work and
+a terminal result that has not yet been consumed, so finishing quickly does not
+accidentally open an unbounded queue. A consumed result, or one explicitly
+retired by cancellation, releases its slot. Sandbox workers never receive either
+orchestration tool, and storage also enforces depth one.
 
 The paired `wait_for_agents` call accepts one to four unique child IDs in caller
 order and has only `All` completion semantics. The call is also made alone. Its
@@ -266,8 +271,9 @@ unbounded queue. The scheduler therefore applies configurable limits to:
 
 - background agents running across the installation;
 - running children per chat;
-- four unsettled children per foreground turn, including delivered results
-  that have not yet been consumed;
+- four unsettled children per foreground turn (spawn admission and
+  `wait_for_agents` share this ceiling), including delivered results that have
+  not yet been consumed;
 - wall-clock time, model steps, tool calls, and other resource budgets.
 
 When a running slot is unavailable, accepted work remains durably queued. A

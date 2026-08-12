@@ -441,7 +441,7 @@ async fn container_checkpoint_matches_standalone_container_admission_shape() {
             "research one container fact",
             standalone_lease,
             standalone_turn.steer_revision,
-            AgentRun::MAX_CONCURRENCY_LIMIT,
+            AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS,
             Utc::now(),
         )
         .await
@@ -803,7 +803,11 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::AtCapacity)
     ));
-    assert_eq!(store.list_agent_runs(cap_chat.id).await.unwrap().len(), 6);
+    // One foreground coordinator plus the admitted children at the shared cap.
+    assert_eq!(
+        store.list_agent_runs(cap_chat.id).await.unwrap().len(),
+        1 + AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS as usize
+    );
     assert!(store.list_tool_calls(cap_chat.id).await.unwrap().is_empty());
 }
 
