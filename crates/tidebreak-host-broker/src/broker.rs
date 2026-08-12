@@ -2609,6 +2609,10 @@ impl Operator {
                     expected_label: target_label.clone(),
                 },
             );
+            // Enroll in insertion order so the cap below has something to
+            // evict; without this the queue stays empty and the map grows
+            // unboundedly.
+            state.confirmation_order.push_back(confirmation_id);
             while state.confirmation_order.len() > MAX_PENDING_CONFIRMATIONS {
                 if let Some(evicted) = state.confirmation_order.pop_front() {
                     state.pending_confirmations.remove(&evicted);

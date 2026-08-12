@@ -628,6 +628,14 @@ async fn resolve_tool_call(
     // Only the capture tool may carry one — a client cannot grant another tool
     // an image card by naming it. `None` images or a non-capture tool yields no
     // capture preview.
+    // The mark count comes from the capture's reported rows (the desktop puts
+    // the marks list there), so the card reflects what was actually drawn
+    // rather than a placeholder.
+    let capture_mark_count = rows
+        .and_then(|rows| rows.get("marks"))
+        .and_then(serde_json::Value::as_array)
+        .map(|marks| u32::try_from(marks.len()).unwrap_or(u32::MAX))
+        .unwrap_or(0);
     let capture_preview = images.and_then(|images| {
         if resolved_name == crate::COMPUTER_CAPTURE_SCREEN_TOOL
             && resolution.status() == ToolCallStatus::Completed
@@ -636,7 +644,7 @@ async fn resolve_tool_call(
                 .first()
                 .map(|image| crate::ToolResultPreview::ScreenCapture {
                     image: *image,
-                    mark_count: 0,
+                    mark_count: capture_mark_count,
                 })
         } else {
             None

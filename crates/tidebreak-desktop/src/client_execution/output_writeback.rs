@@ -534,6 +534,7 @@ fn completed(receipt: &OutputWritebackReceipt) -> StoredResolution {
             .with_detail(receipt.relative_path.clone())
             .with_meta(tidebreak_core::format_bytes(receipt.byte_len))],
         })),
+        images: None,
     }
 }
 

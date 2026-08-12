@@ -471,3 +471,58 @@ fn validate_resolution(resolution: &ToolCallResolution) -> Result<(), ServerErro
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A desktop `StoredResolution::Completed` carrying a computer-use
+    /// capture's image references must deserialize into the server's resolution
+    /// shape — same `status`-tagged, snake_case envelope — so the images reach
+    /// the preview projection. A regression here means screenshots publish but
+    /// never materialize as model image blocks.
+    #[test]
+    fn completed_resolution_with_images_round_trips_from_the_desktop_wire() {
+        let blob_id = uuid::Uuid::from_u128(7);
+        // The exact JSON the desktop's `StoredResolution::Completed` serializes
+        // to for a capture. Build it by serializing the real `ImageRef` so the
+        // test tracks the type's wire shape (`media_type` is the snake_case
+        // variant name, not the IANA string).
+        let image = openwave_core::ImageRef {
+            blob_id,
+            media_type: openwave_core::ImageMediaType::Png,
+            width: 2056,
+            height: 1329,
+            byte_len: 979437,
+        };
+        let wire = serde_json::json!({
+            "status": "completed",
+            "result": "{\"status\":\"ok\"}",
+            "images": [serde_json::to_value(image).unwrap()],
+        });
+        let resolution: ClientExecutionResolution = serde_json::from_value(wire).unwrap();
+        let ClientExecutionResolution::Completed { images, .. } = &resolution else {
+            panic!("expected a completed resolution");
+        };
+        let images = images.as_ref().expect("images survive the wire");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].blob_id, blob_id);
+        assert_eq!(images[0].width, 2056);
+    }
+
+    /// A completed resolution with no images (every other client tool) still
+    /// parses — the field is optional for backward compatibility with executors
+    /// that predate it.
+    #[test]
+    fn completed_resolution_without_images_still_parses() {
+        let wire = serde_json::json!({
+            "status": "completed",
+            "result": "done",
+        });
+        let resolution: ClientExecutionResolution = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            resolution,
+            ClientExecutionResolution::Completed { images: None, .. }
+        ));
+    }
+}

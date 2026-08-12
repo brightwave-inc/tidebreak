@@ -335,6 +335,14 @@ pub(super) enum StoredResolution {
         /// rows, which is what it knew.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rows: Option<serde_json::Value>,
+        /// Images the operation published to the blob store and returns by
+        /// reference (a computer-use screen capture). Metadata only — the
+        /// pixels already reached the server through the image-attachment
+        /// route. Serialized into the resolution wire so the store projects a
+        /// `ScreenCapture` preview and the transcript reattaches the image.
+        /// Defaulted for the same receipt-compat reason as `rows`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<openwave_core::ImageRef>>,
     },
     Failed {
         result: String,
@@ -1597,6 +1605,7 @@ mod tests {
         receipt.phase = FolderOperationPhase::DispatchStarted;
         receipt.resolution = Some(StoredResolution::Completed {
             rows: None,
+            images: None,
             result: r#"{"status":"written"}"#.to_owned(),
         });
         store.save_output_writeback(&receipt).unwrap();

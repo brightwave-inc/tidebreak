@@ -553,6 +553,7 @@ fn connected_resolution_from_capabilities(
         result: serde_json::to_string(&result)
             .map_err(|_| "could not encode folder-access result".to_owned())?,
         rows: None,
+        images: None,
     })
 }
 
@@ -561,6 +562,7 @@ fn declined_resolution() -> Result<StoredResolution, String> {
         result: serde_json::to_string(&RequestFolderAccessResult::Declined)
             .map_err(|_| "could not encode folder-access result".to_owned())?,
         rows: None,
+        images: None,
     })
 }
 

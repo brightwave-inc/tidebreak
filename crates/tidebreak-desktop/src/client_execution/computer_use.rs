@@ -1398,7 +1398,20 @@ async fn finish_capture(
     cu.remember_marks(call.chat_id.0, scope, capture.marks.clone());
 
     let image = image_refs.first();
-    completed(serde_json::json!({
+    let marks_json = capture
+        .marks
+        .iter()
+        .map(|mark| {
+            serde_json::json!({
+                "mark": mark.mark,
+                "role": mark.role,
+                "label": mark.label,
+                "element_id": mark.element_id,
+                "element_fingerprint": mark.element_fingerprint,
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({
         "status": "ok",
         "width": capture.width,
         "height": capture.height,
@@ -1412,15 +1425,13 @@ async fn finish_capture(
             "height": image.height,
             "byte_len": image.byte_len,
         })),
-        "marks": capture.marks.iter().map(|mark| serde_json::json!({
-            "mark": mark.mark,
-            "role": mark.role,
-            "label": mark.label,
-            "element_id": mark.element_id,
-            "element_fingerprint": mark.element_fingerprint,
-        })).collect::<Vec<_>>(),
+        "marks": marks_json,
         "marks_note": "Act on a marked element with its `mark` number, or on any element with its `element_id` and `element_fingerprint`.",
-    }))
+    });
+    // The store counts the marks from `rows` for the preview card; capture has
+    // no entry list, so rows carries only the marks.
+    let rows = serde_json::json!({ "marks": marks_json });
+    completed_with_images(result, Some(rows), Some(image_refs))
 }
 
 fn control_meta_json(meta: &openwave_host_broker::ControlMeta) -> serde_json::Value {
@@ -1447,10 +1458,27 @@ fn map_control_error(error: &BrokerClientError) -> StoredResolution {
 }
 
 fn completed(result: serde_json::Value) -> StoredResolution {
+    completed_with_images(result, None, None)
+}
+
+/// A completed resolution that may carry published image references (a screen
+/// capture) and a marks list for the preview card. The images ride the
+/// resolution wire so the server projects a `ScreenCapture` preview and the
+/// transcript reattaches the image; they are metadata refs, the pixels already
+/// published via the image-attachment route. `rows` carries the marks the store
+/// counts for the card (and, for capture, nothing the entry-allowlist would
+/// project, so it stays off the entries path).
+fn completed_with_images(
+    result: serde_json::Value,
+    rows: Option<serde_json::Value>,
+    images: Option<Vec<ImageRef>>,
+) -> StoredResolution {
     match serde_json::to_string(&result) {
-        Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => {
-            StoredResolution::Completed { result, rows: None }
-        }
+        Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => StoredResolution::Completed {
+            result,
+            rows,
+            images,
+        },
         _ => unavailable(
             "result_too_large",
             "The computer-use result was too large to return. Narrow the request and retry.",
