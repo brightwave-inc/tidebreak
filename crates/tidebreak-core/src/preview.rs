@@ -773,6 +773,22 @@ pub enum ToolResultPreview {
         #[ts(optional)]
         feedback: Option<String>,
     },
+    /// A computer-use screen capture, as the captured image plus a bounded
+    /// count of the interactive marks drawn over it.
+    ///
+    /// Built where the client-executed capture resolves rather than by
+    /// [`ToolResultPreview::build`]: the desktop redeems the broker handoff and
+    /// publishes the PNG to the blob store, so the durable row carries only the
+    /// image's `ImageRef` (never the pixels) and the mark count — enough for
+    /// the transcript to reattach the image and for the card to say what it
+    /// shows.
+    ScreenCapture {
+        /// The captured screenshot, content-addressed in the blob store.
+        image: crate::ImageRef,
+        /// How many interactive elements were marked on the capture, so the
+        /// card can say "capture with N controls" without the model's text.
+        mark_count: u32,
+    },
 }
 
 /// The tools that may project a list of entries.
@@ -941,6 +957,8 @@ impl ToolResultPreview {
             // A recap of what the reader chose, which is the whole reason the
             // turn parked. Skipping everything is itself the answer.
             Self::UserQuestions { .. } | Self::PlanDecision { .. } => true,
+            // A capture always has its image to show.
+            Self::ScreenCapture { .. } => true,
         }
     }
 }
@@ -1996,5 +2014,26 @@ mod tests {
         };
         assert_eq!(stdout.chars().count(), MAX_RESULT_STREAM_CHARS);
         assert_eq!(stderr, "kept\nlines\n[31mbut not escapes");
+    }
+
+    #[test]
+    fn a_screen_capture_carries_its_image_for_the_transcript() {
+        let image = crate::ImageRef {
+            blob_id: uuid::Uuid::from_u128(7),
+            media_type: crate::ImageMediaType::Png,
+            width: 2056,
+            height: 1329,
+            byte_len: 979437,
+        };
+        let preview = ToolResultPreview::ScreenCapture {
+            image,
+            mark_count: 12,
+        };
+        // A capture always has its image to show.
+        assert!(preview.has_output());
+        // The image survives a serde round-trip so a stored row reads back.
+        let stored = serde_json::to_value(&preview).unwrap();
+        let recovered: ToolResultPreview = serde_json::from_value(stored).unwrap();
+        assert_eq!(recovered, preview);
     }
 }

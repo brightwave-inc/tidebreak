@@ -300,6 +300,7 @@ pub(in crate::db) async fn resolve_server_tool_call(
         resolution,
         None,
         None,
+        None,
     )
     .await?
     .outcome)
@@ -319,6 +320,7 @@ pub(in crate::db) async fn resolve_server_tool_call_with_preview(
         resolved_at,
         resolution,
         preview,
+        None,
         None,
     )
     .await?
@@ -351,6 +353,7 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call(
         resolution,
         preview,
         None,
+        None,
     )
     .await?
     .outcome)
@@ -381,6 +384,7 @@ pub(in crate::db) async fn abandon_inherited_server_tool_call(
         resolution,
         None,
         None,
+        None,
     )
     .await?
     .outcome)
@@ -396,6 +400,7 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
     rows: Option<&serde_json::Value>,
+    images: Option<&[crate::ImageRef]>,
 ) -> Result<JournaledClientToolCallOutcome> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
@@ -414,6 +419,7 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
         resolution,
         None,
         rows,
+        images,
     )
     .await
 }
@@ -428,6 +434,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
     rows: Option<&serde_json::Value>,
+    images: Option<&[crate::ImageRef]>,
 ) -> Result<JournaledClientToolCallOutcome> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
@@ -446,6 +453,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
         resolution,
         None,
         rows,
+        images,
     )
     .await
 }
@@ -474,6 +482,7 @@ async fn resolve_tool_call(
     resolution: &ToolCallResolution,
     preview: Option<&crate::ToolResultPreview>,
     rows: Option<&serde_json::Value>,
+    images: Option<&[crate::ImageRef]>,
 ) -> Result<JournaledClientToolCallOutcome> {
     validate_resolution(resolution)?;
     let resolved_at = canonical_db_timestamp(resolved_at)?;
@@ -612,7 +621,26 @@ async fn resolve_tool_call(
             },
         )
     });
-    let preview = preview.or(projected.as_ref());
+    // A computer-use capture carries its screenshot by reference, not in
+    // `rows`: the desktop published the PNG to the blob store and sent the
+    // `ImageRef`, so the projection is a `ScreenCapture` preview that lets the
+    // transcript reattach the image (gated on the model's image-input flag).
+    // Only the capture tool may carry one — a client cannot grant another tool
+    // an image card by naming it. `None` images or a non-capture tool yields no
+    // capture preview.
+    let capture_preview = images.and_then(|images| {
+        if resolved_name == crate::COMPUTER_CAPTURE_SCREEN_TOOL
+            && resolution.status() == ToolCallStatus::Completed
+        {
+            images.first().map(|image| crate::ToolResultPreview::ScreenCapture {
+                image: *image,
+                mark_count: 0,
+            })
+        } else {
+            None
+        }
+    });
+    let preview = preview.or(capture_preview.as_ref()).or(projected.as_ref());
     active.result_preview = Set(preview.and_then(|preview| serde_json::to_value(preview).ok()));
     active.error_code = Set(error_code);
     active.error_detail = Set(error_detail);

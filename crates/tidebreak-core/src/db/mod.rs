@@ -2149,14 +2149,7 @@ impl Store for DbStore {
         resolved_at: chrono::DateTime<Utc>,
     ) -> Result<JournaledClientToolCallOutcome> {
         ops::client_execution::resolve_client_tool_call_and_append_event(
-            self,
-            id,
-            chat_id,
-            lease_token,
-            now,
-            resolution,
-            resolved_at,
-            None,
+            self, id, chat_id, lease_token, now, resolution, resolved_at, None, None,
         )
         .await
     }
@@ -2171,6 +2164,7 @@ impl Store for DbStore {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
         rows: Option<&serde_json::Value>,
+        images: Option<&[crate::ImageRef]>,
     ) -> Result<JournaledClientToolCallOutcome> {
         ops::client_execution::resolve_client_tool_call_and_append_event(
             self,
@@ -2181,6 +2175,7 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             rows,
+            images,
         )
         .await
     }
@@ -2203,6 +2198,7 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             None,
+            None,
         )
         .await
     }
@@ -2217,6 +2213,7 @@ impl Store for DbStore {
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
         rows: Option<&serde_json::Value>,
+        images: Option<&[crate::ImageRef]>,
     ) -> Result<JournaledClientToolCallOutcome> {
         ops::client_execution::resolve_expired_client_tool_call_and_append_event(
             self,
@@ -2227,6 +2224,7 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             rows,
+            images,
         )
         .await
     }

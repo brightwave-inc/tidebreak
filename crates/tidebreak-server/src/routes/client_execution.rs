@@ -91,6 +91,14 @@ pub enum ClientExecutionResolution {
         /// predate this field, which simply report no rows.
         #[serde(default)]
         rows: Option<serde_json::Value>,
+        /// Images the executor published to the blob store and is returning by
+        /// reference (a computer-use screen capture). Metadata only — the
+        /// pixels never cross this wire; the desktop publishes them through the
+        /// image-attachment path and sends the resulting `ImageRef`s. The store
+        /// projects them into the call's preview so the transcript reattaches
+        /// them, gated on the model's image-input flag.
+        #[serde(default)]
+        images: Option<Vec<openwave_core::ImageRef>>,
     },
     Failed {
         result: String,
@@ -109,6 +117,15 @@ impl ClientExecutionResolution {
     fn rows(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Completed { rows, .. } => rows.as_ref(),
+            Self::Failed { .. } | Self::Cancelled { .. } => None,
+        }
+    }
+
+    /// The image references the executor returned, if any. Only a completed
+    /// call has any — a failure describes work that did not happen.
+    fn images(&self) -> Option<&[openwave_core::ImageRef]> {
+        match self {
+            Self::Completed { images, .. } => images.as_deref(),
             Self::Failed { .. } | Self::Cancelled { .. } => None,
         }
     }
@@ -356,6 +373,7 @@ pub async fn resolve_client_execution(
     store.require_chat(id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let rows = body.resolution.rows().cloned();
+    let images = body.resolution.images().map(<[_]>::to_vec);
     let resolution = body.resolution.into_core();
     validate_resolution(&resolution)?;
     let now = Utc::now();
@@ -368,6 +386,7 @@ pub async fn resolve_client_execution(
             &resolution,
             now,
             rows.as_ref(),
+            images.as_deref(),
         )
         .await?;
     if resolution_receipt.outcome == ResolveToolCallOutcome::LeaseLost {
@@ -380,6 +399,7 @@ pub async fn resolve_client_execution(
                 &resolution,
                 now,
                 rows.as_ref(),
+                images.as_deref(),
             )
             .await?;
     }

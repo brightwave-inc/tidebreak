@@ -470,7 +470,7 @@ pub fn computer_type_text_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerTypeTextArgs>(
         COMPUTER_TYPE_TEXT_TOOL,
         &format!(
-            "Type text into an element or the focused field. {TARGETING_NOTE}{ACTING_NOTE}"
+            "Type text into an element or the focused field. {TARGETING_NOTE}{ACTING_NOTE}\n\nA newline in `text` is typed as the Return key, which submits many composers and forms instead of inserting a line break — keep `text` to a single line unless you intend to submit, or use Shift+Return via `computer_key_press` where the app supports it."
         ),
     )
 }
