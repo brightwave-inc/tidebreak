@@ -1,8 +1,8 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { create } from "zustand";
 
+import { DocumentIcon } from "./components/document-table/DocumentIcon";
 import type { DeliverableSummary } from "./deliverables";
-import { documentIcon } from "./documentIcon";
 import { cn } from "@/lib/utils";
 
 /** Past this many the rest collapse into a count rather than wrapping on. */
@@ -165,7 +165,6 @@ function OutputChip({
   output: DeliverableSummary;
   onOpen: () => void;
 }) {
-  const Icon = documentIcon(output.mediaType);
   return (
     <button
       type="button"
@@ -176,7 +175,11 @@ function OutputChip({
       onClick={onOpen}
       aria-label={`Open output ${output.filename}`}
     >
-      <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <DocumentIcon
+        mediaType={output.mediaType}
+        className="size-3.5"
+        aria-hidden="true"
+      />
       <span className="min-w-0 truncate">{output.filename}</span>
     </button>
   );

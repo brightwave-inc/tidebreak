@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import type { ProjectDocument } from "./api";
 import { useApp } from "./AppContext";
 import { useProjectListStore } from "./ProjectListStore";
-import { documentIcon } from "./documentIcon";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -124,14 +124,17 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
       {documents !== null && documents.length > 0 && (
         <ul className="m-0 flex list-none flex-col gap-2 p-0" aria-label="Project files">
           {documents.map((document) => {
-            const Icon = documentIcon(document.media_type);
             const size = fileSize(document.source_byte_len);
             return (
               <li
                 key={document.document_id}
                 className="flex items-center gap-3 rounded-lg border border-border px-3 py-2"
               >
-                <Icon className="size-4 shrink-0 text-muted-foreground" />
+                <DocumentIcon
+                  mediaType={document.media_type}
+                  className="size-4"
+                  aria-hidden="true"
+                />
                 <span className="min-w-0 flex-1 truncate text-sm">
                   {document.title ?? "Untitled file"}
                 </span>

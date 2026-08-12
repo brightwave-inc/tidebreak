@@ -72,7 +72,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { documentIcon } from "@/documentIcon";
+import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import type { ImportedDocument } from "@/documents";
 import type { PluginInfo } from "./api";
 import { folderAccessLabel, folderReach } from "./FolderAccess";
@@ -1342,11 +1342,10 @@ function FileAttachmentChip({
   file: ImportedDocument;
   onRemove: () => void;
 }) {
-  const Icon = documentIcon(file.mediaType);
   return (
     <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
       <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
-        <Icon size={16} aria-hidden="true" />
+        <DocumentIcon mediaType={file.mediaType} className="size-4" aria-hidden="true" />
       </span>
       <span className="grid min-w-0 gap-px">
         <strong
