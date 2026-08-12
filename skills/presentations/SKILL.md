@@ -31,27 +31,38 @@ requirement.
 
 ## New decks: detect the runtime first
 
-Before writing a generator, decide Node vs Python in one short check. Do not
-spend turns on `npm install` or a pptxgenjs script when `node`/`npm` are
-missing — that is how runs burn steps and then redo the deck in Python.
+Before writing a generator, decide Node vs Python carefully. Do not spend turns
+on `npm install` or a pptxgenjs script when `node`/`npm` are truly missing —
+that is how runs burn steps and then redo the deck in Python. Also do not treat
+every failed probe as "Node is gone for the turn."
 
 1. **Read this turn's operating notes** (the environment / capability lines
-   injected into the prompt). They are the first signal:
+   injected into the prompt). Gate the fallback on note state first:
    - **Node is unavailable** → skip Node entirely; use the
-     [python-pptx](#new-decks-python-pptx-when-node-is-absent) path.
-   - **Node is being installed** → do work that does not need it, then recheck;
-     if it never becomes runnable, use python-pptx rather than stalling.
-   - **Node is available** (or the notes are silent about Node) → continue to
+     [python-pptx](#new-decks-python-pptx-when-node-is-absent) path (install
+     may still need package-manager network policy).
+   - **Node is being installed** → do work that does not need Node, then
+     **recheck later in the turn**. Do **not** start the python-pptx path on
+     the first failed probe while install is in progress. If Node still does
+     not run after a later recheck, say so and only then take the python-pptx
+     path (or a markdown outline with the user's knowledge) — do not silently
+     switch generators mid-turn.
+   - **Node is available**, or the notes are silent about Node → continue to
      step 2. Notes can lag a managed image or a host that lost its toolchain;
-     they do not replace a real binary check.
-2. **Probe the binaries once** in a single `exec` (no package install yet):
+     they do not replace a real binary check, and a probe always overrides a
+     stale "available" claim.
+2. **Probe the binaries once** in a single `exec` (no package install yet),
+   unless step 1 already sent you to python-pptx because Node is unavailable:
 
    ```
    command -v node && node -v && command -v npm && npm -v
    ```
 
-   - If that fails → **python-pptx** path. Do not retry with `npm install`,
-     `npx`, or alternate Node version managers.
+   - If that fails **and** notes did not say Node is being installed →
+     **python-pptx** path. Do not retry with `npm install`, `npx`, or alternate
+     Node version managers.
+   - If that fails **while** notes say Node is being installed → wait/recheck;
+     do not fall through to python-pptx yet.
    - If that succeeds → **pptxgenjs** path (preferred).
 
 Do not invent a third generator, and do not mix the two in one deck. Once you
@@ -94,12 +105,20 @@ Keep `--ignore-scripts`: a local workspace runs on the user's own machine, and
 a package's install hooks are arbitrary code nobody asked to run.
 
 Installs work only when this chat's network policy allows package managers,
-and they persist for the rest of the conversation. If an install is refused by
-policy, do not retry: tell the user to enable the package-manager network
-policy for this chat, and either use the python-pptx path (if Python/pip can
-install) or offer a markdown outline of the deck — only with their knowledge,
-never as a silent substitution. If neither generator can be installed, say so
-plainly instead of quietly delivering a lesser format.
+and they persist for the rest of the conversation.
+
+**Package-manager policy refusal is not a runtime fallback.** If Node is
+present but `npm install` is refused (or `require('pptxgenjs')` fails and the
+install cannot run), do **not** pivot to `pip install python-pptx` as if it were
+a different class of problem — pip hits the same package-manager gate. Tell the
+user to enable the package-manager network policy for this chat, and offer a
+markdown outline of the deck only with their knowledge, never as a silent
+substitution. The python-pptx path is for when the **Node runtime itself** is
+absent (or still missing after an honest Installing recheck), not for when npm
+was refused.
+
+If neither generator can be installed, say so plainly instead of quietly
+delivering a lesser format.
 
 ### Write and run the deck
 
@@ -146,15 +165,19 @@ Style rules:
 
 ## New decks: python-pptx (when Node is absent)
 
-Use this path when detect fails, the operating notes say Node is unavailable,
-or npm cannot install `pptxgenjs` and Python still can. It is a **fallback for
-new decks only** — never use it to "edit" an existing deck (that rebuilds and
-strips the design; use the XML pipeline instead).
+Use this path when the operating notes say Node is **unavailable**, or when
+detect's binary probe fails after notes are silent/available (not while Node is
+still **being installed**). It is a **fallback for new decks only** — never use
+it to "edit" an existing deck (that rebuilds and strips the design; use the XML
+pipeline instead). Do **not** take this path merely because `npm install` was
+refused while Node itself is present.
 
 ### Install the pin
 
-Install with its own `exec` call — commands have a bounded wall clock, and one
-`pip` invocation per package stays inside it:
+`python-pptx` is **not** preinstalled on the documents image and is not in the
+offline package cache unless a prior install in this chat populated user
+site-packages. Install on demand with its own `exec` call — commands have a
+bounded wall clock, and one `pip` invocation per package stays inside it:
 
 ```
 python3 -m pip install --user python-pptx==1.0.2
@@ -163,7 +186,8 @@ python3 -m pip install --user python-pptx==1.0.2
 Same network-policy rules as npm: if the install is refused, do not retry;
 tell the user to enable the package-manager network policy, and offer a
 markdown outline only with their knowledge. If `python-pptx` cannot be
-installed either, say so plainly.
+installed either, say so plainly. Do not `import pptx` without a successful
+install in this chat.
 
 ### Write and run the deck
 
