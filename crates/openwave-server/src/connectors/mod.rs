@@ -39,6 +39,6 @@ pub use gateway::{
     validate_mcp_endpoint_slug, AuthorizedSession, CredentialVault, GatewayApp, GatewayAuth,
     GatewayAuthConfig, GatewayConnection, GatewayConsentOutcome, GatewayCredentials,
     GatewayIdentity, GatewayInvokeOutcome, GatewayMeta, GatewayModel, GatewayOperationSummary,
-    GatewayPublishOutcome, GatewayRegistrationOutcome, GatewayTeam, PendingSignIn, TokenSet,
-    RESOURCE_CONTROL, RESOURCE_LLM, SECRET_KEY as GATEWAY_SECRET_KEY,
+    GatewayRegistrationOutcome, PendingSignIn, TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
+    SECRET_KEY as GATEWAY_SECRET_KEY,
 };

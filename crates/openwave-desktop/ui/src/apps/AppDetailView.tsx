@@ -1,22 +1,15 @@
-import {
-  ChevronLeft,
-  ExternalLink,
-  ShieldCheck,
-  Trash2,
-  Users,
-  X,
-} from "lucide-react";
+import { ChevronLeft, ExternalLink, ShieldCheck, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import type { AppDetail, AppGrantState, GatewayTeamInfo } from "@/api";
+import type { AppDetail, AppGrantState } from "@/api";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
 import { Button } from "@/components/ui/button";
-import { openSignInPage } from "@/openSignInPage";
+import { useManagedPolicy } from "@/managedPolicy";
+import { openInBrowser } from "@/openInBrowser";
 import { AppConsentSheet } from "./AppConsentSheet";
 import { AppFrame } from "./AppFrame";
-import { AppPublishDialog } from "./AppPublishDialog";
 import { friendlyAppsError, updatedLabel } from "./AppsView";
 import type { AppsApis } from "./appsApis";
 
@@ -71,13 +64,6 @@ export function AppDetailView({
   // refusal, or null once dismissed. It names the bound app, so the banner
   // does not have to guess which one needs connecting.
   const [connectPrompt, setConnectPrompt] = useState<string | null>(null);
-  // The teams this app could be published to, or null while unknown. Null and
-  // an empty list are both "no affordance": publishing is only offered once
-  // the server has said this profile's gateway can hold shared apps at all.
-  const [publishTeams, setPublishTeams] = useState<GatewayTeamInfo[] | null>(
-    null,
-  );
-  const [publishOpen, setPublishOpen] = useState(false);
   const generationRef = useRef(0);
   const mutationGenerationRef = useRef(0);
   const refreshGenerationRef = useRef(0);
@@ -85,6 +71,10 @@ export function AppDetailView({
   const appIdRef = useRef(appId);
   appIdRef.current = appId;
   const { confirm, dialog } = useConfirm();
+  const policy = useManagedPolicy();
+  // The gateway page the Publish affordance opens is built from this URL, so
+  // an unpaired profile has nowhere to send the author and offers nothing.
+  const gatewayPaired = policy.managed && Boolean(policy.gateway_url);
 
   function scopeIsCurrent(targetAppId: string, scopeGeneration: number) {
     return (
@@ -127,8 +117,6 @@ export function AppDetailView({
     setActionError(null);
     setBusy(false);
     setConnectPrompt(null);
-    setPublishTeams(null);
-    setPublishOpen(false);
     void (async () => {
       try {
         const [loadedDetail, loadedGrant] = await Promise.all([
@@ -141,18 +129,6 @@ export function AppDetailView({
       } catch (caught) {
         if (generation !== generationRef.current) return;
         setLoadError(friendlyAppsError(caught, "Could not load this app."));
-      }
-    })();
-    // Publishing is an aside to opening the app, so its read never gates the
-    // page or reports failure: a gateway that cannot answer simply leaves the
-    // affordance hidden, exactly as one that says it cannot publish does.
-    void (async () => {
-      try {
-        const targets = await apis.publishTeams();
-        if (generation !== generationRef.current) return;
-        setPublishTeams(targets.supported ? targets.teams : null);
-      } catch {
-        /* no publish affordance; the page is unaffected */
       }
     })();
     return () => {
@@ -259,10 +235,38 @@ export function AppDetailView({
         toast.error("This profile is not paired with a model gateway.");
         return;
       }
-      await openSignInPage(baseUrl);
+      await openInBrowser(baseUrl);
       setConnectPrompt(null);
     } catch (caught) {
       toast.error(friendlyAppsError(caught, "Could not open your gateway."));
+    }
+  }
+
+  // Publishing happens at the gateway, on the app's own page there, next to
+  // the publish state and team grants it changes — decision record 11. This
+  // host's part is the address, and getting it registers the app there if it
+  // never has been, so the page exists by the time the browser arrives.
+  async function onPublishAtGateway() {
+    const targetAppId = appId;
+    setBusy(true);
+    try {
+      const page = await apis.gatewayPage(targetAppId);
+      if (page.outcome === "ready" && page.url) {
+        await openInBrowser(page.url);
+        return;
+      }
+      // The gateway's own words wherever it had any: a bundle it will not
+      // hold names what about it, and nothing assembled here could.
+      toast.error(
+        page.message ??
+          (page.outcome === "no_gateway"
+            ? "This profile is not paired with a model gateway."
+            : "Your gateway does not hold shared apps, so this app has no page there."),
+      );
+    } catch (caught) {
+      toast.error(friendlyAppsError(caught, "Could not open your gateway."));
+    } finally {
+      if (appIdRef.current === targetAppId) setBusy(false);
     }
   }
 
@@ -444,10 +448,11 @@ export function AppDetailView({
                 {revisionSummary(detail)}{" "}
               </p>
 
-              {/* Publishing is offered only for an app that actually uses the
-                  gateway — the same bindings registration follows — and only
-                  where the gateway said it can hold shared apps. */}
-              {publishTeams &&
+              {/* Offered only for an app that actually uses the gateway --
+                  the same bindings registration follows -- and only on a
+                  profile paired with one, since the page it opens is built
+                  from the managed policy's gateway URL. */}
+              {gatewayPaired &&
                 grant.bindings.some(
                   (binding) => binding.gateway_app !== null,
                 ) && (
@@ -455,10 +460,10 @@ export function AppDetailView({
                     variant="outline"
                     size="xs"
                     disabled={busy}
-                    onClick={() => setPublishOpen(true)}
+                    onClick={() => void onPublishAtGateway()}
                   >
-                    <Users className="size-3.5" aria-hidden="true" />
-                    Publish
+                    <ExternalLink className="size-3.5" aria-hidden="true" />
+                    Publish at gateway
                   </Button>
                 )}
 
@@ -472,17 +477,6 @@ export function AppDetailView({
                 Delete app
               </Button>
             </footer>
-
-            {publishTeams && (
-              <AppPublishDialog
-                open={publishOpen}
-                onOpenChange={setPublishOpen}
-                appName={detail.name}
-                teams={publishTeams}
-                grantedLocally={grant.granted}
-                onPublish={(teamId) => apis.publish(appId, teamId)}
-              />
-            )}
           </>
         )}
       </div>

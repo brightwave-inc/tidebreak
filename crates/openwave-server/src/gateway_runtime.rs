@@ -138,32 +138,6 @@ pub(crate) struct GatewayAppInfo {
     pub(crate) used_by_app_count: usize,
 }
 
-/// Renderer-safe list of the teams the signed-in user may publish a local app
-/// to, fetched live from the gateway.
-///
-/// `supported` is false for every state where the affordance has no meaning —
-/// an unmanaged profile, a managed one with no gateway URL, or a deployment
-/// that predates the teams read — so the renderer hides publishing rather
-/// than offering an empty picker it cannot explain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct GatewayTeams {
-    pub(crate) supported: bool,
-    pub(crate) teams: Vec<GatewayTeamInfo>,
-}
-
-/// One team the signed-in user belongs to.
-///
-/// The gateway's slug is deliberately not projected: nothing the renderer
-/// does needs it, and a publish names the id. A disabled team is carried
-/// rather than filtered so the picker can show it, greyed, instead of leaving
-/// the author looking for a team that silently vanished.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct GatewayTeamInfo {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) enabled: bool,
-}
-
 impl GatewayRuntime {
     pub(crate) fn new(
         store: Arc<dyn Store>,
@@ -307,50 +281,6 @@ impl GatewayRuntime {
                     app_kind: app.app_kind,
                     enabled: app.enabled,
                     mcp_endpoint_slugs: app.mcp_endpoint_slugs,
-                })
-                .collect(),
-        })
-    }
-
-    /// The teams the signed-in user belongs to — the set a publish may name.
-    ///
-    /// Gated on exactly the expression a registration is:
-    /// [`crate::gateway_drafts::registration_base_url`]. A profile with no
-    /// managed gateway has nothing to publish to, and says so as an answer
-    /// rather than an error, so the renderer can hide the affordance without
-    /// having to tell a misconfiguration from an outage.
-    ///
-    /// A missing session folds into the same answer. Nobody can publish while
-    /// signed out, so `supported: false` is the truthful reply rather than a
-    /// degradation — and this read runs on every visit to an app's page, so
-    /// reporting a sign-in as a failure would log an error per page view for a
-    /// state the endpoint can answer calmly. A gateway that is genuinely
-    /// unreachable still errors: that one is not an answer.
-    pub(crate) async fn teams(&self) -> Result<GatewayTeams> {
-        let unsupported = || GatewayTeams {
-            supported: false,
-            teams: Vec::new(),
-        };
-        let Some(base_url) = crate::gateway_drafts::registration_base_url(self).await else {
-            return Ok(unsupported());
-        };
-        let connection = self.connection_at(base_url).await?;
-        let teams = match connection.teams().await {
-            Ok(teams) => teams,
-            Err(error) if is_sign_in_required(&error) => return Ok(unsupported()),
-            Err(error) => return Err(error),
-        };
-        let Some(teams) = teams else {
-            return Ok(unsupported());
-        };
-        Ok(GatewayTeams {
-            supported: true,
-            teams: teams
-                .into_iter()
-                .map(|team| GatewayTeamInfo {
-                    id: team.id,
-                    name: team.name,
-                    enabled: team.enabled,
                 })
                 .collect(),
         })

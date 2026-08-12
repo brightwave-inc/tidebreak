@@ -10,7 +10,7 @@ import type {
   ProviderKind,
   ReasoningEffort,
 } from "../api";
-import { openSignInPage } from "../openSignInPage";
+import { openInBrowser } from "../openInBrowser";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -928,7 +928,7 @@ function OpenAiCredentialSection({
     setError(null);
     try {
       const { authorization_url } = await client.openaiChatgptSignIn();
-      await openSignInPage(authorization_url);
+      await openInBrowser(authorization_url);
       toast.message("Finish signing in with ChatGPT in your browser");
       startPolling(authorization_url);
     } catch (err) {
@@ -997,7 +997,7 @@ function OpenAiCredentialSection({
               // doubles the tab. Route through the native opener and keep the
               // href for hover/copy.
               event.preventDefault();
-              void openSignInPage(pendingUrl);
+              void openInBrowser(pendingUrl);
             }}
           >
             Open the sign-in page again

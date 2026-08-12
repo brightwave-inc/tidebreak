@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ExternalLink, LogOut, PlugZap, RefreshCw } from "lucide-react";
 import type { ApiClient, GatewayApps, GatewayStatus } from "../api";
-import { openSignInPage } from "../openSignInPage";
+import { openInBrowser } from "../openInBrowser";
 import { Button } from "@/components/ui/button";
 import {
   SettingsError,
@@ -275,7 +275,7 @@ function ManagedGatewayPanel({
                     // preventDefault, which doubled this one. Route through
                     // the native opener and keep the href for hover/copy.
                     event.preventDefault();
-                    void openSignInPage(pendingUrl);
+                    void openInBrowser(pendingUrl);
                   }}
                 >
                   Open the sign-in page again
@@ -290,7 +290,7 @@ function ManagedGatewayPanel({
                 onClick={() =>
                   void run(async () => {
                     const started = await client.gatewaySignIn();
-                    await openSignInPage(started.authorization_url);
+                    await openInBrowser(started.authorization_url);
                   })
                 }
               >

@@ -2,9 +2,9 @@ import {
   type AppDetail as WireAppDetail,
   type AppGrantState as WireAppGrantState,
   type AppInvokeRefusalKind,
+  type AppGatewayPageOutcome as WireAppGatewayPageOutcome,
+  type AppGatewayPageResult as WireAppGatewayPageResult,
   type AppLibrary as WireAppLibrary,
-  type AppPublishOutcome as WireAppPublishOutcome,
-  type AppPublishResult as WireAppPublishResult,
   type AppSummary as WireAppSummary,
   type AppViewSession,
   type ApprovalGrantRung,
@@ -38,8 +38,6 @@ import {
   type GatewayApps as WireGatewayApps,
   type GatewayAppInfo as WireGatewayAppInfo,
   type GatewayStatus as WireGatewayStatus,
-  type GatewayTeams as WireGatewayTeams,
-  type GatewayTeamInfo as WireGatewayTeamInfo,
   type SignInProgress,
   type StandingGrantSnapshot,
   type ConsentStatementSnapshot,
@@ -683,17 +681,11 @@ export type AppDetail = WireAppDetail;
 /** Renderer-safe grant state for one app: the consent sheet's whole input. */
 export type AppGrantState = WireAppGrantState;
 
-/** The teams a local app may be published to at this profile's gateway. */
-export type GatewayTeams = WireGatewayTeams;
+/** Where an app's page lives at the gateway, with the gateway's own words. */
+export type AppGatewayPageResult = WireAppGatewayPageResult;
 
-/** One team the signed-in author belongs to. */
-export type GatewayTeamInfo = WireGatewayTeamInfo;
-
-/** What one publish attempt came back as, with the gateway's own words. */
-export type AppPublishResult = WireAppPublishResult;
-
-/** The closed set of publish answers the app page branches on. */
-export type AppPublishOutcome = WireAppPublishOutcome;
+/** The closed set of answers the app page branches on. */
+export type AppGatewayPageOutcome = WireAppGatewayPageOutcome;
 
 /** A single-use frame address for one stored app revision. */
 export type AppViewSessionInfo = AppViewSession;
