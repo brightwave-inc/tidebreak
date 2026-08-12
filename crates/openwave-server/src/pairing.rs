@@ -22,12 +22,12 @@ use crate::managed_policy;
 use crate::mcp_config::McpRuntime;
 
 /// Serializes pairing end to end. [`managed_policy::provision`] is a
-/// check-then-write over the settings store, and the [`Store`] API offers no
+/// check-then-write over the policy file, and the filesystem offers no
 /// cross-call transaction to make it atomic; two links decoded concurrently
 /// could otherwise both pass the conflict check and the second would
-/// overwrite the first. One desktop process owns the store (the server's
-/// instance lock guarantees it), so a process-local mutex is enough to make
-/// the check-then-write effectively atomic.
+/// overwrite the first. One desktop process owns the data directory (the
+/// server's instance lock guarantees it), so a process-local mutex is
+/// enough to make the check-then-write effectively atomic.
 static PAIRING: Mutex<()> = Mutex::const_new(());
 
 /// The process-local handles pairing needs.
@@ -154,7 +154,7 @@ pub async fn register_pending_pairing(
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
     let _guard = PAIRING.lock().await;
-    let policy = handle.gateway.policy().await?;
+    let policy = handle.gateway.policy()?;
     if policy.managed {
         let replaceable = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned;
         return match policy.gateway_url {
@@ -196,7 +196,7 @@ pub async fn register_replacing_pairing(
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
     let _guard = PAIRING.lock().await;
-    let policy = handle.gateway.policy().await?;
+    let policy = handle.gateway.policy()?;
     if policy.managed {
         let replaceable = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned;
         match policy.gateway_url {
@@ -268,7 +268,7 @@ pub enum DeprovisionTarget {
 
 /// Resolve what an `openwave://deprovision` link would act on.
 pub async fn deprovision_target(handle: &PairingHandle) -> Result<DeprovisionTarget> {
-    let policy = handle.gateway.policy().await?;
+    let policy = handle.gateway.policy()?;
     let source_is_os = policy.source == crate::managed_policy::ManagedPolicySource::Os;
     Ok(if !policy.managed {
         DeprovisionTarget::Unprovisioned
@@ -302,7 +302,7 @@ pub async fn deprovision_provisioned_gateway(
     expected_current: &str,
 ) -> Result<(), PairingError> {
     let _guard = PAIRING.lock().await;
-    let policy = handle.gateway.policy().await?;
+    let policy = handle.gateway.policy()?;
     if policy.source == crate::managed_policy::ManagedPolicySource::Os {
         return Err(PairingError::Conflict {
             provisioned_url: policy.gateway_url.unwrap_or_default(),
@@ -328,7 +328,7 @@ pub async fn deprovision_provisioned_gateway(
             )))
         }
     }
-    managed_policy::deprovision(&*handle.store, expected_current).await?;
+    managed_policy::deprovision(&**handle.gateway.provisioned_policy(), expected_current)?;
     handle.gateway.abandon_sign_in_and_pairing().await;
     // Retire against the newly-open policy. A revoke that fails must not
     // resurrect the disconnect — the local clear inside is unconditional and
@@ -360,7 +360,7 @@ pub async fn deprovision_provisioned_gateway(
 /// stores the new one, so its refresh token does not stay live at a gateway
 /// this profile no longer answers to.
 pub(crate) async fn commit_signed_in_pairing(
-    store: &dyn Store,
+    provisioned: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
     secrets: Arc<dyn SecretProvider>,
     mcp: &McpRuntime,
@@ -371,7 +371,7 @@ pub(crate) async fn commit_signed_in_pairing(
     // pairing path; no gateway-state lock, for the same reason the old
     // probe-then-provision path took none — the snapshot stamp is the guard.
     let _guard = PAIRING.lock().await;
-    let policy = managed_policy::resolve(store, os_policy).await?;
+    let policy = managed_policy::resolve(provisioned, os_policy)?;
     if policy.managed && policy.gateway_url.as_deref() != Some(base_url) {
         let replacing = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned
             && replaces.is_some()
@@ -384,11 +384,11 @@ pub(crate) async fn commit_signed_in_pairing(
                 "this device became managed by {authority} during sign-in; the pairing was not applied"
             )));
         }
-        managed_policy::reprovision(store, base_url, replaces.expect("checked above")).await?;
+        managed_policy::reprovision(provisioned, base_url, replaces.expect("checked above"))?;
     } else {
-        managed_policy::provision(store, base_url).await?;
+        managed_policy::provision(provisioned, base_url)?;
     }
-    let policy = managed_policy::resolve(store, os_policy).await?;
+    let policy = managed_policy::resolve(provisioned, os_policy)?;
     crate::gateway_runtime::retire_superseded_gateway_session(secrets, &policy).await?;
     mcp.enforce_manual_lockdown().await;
     Ok(())
@@ -406,7 +406,7 @@ mod tests {
     use openwave_core::ToolRegistry;
 
     use super::*;
-    use crate::managed_policy::{resolve, NoOsPolicy};
+    use crate::managed_policy::{MemoryProvisionedPolicy, NoOsPolicy};
     use crate::mcp_config::{
         GatewayEndpointAccess, GatewayEndpoints, McpHealth, McpServerDefinition, McpServersConfig,
         MANAGED_DISABLED_DIAGNOSTIC,
@@ -447,6 +447,8 @@ mod tests {
 
     /// The handle plus the runtimes behind it, for the assertions that are
     /// about what pairing *did* to this process rather than what it wrote.
+    /// The returned provisioned source is the one both runtimes resolve
+    /// against, so the test can provision through it directly.
     fn test_handle_with_runtimes(
         store: &Arc<dyn Store>,
     ) -> (
@@ -454,16 +456,19 @@ mod tests {
         Arc<McpRuntime>,
         Arc<crate::gateway_runtime::GatewayRuntime>,
     ) {
+        let provisioned = MemoryProvisionedPolicy::new();
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
             Arc::new(TestSecrets::default()),
             Arc::new(NoGateway),
+            provisioned.clone(),
             Arc::new(NoOsPolicy),
         ));
         let gateway = crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             Arc::new(TestSecrets::default()),
+            provisioned,
             Arc::new(NoOsPolicy),
         );
         (
@@ -536,7 +541,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome, PendingRegistration::Registered);
-        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+        assert!(!gateway.policy().unwrap().managed);
         assert_eq!(
             gateway.pending_pairing_url().await.as_deref(),
             Some("https://gw.invalid/"),
@@ -554,7 +559,7 @@ mod tests {
 
         gateway.dismiss_pending_pairing().await;
         assert_eq!(gateway.pending_pairing_url().await, None);
-        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+        assert!(!gateway.policy().unwrap().managed);
     }
 
     /// A link for a gateway other than the managing one is the typed
@@ -563,10 +568,9 @@ mod tests {
     #[tokio::test]
     async fn registration_refuses_a_gateway_other_than_the_managing_one() {
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "https://managed.invalid/")
-            .await
-            .unwrap();
         let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&**gateway.provisioned_policy(), "https://managed.invalid/")
+            .unwrap();
 
         let error = register_pending_pairing(&handle, "https://other.invalid")
             .await
@@ -594,7 +598,7 @@ mod tests {
         assert_eq!(outcome, PendingRegistration::AlreadyManaged);
         assert_eq!(gateway.pending_pairing_url().await, None);
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = gateway.policy().unwrap();
         assert_eq!(
             policy.gateway_url.as_deref(),
             Some("https://managed.invalid/")
@@ -608,10 +612,9 @@ mod tests {
     #[tokio::test]
     async fn a_replacing_registration_holds_the_row_to_the_confirmed_expectation() {
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "https://managed.invalid/")
-            .await
-            .unwrap();
         let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&**gateway.provisioned_policy(), "https://managed.invalid/")
+            .unwrap();
 
         let outcome =
             register_replacing_pairing(&handle, "https://new.invalid", "https://managed.invalid/")
@@ -622,8 +625,8 @@ mod tests {
             gateway.pending_pairing_url().await.as_deref(),
             Some("https://new.invalid/")
         );
-        // Parking is process-ephemeral: the durable row has not moved.
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        // Parking is process-ephemeral: the durable policy has not moved.
+        let policy = gateway.policy().unwrap();
         assert_eq!(
             policy.gateway_url.as_deref(),
             Some("https://managed.invalid/")
@@ -672,11 +675,13 @@ mod tests {
             store.clone(),
             Arc::new(TestSecrets::default()),
             Arc::new(NoGateway),
+            MemoryProvisionedPolicy::new(),
             Arc::new(OsAsserted),
         ));
         let gateway = crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             test_secrets(),
+            MemoryProvisionedPolicy::new(),
             Arc::new(OsAsserted),
         );
         let handle = PairingHandle::new(store.clone(), mcp, gateway.clone());
@@ -705,7 +710,7 @@ mod tests {
     #[tokio::test]
     async fn a_commit_provisions_policy_and_a_stale_snapshot_is_never_honored() {
         let (store, _directory) = test_store().await;
-        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
+        let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
 
         // A model snapshot synced from some earlier deployment must not
         // survive as this gateway's model set.
@@ -728,7 +733,7 @@ mod tests {
         .unwrap();
 
         commit_signed_in_pairing(
-            &*store,
+            &**gateway.provisioned_policy(),
             &NoOsPolicy,
             test_secrets(),
             &mcp,
@@ -738,7 +743,7 @@ mod tests {
         .await
         .unwrap();
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = gateway.policy().unwrap();
         assert!(policy.managed);
         assert_eq!(
             policy.gateway_url.as_deref(),
@@ -754,7 +759,7 @@ mod tests {
 
         // A later sign-in against the same gateway re-commits harmlessly.
         commit_signed_in_pairing(
-            &*store,
+            &**gateway.provisioned_policy(),
             &NoOsPolicy,
             test_secrets(),
             &mcp,
@@ -771,13 +776,11 @@ mod tests {
     #[tokio::test]
     async fn a_commit_refuses_a_profile_claimed_mid_flow() {
         let (store, _directory) = test_store().await;
-        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
-        managed_policy::provision(&*store, "https://mdm.invalid/")
-            .await
-            .unwrap();
+        let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&**gateway.provisioned_policy(), "https://mdm.invalid/").unwrap();
 
         let error = commit_signed_in_pairing(
-            &*store,
+            &**gateway.provisioned_policy(),
             &NoOsPolicy,
             test_secrets(),
             &mcp,
@@ -790,7 +793,7 @@ mod tests {
         assert!(error.to_string().contains("https://mdm.invalid/"));
         assert!(!error.to_string().contains("pending.invalid"));
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = gateway.policy().unwrap();
         assert_eq!(policy.gateway_url.as_deref(), Some("https://mdm.invalid/"));
     }
 
@@ -841,8 +844,8 @@ mod tests {
         let (old_base, revoked) = serve_revocable_gateway().await;
         let old_url = format!("{old_base}/");
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, &old_url).await.unwrap();
-        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
+        let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&**gateway.provisioned_policy(), &old_url).unwrap();
         let secrets = test_secrets();
         let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": old_url,
@@ -858,7 +861,7 @@ mod tests {
             .unwrap();
 
         commit_signed_in_pairing(
-            &*store,
+            &**gateway.provisioned_policy(),
             &NoOsPolicy,
             secrets.clone(),
             &mcp,
@@ -868,7 +871,7 @@ mod tests {
         .await
         .unwrap();
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = gateway.policy().unwrap();
         assert!(policy.managed);
         assert_eq!(
             policy.gateway_url.as_deref(),
@@ -895,22 +898,17 @@ mod tests {
     #[tokio::test]
     async fn a_replacing_commit_refuses_a_row_that_moved_mid_flow() {
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "https://old.invalid/")
-            .await
-            .unwrap();
-        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
-        // Another pairing path re-pointed the row after the user's
+        let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&**gateway.provisioned_policy(), "https://old.invalid/").unwrap();
+        // Another pairing path re-pointed the policy after the user's
         // confirmation named https://old.invalid/.
-        store
-            .set_setting(
-                "managed_policy_v1",
-                &json!({"gateway_url": "https://third.invalid/"}),
-            )
-            .await
+        gateway
+            .provisioned_policy()
+            .write("https://third.invalid/")
             .unwrap();
 
         let error = commit_signed_in_pairing(
-            &*store,
+            &**gateway.provisioned_policy(),
             &NoOsPolicy,
             test_secrets(),
             &mcp,
@@ -922,7 +920,7 @@ mod tests {
         .unwrap();
         assert!(error.to_string().contains("https://third.invalid/"));
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = gateway.policy().unwrap();
         assert_eq!(
             policy.gateway_url.as_deref(),
             Some("https://third.invalid/")
@@ -937,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn a_commit_takes_down_a_manual_mcp_server_this_process_is_running() {
         let (store, _directory) = test_store().await;
-        let (_handle, mcp, _gateway) = test_handle_with_runtimes(&store);
+        let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
 
         // A real connection, established while the profile was still open.
         mcp.replace(McpServersConfig {
@@ -964,7 +962,7 @@ mod tests {
         assert!(mcp.snapshot().get("mcp__private_docs__lookup").is_some());
 
         commit_signed_in_pairing(
-            &*store,
+            &**gateway.provisioned_policy(),
             &NoOsPolicy,
             test_secrets(),
             &mcp,
@@ -993,8 +991,7 @@ mod tests {
     async fn a_deprovision_deletes_the_row_and_drops_the_pending_pairing() {
         let (store, _directory) = test_store().await;
         let (handle, mcp, gateway) = test_handle_with_runtimes(&store);
-        managed_policy::provision(&*store, "https://managed.invalid/")
-            .await
+        managed_policy::provision(&**gateway.provisioned_policy(), "https://managed.invalid/")
             .unwrap();
         gateway
             .register_pending_pairing("https://parked.invalid/".to_string(), mcp.clone(), None)
@@ -1010,13 +1007,9 @@ mod tests {
             .await
             .unwrap();
 
-        let policy = resolve(&*store, &NoOsPolicy).await.unwrap();
+        let policy = gateway.policy().unwrap();
         assert!(!policy.managed && !policy.misconfigured);
-        assert!(store
-            .get_setting("managed_policy_v1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(gateway.provisioned_policy().read().unwrap().is_none());
         assert_eq!(gateway.pending_pairing_url().await, None);
         assert_eq!(
             deprovision_target(&handle).await.unwrap(),
@@ -1038,19 +1031,20 @@ mod tests {
         }
 
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, "https://sticky.invalid/")
-            .await
-            .unwrap();
+        let provisioned = MemoryProvisionedPolicy::new();
+        managed_policy::provision(&*provisioned, "https://sticky.invalid/").unwrap();
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
             Arc::new(TestSecrets::default()),
             Arc::new(NoGateway),
+            provisioned.clone(),
             Arc::new(OsAsserted),
         ));
         let gateway = crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             test_secrets(),
+            provisioned.clone(),
             Arc::new(OsAsserted),
         );
         let handle = PairingHandle::new(store.clone(), mcp, gateway);
@@ -1075,9 +1069,9 @@ mod tests {
             }
         }
         assert_eq!(
-            managed_policy::provisioned_url(&*store).await.unwrap(),
+            managed_policy::provisioned_url(&*provisioned).unwrap(),
             Some("https://sticky.invalid/".to_string()),
-            "an MDM refusal must not consume the sticky row underneath"
+            "an MDM refusal must not consume the sticky policy underneath"
         );
     }
 
@@ -1088,9 +1082,8 @@ mod tests {
     #[tokio::test]
     async fn a_deprovision_refuses_a_row_that_moved_and_tolerates_one_that_vanished() {
         let (store, _directory) = test_store().await;
-        let (handle, _mcp, _gateway) = test_handle_with_runtimes(&store);
-        managed_policy::provision(&*store, "https://managed.invalid/")
-            .await
+        let (handle, _mcp, gateway) = test_handle_with_runtimes(&store);
+        managed_policy::provision(&**gateway.provisioned_policy(), "https://managed.invalid/")
             .unwrap();
 
         let error = deprovision_provisioned_gateway(&handle, "https://elsewhere.invalid/")
@@ -1105,11 +1098,11 @@ mod tests {
             other => panic!("expected the replaceable conflict, got {other:?}"),
         }
         assert_eq!(
-            managed_policy::provisioned_url(&*store).await.unwrap(),
+            managed_policy::provisioned_url(&**gateway.provisioned_policy()).unwrap(),
             Some("https://managed.invalid/".to_string())
         );
 
-        store.delete_setting("managed_policy_v1").await.unwrap();
+        gateway.provisioned_policy().clear().unwrap();
         deprovision_provisioned_gateway(&handle, "https://managed.invalid/")
             .await
             .unwrap();
@@ -1124,23 +1117,24 @@ mod tests {
         let (base, revoked) = serve_revocable_gateway().await;
         let gateway_url = format!("{base}/");
         let (store, _directory) = test_store().await;
-        managed_policy::provision(&*store, &gateway_url)
-            .await
-            .unwrap();
+        let provisioned = MemoryProvisionedPolicy::new();
+        managed_policy::provision(&*provisioned, &gateway_url).unwrap();
         let secrets = test_secrets();
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
             Arc::new(TestSecrets::default()),
             Arc::new(NoGateway),
+            provisioned.clone(),
             Arc::new(NoOsPolicy),
         ));
         let gateway = crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             secrets.clone(),
+            provisioned,
             Arc::new(NoOsPolicy),
         );
-        let handle = PairingHandle::new(store.clone(), mcp, gateway);
+        let handle = PairingHandle::new(store.clone(), mcp, gateway.clone());
         let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": gateway_url,
             "installation_id": "install-1",
@@ -1158,7 +1152,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!resolve(&*store, &NoOsPolicy).await.unwrap().managed);
+        assert!(!gateway.policy().unwrap().managed);
         assert!(
             revoked
                 .lock()

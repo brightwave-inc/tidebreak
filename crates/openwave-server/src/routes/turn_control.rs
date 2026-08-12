@@ -322,7 +322,8 @@ pub async fn post_message(
         // out from under the label the pill still shows; the picker offers
         // only gateway models to fix it. A managed profile with nothing
         // entitled also keeps the raw selection, refused with the real reason.
-        let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+        let managed =
+            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
         let selected = if managed.managed && chat.model.is_none() {
             model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
                 .await?
@@ -734,7 +735,8 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
             continue;
         };
         let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+        let managed =
+            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
         let selected = if managed.managed && chat.model.is_none() {
             model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
                 .await?

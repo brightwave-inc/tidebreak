@@ -51,6 +51,7 @@ pub struct ConfiguredResolver {
     secrets: Arc<dyn SecretProvider>,
     gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
     chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     cached: Mutex<CachedProvider>,
 }
@@ -58,7 +59,8 @@ pub struct ConfiguredResolver {
 impl ConfiguredResolver {
     /// A resolver that reads provider config from `store` and credentials from
     /// `secrets`, with `gateway` and `chatgpt` supplying their OAuth token
-    /// sources and `os_policy` the OS authority for managed-mode resolution.
+    /// sources and `provisioned_policy`/`os_policy` the two authorities for
+    /// managed-mode resolution.
     ///
     /// Both OAuth runtimes must be the same instances the rest of the process
     /// holds — see [`crate::state::AppState::with_gateway_runtime`].
@@ -67,6 +69,7 @@ impl ConfiguredResolver {
         secrets: Arc<dyn SecretProvider>,
         gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
         chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
+        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
         Self {
@@ -74,6 +77,7 @@ impl ConfiguredResolver {
             secrets,
             gateway,
             chatgpt,
+            provisioned_policy,
             os_policy,
             cached: Mutex::new(None),
         }
@@ -88,7 +92,8 @@ impl ProviderResolver for ConfiguredResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {
         // A profile that claims to be managed but whose policy cannot be read
         // fails closed: no egress, rather than quietly reverting to BYOK routes.
-        let Ok(policy) = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await
+        let Ok(policy) =
+            crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)
         else {
             return Arc::new(UnconfiguredProvider);
         };

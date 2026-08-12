@@ -168,10 +168,11 @@ pub async fn write_selection(
 pub async fn resolve(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    provisioned_policy: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
     role: ModelRole,
 ) -> Result<Option<ResolvedModelPolicy>> {
-    let managed = crate::managed_policy::resolve(store, os_policy).await?;
+    let managed = crate::managed_policy::resolve(provisioned_policy, os_policy)?;
     if let Some(selection) = read_selection(store, role).await? {
         // A selection whose provider has since been disabled or lost its
         // credential, or whose capabilities no longer satisfy the role, falls
@@ -298,10 +299,11 @@ async fn usable_policy(
 pub async fn resolve_utility_model(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    provisioned_policy: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
 ) -> Result<Option<UtilityModel>> {
     let role = ModelRole::Utility;
-    let Some(policy) = resolve(store, secrets, os_policy, role).await? else {
+    let Some(policy) = resolve(store, secrets, provisioned_policy, os_policy, role).await? else {
         return Ok(None);
     };
     Ok(Some(UtilityModel {
@@ -360,6 +362,7 @@ mod tests {
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(TestSecrets::default());
         let os_policy = crate::managed_policy::NoOsPolicy;
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
 
         providers::write_credential(
             &*secrets,
@@ -386,7 +389,7 @@ mod tests {
         .await
         .unwrap();
 
-        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
             .await
             .unwrap()
             .expect("the capable Together default keeps utility work enabled");
@@ -403,7 +406,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
             .await
             .unwrap()
             .expect("Kimi K3 supports the strict utility response contract");
@@ -427,6 +430,7 @@ mod tests {
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(TestSecrets::default());
         let os_policy = crate::managed_policy::NoOsPolicy;
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
 
         // A credentialed BYOK provider: the role resolves to its curated
         // default while the profile is open.
@@ -448,7 +452,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            resolve_utility_model(&*store, &*secrets, &os_policy)
+            resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
                 .await
                 .unwrap()
                 .map(|model| model.model),
@@ -457,13 +461,13 @@ mod tests {
 
         // Managed, with no gateway session yet: the BYOK key is locked out and
         // there is nothing to fall back to, so consumers skip their work.
-        crate::managed_policy::provision(&*store, "https://corp.gateway")
-            .await
-            .unwrap();
-        assert!(resolve_utility_model(&*store, &*secrets, &os_policy)
-            .await
-            .unwrap()
-            .is_none());
+        crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+        assert!(
+            resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Signed in, with entitled models synced: the walk lands on the
         // gateway's first usable model.
@@ -510,7 +514,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let utility = resolve_utility_model(&*store, &*secrets, &os_policy)
+        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
             .await
             .unwrap()
             .expect("a managed profile resolves the utility role to a gateway model");

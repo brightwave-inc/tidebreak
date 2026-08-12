@@ -548,7 +548,7 @@ where
 /// with a gateway URL — read exactly as the invoke dispatcher reads it, so
 /// the grant and invoke paths can never key a mapping differently.
 pub(crate) async fn registration_base_url(runtime: &GatewayRuntime) -> Option<String> {
-    let policy = runtime.policy().await.ok()?;
+    let policy = runtime.policy().ok()?;
     policy.gateway_url.filter(|_| policy.managed)
 }
 

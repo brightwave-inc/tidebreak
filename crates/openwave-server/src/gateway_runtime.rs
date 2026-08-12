@@ -41,6 +41,9 @@ const MODEL_SYNC_RETRY: Duration = Duration::from_secs(60);
 pub(crate) struct GatewayRuntime {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    /// The provisioned-policy home for managed-mode resolution: the sticky
+    /// pairing record, durable beside (not inside) the SQLite profile.
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     /// The OS authority for managed-mode resolution: a managed profile's
     /// deployment URL comes from the resolved policy, not the stored row.
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
@@ -142,11 +145,13 @@ impl GatewayRuntime {
     pub(crate) fn new(
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
+        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             secrets,
+            provisioned_policy,
             os_policy,
             cached: Mutex::new(None),
             sign_in: Mutex::new(SignInProgress::Idle),
@@ -155,9 +160,17 @@ impl GatewayRuntime {
         })
     }
 
+    /// The provisioned-policy home this runtime resolves against — the
+    /// pairing write path must commit through the same instance.
+    pub(crate) fn provisioned_policy(
+        &self,
+    ) -> &Arc<dyn crate::managed_policy::ProvisionedPolicySource> {
+        &self.provisioned_policy
+    }
+
     /// The one policy read every surface here shares.
-    pub(crate) async fn policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
-        crate::managed_policy::resolve(&*self.store, &*self.os_policy).await
+    pub(crate) fn policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
+        crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)
     }
 
     /// Park a shell-validated pairing until a sign-in consents to it,
@@ -216,7 +229,7 @@ impl GatewayRuntime {
     pub(crate) async fn status(&self) -> Result<GatewayStatus> {
         // One policy read for the whole projection: the renderer polls this
         // every couple of seconds while a sign-in is pending.
-        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = policy.gateway_url.clone();
         let credentials = match self.connection_for(&policy).await? {
             Some(connection) => connection.stored_credentials().await?,
@@ -303,7 +316,7 @@ impl GatewayRuntime {
         &self,
         mcp: &crate::mcp_config::McpRuntime,
     ) -> Result<()> {
-        let policy = self.policy().await?;
+        let policy = self.policy()?;
         let Some(connection) = self.connection_for(&policy).await? else {
             return Ok(());
         };
@@ -346,7 +359,7 @@ impl GatewayRuntime {
     pub(crate) async fn entitled_apps_if_signed_in(
         &self,
     ) -> Result<Option<(String, Vec<GatewayApp>)>> {
-        let policy = self.policy().await?;
+        let policy = self.policy()?;
         let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
             return Ok(None);
         };
@@ -373,7 +386,7 @@ impl GatewayRuntime {
         &self,
         app_id: &str,
     ) -> Result<Option<Vec<GatewayOperationSummary>>> {
-        let policy = self.policy().await?;
+        let policy = self.policy()?;
         let Some(connection) = self.connection_for(&policy).await? else {
             return Ok(None);
         };
@@ -448,7 +461,7 @@ impl GatewayRuntime {
         self: &Arc<Self>,
         mcp: Arc<crate::mcp_config::McpRuntime>,
     ) -> Result<String> {
-        let policy = self.policy().await?;
+        let policy = self.policy()?;
         let pairing = self.pending_pairing.lock().await.clone();
         let connection = match &pairing {
             Some(pending) => self.connection_at(pending.base_url.clone()).await?,
@@ -550,7 +563,7 @@ impl GatewayRuntime {
     /// cannot interleave with a dismissal or re-registration.
     async fn commit_pairing(&self, pending: &PendingPairing) -> Result<()> {
         crate::pairing::commit_signed_in_pairing(
-            &*self.store,
+            &*self.provisioned_policy,
             &*self.os_policy,
             self.secrets.clone(),
             &pending.mcp,
@@ -565,7 +578,7 @@ impl GatewayRuntime {
     /// Revoke the session (best-effort at the gateway), clear local state, and
     /// drop the synced model snapshot. Managed-only, like sign-in.
     pub(crate) async fn sign_out(&self) -> Result<()> {
-        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         // Take the state lock for the whole operation and invalidate any
         // pending browser flow before revoking anything: an exchange that
@@ -624,7 +637,7 @@ impl GatewayRuntime {
     /// callers without the secrets handle can reach
     /// [`retire_superseded_gateway_session`].
     pub(crate) async fn retire_session_for_current_policy(&self) -> Result<()> {
-        let policy = self.policy().await?;
+        let policy = self.policy()?;
         retire_superseded_gateway_session(self.secrets.clone(), &policy).await
     }
 
@@ -636,7 +649,7 @@ impl GatewayRuntime {
     /// honoring it here would let a pre-provisioning write redirect sign-in
     /// and every minted bearer; it is never read.
     pub(crate) async fn connection(&self) -> Result<Option<Arc<GatewayConnection>>> {
-        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         self.connection_for(&policy).await
     }
 
@@ -656,7 +669,7 @@ impl GatewayRuntime {
     /// profile is unmanaged: the sign-in surface (sign-in, sign-out, apps,
     /// model sync) exists only under managed policy.
     async fn managed_connection(&self) -> Result<Arc<GatewayConnection>> {
-        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         self.connection_at(base_url).await
     }
@@ -698,7 +711,7 @@ impl GatewayRuntime {
     pub(crate) async fn sync_models(
         &self,
     ) -> std::result::Result<usize, crate::error::ServerError> {
-        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
         // Fetch the full entitled set: each row names the compatibility
@@ -744,7 +757,7 @@ impl GatewayRuntime {
         // push) may have re-pointed the deployment while it was in flight.
         // Re-resolve under the lock and refuse to stamp a snapshot the new
         // policy never entitled.
-        let policy = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         if policy.gateway_url.as_deref() != Some(base_url.as_str()) {
             // A benign, retryable race — the deployment was re-pointed while
             // the fetch was in flight — not an internal fault. The stable
@@ -831,7 +844,7 @@ impl GatewayRuntime {
     async fn sync_models_if_connected(
         &self,
     ) -> std::result::Result<Option<usize>, crate::error::ServerError> {
-        let policy = self.policy().await?;
+        let policy = self.policy()?;
         let Some(connection) = self.connection_for(&policy).await? else {
             return Ok(None);
         };
@@ -1027,7 +1040,6 @@ impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
         let policy = self
             .runtime
             .policy()
-            .await
             .map_err(unreachable("read this profile's gateway policy"))?;
         let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
             return Err(GatewayDispatchError::NoSession);
@@ -1508,13 +1520,13 @@ mod tests {
             .save(&credentials)
             .await
             .unwrap();
-        crate::managed_policy::provision(&*store, provisioned)
-            .await
-            .unwrap();
+        let provisioned_policy = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned_policy, provisioned).unwrap();
         (
             GatewayRuntime::new(
                 store.clone(),
                 secrets,
+                provisioned_policy,
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             store,
@@ -1539,6 +1551,7 @@ mod tests {
             store.clone(),
             Arc::new(MockSecrets::default()),
             runtime.clone(),
+            runtime.provisioned_policy().clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ))
     }
@@ -1551,9 +1564,7 @@ mod tests {
 
         assert_eq!(runtime.sync_models().await.unwrap(), 2);
 
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = runtime.policy().unwrap();
         let models = providers::gateway_models(&*store, &policy).await.unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "sample-claude");
@@ -1615,12 +1626,12 @@ mod tests {
             openwave_core::CachingSecretProvider::new(inner.clone())
                 .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
         );
-        crate::managed_policy::provision(&*store, &base)
-            .await
-            .unwrap();
+        let provisioned_policy = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned_policy, &base).unwrap();
         let runtime = GatewayRuntime::new(
             store.clone(),
             secrets,
+            provisioned_policy,
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
 
@@ -1856,9 +1867,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = runtime.policy().unwrap();
         let routes = providers::collect_routes(
             &*store,
             &*runtime.secrets,
@@ -1978,7 +1987,12 @@ mod tests {
             .await
             .unwrap();
         let os = Arc::new(SwappableOs(std::sync::Mutex::new(base_a.clone())));
-        let runtime = GatewayRuntime::new(store.clone(), secrets, os.clone());
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            os.clone(),
+        );
 
         let sync = tokio::spawn({
             let runtime = runtime.clone();
@@ -2036,9 +2050,7 @@ mod tests {
         assert!(!status.signed_in);
         assert_eq!(status.model_count, 0);
         assert!(status.account_hint.is_none());
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = runtime.policy().unwrap();
         assert!(providers::gateway_models(&*store, &policy)
             .await
             .unwrap()
@@ -2205,13 +2217,17 @@ mod tests {
             .save(&credentials)
             .await
             .unwrap();
-        crate::managed_policy::provision(&*store, &base)
-            .await
-            .unwrap();
+        let provisioned_policy = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned_policy, &base).unwrap();
 
         let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
             Arc::new(crate::managed_policy::NoOsPolicy);
-        let runtime = GatewayRuntime::new(store.clone(), secrets.clone(), os_policy.clone());
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            provisioned_policy.clone(),
+            os_policy.clone(),
+        );
         let chatgpt = Arc::new(
             crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
         );
@@ -2220,6 +2236,7 @@ mod tests {
             secrets.clone(),
             runtime.clone(),
             chatgpt.clone(),
+            provisioned_policy.clone(),
             os_policy.clone(),
         ));
         let state = crate::state::AppState::with_gateway_runtime(
@@ -2232,6 +2249,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             runtime,
             chatgpt,
+            provisioned_policy,
             os_policy,
         )
         .unwrap();
@@ -2379,6 +2397,7 @@ mod tests {
         let runtime = GatewayRuntime::new(
             store.clone(),
             Arc::new(MockSecrets::default()),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
         let mcp = mcp_for(&runtime, &store);
@@ -2395,9 +2414,7 @@ mod tests {
             "sign-in must target the pending gateway: {url}"
         );
         // Starting the flow wrote nothing durable.
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = runtime.policy().unwrap();
         assert!(!policy.managed);
 
         runtime.dismiss_pending_pairing().await;
@@ -2470,8 +2487,12 @@ mod tests {
             .save(&credentials)
             .await
             .unwrap();
-        let runtime =
-            GatewayRuntime::new(store.clone(), secrets, Arc::new(OsManaged(base.clone())));
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            Arc::new(OsManaged(base.clone())),
+        );
 
         assert!(
             providers::read_gateway_snapshot(&*store)
@@ -2501,19 +2522,17 @@ mod tests {
             .unwrap(),
         );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-        crate::managed_policy::provision(&*store, "http://127.0.0.1:1")
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned, "http://127.0.0.1:1").unwrap();
         let runtime = GatewayRuntime::new(
             store.clone(),
             secrets,
+            provisioned,
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
 
         assert!(runtime.route_token_source().await.is_none());
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = runtime.policy().unwrap();
         let routes =
             providers::collect_routes(&*store, &*runtime.secrets, None, None, &policy).await;
         assert!(routes
@@ -2582,14 +2601,13 @@ mod tests {
         let runtime = GatewayRuntime::new(
             store.clone(),
             secrets.clone(),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
 
         // The boot cutover warns and ignores the row: no snapshot appears
         // and the profile stays unmanaged.
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = runtime.policy().unwrap();
         providers::retire_legacy_gateway_row(&*store, &policy)
             .await
             .unwrap();
@@ -2676,9 +2694,8 @@ mod tests {
             .await
             .unwrap(),
         );
-        crate::managed_policy::provision(&*store, "https://corp.gateway")
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
         let legacy_row = |id: &str| providers::ProviderConfig {
             enabled: true,
             base_url: Some("https://corp.gateway".to_string()),
@@ -2699,9 +2716,9 @@ mod tests {
         .await
         .unwrap();
 
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         providers::retire_legacy_gateway_row(&*store, &policy)
             .await
             .unwrap();
@@ -2750,9 +2767,8 @@ mod tests {
             .await
             .unwrap(),
         );
-        crate::managed_policy::provision(&*store, "https://corp.gateway")
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
         providers::write_config(
             &*store,
             crate::providers::ProviderKind::ModelGateway,
@@ -2772,9 +2788,9 @@ mod tests {
         .await
         .unwrap();
 
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         providers::retire_legacy_gateway_row(&*store, &policy)
             .await
             .unwrap();
@@ -2824,18 +2840,16 @@ mod tests {
         .await
         .unwrap();
 
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         providers::retire_legacy_gateway_row(&*store, &policy)
             .await
             .unwrap();
 
         assert!(
-            !crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-                .await
-                .unwrap()
-                .managed,
+            !policy.managed,
             "a legacy row must never auto-convert the profile to managed"
         );
         assert!(providers::read_gateway_snapshot(&*store)
@@ -2884,15 +2898,6 @@ mod tests {
     /// shows a definitive policy mismatch may retire it.
     #[tokio::test]
     async fn boot_keeps_the_session_when_the_credential_read_errors() {
-        let directory = tempfile::tempdir().unwrap();
-        let store: Arc<dyn Store> = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                directory.path().join("gateway.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
         let secrets = Arc::new(FlakySecrets::default());
         let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": "http://127.0.0.1:1",
@@ -2909,9 +2914,10 @@ mod tests {
 
         // Unmanaged policy: a readable session WOULD be retired. With the
         // read erroring, retire must leave it exactly where it is.
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         assert!(!policy.managed);
         secrets.fail_reads.store(true, Ordering::SeqCst);
         retire_superseded_gateway_session(secrets.clone(), &policy)
@@ -2930,15 +2936,6 @@ mod tests {
     /// token lives in the keychain forever.
     #[tokio::test]
     async fn boot_clears_a_gateway_session_left_on_an_unmanaged_profile() {
-        let directory = tempfile::tempdir().unwrap();
-        let store: Arc<dyn Store> = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                directory.path().join("gateway.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
         let seed = |secrets: Arc<dyn SecretProvider>, base_url: &'static str| async move {
             let credentials: crate::connectors::GatewayCredentials =
@@ -2959,9 +2956,10 @@ mod tests {
         // anyway, which is the contract.
         seed(secrets.clone(), "http://127.0.0.1:1").await;
 
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         assert!(!policy.managed);
         retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
@@ -2986,12 +2984,10 @@ mod tests {
         // A managed profile's session is untouched: it is the credential the
         // profile actually runs on.
         seed(secrets.clone(), "https://corp.gateway/").await;
-        crate::managed_policy::provision(&*store, "https://corp.gateway")
-            .await
-            .unwrap();
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
         retire_superseded_gateway_session(secrets.clone(), &policy)
             .await
             .unwrap();
@@ -3003,15 +2999,6 @@ mod tests {
     /// ever revoke it at the old deployment.
     #[tokio::test]
     async fn boot_retires_the_session_an_mdm_repoint_superseded() {
-        let directory = tempfile::tempdir().unwrap();
-        let store: Arc<dyn Store> = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                directory.path().join("gateway.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
         let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
         let old_gateway = Arc::new(FakeGateway::default());
         let old_base = format!("http://{}", serve(old_gateway.clone()).await);
@@ -3027,12 +3014,10 @@ mod tests {
             .save(&credentials)
             .await
             .unwrap();
-        crate::managed_policy::provision(&*store, "https://corp-new.gateway")
-            .await
-            .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned, "https://corp-new.gateway").unwrap();
         let mut policy =
-            crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-                .await
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
                 .unwrap();
         assert!(policy.managed);
 
@@ -3056,6 +3041,81 @@ mod tests {
         assert_eq!(
             old_gateway.revoked.lock().unwrap().as_slice(),
             ["mg_rt_zombie"]
+        );
+    }
+
+    /// The durability the policy file exists for: a pre-v1 schema-epoch
+    /// reset deletes the SQLite profile, and the provisioned policy — a
+    /// sidecar file in the data directory — must survive it. The session it
+    /// authorizes is then retained: before the policy lived in the file, the
+    /// reset resolved the profile unmanaged and boot retired the session,
+    /// forcing a full re-pair after every epoch bump.
+    #[tokio::test]
+    async fn a_schema_epoch_reset_keeps_the_policy_and_its_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        let provisioned = crate::managed_policy::ProvisionedPolicyFile::in_data_dir(data_dir);
+        crate::managed_policy::provision(&provisioned, "https://corp.gateway").unwrap();
+
+        // The profile's database, holding a chat so its loss is observable,
+        // and the gateway session the policy authorizes.
+        let store = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            data_dir.join("openwave.db").display()
+        ))
+        .await
+        .unwrap();
+        store
+            .create_chat(&openwave_core::Chat {
+                id: openwave_core::ChatId::new(),
+                project_id: None,
+                title: Some("lost to the reset".to_owned()),
+                model: None,
+                reasoning_effort: None,
+                permission_mode: None,
+                network_policy: Default::default(),
+                attachment_revision: 0,
+                root_attachments: Vec::new(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        // An explicit close, not a drop: the reset below deletes the SQLite
+        // files, which Windows refuses while a handle is open.
+        store.close().await.unwrap();
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": "https://corp.gateway/",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+
+        // The epoch reset, as desktop_schema performs it: the database files
+        // are deleted; everything else in the data directory stays.
+        std::fs::remove_file(data_dir.join("openwave.db")).unwrap();
+        assert!(!data_dir.join("openwave.db").exists());
+
+        // Resolution needs no store at all now: the policy survives, still
+        // managed to the same gateway, and the retire step — boot's session
+        // cleanup — keeps the session it stands behind.
+        let policy =
+            crate::managed_policy::resolve(&provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
+        assert!(policy.managed && !policy.misconfigured);
+        assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+        retire_superseded_gateway_session(secrets.clone(), &policy)
+            .await
+            .unwrap();
+        assert!(
+            crate::connectors::has_stored_credentials(&*secrets).await,
+            "a policy that survives the reset must keep the session it authorizes"
         );
     }
 

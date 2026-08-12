@@ -448,9 +448,11 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
     let store: Arc<dyn Store> = Arc::new(store);
     // Registration only runs where a deployment is resolvable, so the profile
     // has to be provisioned or the seam is never reached at all.
-    crate::managed_policy::provision(&*store, "https://gateway.internal.example.com")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://gateway.internal.example.com",
+    )
+    .unwrap();
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),

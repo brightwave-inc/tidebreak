@@ -1491,9 +1491,11 @@ async fn chatgpt_auth_marks_api_only_openai_models_unavailable() {
     .await
     .unwrap();
 
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
     let catalog = providers::catalog_models(&*store, &*secrets, &policy)
         .await
         .unwrap();
@@ -1670,9 +1672,11 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     .await
     .unwrap();
 
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
     let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::Xai);
@@ -1740,12 +1744,14 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
@@ -1927,12 +1933,14 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets.clone(),
@@ -2189,9 +2197,11 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     assert_eq!(overridden_response.status(), StatusCode::CREATED);
     let overridden: Chat = json_body(overridden_response).await;
 
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
     let credentials: crate::connectors::GatewayCredentials =
         serde_json::from_value(serde_json::json!({
             "base_url": "https://corp.gateway/",
@@ -2379,11 +2389,13 @@ async fn resolver_builds_a_router_from_enabled_providers() {
         crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             secrets.clone(),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
         Arc::new(
             crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
         ),
+        crate::managed_policy::MemoryProvisionedPolicy::new(),
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
     let resolved = resolver.resolve().await;
@@ -2464,9 +2476,11 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         .await
         .unwrap();
 
-        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-            .await
-            .unwrap();
+        let policy = crate::managed_policy::resolve(
+            &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+            &crate::managed_policy::NoOsPolicy,
+        )
+        .unwrap();
         let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, route_kind);
@@ -2477,12 +2491,14 @@ async fn resolver_includes_configured_curated_api_key_providers() {
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         );
         let provider = resolver.resolve().await;
@@ -2527,9 +2543,11 @@ async fn openai_compatible_route_is_free_form_fallback() {
     .await
     .unwrap();
 
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
     let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
     let router = openwave_router::Router::build(routes);
     assert_eq!(
@@ -2575,9 +2593,11 @@ async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
         .unwrap();
     }
 
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
     let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
     let fireworks = routes
         .iter()
@@ -2708,9 +2728,9 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     // fallback is honored — so the managed delta below is load-bearing. The
     // enabled legacy gateway row builds nothing even with a token source in
     // hand: policy is the only gateway source in both directions.
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
     let kinds: Vec<_> =
         providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy)
             .await
@@ -2723,12 +2743,9 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
 
     // Provisioned: only the gateway remains, aimed at the policy URL. The
     // stale stored row and every BYOK credential — stored or env — are inert.
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
     let routes =
         providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy).await;
     assert_eq!(routes.len(), 1);
@@ -2794,26 +2811,33 @@ async fn an_unreadable_policy_fails_the_resolver_closed() {
     )
     .await
     .unwrap();
+    let provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource> = Arc::new(
+        crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+    );
     let resolver = resolver::KeyedResolver::new(
         store.clone(),
         secrets.clone(),
         crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
             secrets.clone(),
+            provisioned_policy.clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
         Arc::new(
             crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
         ),
+        provisioned_policy,
         Arc::new(crate::managed_policy::NoOsPolicy),
     );
     assert_eq!(resolver.resolve().await.id().0, "router");
 
-    // Corrupt the persisted policy record (the key is a persisted contract).
-    store
-        .set_setting("managed_policy_v1", &serde_json::json!({"gateway_url": 42}))
-        .await
-        .unwrap();
+    // Corrupt the persisted policy file: the profile now claims management
+    // the process cannot read, and the resolver fails closed.
+    std::fs::write(
+        dir.path().join("gateway-policy.json"),
+        br#"{"gateway_url": 42}"#,
+    )
+    .unwrap();
     assert_eq!(resolver.resolve().await.id().0, "unconfigured");
 }
 
@@ -2862,12 +2886,14 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets.clone(),
@@ -2888,10 +2914,11 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
     );
 
     // The profile now claims to be managed but the claim cannot be read.
-    store
-        .set_setting("managed_policy_v1", &serde_json::json!({"gateway_url": 42}))
-        .await
-        .unwrap();
+    std::fs::write(
+        dir.path().join("gateway-policy.json"),
+        br#"{"gateway_url": 42}"#,
+    )
+    .unwrap();
 
     let response = router
         .clone()
@@ -2963,7 +2990,7 @@ async fn delete(router: &Router, bearer: &str, uri: &str) -> axum::response::Res
 /// stable `gateway_policy` kind: policy is the only gateway source.
 #[tokio::test]
 async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, _store, dir) = test_app().await;
     let bearer = format!("Bearer {token}");
 
     // Unmanaged first: the retired additive configuration is not writable
@@ -2980,9 +3007,11 @@ async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
     assert_eq!(info.kind, "gateway_policy");
     assert!(info.message.contains("pair via your gateway"));
 
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
 
     // A BYOK credential write is refused with the stable managed kind.
     let response = put_json(
@@ -3051,7 +3080,7 @@ async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
 /// so mounting is not blocked by history the profile cannot edit any more.
 #[tokio::test]
 async fn a_managed_profile_refuses_manual_mcp_servers_and_accepts_gateway_mounts() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, _store, dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let legacy = serde_json::json!({
         "name": "legacy_docs",
@@ -3062,9 +3091,11 @@ async fn a_managed_profile_refuses_manual_mcp_servers_and_accepts_gateway_mounts
     // Configured before the profile was managed.
     let saved = put_mcp_servers(&router, &bearer, serde_json::json!({"servers": [legacy]})).await;
     assert_eq!(saved.status(), StatusCode::OK);
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
 
     for candidate in [
         serde_json::json!([legacy, {"name": "added", "command": "/bin/docs", "enabled": false}]),
@@ -3158,12 +3189,10 @@ async fn a_superseded_gateway_session_never_reads_usable() {
             .unwrap();
     };
     seed(secrets.clone(), "https://old.gateway").await;
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
-    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
-        .await
-        .unwrap();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
 
     assert!(!providers::provider_is_usable(
         &*store,

@@ -145,9 +145,11 @@ async fn a_profile_without_a_gateway_has_no_page_and_registers_nothing() {
 async fn a_registered_app_resolves_to_its_page_at_the_gateway() {
     let (dir, store) = temp_db_store("app-gateway-page-ready.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    crate::managed_policy::provision(&*store, "https://gateway.internal.example.com")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://gateway.internal.example.com",
+    )
+    .unwrap();
     let mut state = state_with(dir.path(), store.clone());
     state.gateway_drafts = Arc::new(ScriptedDrafts::new(|| GatewayRegistration::Registered {
         shared_app_id: "sa-42".into(),
@@ -186,9 +188,11 @@ async fn a_registered_app_resolves_to_its_page_at_the_gateway() {
 async fn a_refused_registration_answers_in_the_gateways_words() {
     let (dir, store) = temp_db_store("app-gateway-page-refused.db").await;
     let store: Arc<dyn Store> = Arc::new(store);
-    crate::managed_policy::provision(&*store, "https://gateway.internal.example.com")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://gateway.internal.example.com",
+    )
+    .unwrap();
     let mut state = state_with(dir.path(), store.clone());
     state.gateway_drafts = Arc::new(ScriptedDrafts::new(|| GatewayRegistration::Refused {
         message: "bundle calls files.read, which this gateway cannot serve".into(),

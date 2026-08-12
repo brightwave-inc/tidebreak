@@ -92,6 +92,10 @@ pub(crate) struct TurnWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     secrets: Arc<dyn SecretProvider>,
+    /// The provisioned-policy home for managed-mode resolution, read
+    /// together with the OS authority so background role resolution sees the
+    /// same policy every request handler does.
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     /// The OS authority for managed-mode resolution, so background role
     /// resolution sees the same policy every request handler does.
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
@@ -365,6 +369,7 @@ impl TurnWorker {
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn SecretProvider>,
+        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
         tools: Arc<ToolRegistry>,
         approvals: Arc<ApprovalBroker>,
@@ -390,6 +395,7 @@ impl TurnWorker {
             store,
             resolver,
             secrets,
+            provisioned_policy,
             os_policy,
             tools,
             blobs: None,
@@ -656,7 +662,7 @@ impl TurnWorker {
         // the route check, is clamped here before anything downstream reads
         // it. Resolved per turn, like the model, so an MDM push takes effect
         // on the next turn without a restart.
-        let managed = crate::managed_policy::resolve(&*self.store, &*self.os_policy).await?;
+        let managed = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         chat.permission_mode = managed.clamp_permission_mode(chat.permission_mode);
         let exec_folders = match self.exec_folder_context.as_ref() {
             Some(provider) => match provider.folder_grants_for_chat(&chat, turn.id).await {
@@ -783,6 +789,7 @@ impl TurnWorker {
             crate::model_roles::resolve_utility_model(
                 &*self.store,
                 &*self.secrets,
+                &*self.provisioned_policy,
                 &*self.os_policy,
             )
             .await?

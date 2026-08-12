@@ -55,6 +55,9 @@ pub(crate) struct McpRuntime {
     secrets: Arc<dyn SecretProvider>,
     /// Resolves gateway-managed endpoints at every connection.
     gateway: Arc<dyn GatewayEndpoints>,
+    /// The provisioned-policy home for managed-mode resolution: the sticky
+    /// pairing record, read together with the OS authority.
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     /// The OS authority for managed-mode resolution. Managed policy locks the
     /// manual transports; the gateway-endpoint transport is the sanctioned
     /// path and stays open.
@@ -77,6 +80,7 @@ impl McpRuntime {
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
         gateway: Arc<dyn GatewayEndpoints>,
+        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     ) -> Self {
         Self {
@@ -91,6 +95,7 @@ impl McpRuntime {
             store,
             secrets,
             gateway,
+            provisioned_policy,
             os_policy,
             host_folders: std::sync::OnceLock::new(),
             plugin_catalog: std::sync::OnceLock::new(),
@@ -252,7 +257,7 @@ impl McpRuntime {
     /// unreadable policy fails closed to the full lockdown — the same judgment
     /// the BYOK boot paths make.
     async fn manual_lockdown(&self) -> ManualLockdown {
-        match crate::managed_policy::resolve(&*self.store, &*self.os_policy).await {
+        match crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy) {
             Ok(policy) => ManualLockdown::for_policy(&policy),
             Err(error) => {
                 tracing::warn!(

@@ -96,6 +96,7 @@ pub async fn post_compact(
     config.utility_model = crate::model_roles::resolve_utility_model(
         &*state.store,
         &*state.secrets,
+        &*state.provisioned_policy,
         &*state.os_policy,
     )
     .await?;

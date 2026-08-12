@@ -125,12 +125,14 @@ async fn titling_app(
             crate::gateway_runtime::GatewayRuntime::new(
                 store.clone(),
                 secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
                 Arc::new(crate::managed_policy::NoOsPolicy),
             ),
             Arc::new(
                 crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
                     .unwrap(),
             ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,

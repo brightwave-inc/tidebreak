@@ -73,7 +73,7 @@ pub(super) async fn validate_model_selection(
             unknown_model_message(value),
         ));
     };
-    let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     if !providers::model_is_usable(&*state.store, &*state.secrets, &policy, &managed).await? {
         return Err(ServerError::conflict_kind(
             "model_provider_unavailable",
@@ -128,7 +128,7 @@ pub(super) async fn refuse_permission_mode_over_ceiling(
     let Some(mode) = requested else {
         return Ok(());
     };
-    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     if !policy.permits_permission_mode(mode) {
         return Err(ServerError::conflict_kind(
             "permission_mode_locked",
@@ -153,7 +153,7 @@ pub(super) async fn refuse_permission_mode_over_ceiling(
 pub(super) async fn refuse_credential_writes_when_managed(
     state: &AppState,
 ) -> Result<(), ServerError> {
-    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     if policy.managed {
         return Err(providers::managed_profile_refusal(
             "this profile is managed by a model gateway; provider API keys are locked",
@@ -226,7 +226,7 @@ pub struct ProvidersList {
 pub async fn list_providers(
     State(state): State<AppState>,
 ) -> Result<Json<ProvidersList>, ServerError> {
-    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     Ok(Json(ProvidersList {
         providers: providers::list_providers(&*state.store, &*state.secrets, &policy).await?,
     }))
@@ -262,6 +262,7 @@ pub async fn put_provider(
         &*state.secrets,
         kind,
         body,
+        &*state.provisioned_policy,
         &*state.os_policy,
     )
     .await?;
@@ -458,7 +459,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             resolved_key,
         });
     }
-    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     let models = providers::catalog_models(&*state.store, &*state.secrets, &policy)
         .await?
         .into_iter()
@@ -568,7 +569,8 @@ async fn resolved_role_key(
                 Some(selection) => selection.to_owned(),
                 None => chat_role_model(&*state.store, &state.agent_config.model).await?,
             };
-            let managed = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+            let managed =
+                crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
             Ok(model_roles::effective_chat_policy(
                 &*state.store,
                 &*state.secrets,
@@ -578,10 +580,14 @@ async fn resolved_role_key(
             .await?
             .map(|policy| policy.key))
         }
-        _ => Ok(
-            model_roles::resolve(&*state.store, &*state.secrets, &*state.os_policy, role)
-                .await?
-                .map(|policy| policy.key),
-        ),
+        _ => Ok(model_roles::resolve(
+            &*state.store,
+            &*state.secrets,
+            &*state.provisioned_policy,
+            &*state.os_policy,
+            role,
+        )
+        .await?
+        .map(|policy| policy.key)),
     }
 }

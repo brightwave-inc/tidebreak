@@ -293,6 +293,7 @@ pub(crate) struct ApprovalJudgeWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     secrets: Arc<dyn openwave_core::SecretProvider>,
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     approvals: Arc<ApprovalBroker>,
     poll: Duration,
@@ -303,6 +304,7 @@ impl ApprovalJudgeWorker {
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn openwave_core::SecretProvider>,
+        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
         os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
         approvals: Arc<ApprovalBroker>,
     ) -> Self {
@@ -310,6 +312,7 @@ impl ApprovalJudgeWorker {
             store,
             resolver,
             secrets,
+            provisioned_policy,
             os_policy,
             approvals,
             poll: Duration::from_millis(750),
@@ -370,6 +373,7 @@ impl ApprovalJudgeWorker {
         let Some(utility) = crate::model_roles::resolve_utility_model(
             &*self.store,
             &*self.secrets,
+            &*self.provisioned_policy,
             &*self.os_policy,
         )
         .await?

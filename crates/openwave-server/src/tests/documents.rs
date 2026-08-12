@@ -1591,6 +1591,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         crate::gateway_runtime::GatewayRuntime::new(
             store_for_gateway,
             Arc::new(MemSecrets::default()),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
     );

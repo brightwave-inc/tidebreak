@@ -190,6 +190,9 @@ async fn test_runtime_with(
             store.clone(),
             Arc::new(TestSecrets::default()),
             gateway,
+            Arc::new(crate::managed_policy::ProvisionedPolicyFile::in_data_dir(
+                directory.path(),
+            )),
             os_policy,
         )),
         store,
@@ -1029,7 +1032,7 @@ async fn replaces_with_a_streamable_http_server_and_mounts_its_tools() {
 #[tokio::test]
 async fn a_running_manual_server_is_torn_down_when_policy_flips_managed() {
     let address = serve_fake_http_mcp().await;
-    let (runtime, store, _directory) = test_runtime().await;
+    let (runtime, _store, directory) = test_runtime().await;
     let mut definition = http_definition("gateway", &format!("http://{address}/mcp"));
     definition.bearer_token_env = Some("PATH".to_string());
     runtime
@@ -1043,9 +1046,11 @@ async fn a_running_manual_server_is_torn_down_when_policy_flips_managed() {
 
     // The profile becomes managed with the child already connected — an
     // MDM push, or deep-link pairing mid-session.
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(directory.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
     assert!(runtime.enforce_manual_lockdown().await);
 
     assert!(
@@ -1070,13 +1075,15 @@ async fn a_running_manual_server_is_torn_down_when_policy_flips_managed() {
 /// close, is ignored outright.
 #[tokio::test]
 async fn managed_policy_forces_manual_servers_down_and_ignores_the_boot_file() {
-    let (runtime, store, _directory) = test_runtime().await;
+    let (runtime, store, directory) = test_runtime().await;
     let mut manual = disabled_definition("private_docs", "/bin/docs");
     manual.enabled = true;
     seed_records(&store, &[manual, gateway_definition("tools", "tools")]).await;
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(directory.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
 
     runtime
         .initialize(ConfiguredMcpServers::default())
@@ -1107,10 +1114,12 @@ async fn managed_policy_forces_manual_servers_down_and_ignores_the_boot_file() {
 
     // A fresh profile whose only configuration is the boot file: managed,
     // so the file is inert and nothing is configured or persisted.
-    let (runtime, store, _directory) = test_runtime().await;
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    let (runtime, store, directory) = test_runtime().await;
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(directory.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
     let boot = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
     runtime.initialize(boot).await.unwrap();
     assert!(runtime.info().await.servers.is_empty());
@@ -1467,9 +1476,11 @@ async fn managed_policy_locks_plugin_sourced_servers_like_manual_ones() {
         root,
         data,
     )])));
-    crate::managed_policy::provision(&*store, "https://corp.gateway")
-        .await
-        .unwrap();
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(directory.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
 
     assert!(runtime.reconcile_plugin_servers().await);
     let info = runtime.info().await;
