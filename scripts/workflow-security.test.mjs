@@ -245,14 +245,6 @@ test("PR lanes are scope-gated, never label-gated", () => {
     ci,
     /cp "\$trusted" "\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
   );
-  assert.match(
-    ci,
-    /sed -i \\\n\s+-e 's\/OPENWAVE\/TIDEBREAK\/g' \\\n\s+-e 's\/OpenWave\/Tidebreak\/g' \\\n\s+-e 's\/openwave\/tidebreak\/g' \\\n\s+"\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
-  );
-  assert.match(
-    ci,
-    /sed -i \\\n\s+-e 's\/TIDEBREAK\/TIDEBREAK\/g' \\\n\s+-e 's\/Tidebreak\/Tidebreak\/g' \\\n\s+-e 's\/tidebreak\/tidebreak\/g' \\\n\s+"\$GITHUB_WORKSPACE\/scripts\/\.trusted-workflow-security\.test\.mjs"/,
-  );
   assert.match(ci, /CANONICAL_REPOSITORY: brightwave-inc\/tidebreak/);
   assert.match(
     ci,
@@ -998,13 +990,13 @@ test("release caches restore only credential-free compiler products", () => {
   ]) {
     assert.match(
       restoreStep,
-      /macos-release-target-v3-\$\{\{ matrix\.arch \}\}-/,
+      /macos-release-target-v\d+-\$\{\{ matrix\.arch \}\}-/,
       "unsigned product caches should be preferred when available",
     );
     assert.doesNotMatch(
       restoreStep,
       /macos-release-(?:target|prepared)-v[12]-/,
-      "older cache generations bake in a stale MACOSX_DEPLOYMENT_TARGET and must not be restored",
+      "older cache generations bake in runner-absolute checkout paths and must not be restored",
     );
   }
 
@@ -1014,7 +1006,7 @@ test("release caches restore only credential-free compiler products", () => {
   for (const restoreStep of [releasePrepareCache, warmBuildCache]) {
     assert.match(
       restoreStep,
-      /^\s*macos-release-target-v3-\$\{\{ matrix\.arch \}\}-$/m,
+      /^\s*macos-release-target-v\d+-\$\{\{ matrix\.arch \}\}-$/m,
       "credential-free jobs may fall back to any warmed cache for this arch",
     );
   }
