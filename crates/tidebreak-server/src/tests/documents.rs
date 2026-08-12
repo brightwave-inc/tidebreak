@@ -1650,12 +1650,13 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
             "{name} must consent as app control"
         );
     }
+    // The pure reads and capture are ReadOnly; scroll and focus are acting
+    // tools (they synthesize input and move windows) and are covered by the
+    // control-tool loop above.
     for name in [
         openwave_core::COMPUTER_LIST_WINDOWS_TOOL,
         openwave_core::COMPUTER_CAPTURE_SCREEN_TOOL,
         openwave_core::COMPUTER_READ_APP_CONTENT_TOOL,
-        openwave_core::COMPUTER_SCROLL_TOOL,
-        openwave_core::COMPUTER_FOCUS_WINDOW_TOOL,
         openwave_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL,
         openwave_core::COMPUTER_WAIT_TOOL,
     ] {

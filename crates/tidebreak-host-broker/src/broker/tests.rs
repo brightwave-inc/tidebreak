@@ -4477,6 +4477,10 @@ impl StubCuBackend {
         self.clicked.lock().unwrap().clone()
     }
 
+    fn keys(&self) -> Vec<String> {
+        self.keys.lock().unwrap().clone()
+    }
+
     /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
     /// finds exactly one mark.
     fn ax_tree(&self) -> AxTree {
@@ -4805,6 +4809,53 @@ fn navigation_labels_proceed_without_a_confirmation() {
     let result = fixture.click("com.example.app").unwrap();
     assert!(matches!(result, OperationResult::CuClick(_)));
     assert_eq!(fixture.backend.clicks().len(), 1);
+}
+
+#[test]
+fn a_commit_shaped_key_press_is_held_for_confirmation() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    // A chorded key (Cmd+Shift+D, "send" in Mail) is commit-shaped: it parks
+    // on a confirmation and nothing is pressed yet.
+    let held = fixture
+        .operate(OperationRequest::CuKeyPress {
+            bundle_id: "com.example.app".to_owned(),
+            key: "d".to_owned(),
+            modifiers: Some(vec!["cmd".to_owned(), "shift".to_owned()]),
+        })
+        .unwrap();
+    let OperationResult::CuNeedsConfirmation(confirmation) = held else {
+        panic!("expected a confirmation hold for a chorded key, got {held:?}")
+    };
+    assert!(fixture.backend.keys().is_empty());
+
+    // Confirming performs exactly the held key press.
+    fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: confirmation.confirmation_id,
+            },
+        ))
+        .unwrap();
+    assert_eq!(fixture.backend.keys(), ["d"]);
+}
+
+#[test]
+fn a_plain_navigation_key_proceeds_without_a_confirmation() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    // An unmodified navigation key is not commit-shaped.
+    let result = fixture
+        .operate(OperationRequest::CuKeyPress {
+            bundle_id: "com.example.app".to_owned(),
+            key: "left".to_owned(),
+            modifiers: None,
+        })
+        .unwrap();
+    assert!(matches!(result, OperationResult::CuKeyPress(_)));
+    assert_eq!(fixture.backend.keys(), ["left"]);
 }
 
 #[test]

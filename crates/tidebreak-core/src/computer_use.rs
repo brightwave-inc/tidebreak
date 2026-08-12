@@ -72,11 +72,14 @@ pub const COMPUTER_USE_TOOLS: [&str; 10] = [
 
 /// The control (acting) tools, which require the `ControlApp` grant and gate
 /// behind the `ComputerMayControlApp` approval kind. Reads never card per-call
-/// once their grant exists.
-pub const COMPUTER_USE_CONTROL_TOOLS: [&str; 3] = [
+/// once their grant exists. Scroll and focus are acting tools: they synthesize
+/// input, warp the cursor, and raise windows, so they are not read-only.
+pub const COMPUTER_USE_CONTROL_TOOLS: [&str; 5] = [
     COMPUTER_CLICK_TOOL,
     COMPUTER_TYPE_TEXT_TOOL,
     COMPUTER_KEY_PRESS_TOOL,
+    COMPUTER_SCROLL_TOOL,
+    COMPUTER_FOCUS_WINDOW_TOOL,
 ];
 
 /// Whether `name` is any computer-use tool.
@@ -542,13 +545,20 @@ mod tests {
         for name in COMPUTER_USE_CONTROL_TOOLS {
             assert!(is_computer_use_control_tool(name));
         }
-        // Reads are not control tools.
+        // Pure reads are not control tools.
         assert!(!is_computer_use_control_tool(COMPUTER_LIST_WINDOWS_TOOL));
         assert!(!is_computer_use_control_tool(COMPUTER_CAPTURE_SCREEN_TOOL));
         assert!(!is_computer_use_control_tool(
             COMPUTER_READ_APP_CONTENT_TOOL
         ));
-        assert!(!is_computer_use_control_tool(COMPUTER_SCROLL_TOOL));
+        assert!(!is_computer_use_control_tool(
+            COMPUTER_RETURN_TO_OPENWAVE_TOOL
+        ));
+        assert!(!is_computer_use_control_tool(COMPUTER_WAIT_TOOL));
+        // Scroll and focus act (they synthesize input and move windows), so
+        // they are control tools.
+        assert!(is_computer_use_control_tool(COMPUTER_SCROLL_TOOL));
+        assert!(is_computer_use_control_tool(COMPUTER_FOCUS_WINDOW_TOOL));
         assert!(!is_computer_use_tool("read_file"));
     }
 

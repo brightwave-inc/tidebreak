@@ -35,7 +35,7 @@ use crate::{
         BackendError, BackendErrorKind, ComputerUseBackend, ControlMeta, HelperBackend,
         UnsupportedBackend,
     },
-    consequential::{classify, truncate_label},
+    consequential::{classify, key_press_needs_confirmation, truncate_label},
     path_policy::RootIdentity,
     protocol::{
         AppFolderWriteRequest, CaptureTargetWire, ControlEnvelope, ControlRequest,
@@ -302,6 +302,14 @@ enum PendingActionKind {
         bundle_id: String,
         text: String,
         target: ElementTarget,
+    },
+    /// A key press held for confirmation — a chord or a bare Return, the
+    /// keyboard paths that commit (send / delete / quit) without any element
+    /// label the consequential classifier could read.
+    KeyPress {
+        bundle_id: String,
+        key: String,
+        modifiers: Option<Vec<String>>,
     },
 }
 
@@ -1835,6 +1843,10 @@ impl Controller {
         let Some(pending) = pending else {
             return Err(error_response(BrokerError::UnknownConfirmation));
         };
+        // A held key press has no target element; an owned empty target keeps
+        // the act-time element re-check inert (it only runs when an
+        // `element_id` is present).
+        let empty_target = ElementTarget::default();
         let (bundle_id, target, op) = match &pending.action {
             PendingActionKind::Click {
                 bundle_id, target, ..
@@ -1842,10 +1854,14 @@ impl Controller {
             PendingActionKind::TypeText {
                 bundle_id, target, ..
             } => (bundle_id, target, ControlOp::TypeText),
+            PendingActionKind::KeyPress { bundle_id, .. } => {
+                (bundle_id, &empty_target, ControlOp::KeyPress)
+            }
         };
         let audit_operation = match op {
             ControlOp::Click => AuditOperation::CuClick,
             ControlOp::TypeText => AuditOperation::CuTypeText,
+            ControlOp::KeyPress => AuditOperation::CuKeyPress,
         };
         let audit = OperationAudit {
             actor: AuditActor::Operation {
@@ -1925,6 +1941,14 @@ impl Controller {
                 text,
                 target,
             } => self.shared.computer_use.type_text(bundle_id, text, target),
+            PendingActionKind::KeyPress {
+                bundle_id,
+                key,
+                modifiers,
+            } => self
+                .shared
+                .computer_use
+                .key_press(bundle_id, key, modifiers.as_deref()),
         }
         .map_err(BrokerError::ComputerUse)
     }
@@ -2598,6 +2622,21 @@ impl Operator {
             return Ok(None);
         };
         let target_label = description.label.as_deref().map(truncate_label);
+        self.hold_for_confirmation(context, bundle_id, action, target_label, reason)
+    }
+
+    /// Hold a consequential action for explicit user confirmation, returning
+    /// the single-use confirmation. The broker owns the action's parameters —
+    /// the agent cannot substitute a different target or text at confirm time.
+    /// Returns `Ok(None)` to proceed without a hold.
+    fn hold_for_confirmation(
+        &self,
+        context: ExecutionContext,
+        bundle_id: &str,
+        action: PendingActionKind,
+        target_label: Option<String>,
+        reason: String,
+    ) -> Result<Option<OperationResult>, BrokerError> {
         let confirmation_id = Uuid::new_v4();
         {
             let mut state = self.lock_state()?;
@@ -2654,6 +2693,33 @@ impl Operator {
             let state = self.lock_state()?;
             authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
+        // A key press has no element label the consequential gate could read,
+        // but chords and bare Return are the commit paths (send / delete /
+        // quit). Confirm those before acting.
+        if key_press_needs_confirmation(&key, modifiers.as_ref().is_some_and(|m| !m.is_empty())) {
+            let label = match &modifiers {
+                Some(modifiers) if !modifiers.is_empty() => {
+                    format!("{}+{}", modifiers.join("+"), key)
+                }
+                _ => key.clone(),
+            };
+            if let Some(held) = self.hold_for_confirmation(
+                context,
+                &bundle_id,
+                PendingActionKind::KeyPress {
+                    bundle_id: bundle_id.clone(),
+                    key: key.clone(),
+                    modifiers: modifiers.clone(),
+                },
+                Some(truncate_label(&label)),
+                format!(
+                    "This presses \u{201c}{}\u{201d}, a keyboard shortcut that can commit an action (send, delete, or quit) with no undo.",
+                    truncate_label(&label)
+                ),
+            )? {
+                return Ok((held, Some(grant_id)));
+            }
+        }
         let meta = self
             .shared
             .computer_use
@@ -2680,9 +2746,12 @@ impl Operator {
             return Err(BrokerError::InvalidCuRequest);
         }
         let target = ElementTarget::from(target);
+        // Scroll synthesizes a wheel event and warps the cursor to the target —
+        // an input mutation, so it needs the control grant, not merely the
+        // read grant.
         let grant_id = {
             let state = self.lock_state()?;
-            authorize_computer_use(&state, context, Capability::ReadAppContent, &bundle_id)?
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
         let meta = self
             .shared
@@ -2700,9 +2769,11 @@ impl Operator {
     ) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
         validate_bundle_id(&bundle_id)?;
         require_unblocked(&bundle_id)?;
+        // Focus activates and raises another app's window — a visible host
+        // mutation, so it needs the control grant, not merely the read grant.
         let grant_id = {
             let state = self.lock_state()?;
-            authorize_computer_use(&state, context, Capability::ReadAppContent, &bundle_id)?
+            authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
         let meta = self
             .shared

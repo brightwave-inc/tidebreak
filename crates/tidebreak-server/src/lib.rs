@@ -1596,6 +1596,8 @@ fn agent_deps(
 /// `ToolApprovalKind::for_tool_name`, so plan mode refuses them and a control
 /// call cards once per app instead of per action.
 fn register_computer_use_tools(tools: &mut ToolRegistry) {
+    // Pure reads and capture are ReadOnly — once their broker grant exists
+    // they never card per call, and plan mode keeps them.
     for (spec, validate) in [
         (
             computer_list_windows_tool_spec(),
@@ -1610,14 +1612,6 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
             validate_computer_read_app_content_arguments,
         ),
         (
-            computer_scroll_tool_spec(),
-            validate_computer_scroll_arguments,
-        ),
-        (
-            computer_focus_window_tool_spec(),
-            validate_computer_focus_window_arguments,
-        ),
-        (
             computer_return_to_openwave_tool_spec(),
             validate_computer_return_to_openwave_arguments,
         ),
@@ -1625,6 +1619,10 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
     ] {
         tools.register_validated_client(spec, ApprovalClass::ReadOnly, validate);
     }
+    // The acting tools are Sensitive, resolving to `ComputerMayControlApp`
+    // through `ToolApprovalKind::for_tool_name`. Scroll and focus act too —
+    // they synthesize input, warp the cursor, and raise windows — so they are
+    // not read-only and plan mode refuses them.
     for (spec, validate) in [
         (
             computer_click_tool_spec(),
@@ -1637,6 +1635,14 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
         (
             computer_key_press_tool_spec(),
             validate_computer_key_press_arguments,
+        ),
+        (
+            computer_scroll_tool_spec(),
+            validate_computer_scroll_arguments,
+        ),
+        (
+            computer_focus_window_tool_spec(),
+            validate_computer_focus_window_arguments,
         ),
     ] {
         tools.register_validated_client(spec, ApprovalClass::Sensitive, validate);

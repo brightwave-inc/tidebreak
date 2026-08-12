@@ -35,6 +35,10 @@ pub enum ControlOp {
     /// Typing into the element — consequential when it is a
     /// secure/credential/payment field.
     TypeText,
+    /// A key press. Not label-classified (a key has no activatable label);
+    /// gated separately by the broker, which confirms the commit-shaped keys
+    /// (chords and bare Return) rather than running them through `classify`.
+    KeyPress,
 }
 
 /// The classification verdict.
@@ -131,7 +135,27 @@ pub fn classify(op: ControlOp, role: Option<&str>, label: Option<&str>) -> Conse
     match op {
         ControlOp::Click => classify_click(label),
         ControlOp::TypeText => classify_type_text(role, label),
+        // A key press has no element label to classify; the broker gates the
+        // commit-shaped keys separately via [`key_press_needs_confirmation`].
+        ControlOp::KeyPress => Consequence::Benign,
     }
+}
+
+/// Whether a key press is commit-shaped — a chord (any modifier held) or a bare
+/// Return — and so needs an explicit confirmation. Keyboard shortcuts are the
+/// primary commit path in the apps the gate exists for (Cmd+Shift+D / Cmd+Enter
+/// sends mail, Return sends a chat message, Cmd+Delete trashes the selection),
+/// and no element label describes them, so the broker confirms these rather
+/// than classifying an element. Unmodified navigation and editing keys (arrows,
+/// Tab, letters, Escape) are not confirmed.
+pub fn key_press_needs_confirmation(key: &str, has_modifier: bool) -> bool {
+    if has_modifier {
+        return true;
+    }
+    matches!(
+        key.trim().to_lowercase().as_str(),
+        "return" | "enter" | "forwarddelete" | "delete"
+    )
 }
 
 fn classify_click(label: Option<&str>) -> Consequence {
