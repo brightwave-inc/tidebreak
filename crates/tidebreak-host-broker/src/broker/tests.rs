@@ -737,7 +737,11 @@ fn grant_statements_report_every_minted_consent_with_safe_folder_identity() {
         assert_eq!(grant.subject, subject);
         assert_eq!(grant.consent_method, ConsentMethod::FolderPicker);
         match &grant.scope {
-            Scope::Subject => assert_eq!(grant.root_display_name, None),
+            // This registration mints only folder grants; computer-use scopes
+            // never appear here.
+            Scope::Subject | Scope::App { .. } | Scope::Screen => {
+                assert_eq!(grant.root_display_name, None)
+            }
             Scope::Root { .. } | Scope::PathSubtree { .. } => {
                 // The safe identity is the registered folder's basename, the
                 // same name the approved-roots listing exposes — never a path.

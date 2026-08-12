@@ -10,10 +10,13 @@
 pub mod audit;
 pub mod broker;
 pub mod capability;
+pub mod computer_use;
+pub mod consequential;
 pub mod id;
 pub mod path_policy;
 pub mod protocol;
 pub mod relative_path;
+pub mod set_of_marks;
 pub mod sidecar;
 
 pub use audit::{
@@ -24,6 +27,13 @@ pub use broker::{Broker, BrokerError, Controller, Operator};
 pub use capability::{
     Capability, ConsentMethod, ConsentRecord, Grant, GrantError, RootAttachment, Scope,
 };
+pub use computer_use::{
+    AxTree, BackendError, BackendErrorKind, CaptureMeta, CaptureTarget, ComputerUseBackend,
+    ControlMeta, ElementDescription, ElementTarget, HelperBackend, PermissionStatus,
+    UnsupportedBackend, WindowFrame, WindowInfo, HELPER_PATH_ENV,
+};
+pub use consequential::{classify, truncate_label, Consequence, ControlOp};
+pub use set_of_marks::{extract_marks, Mark, MarkFrame};
 pub use id::{
     AppId, ExecutionContext, GrantId, GrantSubject, IdError, OperationId, ParseIdError, RequestId,
     RootId, SubjectKind,

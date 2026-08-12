@@ -35,6 +35,43 @@ pub enum Capability {
     /// is authorized on top of read, never instead of it — so revoking it
     /// leaves the folder readable, and revoking read takes exec with it.
     ExecuteCommands,
+    /// Capture the screen. Scoped to the whole display ([`Scope::Screen`]) or
+    /// to one app ([`Scope::App`]).
+    CaptureScreen,
+    /// Read an app's accessibility tree (on-screen text, element roles, bounds).
+    /// Scoped to one app ([`Scope::App`]).
+    ReadAppContent,
+    /// Drive an app: click, type, press keys, scroll, focus. The highest-trust
+    /// computer-use capability; scoped to one app ([`Scope::App`]). Granting it
+    /// implies [`Capability::ReadAppContent`] and [`Capability::CaptureScreen`]
+    /// for the same app.
+    ControlApp,
+}
+
+impl Capability {
+    /// Whether holding `granted` satisfies a request for `requested` at the
+    /// same scope.
+    ///
+    /// Reflexive, plus the computer-use implication chain: control implies both
+    /// reads, and the two read capabilities imply each other. Implication is
+    /// one-directional from control to reads — a read grant never confers
+    /// control. Folder capabilities imply only themselves.
+    ///
+    /// This is the seam the broker's operation dispatch consults when it
+    /// authorizes a computer-use request against the live grants; the folder
+    /// `authorize` path matches capabilities exactly and does not use it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn implies(granted: Capability, requested: Capability) -> bool {
+        use Capability::{CaptureScreen, ControlApp, ReadAppContent};
+        if granted == requested {
+            return true;
+        }
+        match (granted, requested) {
+            (ControlApp, ReadAppContent | CaptureScreen) => true,
+            (ReadAppContent, CaptureScreen) | (CaptureScreen, ReadAppContent) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Resource scope covered by one grant.
@@ -51,6 +88,12 @@ pub enum Scope {
         root_id: RootId,
         relative: RelativePath,
     },
+    /// One application, named by its macOS bundle id (e.g. "com.apple.Notes").
+    /// The scope for `ReadAppContent` and `ControlApp`, and one of the two
+    /// scopes for `CaptureScreen`.
+    App { bundle_id: String },
+    /// The whole display. The scope for a full-screen `CaptureScreen` grant.
+    Screen,
 }
 
 /// How the user expressed consent for a grant.
@@ -258,6 +301,15 @@ fn validate_capability_scope(capability: Capability, scope: &Scope) -> Result<()
         (Capability::ReadFiles | Capability::WriteFiles, Scope::PathSubtree { .. }) => {
             Err(GrantError::EmptySubtree)
         }
+        // App-scoped computer use: reading content or driving the app. Capture
+        // may also be app-scoped (every window of one app).
+        (
+            Capability::ReadAppContent | Capability::ControlApp | Capability::CaptureScreen,
+            Scope::App { bundle_id },
+        ) if !bundle_id.trim().is_empty() => Ok(()),
+        // Whole-display capture is its own scope; reads and control are never
+        // display-scoped.
+        (Capability::CaptureScreen, Scope::Screen) => Ok(()),
         _ => Err(GrantError::InvalidCapabilityScope),
     }
 }
@@ -609,5 +661,81 @@ mod tests {
             Resource::Root(&root),
         )
         .is_err());
+    }
+
+    #[test]
+    fn control_app_implies_both_reads() {
+        use Capability::{CaptureScreen, ControlApp, ReadAppContent};
+        assert!(Capability::implies(ControlApp, ReadAppContent));
+        assert!(Capability::implies(ControlApp, CaptureScreen));
+    }
+
+    #[test]
+    fn the_two_read_capabilities_imply_each_other() {
+        use Capability::{CaptureScreen, ReadAppContent};
+        assert!(Capability::implies(ReadAppContent, CaptureScreen));
+        assert!(Capability::implies(CaptureScreen, ReadAppContent));
+    }
+
+    #[test]
+    fn implication_is_one_directional_from_control_to_reads() {
+        use Capability::{CaptureScreen, ControlApp, ReadAppContent};
+        // A read grant must never confer control.
+        assert!(!Capability::implies(ReadAppContent, ControlApp));
+        assert!(!Capability::implies(CaptureScreen, ControlApp));
+    }
+
+    #[test]
+    fn folder_capabilities_imply_only_themselves() {
+        use Capability::{CaptureScreen, ControlApp, ExecuteCommands, ReadFiles};
+        // Folder exec does not reach computer use, and vice versa.
+        assert!(!Capability::implies(ExecuteCommands, ControlApp));
+        assert!(!Capability::implies(ControlApp, ExecuteCommands));
+        assert!(!Capability::implies(ReadFiles, CaptureScreen));
+        // Reflexivity holds for every capability.
+        assert!(Capability::implies(ExecuteCommands, ExecuteCommands));
+        assert!(Capability::implies(ControlApp, ControlApp));
+    }
+
+    #[test]
+    fn app_and_screen_scopes_validate_against_their_capabilities() {
+        let subject = subject_project(Uuid::new_v4());
+        let consent = || {
+            ConsentRecord::new(
+                ConsentMethod::FolderPicker,
+                Utc.with_ymd_and_hms(2026, 7, 14, 0, 0, 0).unwrap(),
+            )
+        };
+        let app = || Scope::App {
+            bundle_id: "com.apple.Notes".to_string(),
+        };
+
+        // Valid pairings.
+        for (capability, scope) in [
+            (Capability::ReadAppContent, app()),
+            (Capability::ControlApp, app()),
+            (Capability::CaptureScreen, app()),
+            (Capability::CaptureScreen, Scope::Screen),
+        ] {
+            let scope_debug = format!("{scope:?}");
+            Grant::from_consent(GrantId::new(), subject, capability, scope, consent())
+                .unwrap_or_else(|_| panic!("{capability:?} with {scope_debug} should be valid"));
+        }
+
+        // Reads and control are never display-scoped; capture is never
+        // subject-scoped; an empty bundle id is rejected.
+        for (capability, scope) in [
+            (Capability::ReadAppContent, Scope::Screen),
+            (Capability::ControlApp, Scope::Screen),
+            (Capability::CaptureScreen, Scope::Subject),
+            (
+                Capability::ControlApp,
+                Scope::App {
+                    bundle_id: "   ".to_string(),
+                },
+            ),
+        ] {
+            assert!(Grant::from_consent(GrantId::new(), subject, capability, scope, consent()).is_err());
+        }
     }
 }

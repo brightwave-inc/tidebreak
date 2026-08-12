@@ -2833,7 +2833,10 @@ fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, Er
     const MAX_LIST_GRANTS: usize = MAX_LIST_ROOTS * 8;
     let scope_display_name = |scope: &Scope, dormant: Option<&UnavailableRoot>| {
         let root_id = match scope {
-            Scope::Subject => return None,
+            // Computer-use scopes (an app, the whole display) name no folder
+            // root; their display identity comes from the bundle id, not a
+            // registered root.
+            Scope::Subject | Scope::App { .. } | Scope::Screen => return None,
             Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id,
         };
         if let Some(root) = state.roots.get(&root_id) {
@@ -3208,7 +3211,7 @@ fn path_starts_with(candidate: &RelativePath, prefix: &RelativePath) -> bool {
 fn scope_targets_root(scope: &Scope, requested: RootId) -> bool {
     match scope {
         Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id == requested,
-        Scope::Subject => false,
+        Scope::Subject | Scope::App { .. } | Scope::Screen => false,
     }
 }
 
