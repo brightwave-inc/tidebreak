@@ -32,6 +32,7 @@ const DELEGATED_FILE_READ_PREFIX: &str = "delegated-file-read-";
 const MANUAL_FOLDER_CONNECT_PREFIX: &str = "manual-folder-connect-";
 const OUTPUT_EXPORT_PREFIX: &str = "output-export-";
 const OUTPUT_WRITEBACK_PREFIX: &str = "output-writeback-";
+const COMPUTER_USE_PREFIX: &str = "computer-use-";
 const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
 const OUTPUT_EXPORT_RECEIPT_VERSION: u32 = 1;
 const OUTPUT_WRITEBACK_RECEIPT_VERSION: u32 = 1;
@@ -105,6 +106,28 @@ pub(super) enum DispatchRecovery {
     /// true of a later call from the model, so a terminalized import is only
     /// ever one retry away from the same single source.
     Retry,
+}
+
+/// Durable receipt for one computer-use tool call.
+///
+/// Same recovery contract as [`FolderOperationReceipt`]: the canonical request
+/// is recovered from the server-owned tool call, and the receipt preserves only
+/// the exact native lease, how far dispatch got, and the terminal model result.
+/// Every computer-use op terminalizes an ambiguous dispatch rather than
+/// retrying — a control op may already have acted, and a capture already
+/// disclosed the screen, so nothing here is safe to re-fire blindly.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct ComputerUseReceipt {
+    version: u32,
+    pub(super) chat_id: ChatId,
+    pub(super) call_id: CallId,
+    pub(super) executor_id: Uuid,
+    pub(super) lease_token: Uuid,
+    #[serde(default)]
+    pub(super) phase: FolderOperationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolution: Option<StoredResolution>,
 }
 
 /// Native-only recovery state for one exact sandbox delegated-file read.
@@ -353,6 +376,21 @@ impl std::fmt::Debug for FolderOperationReceipt {
             .field("lease_token", &"[redacted]")
             .field("phase", &self.phase)
             .field("recovery", &self.recovery)
+            .field("resolution", &self.resolution)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ComputerUseReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ComputerUseReceipt")
+            .field("version", &self.version)
+            .field("chat_id", &self.chat_id)
+            .field("call_id", &self.call_id)
+            .field("executor_id", &self.executor_id)
+            .field("lease_token", &"[redacted]")
+            .field("phase", &self.phase)
             .field("resolution", &self.resolution)
             .finish()
     }
@@ -737,6 +775,33 @@ impl FolderOperationReceipt {
     }
 }
 
+impl ComputerUseReceipt {
+    pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
+        Self {
+            version: RECEIPT_VERSION,
+            chat_id,
+            call_id,
+            executor_id,
+            lease_token: Uuid::new_v4(),
+            phase: FolderOperationPhase::NotStarted,
+            resolution: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != RECEIPT_VERSION
+            || self.chat_id.0.is_nil()
+            || self.call_id.0.is_nil()
+            || self.executor_id.is_nil()
+            || self.lease_token.is_nil()
+            || (self.resolution.is_some() && self.phase != FolderOperationPhase::DispatchStarted)
+        {
+            return Err(invalid_data("invalid computer-use receipt"));
+        }
+        Ok(())
+    }
+}
+
 impl DelegatedFileReadReceipt {
     pub(super) fn new(call_id: CallId, executor_id: Uuid) -> Self {
         Self {
@@ -832,6 +897,7 @@ impl ReceiptStore {
         store.load_manual_connects()?;
         store.load_output_exports()?;
         store.load_output_writebacks()?;
+        store.load_computer_uses()?;
         Ok(store)
     }
 
@@ -913,6 +979,19 @@ impl ReceiptStore {
         write_atomically(&self.directory, &path, &bytes)
     }
 
+    pub(super) fn save_computer_use(&self, receipt: &ComputerUseReceipt) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("computer-use receipt is too large"));
+        }
+        write_atomically(
+            &self.directory,
+            &self.computer_use_receipt_path(receipt.call_id),
+            &bytes,
+        )
+    }
+
     pub(super) fn save_output_writeback(&self, receipt: &OutputWritebackReceipt) -> io::Result<()> {
         receipt.validate()?;
         let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
@@ -963,6 +1042,14 @@ impl ReceiptStore {
 
     pub(super) fn remove_output_writeback(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.output_writeback_receipt_path(call_id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn remove_computer_use(&self, call_id: CallId) -> io::Result<()> {
+        match fs::remove_file(self.computer_use_receipt_path(call_id)) {
             Ok(()) => sync_directory(&self.directory),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -1229,6 +1316,51 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(super) fn load_computer_uses(&self) -> io::Result<Vec<ComputerUseReceipt>> {
+        let mut receipts = Vec::new();
+        let mut call_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(call_id) = file_name
+                .strip_prefix(COMPUTER_USE_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many pending client-execution receipts"));
+            }
+            let call_id = call_id
+                .parse::<Uuid>()
+                .map(CallId::from)
+                .map_err(invalid_data)?;
+            validate_private_file(&entry.path(), MAX_RECEIPT_BYTES)?;
+            let mut bytes = Vec::new();
+            File::open(entry.path())?
+                .take((MAX_RECEIPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_RECEIPT_BYTES {
+                return Err(invalid_data("computer-use receipt is too large"));
+            }
+            let receipt: ComputerUseReceipt =
+                serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            receipt.validate()?;
+            if receipt.call_id != call_id {
+                return Err(invalid_data("computer-use receipt identity mismatch"));
+            }
+            if !call_ids.insert(call_id) {
+                return Err(invalid_data("duplicate computer-use receipt identity"));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.call_id.to_string());
+        Ok(receipts)
+    }
+
     pub(super) fn load_output_writebacks(&self) -> io::Result<Vec<OutputWritebackReceipt>> {
         let mut receipts = Vec::new();
         let mut call_ids = HashSet::new();
@@ -1297,6 +1429,11 @@ impl ReceiptStore {
     fn output_writeback_receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory
             .join(format!("{OUTPUT_WRITEBACK_PREFIX}{call_id}.json"))
+    }
+
+    fn computer_use_receipt_path(&self, call_id: CallId) -> PathBuf {
+        self.directory
+            .join(format!("{COMPUTER_USE_PREFIX}{call_id}.json"))
     }
 }
 

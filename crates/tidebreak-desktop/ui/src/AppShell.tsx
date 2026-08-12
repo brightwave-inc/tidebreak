@@ -26,6 +26,7 @@ import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
+import { ComputerUseIndicator } from "./ComputerUseIndicator";
 import { useDesktopNavigation } from "./DesktopNavigation";
 import { hasMacOverlayTitlebar, hasNativeHost } from "./host";
 import { friendlyErrorMessage } from "./lib/utils";
@@ -636,6 +637,7 @@ export function AppShell() {
               navigation={desktopNavigation}
             />
           )}
+          <ComputerUseIndicator />
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
             <Outlet />

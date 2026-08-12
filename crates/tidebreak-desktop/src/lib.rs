@@ -316,6 +316,11 @@ pub fn run() {
             node_install::install_node_runtime,
             client_execution::resolve_folder_access_request,
             client_execution::output_writeback::resolve_output_writeback_request,
+            client_execution::computer_use::computer_use_state,
+            client_execution::computer_use::stop_computer_use_control,
+            client_execution::computer_use::resume_computer_use_control,
+            client_execution::computer_use::resolve_computer_use_consent,
+            client_execution::computer_use::resolve_computer_use_confirmation,
             host_access::connect_folder,
             host_access::connect_approved_folder,
             host_access::list_approved_folders,
@@ -484,6 +489,10 @@ async fn boot_server(
     tauri::async_runtime::spawn(async move {
         client_execution::delegated_file_read::recover_delegated_file_read(delegated_file_app)
             .await;
+    });
+    let computer_use_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        client_execution::computer_use::recover_computer_use_operations(computer_use_app).await;
     });
     let output_writeback_app = app.clone();
     tauri::async_runtime::spawn(async move {

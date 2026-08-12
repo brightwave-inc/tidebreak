@@ -585,7 +585,7 @@ pub(super) fn granted_folder_capabilities(
         .collect()
 }
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     if value.len() <= max_bytes {
         return (value.to_owned(), false);
     }
