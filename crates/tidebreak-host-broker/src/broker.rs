@@ -767,17 +767,18 @@ struct OperationAudit {
 
 impl OperationAudit {
     fn from_envelope(envelope: &OperationEnvelope) -> Self {
-        // Input synthesis (click / type / key) is a host mutation: its intent
-        // record must be durable before any event is synthesized, and the op
-        // refuses when the record cannot be made durable. Scroll and focus
-        // are reversible view changes authorized on the read capability, so
-        // like the folder reads they are completion-recorded only.
+        // Input synthesis (click / type / key / scroll / focus) is a host
+        // mutation: its intent record must be durable before any event is
+        // synthesized, and the op refuses when the record cannot be made
+        // durable. Scroll warps the cursor; focus raises a window.
         let mutates = matches!(
             envelope.request,
             OperationRequest::WriteFile(_)
                 | OperationRequest::CuClick { .. }
                 | OperationRequest::CuTypeText { .. }
                 | OperationRequest::CuKeyPress { .. }
+                | OperationRequest::CuScroll { .. }
+                | OperationRequest::CuFocusWindow { .. }
         );
         let (operation, capability, target) = match &envelope.request {
             OperationRequest::ListRoots => (
@@ -2256,7 +2257,7 @@ impl Operator {
             actor: metadata.actor,
             operation,
             target: metadata.target,
-            outcome: audit_outcome(error),
+            outcome: operation_audit_outcome(result),
             capability: Some(metadata.capability),
             grant_id,
             error_code: error.map(|error| error.code),
@@ -3384,6 +3385,15 @@ fn audit_outcome(error: Option<&ErrorResponse>) -> AuditOutcome {
         None => AuditOutcome::Allowed,
         Some(ErrorCode::Denied) => AuditOutcome::Denied,
         Some(_) => AuditOutcome::Failed,
+    }
+}
+
+/// Completion outcome for an operator result. A hold is not an executed
+/// action: [`AuditOutcome::Held`] is distinct from [`AuditOutcome::Allowed`].
+fn operation_audit_outcome(result: &Result<OperationResult, ErrorResponse>) -> AuditOutcome {
+    match result {
+        Ok(OperationResult::CuNeedsConfirmation(_)) => AuditOutcome::Held,
+        _ => audit_outcome(result.as_ref().err()),
     }
 }
 

@@ -99,7 +99,7 @@ pub enum AuditOperation {
     ProtocolVersionMismatch,
 }
 
-/// Whether the broker performed, refused, or failed an operation.
+/// Whether the broker performed, refused, held, or failed an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditOutcome {
@@ -110,6 +110,10 @@ pub enum AuditOutcome {
     /// exactly what the trail should say rather than omitting the operation.
     Attempted,
     Allowed,
+    /// A consequential action was parked for confirmation and did not run.
+    /// Distinct from [`Self::Allowed`]: the host was not mutated. Confirming
+    /// later writes its own Attempted/Allowed pair for the act that fired.
+    Held,
     Denied,
     Failed,
 }
