@@ -29,8 +29,11 @@
 //! *Using* a folder an operator already connected is a different matter, and it
 //! works: an embedded run starts [`crate::folder_executor`] over the chat it is
 //! driving, which claims the parked folder tool calls and runs them through the
-//! host broker's capability checks. That executor answers only for folders that
-//! are already connected; it has no path to a new grant.
+//! host broker's capability checks. An attached run starts no executor — the
+//! process that owns the server (`openwave serve`, or an embedded peer) does —
+//! and that same executor settles a mid-turn `request_folder_access` as the
+//! typed `Declined` result rather than hanging the turn. Neither path can mint
+//! a new grant; standing consent stays with `openwave folder connect`.
 
 use std::collections::HashMap;
 use std::future::Future as _;
@@ -154,11 +157,13 @@ pub async fn run(
     let mut driver = Driver::from_stdin(driving);
 
     // The folder tools the agent may use on a folder an operator already
-    // connected execute in this process, because this process is the one that
-    // owns the broker state they read. Scoped to this run's chat: a print run
-    // answers for the conversation it drives and no other. An attached run has
-    // no executor credential and starts nothing — it touches no local data
-    // directory either, which is why the profile is only resolved here.
+    // connected execute in this process when this process owns the broker
+    // state they read. Scoped to this run's chat: a print run answers for the
+    // conversation it drives and no other. An attached run has no executor
+    // credential and starts nothing — `openwave serve` (or whichever process
+    // embedded the engine) holds the credential and claims the parked calls,
+    // including declining a mid-turn `request_folder_access`. The profile is
+    // only resolved here for the embedded path that needs a local data dir.
     let folder_executor = match executor_token.as_deref() {
         Some(executor_token) => crate::folder_executor::FolderExecutor::new(
             client.clone(),
@@ -670,9 +675,10 @@ impl FolderDeclines {
         printer: &mut Printer,
     ) {
         // Attach mode has no client-executor credential and is not the trusted
-        // surface for this server — the process that owns it is, and if that is
-        // a desktop it will show the user a picker. Say so and leave the call
-        // alone rather than pretending to be it.
+        // surface for this server — the process that owns it is. Headless
+        // owners (`openwave serve`, an embedded `-p`/`tui`) settle the call
+        // declined without granting; a desktop owner may show a picker. Say so
+        // and leave the call alone rather than pretending to be that surface.
         let Some(executor_token) = executor_token else {
             printer.notice(&format!(
                 "folder request {call_id} left for the attached server's own client executor; \
@@ -742,11 +748,14 @@ impl Drop for FolderDeclines {
 /// - **Never parked, or unreadable.** Not evidence of anything: keep asking. A
 ///   poll that fails says nothing about the call, so it is retried too. The
 ///   waiting ends when the call completes or the turn does, not on a clock.
-/// - **Parked, and claimed by somebody else.** Never race it — this process has
-///   no way to grant anything. But it is also the only surface that answers for
-///   this server, so a claim it does not hold is a call it cannot settle.
-/// - **Parked, and the claim or the resolve failed.** The refusal is owed and
-///   undeliverable, which is the one shape that must end the run.
+/// - **Parked, and claimed by somebody else.** The headless
+///   [`crate::folder_executor`] — this process's own, or `openwave serve`'s —
+///   settles folder-access requests declined. Do not race it and do not halt:
+///   the turn continues when that executor publishes the terminal result.
+/// - **Parked, and this refusal claimed and resolved it.** The ordinary path.
+/// - **Parked, and the claim or the resolve failed while the call is still
+///   unclaimed.** The refusal is owed and undeliverable, which is the one shape
+///   that must end the run.
 /// - **Parked, but not a folder request.** Impossible by construction — the name
 ///   came from the announcement of this same call — and not this run's answer to
 ///   give if it happens. Say so and leave it.
@@ -769,16 +778,17 @@ async fn decline(
                         ),
                     });
                 }
+                // Another executor (this process's folder_executor, or serve's)
+                // already owns the call. Stand down; its terminal result ends
+                // the wait via ToolCallCompleted.
                 Some(call) if call.client_executor_id.is_some() => {
-                    return Some(FolderDecline::Unanswerable {
-                        call_id,
-                        message: format!(
-                            "the folder request is claimed by another executor, and this run \
-                             cannot resolve a claim it does not hold: call {call_id} stays parked"
-                        ),
-                    });
+                    return None;
                 }
                 Some(_) => break,
+                // Gone from the pending set: either never parked, or already
+                // settled (including by folder_executor). Keep polling only for
+                // the never-parked case; ToolCallCompleted aborts this task
+                // when the call is terminal.
                 None => {}
             }
         }
@@ -787,13 +797,16 @@ async fn decline(
     }
 
     match resolve_declined(client, executor_token, chat, call_id).await {
-        Ok(()) => Some(FolderDecline::Noted {
+        ResolveDeclined::Declined => Some(FolderDecline::Noted {
             call_id,
             message: "folder access declined: headless runs connect folders with `openwave \
                       folder connect`, never mid-turn"
                 .to_owned(),
         }),
-        Err(error) => Some(FolderDecline::Unanswerable {
+        // folder_executor won the race after we saw the call unclaimed. The
+        // turn is not stuck; its completion event is what ends the wait.
+        ResolveDeclined::HandledElsewhere => None,
+        ResolveDeclined::Failed(error) => Some(FolderDecline::Unanswerable {
             call_id,
             message: format!(
                 "the parked folder request could not be declined: {error}; the turn is waiting \
@@ -803,21 +816,44 @@ async fn decline(
     }
 }
 
+/// Outcome of trying to claim and decline one folder-access request.
+enum ResolveDeclined {
+    Declined,
+    /// Another executor already claimed or resolved the call.
+    HandledElsewhere,
+    Failed(AgentError),
+}
+
 /// Claim the parked call and resolve it declined.
 async fn resolve_declined(
     client: &Client,
     executor_token: &str,
     chat: ChatId,
     call_id: CallId,
-) -> Result<()> {
+) -> ResolveDeclined {
     let executor_id = uuid::Uuid::new_v4();
     let lease_token = uuid::Uuid::new_v4();
-    client
+    if let Err(error) = client
         .claim_client_execution(executor_token, chat, call_id, executor_id, lease_token)
-        .await?;
-    let declined = serde_json::to_string(&RequestFolderAccessResult::Declined)
-        .map_err(|error| AgentError::msg(format!("could not encode the refusal: {error}")))?;
-    client
+        .await
+    {
+        // A conflict means the call is not claimable by this pair right now —
+        // typically folder_executor already owns it or already finished it.
+        return if error.is_conflict() {
+            ResolveDeclined::HandledElsewhere
+        } else {
+            ResolveDeclined::Failed(error.into())
+        };
+    }
+    let declined = match serde_json::to_string(&RequestFolderAccessResult::Declined) {
+        Ok(declined) => declined,
+        Err(error) => {
+            return ResolveDeclined::Failed(AgentError::msg(format!(
+                "could not encode the refusal: {error}"
+            )));
+        }
+    };
+    match client
         .resolve_client_execution(
             executor_token,
             chat,
@@ -830,8 +866,12 @@ async fn resolve_declined(
                 rows: None,
             },
         )
-        .await?;
-    Ok(())
+        .await
+    {
+        Ok(()) => ResolveDeclined::Declined,
+        Err(error) if error.is_conflict() => ResolveDeclined::HandledElsewhere,
+        Err(error) => ResolveDeclined::Failed(error.into()),
+    }
 }
 
 /// The event socket plus the cursor a reconnect resumes from.

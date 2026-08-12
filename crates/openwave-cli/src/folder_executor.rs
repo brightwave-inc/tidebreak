@@ -18,9 +18,16 @@
 //!
 //! **It never widens a grant.** The tools here read folders that are *already*
 //! connected. `request_folder_access` — the only tool that asks for a new one —
-//! is deliberately not in this module's dispatch table; it keeps the typed
-//! refusal [`crate::print`] gives it, and standing consent still comes only
-//! from `openwave folder connect`. See [`crate::folder`].
+//! is answered here too, but only with the folder contract's typed `Declined`
+//! result: the same answer an undecided desktop prompt and print mode's own
+//! refusal produce. No picker runs, no path is chosen, and no grant is minted.
+//! Standing consent still comes only from `openwave folder connect`. See
+//! [`crate::folder`].
+//!
+//! Declining here is what keeps an attached (`--server` / `--attach`) print run
+//! from hanging: that client holds no executor credential and correctly leaves
+//! the call for this process. Without a headless answer, `openwave serve` would
+//! park `request_folder_access` forever even though it already owns the broker.
 //!
 //! **Only the process that owns the broker runs it.** The executor needs the
 //! server's client-executor credential, which [`crate::connect::Session`] holds
@@ -76,11 +83,12 @@ use std::path::{Path, PathBuf};
 use openwave_core::{
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
-    validate_write_output_to_connected_folder_arguments, AgentError, CallId, ChatId,
-    GrantedFolderCapability, ImportConnectedFileArgs, ImportConnectedFileResult, ListFolderArgs,
-    ReadConnectedFileArgs, Result, ResultEntry, ResultEntryKind, ToolCallExecution, ToolCallRecord,
-    ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
-    READ_CONNECTED_FILE_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
+    AgentError, CallId, ChatId, GrantedFolderCapability, ImportConnectedFileArgs,
+    ImportConnectedFileResult, ListFolderArgs, ReadConnectedFileArgs, RequestFolderAccessResult,
+    Result, ResultEntry, ResultEntryKind, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
+    READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 use openwave_host_broker::{
     Capability, EntryKind, ExecutionContext, OperationEnvelope, OperationRequest, OperationResult,
@@ -403,6 +411,14 @@ impl FolderExecutor {
 
     /// Run one claimed call, returning the model-facing terminal outcome.
     async fn run_call(&self, chat: ChatId, call: &ToolCallRecord) -> ClientExecutionOutcome {
+        // New folder consent is operator work (`openwave folder connect`), not
+        // something a headless executor can grant. Resolve the parked call with
+        // the same typed Declined the desktop produces when the picker is
+        // closed, so an attached print client that correctly left the call here
+        // does not hang waiting for a surface that will never appear.
+        if call.name == REQUEST_FOLDER_ACCESS_TOOL {
+            return declined_folder_access();
+        }
         // The one call a headless install cannot honor. It needs the exec
         // write-overlay materializer, which no headless embedding installs, so
         // it fails closed with the desktop's own code for that state rather than
@@ -576,13 +592,14 @@ impl FolderExecutor {
 
 /// Whether this executor answers for a tool.
 ///
-/// `request_folder_access` is deliberately absent: it asks for consent this
-/// process cannot give, and print mode's typed refusal remains the only answer
-/// a headless run has for it.
+/// `request_folder_access` is included only so it can be settled declined: this
+/// process still cannot grant or widen folder access. Standing consent stays
+/// with `openwave folder connect`.
 fn handles(name: &str) -> bool {
     matches!(
         name,
-        LIST_CONNECTED_FOLDERS_TOOL
+        REQUEST_FOLDER_ACCESS_TOOL
+            | LIST_CONNECTED_FOLDERS_TOOL
             | LIST_FOLDER_TOOL
             | READ_CONNECTED_FILE_TOOL
             | IMPORT_CONNECTED_FILE_TOOL
@@ -595,13 +612,13 @@ fn handles(name: &str) -> bool {
 /// A read has no durable host outcome to reconcile against, so an interrupted
 /// one is closed out. An import derives its source identity from the exact
 /// request, so running it again converges on the same single source. A
-/// write-back never reaches the host from here at all, so replaying its
-/// fail-closed answer is free.
+/// write-back and a folder-access refusal never reach the host from here at
+/// all, so replaying their fail-closed answers is free.
 fn recovery_policy(name: &str) -> DispatchRecovery {
     match name {
-        IMPORT_CONNECTED_FILE_TOOL | WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL => {
-            DispatchRecovery::Retry
-        }
+        IMPORT_CONNECTED_FILE_TOOL
+        | WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL
+        | REQUEST_FOLDER_ACCESS_TOOL => DispatchRecovery::Retry,
         _ => DispatchRecovery::Terminalize,
     }
 }
@@ -615,6 +632,7 @@ fn is_canonical_folder_call(call: &ToolCallRecord) -> bool {
         return false;
     }
     match call.name.as_str() {
+        REQUEST_FOLDER_ACCESS_TOOL => validate_request_folder_access_arguments(&call.arguments),
         LIST_CONNECTED_FOLDERS_TOOL => validate_list_connected_folders_arguments(&call.arguments),
         LIST_FOLDER_TOOL => validate_list_folder_arguments(&call.arguments),
         READ_CONNECTED_FILE_TOOL => validate_read_connected_file_arguments(&call.arguments),
@@ -807,6 +825,20 @@ fn read_file_name(path: &str) -> String {
     }
 }
 
+/// The model-facing answer when headless cannot open a consent surface.
+///
+/// Byte-compatible with print mode's own refusal and with the desktop's
+/// closed-picker path: a completed call whose result is `Declined`, never a
+/// failure code that would look like a broken tool.
+fn declined_folder_access() -> ClientExecutionOutcome {
+    let declined = serde_json::to_string(&RequestFolderAccessResult::Declined)
+        .unwrap_or_else(|_| r#"{"status":"declined"}"#.to_owned());
+    ClientExecutionOutcome::Completed {
+        result: declined,
+        rows: None,
+    }
+}
+
 fn unavailable(code: &str, message: &str) -> ClientExecutionOutcome {
     ClientExecutionOutcome::Failed {
         result: serde_json::json!({ "status": "unavailable", "message": message }).to_string(),
@@ -871,20 +903,33 @@ mod tests {
     }
 
     /// The boundary between "a folder this conversation already has" and "ask
-    /// for another one". A headless run answers the first and must never answer
-    /// the second: `request_folder_access` has no route into this executor, so
-    /// print mode's typed refusal stays the only answer to it and no folder
-    /// grant can be created or widened from a parked call.
+    /// for another one". A headless run answers the first for real. It answers
+    /// the second only with `Declined`: the call is claimed so the turn does
+    /// not hang, and no grant can be created or widened from that path.
     #[test]
-    fn the_executor_never_answers_a_request_for_new_folder_access() {
-        assert!(!handles(REQUEST_FOLDER_ACCESS_TOOL));
-        assert!(!is_canonical_folder_call(&call(
+    fn the_executor_declines_a_request_for_new_folder_access_without_granting() {
+        assert!(handles(REQUEST_FOLDER_ACCESS_TOOL));
+        assert!(is_canonical_folder_call(&call(
             REQUEST_FOLDER_ACCESS_TOOL,
             serde_json::json!({
                 "reason": "Read reports",
                 "requested_capabilities": ["read_files"],
             }),
         )));
+        // A malformed request is not canonical, so discovery never claims it
+        // for a host operation or a fabricated decline.
+        assert!(!is_canonical_folder_call(&call(
+            REQUEST_FOLDER_ACCESS_TOOL,
+            serde_json::json!({ "reason": "", "requested_capabilities": ["read_files"] }),
+        )));
+        let ClientExecutionOutcome::Completed { result, rows } = declined_folder_access() else {
+            panic!("a headless folder-access answer completes as Declined");
+        };
+        assert!(rows.is_none());
+        assert_eq!(
+            serde_json::from_str::<RequestFolderAccessResult>(&result).unwrap(),
+            RequestFolderAccessResult::Declined
+        );
         // Nor by any other name: dispatch is a closed match, and a name it does
         // not know produces no broker request at all.
         assert!(broker_request(&call("exec", serde_json::json!({}))).is_err());
@@ -1005,6 +1050,10 @@ mod tests {
         }
         assert_eq!(
             recovery_policy(IMPORT_CONNECTED_FILE_TOOL),
+            DispatchRecovery::Retry
+        );
+        assert_eq!(
+            recovery_policy(REQUEST_FOLDER_ACCESS_TOOL),
             DispatchRecovery::Retry
         );
     }
