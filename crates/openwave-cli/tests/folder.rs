@@ -111,9 +111,7 @@ fn start_serve(data_dir: &Path) -> ServeEndpoint {
         .trim()
         .to_owned();
     // Keep draining so a long-lived daemon cannot block on a full stdout pipe.
-    let drain = std::thread::spawn(move || {
-        for _ in lines {}
-    });
+    let drain = std::thread::spawn(move || for _ in lines {});
     ServeEndpoint {
         url,
         token,
@@ -516,9 +514,7 @@ fn a_serve_daemon_executes_folder_calls_for_an_attached_client() {
         .trim_start_matches("openwave: token ")
         .trim()
         .to_owned();
-    let _drain = std::thread::spawn(move || {
-        for _ in lines {}
-    });
+    let _drain = std::thread::spawn(move || for _ in lines {});
 
     let attached = openwave(&data_dir)
         .args([

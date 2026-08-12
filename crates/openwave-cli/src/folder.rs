@@ -163,9 +163,7 @@ pub async fn run(command: Command) -> Result<()> {
     match command {
         Command::Connect { chat, path } => connect(&store, &data_dir, chat, path).await,
         Command::List { chat } => list(&store, &data_dir, chat).await,
-        Command::Disconnect { chat, target } => {
-            disconnect(&store, &data_dir, chat, &target).await
-        }
+        Command::Disconnect { chat, target } => disconnect(&store, &data_dir, chat, &target).await,
     }
 }
 
@@ -240,7 +238,8 @@ pub(crate) fn open_broker(data_dir: &Path) -> Result<Broker> {
             AgentError::config(format!("could not initialize the folder policy: {error}"))
         })?;
     let execute_commands = openwave_code_execution::LocalExecutionProvider::availability().is_ok();
-    Broker::open_with_execute_commands(policy, &data_dir, execute_commands).map_err(broker_open_error)
+    Broker::open_with_execute_commands(policy, &data_dir, execute_commands)
+        .map_err(broker_open_error)
 }
 
 /// Map a broker-open failure into an operator-facing configuration error.
