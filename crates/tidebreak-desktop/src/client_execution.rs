@@ -25,8 +25,8 @@ use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 use self::folder_operations::granted_folder_capabilities;
 
-mod control_plane;
 pub(crate) mod computer_use;
+mod control_plane;
 pub(crate) mod delegated_file_read;
 pub(crate) mod folder_operations;
 pub(crate) mod output_writeback;

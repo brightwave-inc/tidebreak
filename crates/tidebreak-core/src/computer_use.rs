@@ -225,10 +225,7 @@ pub struct ComputerClickArgs {
     pub target: ElementTargetArgs,
     /// Which button. Defaults to left.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(
-        with = "ClickButton",
-        description = "Mouse button (default left)."
-    )]
+    #[schemars(with = "ClickButton", description = "Mouse button (default left).")]
     pub button: Option<ClickButton>,
     /// Double-click when true. Defaults to a single click.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,7 +259,10 @@ pub struct ComputerKeyPressArgs {
     #[schemars(description = "App bundle id.")]
     pub app_id: String,
     /// The key name (e.g. "return", "tab", "escape", "a", "left").
-    #[schemars(length(min = 1), description = "Key name (e.g. \"return\", \"tab\", \"a\").")]
+    #[schemars(
+        length(min = 1),
+        description = "Key name (e.g. \"return\", \"tab\", \"a\")."
+    )]
     pub key: String,
     /// Chord modifiers to hold while pressing the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,8 +349,14 @@ macro_rules! validate_fn {
     };
 }
 
-validate_fn!(validate_computer_list_windows_arguments, ComputerListWindowsArgs);
-validate_fn!(validate_computer_focus_window_arguments, ComputerFocusWindowArgs);
+validate_fn!(
+    validate_computer_list_windows_arguments,
+    ComputerListWindowsArgs
+);
+validate_fn!(
+    validate_computer_focus_window_arguments,
+    ComputerFocusWindowArgs
+);
 validate_fn!(
     validate_computer_return_to_openwave_arguments,
     ComputerReturnToOpenwaveArgs
@@ -458,9 +464,7 @@ pub fn computer_read_app_content_tool_spec() -> ToolSpec {
 pub fn computer_click_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerClickArgs>(
         COMPUTER_CLICK_TOOL,
-        &format!(
-            "Click an element or point in an app. {TARGETING_NOTE}{ACTING_NOTE}"
-        ),
+        &format!("Click an element or point in an app. {TARGETING_NOTE}{ACTING_NOTE}"),
     )
 }
 
@@ -491,9 +495,7 @@ pub fn computer_key_press_tool_spec() -> ToolSpec {
 pub fn computer_scroll_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerScrollArgs>(
         COMPUTER_SCROLL_TOOL,
-        &format!(
-            "Scroll an element or point by a pixel delta. {TARGETING_NOTE}"
-        ),
+        &format!("Scroll an element or point by a pixel delta. {TARGETING_NOTE}"),
     )
 }
 
@@ -540,7 +542,9 @@ mod tests {
         // Reads are not control tools.
         assert!(!is_computer_use_control_tool(COMPUTER_LIST_WINDOWS_TOOL));
         assert!(!is_computer_use_control_tool(COMPUTER_CAPTURE_SCREEN_TOOL));
-        assert!(!is_computer_use_control_tool(COMPUTER_READ_APP_CONTENT_TOOL));
+        assert!(!is_computer_use_control_tool(
+            COMPUTER_READ_APP_CONTENT_TOOL
+        ));
         assert!(!is_computer_use_control_tool(COMPUTER_SCROLL_TOOL));
         assert!(!is_computer_use_tool("read_file"));
     }
@@ -559,7 +563,9 @@ mod tests {
         assert!(!validate_computer_read_app_content_arguments(
             &json!({ "app_id": "com.apple.Notes", "max_nodes": 2001 })
         ));
-        assert!(!validate_computer_read_app_content_arguments(&json!({ "app_id": "  " })));
+        assert!(!validate_computer_read_app_content_arguments(
+            &json!({ "app_id": "  " })
+        ));
         assert!(!validate_computer_read_app_content_arguments(&json!({})));
     }
 
@@ -590,9 +596,15 @@ mod tests {
     #[test]
     fn wait_is_bounded() {
         assert!(validate_computer_wait_arguments(&json!({})));
-        assert!(validate_computer_wait_arguments(&json!({ "seconds": 10.0 })));
-        assert!(!validate_computer_wait_arguments(&json!({ "seconds": 10.5 })));
-        assert!(!validate_computer_wait_arguments(&json!({ "seconds": -1.0 })));
+        assert!(validate_computer_wait_arguments(
+            &json!({ "seconds": 10.0 })
+        ));
+        assert!(!validate_computer_wait_arguments(
+            &json!({ "seconds": 10.5 })
+        ));
+        assert!(!validate_computer_wait_arguments(
+            &json!({ "seconds": -1.0 })
+        ));
         // serde_json cannot represent a non-finite float, so a NaN/Infinity
         // never survives a wire round-trip; the validator's `is_finite` guard
         // covers the in-memory case.
@@ -628,7 +640,11 @@ mod tests {
             computer_return_to_openwave_tool_spec(),
             computer_wait_tool_spec(),
         ] {
-            assert_eq!(spec.input_schema["additionalProperties"], false, "{}", spec.name);
+            assert_eq!(
+                spec.input_schema["additionalProperties"], false,
+                "{}",
+                spec.name
+            );
             // The contracts are model proposals; they never carry a grant,
             // token, or absolute host path.
             assert!(!spec.description.contains("grant"), "{}", spec.name);

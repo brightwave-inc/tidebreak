@@ -533,7 +533,14 @@ impl ScopedStore {
     ) -> Result<JournaledClientToolCallOutcome> {
         self.store
             .resolve_client_tool_call_and_append_event_with_rows(
-                id, chat_id, lease_token, now, resolution, resolved_at, rows, images,
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+                rows,
+                images,
             )
             .await
     }
@@ -553,7 +560,14 @@ impl ScopedStore {
     ) -> Result<JournaledClientToolCallOutcome> {
         self.store
             .resolve_expired_client_tool_call_and_append_event_with_rows(
-                id, chat_id, lease_token, now, resolution, resolved_at, rows, images,
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+                rows,
+                images,
             )
             .await
     }

@@ -2149,7 +2149,15 @@ impl Store for DbStore {
         resolved_at: chrono::DateTime<Utc>,
     ) -> Result<JournaledClientToolCallOutcome> {
         ops::client_execution::resolve_client_tool_call_and_append_event(
-            self, id, chat_id, lease_token, now, resolution, resolved_at, None, None,
+            self,
+            id,
+            chat_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            None,
+            None,
         )
         .await
     }

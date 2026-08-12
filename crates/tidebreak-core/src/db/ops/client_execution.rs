@@ -632,10 +632,12 @@ async fn resolve_tool_call(
         if resolved_name == crate::COMPUTER_CAPTURE_SCREEN_TOOL
             && resolution.status() == ToolCallStatus::Completed
         {
-            images.first().map(|image| crate::ToolResultPreview::ScreenCapture {
-                image: *image,
-                mark_count: 0,
-            })
+            images
+                .first()
+                .map(|image| crate::ToolResultPreview::ScreenCapture {
+                    image: *image,
+                    mark_count: 0,
+                })
         } else {
             None
         }

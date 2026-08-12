@@ -229,12 +229,7 @@ impl ComputerUseState {
 
     /// Resolve a Set-of-Marks number to its element address, from the most
     /// recent capture or tree read for this chat and app.
-    fn resolve_mark(
-        &self,
-        chat_id: Uuid,
-        scope: &str,
-        mark: u32,
-    ) -> Option<(String, String)> {
+    fn resolve_mark(&self, chat_id: Uuid, scope: &str, mark: u32) -> Option<(String, String)> {
         lock(&self.marks)
             .get(&(chat_id, scope.to_owned()))
             .and_then(|marks| marks.iter().find(|entry| entry.mark == mark))
@@ -448,11 +443,11 @@ async fn recover_once(app: &AppHandle) -> bool {
                 continue;
             }
         };
-        for call in calls.into_iter().filter(|call| {
-            !recovered_call_ids.contains(&call.id) && is_computer_use_call(call)
-        }) {
-            let receipt =
-                ComputerUseReceipt::new(chat.id, call.id, state.receipts.executor_id());
+        for call in calls
+            .into_iter()
+            .filter(|call| !recovered_call_ids.contains(&call.id) && is_computer_use_call(call))
+        {
+            let receipt = ComputerUseReceipt::new(chat.id, call.id, state.receipts.executor_id());
             if let Err(error) = execute_receipt(app, &state, receipt).await {
                 eprintln!("openwave-desktop: computer-use execution deferred: {error}");
                 failed = true;
@@ -700,9 +695,16 @@ async fn execute_operation(
 /// a reference into this chat's latest capture for that app, and only this
 /// process holds the table. An unknown mark fails as retryable guidance —
 /// capture again — rather than acting on a guess.
-fn build_action(cu: &ComputerUseState, call: &ToolCallRecord) -> Result<CuAction, StoredResolution> {
-    let invalid =
-        || unavailable("invalid_request", "The computer-use request was not available.");
+fn build_action(
+    cu: &ComputerUseState,
+    call: &ToolCallRecord,
+) -> Result<CuAction, StoredResolution> {
+    let invalid = || {
+        unavailable(
+            "invalid_request",
+            "The computer-use request was not available.",
+        )
+    };
     match call.name.as_str() {
         COMPUTER_LIST_WINDOWS_TOOL => {
             let args: ComputerListWindowsArgs =
@@ -715,9 +717,7 @@ fn build_action(cu: &ComputerUseState, call: &ToolCallRecord) -> Result<CuAction
             let args: ComputerCaptureScreenArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
             let target = match args.app_id {
-                Some(bundle_id) => {
-                    openwave_host_broker::CaptureTargetWire::App { bundle_id }
-                }
+                Some(bundle_id) => openwave_host_broker::CaptureTargetWire::App { bundle_id },
                 None => openwave_host_broker::CaptureTargetWire::Display {
                     display_id: args.display_id,
                 },
@@ -826,8 +826,7 @@ fn resolve_target(
     target: &openwave_core::ElementTargetArgs,
 ) -> Result<ElementTargetWire, StoredResolution> {
     if let Some(mark) = target.mark {
-        let Some((element_id, element_fingerprint)) =
-            cu.resolve_mark(chat_id.0, bundle_id, mark)
+        let Some((element_id, element_fingerprint)) = cu.resolve_mark(chat_id.0, bundle_id, mark)
         else {
             return Err(unavailable(
                 "stale_mark",
@@ -941,14 +940,12 @@ async fn dispatch_broker(
             dispatch_confirmation(app, state, call, held).await
         }
         Ok(result) => map_result(app, state, context, call, result).await,
-        Err(error) => {
-            match map_broker_error(&error) {
-                BrokerFailure::ConsentRequired => {
-                    dispatch_consent(app, state, context, call, request).await
-                }
-                BrokerFailure::Resolution(resolution) => resolution,
+        Err(error) => match map_broker_error(&error) {
+            BrokerFailure::ConsentRequired => {
+                dispatch_consent(app, state, context, call, request).await
             }
-        }
+            BrokerFailure::Resolution(resolution) => resolution,
+        },
     }
 }
 
@@ -960,10 +957,7 @@ enum BrokerFailure {
 }
 
 fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
-    let BrokerClientError::Broker {
-        code, message, ..
-    } = error
-    else {
+    let BrokerClientError::Broker { code, message, .. } = error else {
         // Transport-layer failures say nothing about authorization and must
         // not surface broker internals to the model.
         return BrokerFailure::Resolution(unavailable(
@@ -1044,10 +1038,13 @@ async fn dispatch_consent(
     let (sender, receiver) = oneshot::channel();
     {
         let mut prompts = lock(&cu.prompts);
-        prompts.insert(call.id, PendingPrompt::Consent {
-            view,
-            decision: sender,
-        });
+        prompts.insert(
+            call.id,
+            PendingPrompt::Consent {
+                view,
+                decision: sender,
+            },
+        );
     }
     emit_state(app, cu);
     let decision = tokio::select! {
@@ -1063,7 +1060,10 @@ async fn dispatch_consent(
     let conversation_subject = match GrantSubject::conversation(call.chat_id.0) {
         Ok(subject) => subject,
         Err(_) => {
-            return unavailable("invalid_request", "The computer-use request was not available.")
+            return unavailable(
+                "invalid_request",
+                "The computer-use request was not available.",
+            )
         }
     };
     let (capability_wire, grant_subject) = match decision {
@@ -1179,10 +1179,13 @@ async fn dispatch_confirmation(
     let (sender, receiver) = oneshot::channel();
     {
         let mut prompts = lock(&cu.prompts);
-        prompts.insert(call.id, PendingPrompt::Confirmation {
-            view,
-            decision: sender,
-        });
+        prompts.insert(
+            call.id,
+            PendingPrompt::Confirmation {
+                view,
+                decision: sender,
+            },
+        );
     }
     emit_state(app, cu);
     let confirmed = tokio::select! {
@@ -1194,7 +1197,11 @@ async fn dispatch_confirmation(
 
     if !confirmed {
         return unavailable(
-            if cu.is_halted() { "stopped_by_user" } else { "confirmation_declined" },
+            if cu.is_halted() {
+                "stopped_by_user"
+            } else {
+                "confirmation_declined"
+            },
             if cu.is_halted() {
                 "The user stopped computer control. Do not retry this or any further control action; tell the user control was stopped."
             } else {
@@ -1441,10 +1448,9 @@ fn map_control_error(error: &BrokerClientError) -> StoredResolution {
 
 fn completed(result: serde_json::Value) -> StoredResolution {
     match serde_json::to_string(&result) {
-        Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => StoredResolution::Completed {
-            result,
-            rows: None,
-        },
+        Ok(result) if result.len() <= MAX_RESULT_CONTENT_BYTES => {
+            StoredResolution::Completed { result, rows: None }
+        }
         _ => unavailable(
             "result_too_large",
             "The computer-use result was too large to return. Narrow the request and retry.",
@@ -1491,7 +1497,11 @@ mod tests {
     fn a_mark_resolves_to_its_element_from_the_latest_capture() {
         let cu = ComputerUseState::default();
         let chat = Uuid::new_v4();
-        cu.remember_marks(chat, "com.example.app", vec![mark(1, "0.1"), mark(2, "0.4.2")]);
+        cu.remember_marks(
+            chat,
+            "com.example.app",
+            vec![mark(1, "0.1"), mark(2, "0.4.2")],
+        );
 
         let wire = resolve_target(
             &cu,
@@ -1536,7 +1546,10 @@ mod tests {
             &target_with_mark(7),
         )
         .expect_err("an unknown mark must not act");
-        let StoredResolution::Failed { error_code, result, .. } = &missing else {
+        let StoredResolution::Failed {
+            error_code, result, ..
+        } = &missing
+        else {
             panic!("an unknown mark fails the call");
         };
         assert_eq!(error_code, "stale_mark");
@@ -1578,7 +1591,10 @@ mod tests {
         } else {
             unreachable!("the latch was just set")
         };
-        let StoredResolution::Failed { error_code, result, .. } = &resolution else {
+        let StoredResolution::Failed {
+            error_code, result, ..
+        } = &resolution
+        else {
             panic!("a halted control op fails the call");
         };
         assert_eq!(error_code, "stopped_by_user");
@@ -1614,13 +1630,16 @@ mod tests {
 
         let action = build_action(
             &cu,
-            &call(COMPUTER_CLICK_TOOL, serde_json::json!({
-                "app_id": "com.example.app",
-                "element_id": "0.1",
-                "element_fingerprint": "fp",
-                "button": "right",
-                "double": true,
-            })),
+            &call(
+                COMPUTER_CLICK_TOOL,
+                serde_json::json!({
+                    "app_id": "com.example.app",
+                    "element_id": "0.1",
+                    "element_fingerprint": "fp",
+                    "button": "right",
+                    "double": true,
+                }),
+            ),
         );
         let Ok(CuAction::Broker(OperationRequest::CuClick {
             bundle_id,
@@ -1637,11 +1656,14 @@ mod tests {
 
         let action = build_action(
             &cu,
-            &call(COMPUTER_KEY_PRESS_TOOL, serde_json::json!({
-                "app_id": "com.example.app",
-                "key": "return",
-                "modifiers": ["cmd", "shift"],
-            })),
+            &call(
+                COMPUTER_KEY_PRESS_TOOL,
+                serde_json::json!({
+                    "app_id": "com.example.app",
+                    "key": "return",
+                    "modifiers": ["cmd", "shift"],
+                }),
+            ),
         );
         let Ok(CuAction::Broker(OperationRequest::CuKeyPress { key, modifiers, .. })) = action
         else {
@@ -1672,7 +1694,10 @@ mod tests {
         };
         assert_eq!(seconds, 2.5);
         assert!(matches!(
-            build_action(&cu, &call(COMPUTER_RETURN_TO_OPENWAVE_TOOL, serde_json::json!({}))),
+            build_action(
+                &cu,
+                &call(COMPUTER_RETURN_TO_OPENWAVE_TOOL, serde_json::json!({}))
+            ),
             Ok(CuAction::ReturnToOpenwave)
         ));
     }
