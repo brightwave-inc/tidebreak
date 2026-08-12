@@ -3327,7 +3327,7 @@ fn error_response(error: BrokerError) -> ErrorResponse {
                 true,
             ),
             BackendErrorKind::Yielded => (
-                ErrorCode::Denied,
+                ErrorCode::Yielded,
                 "a system security surface owns the foreground",
                 false,
             ),

@@ -74,11 +74,6 @@ const MAX_WINDOW_ROWS: usize = 64;
 const MAX_MARK_TABLES: usize = 64;
 /// Mark numbers are 1-based; mirrors the core contract's bound.
 const MAX_CACHED_MARKS: usize = tidebreak_core::MAX_MARK as usize;
-/// The broker's exact words when auto-yield refuses an op. `ErrorCode::Denied`
-/// covers a grant miss, the blocklist, and a yield; the blocklist is
-/// pre-checked natively, so this message is what tells a security-surface
-/// yield (hard stop, no consent card) apart from a grant miss (consent card).
-const YIELD_MESSAGE: &str = "a system security surface owns the foreground";
 /// Renderer event carrying the full control/consent snapshot on every change.
 const STATE_EVENT: &str = "computer-use-state-changed";
 /// A control op touches the indicator as recently active for this long after
@@ -957,7 +952,7 @@ enum BrokerFailure {
 }
 
 fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
-    let BrokerClientError::Broker { code, message, .. } = error else {
+    let BrokerClientError::Broker { code, .. } = error else {
         // Transport-layer failures say nothing about authorization and must
         // not surface broker internals to the model.
         return BrokerFailure::Resolution(unavailable(
@@ -966,20 +961,14 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
         ));
     };
     match code {
-        ErrorCode::Denied => {
-            // A yield is a hard stop, never a consent prompt. The blocklist was
-            // pre-checked natively, so any other Denied is a grant miss — every
-            // computer-use op names a grantable capability (a display capture
-            // or screen-wide window list asks for the whole-screen scope).
-            if message == YIELD_MESSAGE {
-                BrokerFailure::Resolution(unavailable(
-                    "control_yielded",
-                    "A system security surface owns the foreground, so the action was refused. Do not retry; tell the user what you were trying to do.",
-                ))
-            } else {
-                BrokerFailure::ConsentRequired
-            }
-        }
+        ErrorCode::Yielded => BrokerFailure::Resolution(unavailable(
+            "control_yielded",
+            "A system security surface owns the foreground, so the action was refused. Do not retry; tell the user what you were trying to do.",
+        )),
+        // The blocklist was pre-checked natively, so Denied is a grant miss —
+        // every computer-use op names a grantable capability (a display
+        // capture or screen-wide window list asks for the whole-screen scope).
+        ErrorCode::Denied => BrokerFailure::ConsentRequired,
         ErrorCode::OsPermissionDenied => BrokerFailure::Resolution(unavailable(
             "os_permission_required",
             "macOS has not granted OpenWave Screen Recording and Accessibility. Ask the user to enable them in Settings, then retry.",
@@ -1734,8 +1723,8 @@ mod tests {
     #[test]
     fn a_yield_maps_to_a_hard_refusal_not_a_consent_prompt() {
         let error = BrokerClientError::Broker {
-            code: ErrorCode::Denied,
-            message: YIELD_MESSAGE.to_owned(),
+            code: ErrorCode::Yielded,
+            message: "wording is not the contract".to_owned(),
             retryable: false,
         };
         match map_broker_error(&error) {
@@ -1745,9 +1734,11 @@ mod tests {
             _ => panic!("a yield must never become a consent card"),
         }
 
+        // Denied is a grant miss even if the message still uses the former
+        // yield sentence — the code is the contract, not the English.
         let grant_miss = BrokerClientError::Broker {
             code: ErrorCode::Denied,
-            message: "host operation was denied".to_owned(),
+            message: "a system security surface owns the foreground".to_owned(),
             retryable: false,
         };
         assert!(matches!(

@@ -4748,6 +4748,17 @@ impl CuFixture {
 }
 
 #[test]
+fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
+    let response = error_response(BrokerError::ComputerUse(BackendError {
+        kind: BackendErrorKind::Yielded,
+        message: "helper wording is not the contract".to_owned(),
+    }));
+    assert_eq!(response.code, ErrorCode::Yielded);
+    assert_ne!(response.code, ErrorCode::Denied);
+    assert!(!response.retryable);
+}
+
+#[test]
 fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
     let fixture = cu_setup();
     // The blocklist outranks consent: mint a grant for a blocked bundle by

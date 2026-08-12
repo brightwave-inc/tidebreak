@@ -662,6 +662,10 @@ pub enum ErrorCode {
     /// label changed since it was read. Retryable: re-read the accessibility
     /// tree and re-issue against the fresh element.
     StaleElement,
+    /// A control op backed off because a security surface owns the foreground.
+    /// Distinct from [`ErrorCode::Denied`]: the remedy is to back off, never a
+    /// per-app consent card.
+    Yielded,
 }
 
 /// Safe error payload; it never embeds an absolute path or raw OS error text.
