@@ -3210,6 +3210,39 @@ fn version_four_files_load_and_recover_their_settled_positions() {
 }
 
 #[test]
+fn a_current_version_file_is_not_reinterpreted_on_load() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    drop(broker);
+
+    // A current-version file says for itself which positions are settled. The
+    // reconstruction that reads positions out of attachments and registrations
+    // applies only to files that predate the record; if it ran here it would
+    // stand in for the evidence the validation rules look for, and this file —
+    // an attachment with no grant behind it and no recorded position — would be
+    // accepted instead of refused.
+    let state_path = state_dir.join("host-broker-state.json");
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    persisted["grants"] = serde_json::json!([]);
+    persisted["settled"] = serde_json::json!([]);
+    std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    assert!(
+        Broker::open(test_policy(&temp), &state_dir).is_err(),
+        "a current-version file must be validated as written, not reinterpreted"
+    );
+}
+
+#[test]
 fn binary_reads_return_bytes_that_text_reads_refuse() {
     let (_temp, broker, path, audit) = audited_setup();
     // A minimal PDF header followed by a byte sequence that is not valid UTF-8.

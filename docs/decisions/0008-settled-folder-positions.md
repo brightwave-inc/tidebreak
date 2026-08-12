@@ -128,6 +128,14 @@ of the pressure this record absorbs comes from the two keys, and a design where
 an attachment and a grant name the same thing could carry the answer on the
 grant itself.
 
+Revisit the reconstruction path separately, and earlier. It applies only to
+files below the current version, and its inferences are deliberately looser than
+what the live code records — an attachment settles its own conversation's
+subject, which the live code never does for a chat in a project. Once version 2
+through 4 files can be assumed gone from the installed base, the whole seeding
+block is deletable, and deleting it removes the only place where a load writes
+positions nobody answered for.
+
 ## Validation
 
 - An arrival into an emptied position mints nothing: revoke every root-scoped

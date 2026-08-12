@@ -45,8 +45,9 @@ struct PersistedState {
     attachments: Vec<RootAttachment>,
     mutations: Vec<PersistedMutation>,
     /// Folder positions this install has already settled. Absent in files
-    /// written before version 5, where it is recovered from the grants that
-    /// survive — see [`StateFile::load`].
+    /// written before version 5, where it is reconstructed from the grants,
+    /// attachments, and registration owners that survive — see
+    /// [`StateFile::load`].
     #[serde(default)]
     settled: Vec<PersistedSettledRoot>,
 }
@@ -192,25 +193,35 @@ impl StateFile {
         // position is recovered from the registration owner instead. A position
         // none of the three reaches re-mints once on its next arrival and is
         // settled from then on.
-        let mut settled: HashSet<(GrantSubject, RootId)> = grants
-            .iter()
-            .filter_map(|grant| match grant.scope() {
+        //
+        // All three are inferences, and they only apply to a file that predates
+        // the record. A file that carries the record has already said which
+        // positions are settled, and inferring more on top of it would write
+        // back positions the live code never settles — an attachment's own
+        // conversation subject, where the grants sit on the project — turning a
+        // one-time migration into a permanent rewrite. It would also stand in
+        // for the evidence the validation rules below look for, so a row with
+        // neither a grant nor a recorded position would satisfy them by
+        // construction.
+        let mut settled: HashSet<(GrantSubject, RootId)> = HashSet::new();
+        if persisted.version < STATE_VERSION {
+            settled.extend(grants.iter().filter_map(|grant| match grant.scope() {
                 Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => {
                     Some((grant.subject(), *root_id))
                 }
                 Scope::Subject => None,
-            })
-            .collect();
-        for attachment in &attachments {
-            if let Ok(subject) = GrantSubject::conversation(attachment.conversation_id()) {
-                settled.insert((subject, attachment.root_id()));
+            }));
+            for attachment in &attachments {
+                if let Ok(subject) = GrantSubject::conversation(attachment.conversation_id()) {
+                    settled.insert((subject, attachment.root_id()));
+                }
             }
-        }
-        for (root_id, root) in &roots {
-            settled.insert((root.owner, *root_id));
-        }
-        for root in &unavailable {
-            settled.insert((root.owner, root.id));
+            for (root_id, root) in &roots {
+                settled.insert((root.owner, *root_id));
+            }
+            for root in &unavailable {
+                settled.insert((root.owner, root.id));
+            }
         }
         settled.extend(
             persisted
