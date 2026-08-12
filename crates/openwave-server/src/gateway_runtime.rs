@@ -576,8 +576,16 @@ impl GatewayRuntime {
                         Ok(()) => {
                             // Best-effort: a failed first sync leaves an
                             // explicit refresh affordance, not a failed
-                            // sign-in.
-                            let _ = runtime.sync_models().await;
+                            // sign-in — but say so in the log, or support
+                            // cannot tell an empty model list from a sync
+                            // that never ran.
+                            if let Err(error) = runtime.sync_models().await {
+                                tracing::warn!(
+                                    "gateway model sync after sign-in failed \
+                                     (the background sync will retry): {}",
+                                    error.message()
+                                );
+                            }
                             // Likewise: mount-by-default must never fail a
                             // sign-in, and the background sync retries it.
                             if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
@@ -1648,6 +1656,68 @@ mod tests {
             crate::providers::ProviderKind::ModelGateway
         );
         assert_eq!(policy.display_name, "Sample Claude");
+    }
+
+    /// The boot-before-sign-in race: a status or sync read caches the
+    /// keychain's `NoEntry`, and the session then lands without the cache
+    /// observing the write — a read that was in flight while sign-in
+    /// completed stores its stale miss *after* the write's invalidation, and
+    /// a session written by another process never invalidates at all. The
+    /// gateway session key's misses are not memoized
+    /// (`CachingSecretProvider::with_miss_passthrough`), so the next
+    /// background tick sees the session with no restart and no manual sync.
+    #[tokio::test]
+    async fn a_session_written_behind_the_secret_cache_syncs_without_a_restart() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let inner = Arc::new(MockSecrets::default());
+        // The same wrap `secret_provider` in lib.rs applies at boot.
+        let secrets: Arc<dyn SecretProvider> = Arc::new(
+            openwave_core::CachingSecretProvider::new(inner.clone())
+                .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
+        );
+        crate::managed_policy::provision(&*store, &base)
+            .await
+            .unwrap();
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        );
+
+        // Boot before sign-in: the tick reads the empty store. Were the miss
+        // memoized, this is the read that would hide the session forever.
+        assert_eq!(runtime.sync_models_if_connected().await.unwrap(), None);
+
+        // The session lands behind the cache's back, straight into the store.
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "account_hint": "abaas@example.test",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        inner
+            .set_secret(
+                crate::connectors::GATEWAY_SECRET_KEY,
+                &serde_json::to_string(&credentials).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The very next tick recovers — no restart, no manual sync click.
+        assert_eq!(runtime.sync_models_if_connected().await.unwrap(), Some(2));
     }
 
     /// A gateway that serves a model under its upstream id is serving that
