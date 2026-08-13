@@ -270,13 +270,17 @@ export function useModelSettingsNav(): {
 }
 
 /**
- * Per-chat model selector for the message bar. `null` means "use the default"
- * — the global default model, or the server's own when none is set.
+ * Per-chat model selector for the message bar. `null` means follow the
+ * global chat role — the model Settings names, or the server's own when
+ * none is set.
  *
- * `defaultKey` is the catalog key the server says that fallback resolves to,
- * so the default can be named rather than described. It is absent only when
- * the server's fallback is not something the catalog can name, and the copy
- * then says nothing rather than guessing.
+ * The trigger always names that model. "Default" is a mode, not a model,
+ * and a fresh install has neither a configured provider nor a model that
+ * can run, so the pill must not pretend one is selected.
+ *
+ * `defaultKey` is the catalog key the server says that fallback resolves
+ * to. It is only treated as selected when that row can actually run; the
+ * boot default is still a catalog row when nothing is credentialed.
  *
  * The list is the curated one: recommended models, plus whatever the reader
  * has overridden, plus this chat's own model however it is flagged. The
@@ -317,6 +321,10 @@ export function ModelMenu({
   const canonical = canonicalModelSelection(models, value);
   const isDefault = value === null;
   const resolvedDefault = modelForSelection(models, defaultKey);
+  // A catalog hit is not enough: first install still resolves the boot
+  // default, and that row cannot run until its provider is configured.
+  const usableDefault =
+    resolvedDefault?.available === true ? resolvedDefault : null;
   const anyAvailable = models.some((model) => model.available);
   const groups = visibleModelGroups(models, canonical, visibilityOverrides);
   const unconfigured = notConnectedProviders(models, providers, managed);
@@ -328,22 +336,23 @@ export function ModelMenu({
     (state) => state.toggleModelMenuNotConnected,
   );
 
-  const label = isDefault ? "Default" : (known?.display_name ?? `${value} (unavailable)`);
-  // The pill names the default's resolution too: the reader is hovering the
-  // control precisely because "Default" does not tell them what will run.
+  const label = isDefault
+    ? (usableDefault?.display_name ?? "No model")
+    : (known?.display_name ?? `${value} (unavailable)`);
   const triggerLabel =
-    isDefault && resolvedDefault
-      ? `Model: Default (${resolvedDefault.display_name})`
-      : `Model: ${label}`;
-  const defaultTooltip = resolvedDefault
+    isDefault && !usableDefault ? "No model selected" : `Model: ${label}`;
+  const defaultTooltip = usableDefault
     ? isDefault
-      ? `New turns run against the default model. Currently: ${resolvedDefault.display_name}.`
-      : "Override active. Toggle Default to go back to the default model."
-    : "New turns run against the default model.";
+      ? `New turns run against ${usableDefault.display_name}.`
+      : `Override active. Toggle Default to go back to ${usableDefault.display_name}.`
+    : "Toggle Default to follow the model from Settings.";
+  // Following a default that cannot run is not a mode worth offering; an
+  // override still needs the switch so the chat can return to Settings.
+  const showDefaultSwitch = usableDefault !== null || !isDefault;
 
   // The mark of whatever will actually run, so the pill reads the same whether
   // the model was chosen here or inherited.
-  const pillModel = known ?? (isDefault ? resolvedDefault : null);
+  const pillModel = known ?? (isDefault ? usableDefault : null);
 
   // Controlled so every path that changes the chat's model closes the menu —
   // including the Default switch, which is a selection like any row but is not
@@ -379,37 +388,39 @@ export function ModelMenu({
         className="model-menu-content w-80 overflow-y-auto p-0"
       >
         <div className="flex flex-col gap-1 p-1">
-          <DefaultRow
-            isDefault={isDefault}
-            tooltip={defaultTooltip}
-            // With nothing available, turning the default off has nowhere to
-            // land — freeze the switch instead of letting it snap back;
-            // flipping back *to* the default must always stay possible.
-            disabled={Boolean(disabled) || (isDefault && !anyAvailable)}
-            onToggle={(useDefault) => {
-              if (useDefault) {
-                void onChange(null);
-                setOpen(false);
-                return;
-              }
-              // Turning the default off has to land on something; the first
-              // model as the menu renders them, so the check appears at the
-              // top of the list rather than mid-scroll.
-              const first = firstAvailableModel(
-                models,
-                canonical,
-                visibilityOverrides,
-              );
-              if (first) {
-                void onChange(first.key);
-                setOpen(false);
-              }
-            }}
-          />
+          {showDefaultSwitch && (
+            <DefaultRow
+              isDefault={isDefault}
+              tooltip={defaultTooltip}
+              // With nothing available, turning the default off has nowhere to
+              // land — freeze the switch instead of letting it snap back;
+              // flipping back *to* the default must always stay possible.
+              disabled={Boolean(disabled) || (isDefault && !anyAvailable)}
+              onToggle={(useDefault) => {
+                if (useDefault) {
+                  void onChange(null);
+                  setOpen(false);
+                  return;
+                }
+                // Turning the default off has to land on something; the first
+                // model as the menu renders them, so the check appears at the
+                // top of the list rather than mid-scroll.
+                const first = firstAvailableModel(
+                  models,
+                  canonical,
+                  visibilityOverrides,
+                );
+                if (first) {
+                  void onChange(first.key);
+                  setOpen(false);
+                }
+              }}
+            />
+          )}
 
           {!anyAvailable && (
             <div>
-              <DropdownMenuSeparator />
+              {showDefaultSwitch && <DropdownMenuSeparator />}
               <p className="text-muted-foreground px-2 py-2 text-sm">
                 {managed
                   ? "Models are provided by your organization's gateway. None are available yet — contact your administrator."
@@ -418,9 +429,9 @@ export function ModelMenu({
             </div>
           )}
 
-          {groups.map((group) => (
+          {groups.map((group, index) => (
             <div key={group.provider}>
-              <DropdownMenuSeparator />
+              {(showDefaultSwitch || index > 0) && <DropdownMenuSeparator />}
               {/* A plain header rather than a menu item: it names the run, and
                   arrowing through the picker should land on models only. The
                   same vendor can arrive from two providers (natively and via
@@ -429,7 +440,9 @@ export function ModelMenu({
                 {providerLabel(group.provider)}
               </div>
               {group.models.map((model) => {
-                const selected = !isDefault && canonical === model.key;
+                const selected = isDefault
+                  ? usableDefault?.key === model.key
+                  : canonical === model.key;
                 return (
                   <DropdownMenuItem
                     key={model.key}
@@ -443,10 +456,7 @@ export function ModelMenu({
                       if (selected || !model.available) return;
                       void onChange(model.key);
                     }}
-                    className={cn(
-                      "flex items-center gap-2",
-                      isDefault && "opacity-60",
-                    )}
+                    className="flex items-center gap-2"
                   >
                     <ProviderIcon
                       provider={model.vendor ?? model.provider}
