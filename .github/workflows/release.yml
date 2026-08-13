@@ -5,7 +5,7 @@ run-name: >-
     && format('Dispatch desktop {0}', github.event.release.tag_name)
     || github.event_name == 'workflow_call'
     && format('Publish staging desktop {0}', inputs.version)
-    || format('Publish desktop {0}', inputs.release_tag) }}
+    || format('Publish desktop {0}', github.event.inputs.release_tag) }}
 
 on:
   release:
@@ -88,12 +88,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: refs/tags/${{ github.event.inputs.release_tag }}
       - name: Validate the published release and derive its product version
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
         run: |
           node scripts/check-release-tag.mjs "$RELEASE_TAG"
 
