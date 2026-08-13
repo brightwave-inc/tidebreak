@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::VecDeque;
+
 use tidebreak_core::UtilityModel;
 
 use crate::chat_titling::ChatTitler;
@@ -21,7 +23,11 @@ const CHAT_MODEL: &str = "gpt-5.6-sol";
 /// credentialed provider and differ only in what they ask for.
 struct TitlingStub {
     requests: Mutex<Vec<serde_json::Value>>,
-    title_answer: String,
+    title_answers: Mutex<VecDeque<String>>,
+    fallback_title_answer: String,
+    pause_next_title: AtomicBool,
+    title_entered: Notify,
+    release_title: Notify,
 }
 
 impl TitlingStub {
@@ -41,8 +47,17 @@ async fn answer_as_stub(
     axum::extract::State(stub): axum::extract::State<Arc<TitlingStub>>,
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> impl axum::response::IntoResponse {
-    let text = if request.get("text").is_some() {
-        stub.title_answer.clone()
+    let is_title = request.get("text").is_some();
+    if is_title && stub.pause_next_title.swap(false, Ordering::SeqCst) {
+        stub.title_entered.notify_one();
+        stub.release_title.notified().await;
+    }
+    let text = if is_title {
+        stub.title_answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| stub.fallback_title_answer.clone())
     } else {
         ASSISTANT_ANSWER.to_owned()
     };
@@ -73,9 +88,37 @@ async fn titling_app(
     Arc<TitlingStub>,
     tempfile::TempDir,
 ) {
+    titling_app_with_answers(&[title_answer]).await
+}
+
+/// The same app with a sequence of constrained answers, followed by the last
+/// answer forever. This makes transient failures observable without changing
+/// how the conversation's own turn is answered.
+async fn titling_app_with_answers(
+    title_answers: &[&str],
+) -> (
+    Router,
+    String,
+    Arc<dyn Store>,
+    Arc<TitlingStub>,
+    tempfile::TempDir,
+) {
+    let fallback_title_answer = title_answers
+        .last()
+        .expect("a titling stub needs at least one answer")
+        .to_string();
     let stub = Arc::new(TitlingStub {
         requests: Mutex::new(Vec::new()),
-        title_answer: title_answer.to_owned(),
+        title_answers: Mutex::new(
+            title_answers
+                .iter()
+                .map(|answer| answer.to_string())
+                .collect(),
+        ),
+        fallback_title_answer,
+        pause_next_title: AtomicBool::new(false),
+        title_entered: Notify::new(),
+        release_title: Notify::new(),
     });
     let endpoint = axum::Router::new()
         .route("/v1/responses", axum::routing::post(answer_as_stub))
@@ -235,6 +278,87 @@ async fn a_conversation_with_nothing_to_name_stays_untitled() {
         store.get_chat(chat.id).await.unwrap().unwrap().title,
         None,
         "declining is a valid answer, and it leaves the chat named by nobody",
+    );
+}
+
+/// A broken provider stream is background-maintenance noise, not a reason to
+/// leave a real conversation unnamed when the next call would have worked.
+#[tokio::test(flavor = "multi_thread")]
+async fn titling_retries_transient_failures_before_giving_up() {
+    let (router, bearer, store, stub, _dir) = titling_app_with_answers(&[
+        "not json",
+        r#"{"wrong":"shape"}"#,
+        r#"{"title":"Q3 revenue reconciliation"}"#,
+    ])
+    .await;
+    let chat = make_chat(&router, &bearer).await;
+
+    send_message(&router, &bearer, chat.id, "Reconcile Q3 revenue for me").await;
+
+    assert_eq!(
+        wait_for_title(&store, chat.id).await.as_deref(),
+        Some("Q3 revenue reconciliation"),
+    );
+    assert_eq!(
+        wait_for_titling_requests(&stub, 3).await.len(),
+        3,
+        "one background run gets the initial call plus two retries",
+    );
+}
+
+/// Exhausting one run must release the in-flight claim. The next accepted user
+/// message reaches the same front-of-turn hook and starts a fresh set of tries.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_untitled_chat_tries_again_on_the_next_user_message() {
+    let (router, bearer, store, stub, _dir) = titling_app("not json").await;
+    let chat = make_chat(&router, &bearer).await;
+
+    send_message(&router, &bearer, chat.id, "Reconcile Q3 revenue for me").await;
+    wait_for_turn(&store, chat.id).await;
+    assert_eq!(wait_for_titling_requests(&stub, 3).await.len(), 3);
+    assert_eq!(store.get_chat(chat.id).await.unwrap().unwrap().title, None);
+
+    send_message(&router, &bearer, chat.id, "Use the ledger export too").await;
+    assert_eq!(
+        wait_for_titling_requests(&stub, 6).await.len(),
+        6,
+        "the next user submission starts another three-attempt run",
+    );
+    assert_eq!(store.get_chat(chat.id).await.unwrap().unwrap().title, None);
+}
+
+/// The next turn may start after the foreground answer finishes but before the
+/// background titler does. Its trigger must queue behind the in-flight run,
+/// rather than disappearing because the per-chat claim was already held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_next_message_queued_while_titling_runs_gets_its_own_attempt() {
+    let (router, bearer, store, stub, _dir) = titling_app_with_answers(&[
+        "not json",
+        "not json",
+        "not json",
+        r#"{"title":"Q3 revenue reconciliation"}"#,
+    ])
+    .await;
+    let chat = make_chat(&router, &bearer).await;
+    stub.pause_next_title.store(true, Ordering::SeqCst);
+
+    send_message(&router, &bearer, chat.id, "Reconcile Q3 revenue for me").await;
+    tokio::time::timeout(Duration::from_secs(5), stub.title_entered.notified())
+        .await
+        .expect("the first titling request did not start");
+    wait_for_turn(&store, chat.id).await;
+
+    send_message(&router, &bearer, chat.id, "Use the ledger export too").await;
+    stub.release_title.notify_one();
+
+    assert_eq!(
+        wait_for_title(&store, chat.id).await.as_deref(),
+        Some("Q3 revenue reconciliation"),
+    );
+    assert_eq!(
+        wait_for_titling_requests(&stub, 4).await.len(),
+        4,
+        "the queued user turn runs after the first three-attempt batch fails",
     );
 }
 

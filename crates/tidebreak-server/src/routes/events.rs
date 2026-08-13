@@ -45,23 +45,17 @@ pub async fn chat_events(
     headers: axum::http::HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
-    let chat = store.require_chat(id).await?;
+    store.require_chat(id).await?;
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
     } else {
         upgrade
     };
-    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after, chat.title)))
+    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after)))
 }
 
 /// Serve one client's event stream for `chat`: replay from the journal, then live.
-async fn stream_events(
-    mut socket: WebSocket,
-    state: AppState,
-    chat: ChatId,
-    after: i64,
-    title: Option<String>,
-) {
+async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, after: i64) {
     // Subscribe before replaying, so an event emitted during replay is buffered on
     // the live channel rather than lost in the gap between the two.
     let mut live = state.events.subscribe(chat);
@@ -69,11 +63,20 @@ async fn stream_events(
     // and nothing replays it.
     let mut metadata = state.events.subscribe_metadata(chat);
 
-    // The name is state rather than an event, so the socket opens by stating it
-    // and every reconnect restates it. Nothing retains a notice for a client that
-    // was not listening yet, and the common case is exactly that: a new chat's
-    // first turn can name it before the renderer finishes connecting. A client
-    // that already knows this name does nothing with it.
+    // Subscribe before reading the durable name. If titling commits between the
+    // route's existence check and this read, the read sees it; if it commits
+    // after the read, the subscribed metadata channel sees its notice. The two
+    // may both deliver the same title, which clients deliberately deduplicate,
+    // but there is no ordering in which both miss it.
+    //
+    // The name is state rather than an event, so every reconnect restates it.
+    // Nothing retains a notice for a client that was not listening yet, and the
+    // common case is exactly that: a new chat's first turn can name it before
+    // the renderer finishes connecting.
+    let title = match state.store.get_chat(chat).await {
+        Ok(Some(chat)) => chat.title,
+        Ok(None) | Err(_) => return,
+    };
     if let Some(title) = title {
         if send_frame(
             &mut socket,

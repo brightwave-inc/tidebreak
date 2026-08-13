@@ -22,7 +22,7 @@
 //! greeting: the title outlives the exchange that produced it, so declining is
 //! the better answer while there is nothing to name.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
@@ -57,6 +57,16 @@ const MAX_TITLE_SOURCE_MESSAGE_BYTES: usize = 2 * 1024;
 /// Generous for a short JSON object, so a model that reasons before answering
 /// still has room to emit the object it was constrained to.
 const TITLE_MAX_OUTPUT_TOKENS: u32 = 512;
+
+/// Total provider calls one background titling run may make.
+///
+/// Titling is cheap, invisible maintenance, and a transient broken stream
+/// should not leave a useful conversation unnamed until the reader happens to
+/// send another message. Three attempts cover the ordinary one-off transport
+/// and provider failures without turning a background convenience into a retry
+/// loop. If all three fail, the chat stays untitled and the next user turn
+/// starts a fresh run.
+const TITLE_ATTEMPTS: usize = 3;
 
 /// Largest completion accepted before the call is abandoned.
 const MAX_TITLE_COMPLETION_BYTES: usize = 4 * 1024;
@@ -120,12 +130,13 @@ pub(crate) struct ChatTitler {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     events: Arc<EventBus>,
-    /// Conversations with a titling call in flight.
+    /// Conversations with a titling call in flight, and at most one utility
+    /// model queued by a user turn that arrived while that call was running.
     ///
     /// Every turn on an untitled chat would otherwise start another call: a
     /// conversation that stays untitled — because it is still small talk, or
     /// because the calls keep failing — would pay for one on every message.
-    in_flight: Mutex<HashSet<ChatId>>,
+    in_flight: Mutex<HashMap<ChatId, Option<UtilityModel>>>,
 }
 
 impl ChatTitler {
@@ -140,7 +151,7 @@ impl ChatTitler {
             store,
             resolver,
             events,
-            in_flight: Mutex::new(HashSet::new()),
+            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -150,28 +161,44 @@ impl ChatTitler {
     /// it does not arrive, which is what lets this be called from the front of a
     /// turn rather than bolted onto each of its completion paths.
     pub(crate) fn spawn(self: &Arc<Self>, chat_id: ChatId, utility: UtilityModel) {
-        let Some(claim) = TitlingClaim::acquire(self, chat_id) else {
+        let Some((mut claim, mut utility)) = TitlingClaim::acquire(self, chat_id, utility) else {
             return;
         };
         let titler = self.clone();
         tokio::spawn(async move {
             // Held for the duration, released on drop, so a call that returns
             // early — or panics — does not lock the chat out of a later attempt.
-            let _claim = claim;
-            // Logged either way. The work is invisible by design — no event, no
-            // turn outcome — so without a line here the only way to tell a
-            // declined title from a broken one is to read the database.
-            match titler.derive_title(chat_id, &utility).await {
-                Ok(Some(title)) => {
-                    eprintln!(
-                        "tidebreak: titled chat {chat_id} on {}: {title}",
-                        utility.model
-                    )
+            loop {
+                // Logged either way. The work is invisible by design — no
+                // event, no turn outcome — so without a line here the only way
+                // to tell a declined title from a broken one is to read the
+                // database.
+                let should_run_pending = match titler.derive_title(chat_id, &utility).await {
+                    Ok(Some(title)) => {
+                        eprintln!(
+                            "tidebreak: titled chat {chat_id} on {}: {title}",
+                            utility.model
+                        );
+                        false
+                    }
+                    Ok(None) => {
+                        eprintln!("tidebreak: left chat {chat_id} untitled");
+                        true
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "tidebreak: could not derive a title for chat {chat_id}: {error}"
+                        );
+                        true
+                    }
+                };
+                if !should_run_pending {
+                    break;
                 }
-                Ok(None) => eprintln!("tidebreak: left chat {chat_id} untitled"),
-                Err(error) => {
-                    eprintln!("tidebreak: could not derive a title for chat {chat_id}: {error}")
-                }
+                let Some(next_utility) = claim.take_pending_or_release() else {
+                    break;
+                };
+                utility = next_utility;
             }
         });
     }
@@ -199,13 +226,35 @@ impl ChatTitler {
             return Ok(None);
         };
         let provider = self.resolver.resolve().await;
-        let Some(proposed) = request_title(provider.as_ref(), utility, &material).await? else {
-            return Ok(None);
+        let mut attempt = 1;
+        let title = loop {
+            match request_title(provider.as_ref(), utility, &material).await {
+                Ok(None) => break None,
+                Ok(Some(proposed)) => match normalize_derived_title(&proposed) {
+                    Some(title) => break Some(title),
+                    None if attempt < TITLE_ATTEMPTS => {
+                        eprintln!(
+                            "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} returned an unusable title for chat {chat_id}: {proposed:?}"
+                        );
+                        attempt += 1;
+                    }
+                    None => {
+                        return Err(AgentError::msg(format!(
+                            "titling model returned an unusable title: {proposed:?}"
+                        )))
+                    }
+                },
+                Err(error) if attempt < TITLE_ATTEMPTS => {
+                    eprintln!(
+                        "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} failed for chat {chat_id}: {error}"
+                    );
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
         };
-        let Some(title) = normalize_derived_title(&proposed) else {
-            return Err(AgentError::msg(format!(
-                "titling model returned an unusable title: {proposed:?}"
-            )));
+        let Some(title) = title else {
+            return Ok(None);
         };
         if !self.store.set_chat_title_if_unset(chat_id, &title).await? {
             return Ok(None);
@@ -226,25 +275,62 @@ impl ChatTitler {
 struct TitlingClaim {
     titler: Arc<ChatTitler>,
     chat_id: ChatId,
+    released: bool,
 }
 
 impl TitlingClaim {
-    /// Claim `chat_id`, or `None` when a titling call already holds it.
-    fn acquire(titler: &Arc<ChatTitler>, chat_id: ChatId) -> Option<Self> {
-        titler
+    /// Claim `chat_id`, or coalesce this trigger behind its running call.
+    fn acquire(
+        titler: &Arc<ChatTitler>,
+        chat_id: ChatId,
+        utility: UtilityModel,
+    ) -> Option<(Self, UtilityModel)> {
+        let mut in_flight = titler
             .in_flight
             .lock()
-            .expect("titling claims are never held across a panic")
-            .insert(chat_id)
-            .then(|| Self {
-                titler: titler.clone(),
-                chat_id,
-            })
+            .expect("titling claims are never held across a panic");
+        match in_flight.entry(chat_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(None);
+                Some((
+                    Self {
+                        titler: titler.clone(),
+                        chat_id,
+                        released: false,
+                    },
+                    utility,
+                ))
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(Some(utility));
+                None
+            }
+        }
+    }
+
+    /// Take the one trigger that arrived while this call ran. With none queued,
+    /// release atomically so a concurrent next turn either queues here or starts
+    /// a fresh task; there is no gap in which its trigger can be lost.
+    fn take_pending_or_release(&mut self) -> Option<UtilityModel> {
+        let mut in_flight = self
+            .titler
+            .in_flight
+            .lock()
+            .expect("titling claims are never held across a panic");
+        let pending = in_flight.get_mut(&self.chat_id).and_then(Option::take);
+        if pending.is_none() {
+            in_flight.remove(&self.chat_id);
+            self.released = true;
+        }
+        pending
     }
 }
 
 impl Drop for TitlingClaim {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         if let Ok(mut in_flight) = self.titler.in_flight.lock() {
             in_flight.remove(&self.chat_id);
         }

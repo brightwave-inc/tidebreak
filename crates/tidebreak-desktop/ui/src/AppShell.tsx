@@ -542,7 +542,7 @@ export function AppShell() {
     chatListActions.setSavingTitle(true);
     try {
       const updated = await client.patchChatTitle(target.id, trimmed || null);
-      chatListActions.replaceChat(updated);
+      chatListActions.replaceChat(updated, true);
       chatListActions.endRename();
     } catch (err) {
       chatListActions.setChatsError(`Could not rename chat: ${String(err)}`);
