@@ -764,8 +764,18 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   // The default token with packages:write is the whole credential surface —
   // publishing must not grow a dependency on repository secrets (that set
   // stays isolated to release.yml by the production-secrets test above).
+  // Only the jobs that push (build) or assemble the version tag (manifest)
+  // may hold packages:write; the scanner is packages:read.
   assert.match(publish, /^permissions:\n  contents: read$/m);
-  assert.match(publish, /^    permissions:\n      contents: read\n      packages: write$/m);
+  assert.equal(publish.match(/packages: write/g)?.length, 2);
+  assert.match(
+    workflowJob(publish, "build"),
+    /^    permissions:\n      contents: read\n      packages: write$/m,
+  );
+  assert.match(
+    workflowJob(publish, "manifest"),
+    /^    permissions:\n      contents: read\n      packages: write$/m,
+  );
   assert.doesNotMatch(publish, /secrets\./);
 
   // Version tags are immutable: both the per-arch build job and the manifest
@@ -789,57 +799,41 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   assert.match(publish, /PUBLISHED_IMAGE_DIGEST/);
 });
 
-test("sandbox images are scanned before push and the pin loop never touches main", () => {
+test("sandbox images are scanned in a read-only job before the version tag is published, and the pin loop never touches main", () => {
   const publish = workflows["publish-sandbox-image.yml"];
   const build = workflowJob(publish, "build");
+  const scan = workflowJob(publish, "scan");
+  const manifest = workflowJob(publish, "manifest");
   const pin = workflowJob(publish, "pin");
-  const scanJob = publish.includes("\n  scan:\n")
-    ? workflowJob(publish, "scan")
-    : null;
-  const scanner = scanJob ?? build;
 
   // The scanner is a checksum-pinned binary release, not a third-party
-  // action. It may still live in `build` (scan-before-arch-push) or in a
-  // packages:read `scan` job that gates the version-tag manifest — both
-  // keep trivy off any token that can publish the user-facing tag.
-  assert.match(scanner, /trivy_\$\{TRIVY_VERSION\}_\$\{asset\}\.tar\.gz/);
-  assert.match(scanner, /sha256sum --check/);
+  // action, and it is the only job that runs trivy. It cannot publish:
+  // packages:read, no checkout (so no persisted git credentials), and the
+  // version-tag job waits for it.
+  assert.doesNotMatch(build, /trivy/i);
+  assert.doesNotMatch(manifest, /trivy/i);
+  assert.match(scan, /trivy_\$\{TRIVY_VERSION\}_\$\{asset\}\.tar\.gz/);
+  assert.match(scan, /sha256sum --check/);
   assert.match(publish, /^  TRIVY_VERSION: \d+\.\d+\.\d+$/m);
-  if (scanJob === null) {
-    const scanIndex = build.indexOf("Scan both variants before push");
-    assert.notEqual(scanIndex, -1);
-    assert.ok(
-      build.indexOf("Build both image variants") < scanIndex &&
-        scanIndex < build.indexOf("Push per-architecture tags"),
-      "the scan must gate the per-arch push",
-    );
-  } else {
-    assert.doesNotMatch(build, /trivy/i);
-    assert.match(
-      scanJob,
-      /^    permissions:\n      contents: read\n      packages: read$/m,
-    );
-    assert.doesNotMatch(scanJob, /packages: write/);
-    assert.doesNotMatch(scanJob, /actions\/checkout/);
-    assert.match(
-      workflowJob(publish, "manifest"),
-      /needs: \[resolve, build, scan\]/,
-    );
-  }
+  assert.match(scan, /^    permissions:\n      contents: read\n      packages: read$/m);
+  assert.doesNotMatch(scan, /packages: write/);
+  assert.doesNotMatch(scan, /actions\/checkout/);
+  assert.doesNotMatch(scan, /secrets\./);
+  assert.match(manifest, /needs: \[resolve, build, scan\]/);
 
   // Policy: the run summary carries the full all-severities report, but the
   // publish fails only on fixable CRITICAL vulnerabilities or any secret. A
   // broader gate would drown in LibreOffice CVE noise and be ignored.
   assert.match(
-    scanner,
+    scan,
     /trivy image --timeout 15m --scanners vuln,secret \\\n\s+--format table --output "\$report" "\$image"/,
   );
   assert.match(
-    scanner,
+    scan,
     /trivy image --timeout 15m --scanners vuln \\\n\s+--severity CRITICAL --ignore-unfixed --exit-code 1 "\$image"/,
   );
   assert.match(
-    scanner,
+    scan,
     /trivy image --timeout 15m --scanners secret --exit-code 1 "\$image"/,
   );
 

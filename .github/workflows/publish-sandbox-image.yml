@@ -40,11 +40,14 @@ run-name: >-
 # whole sandbox under emulation there). Image tags are treated as immutable:
 # a tag that already exists on GHCR fails the run rather than being repointed.
 #
-# Before anything is pushed, both variants pass a trivy vulnerability and
-# secret scan (pinned binary release, checksum-verified — this workflow avoids
-# third-party actions). The full all-severities report lands in the run
-# summary; the publish itself fails only on CRITICAL vulnerabilities with a
-# released fix, or on any detected secret.
+# Per-architecture tags are pushed first. Both variants then pass a trivy
+# vulnerability and secret scan in a separate job that cannot publish
+# (packages: read only; pinned binary release, checksum-verified — this
+# workflow avoids third-party actions). The user-facing version tag is
+# assembled only after that scan passes. The full all-severities report
+# lands in the run summary; the publish itself fails only on CRITICAL
+# vulnerabilities with a released fix, or on any detected secret. A failed
+# scan leaves the per-arch tags in place but never creates $IMAGE_TAG.
 #
 # The final manifest-list digests land in the run summary, and the `pin` job
 # proposes the follow-up PR that records the documents digest as the local
@@ -244,6 +247,47 @@ jobs:
             "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}" \
             -e 'require("pptxgenjs")'
 
+      - name: Push per-architecture tags
+        run: |
+          docker push "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
+          docker push "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
+
+  scan:
+    # Read-only gate: the scanner never holds packages:write. A compromised
+    # trivy can steal this job's token and pull, but cannot push a tag or
+    # assemble the version manifest. No checkout — the job only pulls the
+    # images the build job just pushed.
+    name: scan · ${{ matrix.arch }}
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      # packages:read is enough to pull a private first-time package; the
+      # token cannot push even if the scanner exfiltrates it.
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull both image variants
+        run: |
+          docker pull "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
+          docker pull "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
+
       # This workflow deliberately uses no third-party actions; the scanner is
       # the trivy release binary, pinned by version and sha256 checksum the
       # same way the base images are pinned by digest.
@@ -273,7 +317,7 @@ jobs:
       # stops only for what is actionable now — a CRITICAL vulnerability with
       # a released fix, or any detected secret — while the full all-severities
       # report lands in the run summary for the record.
-      - name: Scan both variants before push
+      - name: Scan both variants
         run: |
           for repository in "$SLIM_REPOSITORY" "$DOCUMENTS_REPOSITORY"; do
             image="$repository:$IMAGE_TAG-${{ matrix.arch }}"
@@ -294,14 +338,11 @@ jobs:
             trivy image --timeout 15m --scanners secret --exit-code 1 "$image"
           done
 
-      - name: Push per-architecture tags
-        run: |
-          docker push "$SLIM_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
-          docker push "$DOCUMENTS_REPOSITORY:$IMAGE_TAG-${{ matrix.arch }}"
-
   manifest:
+    # Assembles the user-facing version tag only after every arch image has
+    # been pushed and passed the read-only scan job.
     name: assemble multi-arch manifests
-    needs: [resolve, build]
+    needs: [resolve, build, scan]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
