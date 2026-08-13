@@ -506,6 +506,20 @@ impl ConfiguredCodeExecutionProvider {
                 "a built-in or installed plugin owns this name or one of its members".to_owned(),
             ));
         }
+        // Public imports start off. Absent still means enabled for built-ins
+        // and hand-authored packages, so this has to be a recorded flag, not
+        // a change to that default. Written before the caller reconciles MCP
+        // so a freshly copied `mcp.json` cannot spawn a host process.
+        let mut flags = crate::plugin_state::read_plugin_enable_state(&*self.store).await;
+        flags.set_plugin(&prepared.package.name, false);
+        if let Err(error) =
+            crate::plugin_state::write_plugin_enable_state(&*self.store, &flags).await
+        {
+            crate::plugin_install::rollback_install(&files);
+            return Err(crate::plugin_install::PluginInstallError::Io(
+                std::io::Error::other(error.to_string()),
+            ));
+        }
         Ok(crate::plugin_install::PluginInstallOutcome {
             plugin: prepared.package.name,
             revision: source.revision,
