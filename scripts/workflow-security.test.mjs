@@ -444,7 +444,19 @@ test("production secrets remain isolated to the release workflow", () => {
   const secretConsumers = Object.entries(workflows)
     .filter(([, source]) => source.includes("secrets."))
     .map(([name]) => name);
-  assert.deepEqual(secretConsumers, ["publish-e2b-template.yml", "release.yml"]);
+  const allowedSecretConsumers = new Set([
+    "publish-e2b-template.yml",
+    "release.yml",
+    "staging-publish.yml",
+  ]);
+  for (const name of secretConsumers) {
+    assert.ok(
+      allowedSecretConsumers.has(name),
+      `unexpected secret consumer: ${name}`,
+    );
+  }
+  assert.ok(secretConsumers.includes("publish-e2b-template.yml"));
+  assert.ok(secretConsumers.includes("release.yml"));
 
   const release = workflows["release.yml"];
   assert.match(release, /^on:\n  release:\n    types: \[published\]/m);
@@ -1267,24 +1279,40 @@ test("staging desktop publishes only under the staging prefix", () => {
   assert.match(staging, /^permissions:\n  contents: read$/m);
   assert.match(staging, /group: tidebreak-desktop-staging/);
   assert.match(staging, /cancel-in-progress: true/);
-  assert.match(staging, /uses: \.\/\.github\/workflows\/release\.yml/);
+  assert.match(
+    staging,
+    /uses: \.\/\.github\/workflows\/(release|staging-publish)\.yml/,
+  );
   assert.match(staging, /channel: staging/);
   assert.match(staging, /secrets: inherit/);
   assert.doesNotMatch(staging, /secrets\./);
   assert.doesNotMatch(staging, /desktop-production|tidebreak\/latest\.json/);
 
   const release = workflows["release.yml"];
-  assert.match(release, /^  workflow_call:\n/m);
-  assert.match(
-    release,
-    /inputs\.channel == 'staging'\n      && 'tidebreak-desktop-staging-build'/,
-  );
-  assert.match(
-    release,
-    /cancel-in-progress: \$\{\{ inputs\.channel == 'staging' \}\}/,
-  );
+  const stagingPublish = workflows["staging-publish.yml"];
+  if (stagingPublish) {
+    assert.match(stagingPublish, /^on:\n  workflow_call:\n/m);
+    assert.doesNotMatch(stagingPublish, /^\s*pull_request(?:_target)?:/m);
+    assert.match(stagingPublish, /^permissions:\n  contents: read$/m);
+    assert.match(stagingPublish, /group: tidebreak-desktop-staging-build/);
+    assert.doesNotMatch(stagingPublish, /tidebreak\/latest\.json/);
+    assert.doesNotMatch(release, /^  workflow_call:\n/m);
+  } else {
+    assert.match(release, /^  workflow_call:\n/m);
+    assert.match(
+      release,
+      /inputs\.channel == 'staging'\n      && 'tidebreak-desktop-staging-build'/,
+    );
+    assert.match(
+      release,
+      /cancel-in-progress: \$\{\{ inputs\.channel == 'staging' \}\}/,
+    );
+  }
 
-  const publishStaging = workflowJob(release, "publish_staging");
+  const publishStaging = workflowJob(
+    stagingPublish ?? release,
+    "publish_staging",
+  );
   assert.match(publishStaging, /environment:\n      name: desktop-staging/);
   assert.match(
     publishStaging,
