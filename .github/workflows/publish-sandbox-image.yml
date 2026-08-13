@@ -25,6 +25,12 @@ run-name: >-
 #     vulnerability gate flush through even when nothing in-repo changes;
 #   - manual dispatch with an explicit release-style tag.
 #
+# Publication source is the default branch only. Manual dispatch and the
+# weekly schedule must run this workflow from that branch; every publish
+# (including a v* tag) refuses a SHA that is not an ancestor of it. The
+# build checkout does not persist credentials, and the image dockerignore
+# keeps `.git` out of the `COPY . .` context.
+#
 # Release publishes keep human `vX.Y.Z` tags. Scheduled and main-push rebuilds
 # mint `main-<utc date>-<short sha>-r<run number>` instead:
 #
@@ -109,6 +115,45 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Validate the publication source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          [[ -n "$DEFAULT_BRANCH" ]] || {
+            echo "The repository event did not identify a default branch." >&2
+            exit 1
+          }
+          git fetch --no-tags origin \
+            "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] || {
+            echo "The trusted checkout does not match the workflow revision $SOURCE_SHA." >&2
+            exit 1
+          }
+
+          case "$EVENT_NAME" in
+            workflow_dispatch|schedule)
+              [[ "$SOURCE_REF" == "refs/heads/$DEFAULT_BRANCH" &&
+                "$SOURCE_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
+                echo "Sandbox image publication must run the current $DEFAULT_BRANCH workflow, got $SOURCE_REF ($SOURCE_REF_NAME)" >&2
+                exit 1
+              }
+              ;;
+            push)
+              ;;
+            *)
+              echo "unknown event $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          git merge-base --is-ancestor "$SOURCE_SHA" "origin/$DEFAULT_BRANCH" || {
+            echo "Refusing to publish sandbox images not contained in $DEFAULT_BRANCH: $SOURCE_SHA" >&2
+            exit 1
+          }
       - name: Decide the image tag and whether to publish
         id: decide
         env:
@@ -204,6 +249,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Log in to GHCR
         env:

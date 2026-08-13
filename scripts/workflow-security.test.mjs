@@ -804,16 +804,6 @@ function sandboxPublishControls(publish) {
   };
 }
 
-function sandboxPublishHasAnyMainOnlyControl(controls) {
-  return (
-    controls.hasDefaultBranchEnv ||
-    controls.hasDefaultBranchRefGate ||
-    controls.hasAncestorGate ||
-    controls.hasPersistCredentialsFalse ||
-    controls.hasDockerIgnore
-  );
-}
-
 function assertSandboxPublishMainOnly(controls) {
   assert.ok(
     controls.hasDefaultBranchEnv,
@@ -857,14 +847,11 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   );
   assert.doesNotMatch(publish, /^\s*pull_request(?:_target)?:/m);
 
-  // Current shape: any v* tag and any-ref dispatch may publish. Next shape:
-  // dispatch/schedule must run the default-branch workflow, and every publish
-  // (tag included) refuses a SHA that is not an ancestor of that branch.
-  // Accept either until the workflow change lands; a partial next shape fails.
-  const controls = sandboxPublishControls(publish);
-  if (sandboxPublishHasAnyMainOnlyControl(controls)) {
-    assertSandboxPublishMainOnly(controls);
-  }
+  // Dispatch/schedule must run the default-branch workflow. Every publish,
+  // tag included, refuses a SHA that is not an ancestor of that branch.
+  // The build checkout must not persist GITHUB_TOKEN, and `.git` stays out
+  // of the Docker context.
+  assertSandboxPublishMainOnly(sandboxPublishControls(publish));
 
   // A main push publishes only when the image inputs changed; the scope lives
   // in the resolve job (an `on.push.paths` filter would also gate the tag
