@@ -9,6 +9,13 @@ fn main() {
     println!("cargo:rerun-if-changed={sidecar}");
     println!("cargo:rerun-if-changed=../../scripts/exec-documents");
 
+    println!("cargo:rerun-if-env-changed=TIDEBREAK_CHANNEL");
+    if let Ok(channel) = std::env::var("TIDEBREAK_CHANNEL") {
+        if !channel.is_empty() {
+            println!("cargo:rustc-env=TIDEBREAK_CHANNEL={channel}");
+        }
+    }
+
     let release = std::env::var("PROFILE").as_deref() == Ok("release");
     let mut overlay = std::env::var("TAURI_CONFIG")
         .ok()

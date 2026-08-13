@@ -55,6 +55,8 @@ use tokio::sync::{oneshot, watch};
 
 use tidebreak_server::{DeprovisionTarget, PairingError, PairingHandle, PendingRegistration};
 
+use crate::channel;
+
 /// Where the pairing handler waits for the embedded server's pairing handle:
 /// filled once boot has bound the server. A provision link commonly
 /// *launches* the app, so the handler awaits this instead of racing the boot
@@ -78,26 +80,18 @@ struct ProvisionLink {
     origin: String,
 }
 
-/// The scheme dev builds register and answer alongside `tidebreak`. A dev run
-/// used to `register_all()`, which persistently re-pointed the real scheme's
-/// per-user registration at whatever debug binary ran last — links on that
-/// machine then bypassed the installed app until it was reinstalled. The dev
-/// scheme keeps dev deep-link work exercisable without ever touching the
-/// installed registration. It must stay in the deep-link config's scheme
-/// list: the plugin only recognizes configured schemes when it picks deep
-/// links out of launch arguments.
-const DEV_SCHEME: &str = "tidebreak-dev";
-
 /// Register the open-URL listener and pick up a launch link.
 pub(crate) fn install(app: &tauri::AppHandle) {
     // Dev builds have no installer run to write the scheme registration, so
     // register at runtime — only the dev scheme, never the real one, which
-    // in a dev run would shadow the installed app's registration. Debug-only:
-    // a release binary's registration is the installer's job. Not available
-    // on macOS, where the bundle's Info.plist (generated from the deep-link
-    // config) is the only registration path.
+    // in a dev run would shadow the installed app's registration. A leftover
+    // `register_all()` used to persistently re-point `tidebreak://` at
+    // whatever debug binary ran last. Debug-only: a release binary's
+    // registration is the installer's job. Not available on macOS, where the
+    // bundle's Info.plist (generated from the deep-link config) is the only
+    // registration path.
     #[cfg(all(debug_assertions, any(windows, target_os = "linux")))]
-    if let Err(error) = app.deep_link().register(DEV_SCHEME) {
+    if let Err(error) = app.deep_link().register(channel::DEV_SCHEME) {
         eprintln!("tidebreak-desktop: deep-link scheme registration failed: {error}");
     }
     let handle = app.clone();
@@ -154,18 +148,20 @@ enum DeepLink {
 
 /// Parse and validate a deep link.
 ///
-/// The contract is strict — scheme `tidebreak` (dev builds also answer
-/// `tidebreak-dev`) with no userinfo or port, and an action of `provision`
-/// (with exactly one query parameter named `gateway`, whose value is an
-/// https URL — http only on loopback — with no userinfo, query, or fragment)
-/// or `deprovision` (with no query at all) — so a malformed or hostile link
-/// is refused whole rather than partially honored. Near-miss gateway values
-/// matter: the conflict check on the write path compares normalized URL
-/// strings, so accepting a decorated variant would mint a distinct,
-/// permanently conflicting policy value. The gateway URL is additionally
-/// held to the connectors contract server-side.
+/// The contract is strict — each channel answers only its own scheme (dev
+/// also still parses `tidebreak://` so a typed production link in a debug
+/// window is honored; it never registers that scheme) with no userinfo or
+/// port, and an action of `provision` (with exactly one query parameter
+/// named `gateway`, whose value is an https URL — http only on loopback —
+/// with no userinfo, query, or fragment) or `deprovision` (with no query at
+/// all) — so a malformed or hostile link is refused whole rather than
+/// partially honored. Near-miss gateway values matter: the conflict check
+/// on the write path compares normalized URL strings, so accepting a
+/// decorated variant would mint a distinct, permanently conflicting policy
+/// value. The gateway URL is additionally held to the connectors contract
+/// server-side.
 fn parse_deep_link(url: &tauri::Url) -> Result<DeepLink, String> {
-    if url.scheme() != "tidebreak" && !(cfg!(debug_assertions) && url.scheme() == DEV_SCHEME) {
+    if !channel::current().accepts_scheme(url.scheme()) {
         return Err("not an tidebreak:// link".into());
     }
     if !url.username().is_empty() || url.password().is_some() {
@@ -787,6 +783,24 @@ mod tests {
             assert_eq!(
                 matches!(parsed, Some(Ok(DeepLink::Deprovision))),
                 *accepted,
+                "{link}"
+            );
+        }
+    }
+
+    /// Staging pairing links belong to the packaged staging app. A debug or
+    /// production binary must not honor them — otherwise a `tidebreak-staging://`
+    /// link could land in the wrong data directory.
+    #[test]
+    fn the_staging_scheme_is_channel_specific() {
+        for link in [
+            "tidebreak-staging://provision?gateway=https://gw.example",
+            "tidebreak-staging://deprovision",
+        ] {
+            let url = tauri::Url::parse(link).unwrap();
+            assert_eq!(
+                parse_deep_link(&url).is_ok(),
+                crate::channel::current() == crate::channel::Channel::Staging,
                 "{link}"
             );
         }

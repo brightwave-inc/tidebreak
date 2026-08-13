@@ -11,6 +11,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { parseReleaseTag } from "./check-release-tag.mjs";
+import { desktopChannel } from "./desktop-channel.mjs";
+import { parseStagingVersion, stagingTag } from "./staging-version.mjs";
 
 // The platforms, architectures, and artifact formats a release ships. This is
 // the single source of truth for what a release contains: it drives the
@@ -57,7 +59,7 @@ function parseOptions(args) {
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
       throw new Error(
-        "usage: create-release-manifests.mjs --dist <path> --version <semver> --tag <tag> --sha <commit> --published-at <date> --base-url <url>",
+        "usage: create-release-manifests.mjs --dist <path> --version <semver> --tag <tag> --sha <commit> --published-at <date> --base-url <url> [--channel production|staging]",
       );
     }
     options.set(flag.slice(2), value);
@@ -127,25 +129,8 @@ export function createLatestDocument({ version, publishedAt, artifacts }) {
   };
 }
 
-export function createReleaseManifests({
-  dist,
-  version,
-  tag,
-  sha,
-  publishedAt,
-  baseUrl,
-}) {
-  const parsedTag = parseReleaseTag(tag);
-  if (!parsedTag || parsedTag.version !== version) {
-    throw new Error(`release tag ${tag} does not select version ${version}`);
-  }
-  if (!/^[0-9a-f]{40}$/.test(sha)) {
-    throw new Error("release commit must be a full lowercase SHA-1");
-  }
-  if (Number.isNaN(Date.parse(publishedAt))) {
-    throw new Error(`invalid release publication date: ${publishedAt}`);
-  }
-
+function assertChannelVersion({ channelId, version, tag, baseUrl }) {
+  const channel = desktopChannel(channelId);
   const parsedBaseUrl = new URL(baseUrl);
   if (
     parsedBaseUrl.protocol !== "https:" ||
@@ -154,6 +139,51 @@ export function createReleaseManifests({
     throw new Error("release base URL must use https://downloads.brightwave.io");
   }
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  if (normalizedBaseUrl !== channel.baseUrl) {
+    throw new Error(
+      `${channelId} base URL must be ${channel.baseUrl}, not ${normalizedBaseUrl}`,
+    );
+  }
+
+  if (channelId === "staging") {
+    const parsed = parseStagingVersion(version);
+    if (!parsed) {
+      throw new Error(`invalid staging version: ${version}`);
+    }
+    if (tag !== stagingTag(version)) {
+      throw new Error(`staging tag ${tag} does not select version ${version}`);
+    }
+    return normalizedBaseUrl;
+  }
+
+  const parsedTag = parseReleaseTag(tag);
+  if (!parsedTag || parsedTag.version !== version) {
+    throw new Error(`release tag ${tag} does not select version ${version}`);
+  }
+  return normalizedBaseUrl;
+}
+
+export function createReleaseManifests({
+  dist,
+  version,
+  tag,
+  sha,
+  publishedAt,
+  baseUrl,
+  channel = "production",
+}) {
+  const normalizedBaseUrl = assertChannelVersion({
+    channelId: channel,
+    version,
+    tag,
+    baseUrl,
+  });
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error("release commit must be a full lowercase SHA-1");
+  }
+  if (Number.isNaN(Date.parse(publishedAt))) {
+    throw new Error(`invalid release publication date: ${publishedAt}`);
+  }
   const distPath = path.resolve(dist);
   const artifacts = [];
 
@@ -257,6 +287,7 @@ function main() {
     sha: requiredOption(options, "sha"),
     publishedAt: requiredOption(options, "published-at"),
     baseUrl: requiredOption(options, "base-url"),
+    channel: options.get("channel") || "production",
   });
   console.log(JSON.stringify(result.manifest, null, 2));
 }

@@ -48,7 +48,7 @@ pub struct Config {
     #[serde(default)]
     pub keychain_service: Option<String>,
     /// The host app's OS bundle identifier, when it runs as one (the desktop
-    /// app; its debug builds use a distinct id). On macOS this names
+    /// app; its debug and staging builds use a distinct id). On macOS this names
     /// the managed-preferences domain consulted for OS-managed (MDM) policy.
     /// `None` — the CLI, tests, self-host — only disables that macOS reader;
     /// the Windows and Linux readers are machine-scoped and ignore it.

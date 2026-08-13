@@ -16,6 +16,7 @@ use tidebreak_core::Config;
 
 mod attachments;
 mod broker;
+mod channel;
 mod chat_debug;
 mod client_execution;
 #[cfg(test)]
@@ -254,23 +255,21 @@ fn verify_required_plugins(skills_dir: &Path, plugins_dir: &Path) -> Result<(), 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut context = tauri::generate_context!();
-    // Debug builds run under a distinct identifier so `cargo tauri dev` holds its
-    // own single-instance lock and app-data dir instead of colliding with an
-    // installed release build.
-    #[cfg(debug_assertions)]
-    {
+    // Debug and staging each run under a distinct identifier so they hold
+    // their own single-instance lock and app-data dir instead of colliding
+    // with an installed release — or with each other.
+    let channel = channel::current();
+    if channel != channel::Channel::Production {
         let config = context.config_mut();
-        config.identifier = "io.brightwave.tidebreak.dev".into();
-        // A `[dev]` suffix keeps a debug window visually distinct from an
-        // installed release. The package-info name is what the app menu and
-        // the frontend's `getName()` report, so the UI titlebar follows it.
-        config.product_name = Some("Tidebreak [dev]".into());
+        config.identifier = channel.identifier().into();
+        // The suffix is what the app menu and the frontend's `getName()`
+        // report, so the UI titlebar follows it.
+        config.product_name = Some(channel.product_name().into());
         if let Some(window) = config.app.windows.first_mut() {
-            window.title = "Tidebreak [dev]".into();
+            window.title = channel.product_name().into();
         }
-        context.package_info_mut().name = "Tidebreak [dev]".into();
+        context.package_info_mut().name = channel.product_name().into();
     }
 
     let (info_tx, info_rx) = watch::channel(None);
@@ -412,16 +411,14 @@ async fn boot_server(
         .clone()
         .expect("skills dir was just set");
     config.exec_plugins_dir = Some(exec_plugins_dir(&app, &skills_dir)?);
-    // The effective identifier — including the debug-build override — keys
-    // the macOS managed-preferences (MDM) domain the server reads policy from.
+    // The effective identifier — including the debug and staging overrides —
+    // keys the macOS managed-preferences (MDM) domain the server reads policy from.
     config.bundle_id = Some(app.config().identifier.clone());
-    // Debug builds keep their own keychain service, completing the identifier
-    // and app-data split: dev and release must not share mutable secret state,
-    // and items created by a dev-signed binary fail the release app's keychain
-    // ACL check anyway.
-    #[cfg(debug_assertions)]
-    {
-        config.keychain_service = Some("tidebreak.dev".into());
+    // Non-production channels keep their own keychain service, completing the
+    // identifier and app-data split: they must not share mutable secret state
+    // with each other or with an installed release.
+    if let Some(service) = channel::current().keychain_service() {
+        config.keychain_service = Some(service.into());
     }
     let folder_grants = Arc::new(host_access::DesktopExecFolderGrantResolver::new(
         app.clone(),

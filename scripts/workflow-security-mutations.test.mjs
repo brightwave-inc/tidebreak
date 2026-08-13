@@ -20,6 +20,7 @@ const fixturePaths = [
   ".github/release-drafter.yml",
   ".github/e2b-cli/package.json",
   "crates/tidebreak-desktop/tauri.conf.json",
+  "crates/tidebreak-desktop/tauri.staging.conf.json",
   "crates/tidebreak-desktop/Cargo.toml",
   "crates/tidebreak-desktop/src/lib.rs",
   "crates/tidebreak-desktop/src/updater.rs",

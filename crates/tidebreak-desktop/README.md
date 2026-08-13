@@ -60,8 +60,8 @@ sidecar for the current target automatically.
 Debug builds run under the identifier `io.brightwave.tidebreak.dev` (instead of
 `io.brightwave.tidebreak`), so `cargo tauri dev` keeps its own single-instance
 lock and app-data directory and can run alongside an installed release build.
-This means dev and release profiles do not share state: the first dev run after
-this change starts from an empty data directory.
+Packaged staging builds use `io.brightwave.tidebreak.staging` and a blue icon
+for the same reason: staging, debug, and production do not share state.
 
 Create an installable bundle. The before-build hook compiles the target-specific
 broker and the default Tauri configuration includes it automatically:

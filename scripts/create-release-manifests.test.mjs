@@ -8,6 +8,7 @@ import {
   createReleaseManifests,
   RELEASE_PLATFORMS,
 } from "./create-release-manifests.mjs";
+import { STAGING_BASE_URL } from "./desktop-channel.mjs";
 import { preparePublishedRelease } from "./prepare-published-release.mjs";
 
 const EXPECTED_ARTIFACT_COUNT = RELEASE_PLATFORMS.reduce(
@@ -16,13 +17,13 @@ const EXPECTED_ARTIFACT_COUNT = RELEASE_PLATFORMS.reduce(
   0,
 );
 
-function releaseFixture() {
+function releaseFixture(version = "0.4.2") {
   const dist = mkdtempSync(path.join(tmpdir(), "tidebreak-release-"));
   for (const descriptor of RELEASE_PLATFORMS) {
     for (const arch of descriptor.architectures) {
       const directory = path.join(dist, descriptor.platform, arch);
       mkdirSync(directory, { recursive: true });
-      const baseName = `Tidebreak_0.4.2_${arch}`;
+      const baseName = `Tidebreak_${version}_${arch}`;
       for (const format of descriptor.formats) {
         const file = path.join(directory, `${baseName}${format.extension}`);
         writeFileSync(file, `${format.format}-${descriptor.platform}-${arch}`);
@@ -105,6 +106,56 @@ test("rejects mismatched tags and non-production hosts", () => {
         baseUrl: "https://example.com/tidebreak",
       }),
     /downloads\.brightwave\.io/,
+  );
+  assert.throws(
+    () =>
+      createReleaseManifests({
+        dist,
+        ...RELEASE,
+        baseUrl: STAGING_BASE_URL,
+      }),
+    /production base URL/,
+  );
+});
+
+test("staging manifests stay under the staging prefix", () => {
+  const version = "0.0.0-staging.12";
+  const dist = releaseFixture(version);
+  const staging = {
+    version,
+    tag: "staging-12",
+    sha: RELEASE.sha,
+    publishedAt: RELEASE.publishedAt,
+    baseUrl: STAGING_BASE_URL,
+    channel: "staging",
+  };
+  const { latest, manifest } = createReleaseManifests({ dist, ...staging });
+
+  assert.equal(manifest.version, version);
+  assert.equal(manifest.tag, "staging-12");
+  assert.match(
+    latest.platforms["darwin-aarch64"].url,
+    /\/tidebreak\/staging\/releases\/v0\.0\.0-staging\.12\//,
+  );
+  assert.throws(
+    () =>
+      createReleaseManifests({
+        dist,
+        ...staging,
+        channel: "staging",
+        baseUrl: RELEASE.baseUrl,
+      }),
+    /staging base URL/,
+  );
+  assert.throws(
+    () =>
+      createReleaseManifests({
+        dist,
+        ...RELEASE,
+        channel: "staging",
+        baseUrl: STAGING_BASE_URL,
+      }),
+    /invalid staging version/,
   );
 });
 

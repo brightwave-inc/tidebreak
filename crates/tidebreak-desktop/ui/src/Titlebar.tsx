@@ -21,9 +21,10 @@ export function Titlebar({
   macOverlay: boolean;
   navigation: DesktopNavigation;
 }) {
-  // The host owns the display name: debug builds report "Tidebreak [dev]" so a
-  // dev window is distinguishable from an installed release. The titlebar only
-  // renders inside the native host, where `getName` is always available.
+  // The host owns the display name: debug reports "Tidebreak [dev]" and
+  // staging reports "Tidebreak [staging]" so those windows are
+  // distinguishable from an installed release. The titlebar only renders
+  // inside the native host, where `getName` is always available.
   const [appName, setAppName] = useState("Tidebreak");
   useEffect(() => {
     let cancelled = false;
