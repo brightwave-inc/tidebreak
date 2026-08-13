@@ -103,6 +103,16 @@ const mutations = [
       ),
   },
   {
+    name: "sandbox image release-event trigger",
+    file: ".github/workflows/publish-sandbox-image.yml",
+    expected: "sandbox image publishing",
+    mutate: (source) =>
+      source.replace(
+        /on:\n  release:\n    types: \[published\]\n  push:\n    branches: \[main\]/,
+        'on:\n  push:\n    tags: ["v*"]\n    branches: [main]',
+      ),
+  },
+  {
     name: "default-branch dispatch guard",
     file: ".github/workflows/publish-e2b-template.yml",
     expected: "production secrets remain isolated",
