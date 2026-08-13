@@ -1656,7 +1656,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
         tidebreak_core::COMPUTER_LIST_WINDOWS_TOOL,
         tidebreak_core::COMPUTER_CAPTURE_SCREEN_TOOL,
         tidebreak_core::COMPUTER_READ_APP_CONTENT_TOOL,
-        tidebreak_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL,
+        tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
         tidebreak_core::COMPUTER_WAIT_TOOL,
     ] {
         assert_eq!(

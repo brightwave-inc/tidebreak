@@ -3,4 +3,6 @@
 # The fingerprint is pinned to the commit that introduced the fixture;
 # rewriting the file cannot clear it because the secret-scan lane walks
 # the full history.
-92ee76f115a6d8dbe2602151007ca7b188f7606c:crates/openwave-desktop/src/chat_debug.rs:private-key:1620
+3cf4b1bb39c55874730ff176b8f2fad197e1a112:crates/tidebreak-desktop/src/chat_debug.rs:private-key:1620
+d5d86dd04a3ac14d9380acec0df399fe78ab1ab4:crates/tidebreak-desktop/src/chat_debug.rs:private-key:1620
+6f7778949b3cf266cc39102dcdc0174569bba690:crates/tidebreak-desktop/src/chat_debug.rs:private-key:1620

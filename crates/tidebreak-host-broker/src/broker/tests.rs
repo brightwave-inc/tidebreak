@@ -4775,7 +4775,7 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
         "com.apple.Terminal",
         "com.googlecode.iterm2",
         "com.apple.SecurityAgent",
-        "io.brightwave.openwave",
+        "io.brightwave.tidebreak",
         "io.brightwave.anything",
     ] {
         fixture.broker.shared.state.lock().unwrap().grants.push(

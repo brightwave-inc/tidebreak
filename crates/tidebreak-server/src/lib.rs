@@ -123,14 +123,14 @@ use tidebreak_core::DbStore;
 use tidebreak_core::{
     ask_user_questions_tool_spec, computer_capture_screen_tool_spec, computer_click_tool_spec,
     computer_focus_window_tool_spec, computer_key_press_tool_spec, computer_list_windows_tool_spec,
-    computer_read_app_content_tool_spec, computer_return_to_openwave_tool_spec,
+    computer_read_app_content_tool_spec, computer_return_to_tidebreak_tool_spec,
     computer_scroll_tool_spec, computer_type_text_tool_spec, computer_wait_tool_spec,
     exit_plan_mode_tool_spec, import_connected_file_tool_spec, list_connected_folders_tool_spec,
     list_folder_tool_spec, read_connected_file_tool_spec, request_folder_access_tool_spec,
     validate_ask_user_questions_arguments, validate_computer_capture_screen_arguments,
     validate_computer_click_arguments, validate_computer_focus_window_arguments,
     validate_computer_key_press_arguments, validate_computer_list_windows_arguments,
-    validate_computer_read_app_content_arguments, validate_computer_return_to_openwave_arguments,
+    validate_computer_read_app_content_arguments, validate_computer_return_to_tidebreak_arguments,
     validate_computer_scroll_arguments, validate_computer_type_text_arguments,
     validate_computer_wait_arguments, validate_exit_plan_mode_arguments,
     validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
@@ -1621,8 +1621,8 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
             validate_computer_read_app_content_arguments,
         ),
         (
-            computer_return_to_openwave_tool_spec(),
-            validate_computer_return_to_openwave_arguments,
+            computer_return_to_tidebreak_tool_spec(),
+            validate_computer_return_to_tidebreak_arguments,
         ),
         (computer_wait_tool_spec(), validate_computer_wait_arguments),
     ] {

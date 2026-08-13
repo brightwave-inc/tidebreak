@@ -13,11 +13,11 @@ import {
 function capabilityAsk(capability: ComputerUseCapability, app: string): string {
   switch (capability) {
     case "control_app":
-      return `Allow OpenWave to control ${app}? It will be able to click, type, and press keys there.`;
+      return `Allow Tidebreak to control ${app}? It will be able to click, type, and press keys there.`;
     case "capture_screen":
-      return `Allow OpenWave to capture ${app} on screen?`;
+      return `Allow Tidebreak to capture ${app} on screen?`;
     case "read_app_content":
-      return `Allow OpenWave to read ${app}'s on-screen content?`;
+      return `Allow Tidebreak to read ${app}'s on-screen content?`;
   }
 }
 
@@ -37,7 +37,7 @@ function consentLabel(appName: string | null, bundleId: string): string {
 }
 
 /**
- * The always-on computer-use surface: a banner while OpenWave is driving an
+ * The always-on computer-use surface: a banner while Tidebreak is driving an
  * app (with a Stop that halts before the next action), a stopped state with
  * Resume, and the parked consent / confirmation asks the agent is waiting on.
  *
@@ -123,7 +123,7 @@ export function ComputerUseIndicator() {
             role="status"
           >
             <span>
-              OpenWave is controlling{" "}
+              Tidebreak is controlling{" "}
               {appLabel(snapshot.active.appName, snapshot.active.bundleId)}
             </span>
             <Button
@@ -230,7 +230,7 @@ export function ComputerUseIndicator() {
             aria-busy={deciding}
           >
             <p className="text-sm font-medium break-words">
-              OpenWave wants to {prompt.reason}
+              Tidebreak wants to {prompt.reason}
               {prompt.targetLabel ? ` — “${prompt.targetLabel}”` : ""} in{" "}
               {appLabel(prompt.appName, prompt.bundleId)}.
             </p>

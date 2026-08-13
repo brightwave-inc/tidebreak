@@ -68,7 +68,7 @@ describe("ComputerUseIndicator", () => {
     };
     render(<ComputerUseIndicator />);
 
-    expect(screen.getByText(/OpenWave is controlling Notes/)).toBeTruthy();
+    expect(screen.getByText(/Tidebreak is controlling Notes/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(mocks.stop).toHaveBeenCalledOnce();
   });
@@ -108,7 +108,7 @@ describe("ComputerUseIndicator", () => {
     // the app's self-reported name only as a parenthetical, so a spoofed name
     // cannot mislabel what is being granted.
     expect(
-      screen.getByText(/Allow OpenWave to control com\.apple\.mail \(Mail\)/),
+      screen.getByText(/Allow Tidebreak to control com\.apple\.mail \(Mail\)/),
     ).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Once" }));
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "once");

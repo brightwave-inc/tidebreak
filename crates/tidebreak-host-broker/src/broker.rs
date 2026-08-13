@@ -3048,7 +3048,7 @@ fn open_cu_staging(data_dir: &Path) -> Option<PathBuf> {
 /// system temp dir, still owner-only.
 fn ephemeral_cu_staging() -> Option<PathBuf> {
     let directory = std::env::temp_dir().join(format!(
-        "openwave-cu-staging-{}-{}",
+        "tidebreak-cu-staging-{}-{}",
         std::process::id(),
         Uuid::new_v4().as_simple()
     ));
