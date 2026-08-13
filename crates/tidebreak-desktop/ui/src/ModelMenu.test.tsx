@@ -60,10 +60,14 @@ const HAIKU: ModelInfo = {
   recommended: false,
 };
 
-function triggerMarkup(value: string | null, defaultKey?: string | null): string {
+function triggerMarkup(
+  value: string | null,
+  defaultKey?: string | null,
+  models: ModelInfo[] = MODELS,
+): string {
   return renderToStaticMarkup(
     <ModelMenu
-      models={MODELS}
+      models={models}
       value={value}
       defaultKey={defaultKey ?? null}
       onManageModels={() => {}}
@@ -76,12 +80,27 @@ function triggerMarkup(value: string | null, defaultKey?: string | null): string
 describe("ModelMenu", () => {
   it("names the model the default resolves to", () => {
     const markup = triggerMarkup(null, "anthropic::claude-sonnet-4");
-    expect(markup).toContain('aria-label="Model: Default (Claude Sonnet 4)"');
-    expect(markup).toContain(">Default<");
+    expect(markup).toContain('aria-label="Model: Claude Sonnet 4"');
+    expect(markup).toContain(">Claude Sonnet 4<");
+    expect(markup).not.toContain(">Default<");
   });
 
-  it("promises nothing when the server names no default", () => {
-    expect(triggerMarkup(null)).toContain('aria-label="Model: Default"');
+  it("does not call an unconfigured install a default", () => {
+    expect(triggerMarkup(null)).toContain('aria-label="No model selected"');
+    expect(triggerMarkup(null)).toContain(">No model<");
+    expect(triggerMarkup(null)).not.toContain(">Default<");
+  });
+
+  it("does not treat an unavailable boot default as selected", () => {
+    const unavailable = MODELS.map((model) => ({ ...model, available: false }));
+    const markup = triggerMarkup(
+      null,
+      "anthropic::claude-sonnet-4",
+      unavailable,
+    );
+    expect(markup).toContain('aria-label="No model selected"');
+    expect(markup).toContain(">No model<");
+    expect(markup).not.toContain(">Default<");
   });
 
   it("labels the trigger with a selected model's display name", () => {
