@@ -1142,6 +1142,33 @@ describe("parseAgentActivityHistory", () => {
             output: "\u001b[2Jexit: 0",
           },
         },
+        // The step's own sentence is admitted, and admitting it must not cost
+        // the row: a parser that did not know the key would reject the whole
+        // detail and blank the command, output, and exit status with it.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:47:00Z",
+          detail: {
+            kind: "exec",
+            command: "python3",
+            args: ["report.py"],
+            summary: "Rebuilding the quarterly report",
+          },
+        },
+        // An unusable sentence costs only itself; the command still describes
+        // the row.
+        {
+          kind: "exec",
+          outcome: "completed",
+          at: "2026-08-05T18:48:00Z",
+          detail: {
+            kind: "exec",
+            command: "python3",
+            args: [],
+            summary: "x".repeat(201),
+          },
+        },
       ]),
     ).toEqual([
       {
@@ -1187,6 +1214,23 @@ describe("parseAgentActivityHistory", () => {
         outcome: "completed",
         at: "2026-08-05T18:46:00Z",
         detail: { kind: "exec", command: "make", args: [] },
+      },
+      {
+        kind: "exec",
+        outcome: "completed",
+        at: "2026-08-05T18:47:00Z",
+        detail: {
+          kind: "exec",
+          command: "python3",
+          args: ["report.py"],
+          summary: "Rebuilding the quarterly report",
+        },
+      },
+      {
+        kind: "exec",
+        outcome: "completed",
+        at: "2026-08-05T18:48:00Z",
+        detail: { kind: "exec", command: "python3", args: [] },
       },
     ]);
   });

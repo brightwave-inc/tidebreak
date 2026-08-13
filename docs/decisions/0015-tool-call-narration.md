@@ -48,11 +48,19 @@ preview field, and governed by three rules:
    command narrated differently are the same action, and a standing grant covers
    both.
 
-Included: the result card's collapsed headline, and the activity rail row for
-non-`exec` calls. Excluded, deliberately: the approval card, the judge, grant
-identity, `describes_exactly()` (narration is not part of the action, so a
-narrated call remains exactly describable and stays grantable), and the
-background-run activity timeline, which keeps argv this round.
+Included: the result card's collapsed headline, the activity rail row for
+non-`exec` calls, and a background run's `exec` steps, which carry the sentence
+on the smaller `AgentActivityDetail` projection under the same rules — that
+timeline is a record of what already ran, never a consent surface. (This last
+one was written here as excluded "this round", a scope note rather than a
+decision; it was taken on shortly after, and the rules did not change to allow
+it.) Excluded, deliberately: the approval card, the judge, grant identity, and
+`describes_exactly()` (narration is not part of the action, so a narrated call
+remains exactly describable and stays grantable). Two background step kinds
+also stay literal, for the same reason the argv keeps the expanded pane: a
+search row and a delegated-file row have no body to open, so a sentence there
+would displace the literal action rather than lead it — and a delegated file's
+name is the host's own admission record, not something the model wrote.
 
 The argument is **required in each tool's JSON schema** so models reliably write
 one, and **tolerated in code** so a call that omits it still runs and falls back
@@ -123,3 +131,8 @@ would demand a *server*-derived line, not this one.
 - A schema-gate test: a call omitting the narration is not refused, a foreign
   tool's own required `summary` still is, and a narration of the wrong type
   still fails. Relaxing `required` too broadly, or not at all, fails here.
+- Two background-projection tests: `AgentActivityDetail::build` carries the
+  sentence through the same clamp, and `with_exec_result` preserves it when a
+  step settles. The second is the load-bearing one — that reconstruction is the
+  only place the field can be dropped without a compile error, and a receipt
+  cannot recover a sentence the model wrote at call time.

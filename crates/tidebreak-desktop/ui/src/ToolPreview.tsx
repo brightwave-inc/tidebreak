@@ -125,8 +125,9 @@ export function toolPreviewHeadline(preview: ToolActionPreview): {
  * The one-line form of a command and its argument vector.
  *
  * Shared so a command reads identically wherever it is shown: the foreground
- * approval and result cards, and the background run's activity timeline, which
- * has only this headline and no card to open.
+ * approval and result cards, and the background run's activity timeline, where
+ * it is the card's headline unless the step narrated itself, and its body
+ * either way.
  */
 export function execCommandHeadline(
   command: string,

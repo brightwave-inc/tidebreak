@@ -215,9 +215,11 @@ export function AgentActivityTimeline({
  * The step's own headline, next to the generic label.
  *
  * "Ran a command" is the same sentence whichever command ran, so the validated
- * detail is what tells the steps apart. Non-exec steps carry it inline; a
- * command gets a full card instead ({@link ExecActivityCard}), so this returns
- * nothing for exec detail.
+ * detail is what tells the steps apart — the query one searched for, the file
+ * one read. These rows have no body to open, so they show the literal action
+ * and nothing else; a command gets a full card instead
+ * ({@link ExecActivityCard}), which is why this returns nothing for exec
+ * detail.
  */
 function activityHeadline(
   detail: AgentActivityHistoryEntry["detail"],
@@ -252,23 +254,33 @@ function ExecActivityCard({
   detail: ExecActivityDetail;
   outcome: AgentActivityHistoryEntry["outcome"];
 }) {
-  const headline = execCommandHeadline(detail.command, detail.args);
+  const command = execCommandHeadline(detail.command, detail.args);
+  // The sentence leads when the step wrote one; the command line stays in the
+  // body either way, so the literal action is never more than a click away.
+  const narrated =
+    detail.summary !== undefined && detail.summary.length > 0
+      ? detail.summary
+      : null;
   const failed = outcome === "failed";
   const settled =
     outcome === "completed" || outcome === "failed" || outcome === "cancelled";
   return (
     <ToolCardShell
       icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
-      title={headline}
-      titleClassName="font-mono"
+      title={narrated ?? command}
+      titleClassName={narrated === null ? "font-mono" : undefined}
       badge={<ExecActivityBadge outcome={outcome} exitCode={detail.exit_code} />}
       defaultExpanded={failed}
       className={cn(failed && "border-critical/35")}
-      label={failed ? `Failed command: ${headline}` : `Command: ${headline}`}
+      // The assistive label names the command, not the sentence about it: it
+      // stands in for a title the reader can see but a screen reader would
+      // otherwise get only truncated, and the literal action is the part that
+      // cannot be recovered from anywhere else in the row.
+      label={failed ? `Failed command: ${command}` : `Command: ${command}`}
     >
       <div className="flex flex-col gap-1.5 p-2">
         <pre className="bg-muted text-muted-foreground rounded-md p-2 text-xs break-words whitespace-pre-wrap">
-          {headline}
+          {command}
         </pre>
         {detail.output ? (
           <pre className="bg-muted text-muted-foreground rounded-md p-2 text-xs break-words whitespace-pre-wrap">

@@ -108,4 +108,38 @@ describe("AgentActivityTimeline", () => {
     );
     expect(screen.getByText("No output captured.")).toBeTruthy();
   });
+
+  it("leads a narrated command with its sentence and keeps the command line in the body", () => {
+    const narrated: AgentActivityState = {
+      ...state,
+      items: state.items.map((item, index) =>
+        index === 1
+          ? {
+              ...item,
+              detail: {
+                kind: "exec",
+                command: "pip",
+                args: ["install", "matplotlib"],
+                exit_code: 1,
+                summary: "Installing the plotting library",
+              },
+            }
+          : item,
+      ),
+    };
+    render(<AgentActivityTimeline state={narrated} active={false} expanded />);
+
+    const commandRow = within(screen.getByRole("list")).getAllByRole(
+      "listitem",
+    )[1]!;
+    const card = within(commandRow).getByRole("button", {
+      name: /Installing the plotting library/,
+    });
+    // The sentence is prose, so it does not wear the command's monospace.
+    expect(card.querySelector(".font-mono")).toBeNull();
+    // The literal action is not lost: the open body still carries it.
+    expect(
+      within(commandRow).getByText("pip install matplotlib"),
+    ).toBeTruthy();
+  });
 });

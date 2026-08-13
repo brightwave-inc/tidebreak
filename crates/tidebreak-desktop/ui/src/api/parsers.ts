@@ -610,6 +610,7 @@ function parseAgentActivityDetail(
         "kind",
         "command",
         "args",
+        "summary",
         "exit_code",
         "output",
       ]) ||
@@ -639,6 +640,7 @@ function parseAgentActivityDetail(
       kind: "exec",
       command: value.command,
       args,
+      ...narration(value),
       ...(exitCode === undefined ? {} : { exit_code: exitCode }),
       ...(output === undefined ? {} : { output }),
     };
@@ -965,14 +967,13 @@ const MAX_SUMMARY_CHARS = 200;
  * Unlike every other field here a bad value costs only itself: narration is
  * decoration over an action the card can already describe, so an unreadable
  * one falls back to the literal form rather than dropping the whole preview.
+ * "Unreadable" is the same standard {@link bounded} applies everywhere else —
+ * prose is not exempt from the check that it cannot redraw the line it is
+ * about to be rendered on.
  */
 function narration(value: Record<string, unknown>): { summary?: string } {
   const { summary } = value;
-  if (
-    typeof summary !== "string" ||
-    summary.length === 0 ||
-    summary.length > MAX_SUMMARY_CHARS
-  ) {
+  if (!bounded(summary, MAX_SUMMARY_CHARS) || summary.length === 0) {
     return {};
   }
   return { summary };
