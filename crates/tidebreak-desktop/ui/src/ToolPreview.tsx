@@ -7,6 +7,12 @@ import { networkPolicyLabel } from "./NetworkPolicyDialog";
  * Renderer state holds no tool arguments; a preview is the narrow exception a
  * tool opts into so a human can see what they are approving. Formatting stays
  * here so the approval card and the tool card describe one action identically.
+ *
+ * Deliberately literal, both fields: the action as the tool stated it, never
+ * the call's own `summary`. The approval card renders `detail`, and consent is
+ * given to a command rather than to a sentence about one — see
+ * `docs/decisions/0015-tool-call-narration.md`. Prose belongs to
+ * {@link toolPreviewHeadline}, which only result cards call.
  */
 export type ToolPreviewPresentation = {
   /** One-line form, used as a card title. */
@@ -90,6 +96,29 @@ export function toolPreviewPresentation(
     .filter((line): line is string => typeof line === "string")
     .join("\n");
   return { headline, detail };
+}
+
+/**
+ * The one line a settled call is worth reading, and whether it is prose.
+ *
+ * A card's collapsed state is the only thing most readers ever see, and an
+ * argument vector is not readable to someone who does not read shell — so the
+ * model is asked to say what it is doing, and that sentence leads. The literal
+ * action is never lost: it is one click away in the card's own body, and it is
+ * still the only thing an approval card shows.
+ *
+ * `literal` is what tells a caller to set a monospace face: prose in monospace
+ * reads as something a shell would run, which it is not.
+ */
+export function toolPreviewHeadline(preview: ToolActionPreview): {
+  text: string;
+  literal: boolean;
+} {
+  const summary = "summary" in preview ? preview.summary : undefined;
+  if (typeof summary === "string" && summary.length > 0) {
+    return { text: summary, literal: false };
+  }
+  return { text: toolPreviewPresentation(preview).headline, literal: true };
 }
 
 /**

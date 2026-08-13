@@ -623,7 +623,11 @@ impl GrantScope {
         }
         match self {
             Self::WholeTool => true,
-            Self::ExactAction(granted) => *granted == action,
+            // Compared without narration on both sides: the model's sentence
+            // about a call is display-only, so the same action described in
+            // different words is the same action and a standing grant covers
+            // it. See `docs/decisions/0015-tool-call-narration.md`.
+            Self::ExactAction(granted) => granted.without_summary() == action.without_summary(),
             // Only a command has an executable or a token run to name.
             Self::AnyArgsFor { .. } | Self::CommandPrefix { .. } => false,
             // Handled on canonical arguments above, before the fidelity gate.
@@ -641,7 +645,7 @@ impl GrantScope {
     /// out keeps asking however broadly it was granted.
     fn covers_argv(&self, action: &ToolActionPreview, command: &str, args: &[String]) -> bool {
         if let Self::ExactAction(granted) = self {
-            if granted != action {
+            if granted.without_summary() != action.without_summary() {
                 return false;
             }
         }
@@ -732,7 +736,10 @@ impl GrantScope {
     /// the card showed rather than against anything the client sent.
     #[must_use]
     pub fn ladder_for_action(action: &ToolActionPreview) -> Vec<Self> {
-        let action = action.clone();
+        // Narration is dropped before any rung is minted: a grant is an
+        // identity, and the model's sentence about one call must not be part
+        // of what a later call has to match.
+        let action = action.without_summary();
         // A command's ladder is built by the analyzer rather than assembled
         // here, and every rung on it is verified: a rung appears only when
         // granting exactly that rule would in fact stop the asking. That is
@@ -761,7 +768,7 @@ impl GrantScope {
         // A write's ladder names places, narrowest first: exactly this path,
         // then the directory that holds it. There is deliberately no
         // whole-workspace rung — that consent already exists as `Auto` mode.
-        if let ToolActionPreview::WriteFile { path } = &action {
+        if let ToolActionPreview::WriteFile { path, .. } = &action {
             return place_ladder(path);
         }
         // Delegation is consented to as delegation. A task is model-authored
@@ -1281,6 +1288,7 @@ mod standing_grant_tests {
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: ".".into(),
             files: Vec::new(),
+            summary: None,
         })
     }
 
@@ -1291,6 +1299,7 @@ mod standing_grant_tests {
             domains: Vec::new(),
             start_published_at: None,
             end_published_at: None,
+            summary: None,
         })
     }
 
@@ -1315,6 +1324,61 @@ mod standing_grant_tests {
         assert!(!grants.covers(chat, None, "exec", kind, &exec_args("rm", &["test"])));
         // An action the renderer could not describe was never the one granted.
         assert!(!grants.covers(chat, None, "exec", kind, &no_args()));
+    }
+
+    /// A grant is an identity, and the sentence the model wrote about one call
+    /// is not part of it. Otherwise "always allow `cargo test`" would stop
+    /// covering the next `cargo test` the moment it was narrated differently,
+    /// and the person would be asked again about something they had settled.
+    #[test]
+    fn a_grant_ignores_how_the_call_narrates_itself() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        let narrated = serde_json::json!({
+            "command": "cargo",
+            "args": ["test"],
+            "summary": "Running the test suite",
+        });
+        // Minted from a narrated call, the rung holds the action alone.
+        let ladder = GrantScope::ladder_for("exec", &narrated);
+        assert!(ladder.contains(&exact_command("cargo", &["test"])));
+        grants.record(
+            StandingGrant::scoped(
+                GrantLevel::Chat { chat_id: chat },
+                "exec",
+                kind,
+                exact_command("cargo", &["test"]),
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        assert!(grants.covers(chat, None, "exec", kind, &narrated));
+        assert!(grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &serde_json::json!({
+                "command": "cargo",
+                "args": ["test"],
+                "summary": "Checking the parser change did not break anything",
+            })
+        ));
+        // And narration still buys nothing: a different command is a different
+        // action however familiarly it describes itself.
+        assert!(!grants.covers(
+            chat,
+            None,
+            "exec",
+            kind,
+            &serde_json::json!({
+                "command": "cargo",
+                "args": ["publish"],
+                "summary": "Running the test suite",
+            })
+        ));
     }
 
     /// Staging is part of the action, and a grant retained from before the
@@ -1457,6 +1521,7 @@ mod standing_grant_tests {
                     args: vec!["install".into()],
                     cwd: "./sandbox".into(),
                     files: Vec::new(),
+                    summary: None,
                 }),
                 Utc::now(),
             )
@@ -1646,7 +1711,8 @@ mod standing_grant_tests {
             GrantScope::ladder_for("search", &serde_json::json!({ "query": "revenue" })),
             vec![
                 GrantScope::ExactAction(ToolActionPreview::Search {
-                    query: "revenue".into()
+                    query: "revenue".into(),
+                    summary: None,
                 }),
                 GrantScope::WholeTool,
             ]
@@ -1809,7 +1875,8 @@ mod standing_grant_tests {
             "write_file",
             kind,
             GrantScope::ExactAction(ToolActionPreview::WriteFile {
-                path: "notes.md".into()
+                path: "notes.md".into(),
+                summary: None,
             }),
             Utc::now(),
         )

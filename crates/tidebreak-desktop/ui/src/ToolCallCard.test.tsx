@@ -97,6 +97,29 @@ describe("ToolCommandCard", () => {
     expect(markup).toContain('aria-label="Run a command: Command complete"');
   });
 
+  it("leads with the call's own sentence and keeps the command a click away", () => {
+    const narrated = { ...preview, summary: "Running the workspace tests" };
+    const collapsed = visibleText(
+      renderToStaticMarkup(
+        <ToolCommandCard name="exec" status="completed" preview={narrated} result={null} />,
+      ),
+    );
+    const open = visibleText(
+      renderToStaticMarkup(
+        <ToolCommandCard name="exec" status="running" preview={narrated} result={null} />,
+      ),
+    );
+
+    expect(collapsed).toContain("Running the workspace tests");
+    expect(collapsed).not.toContain("cargo test --workspace");
+    // The literal action is not lost — the open card keeps a pane for it, and
+    // that pane renders the preview's own literal detail.
+    expect(open).toContain("command");
+    expect(toolPreviewPresentation(narrated).detail).toContain(
+      "cargo test --workspace",
+    );
+  });
+
   it("opens while the command is running and closes once it has settled", () => {
     const running = renderToStaticMarkup(
       <ToolCommandCard name="exec" status="running" preview={preview} result={null} />,

@@ -43,6 +43,7 @@ describe("validators against real server output", () => {
         args: ["status"],
         cwd: ".",
         files: ["documents/report.pdf"],
+        summary: "Checking the repository status",
       },
       canApprove: true,
       canRemember: true,

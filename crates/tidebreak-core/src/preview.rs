@@ -31,6 +31,29 @@ pub const MAX_ACTION_FIELD_CHARS: usize = 512;
 /// Most arguments an action preview carries before it elides the tail.
 pub const MAX_ACTION_ARGS: usize = 32;
 
+/// Longest model-authored narration an action preview carries.
+///
+/// Much shorter than [`MAX_ACTION_FIELD_CHARS`] because it is one sentence
+/// shown on one collapsed line; a summary that does not fit on that line is
+/// not doing the job the field exists for.
+pub const MAX_ACTION_SUMMARY_CHARS: usize = 200;
+
+/// What every preview-carrying tool tells the model its `summary` argument is
+/// for.
+///
+/// One wording, shared, so the line reads the same whichever tool wrote it —
+/// a transcript where each tool narrates in its own register reads as several
+/// assistants rather than one. Deliberately says nothing about approval: the
+/// summary is shown to the person after the fact and is never part of a
+/// consent decision, so a model that writes it hoping to persuade is writing
+/// into a field nothing reads.
+pub const SUMMARY_ARGUMENT_DESCRIPTION: &str =
+    "One short present-tense sentence, shown to the user in place of the raw \
+     arguments while this runs: what you are doing and why it helps, in their \
+     words rather than in code. For example 'Reading the word-documents skill' \
+     or 'Checking Q4 revenue in the model'. No file paths, flags, or command \
+     syntax — the exact call is shown alongside it.";
+
 /// Longest captured stream a result preview carries. The execution provider
 /// already bounds what it captures; this bounds what crosses the boundary.
 pub const MAX_RESULT_STREAM_CHARS: usize = 40_000;
@@ -186,6 +209,14 @@ fn receipt_tail(result: &str, max_chars: usize) -> Option<String> {
 /// Approval cards need this because consent to an action you cannot see is not
 /// consent. Result cards reuse it so the same action is described the same way
 /// before and after it runs.
+///
+/// Most variants also carry a `summary`: one sentence the model wrote about
+/// what its own call is doing. It is **display-only**, and it is the one field
+/// here that is prose rather than a projection of the action. See
+/// `docs/decisions/0015-tool-call-narration.md` — it never reaches an approval
+/// card, never reaches the auto-approval judge, and is never part of a grant's
+/// identity ([`Self::without_summary`]), because a call that could describe
+/// itself to a consent decision could describe itself favourably.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum ToolActionPreview {
@@ -215,10 +246,20 @@ pub enum ToolActionPreview {
         /// sends a call that stages anything back to the person.
         #[serde(default)]
         files: Vec<String>,
+        /// Display-only narration; see the type's documentation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
     },
     /// A search of this conversation's own sources. The query is the whole
     /// action, and it is what the excerpts returned will be chosen to match.
-    Search { query: String },
+    Search {
+        query: String,
+        /// Display-only narration; see the type's documentation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
+    },
     /// A public web search. What leaves the device is the entire reason this
     /// call asks first, so the card has to be able to show all of it — the
     /// filters are told to the provider too, not just the query.
@@ -232,11 +273,21 @@ pub enum ToolActionPreview {
         start_published_at: Option<String>,
         /// Latest publication date the search will accept.
         end_published_at: Option<String>,
+        /// Display-only narration; see the type's documentation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
     },
     /// A single public web page fetch. The URL is the entire action — it is
     /// both what leaves the device and where the request goes — so the card
     /// shows it whole.
-    WebExtract { url: String },
+    WebExtract {
+        url: String,
+        /// Display-only narration; see the type's documentation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
+    },
     /// A file write inside the chat's private workspace. The path is the
     /// resource under review — which file the call will create or replace —
     /// and deliberately the only field: the content is not projected, so the
@@ -244,6 +295,10 @@ pub enum ToolActionPreview {
     WriteFile {
         /// Workspace-relative destination path, never a host path.
         path: String,
+        /// Display-only narration; see the type's documentation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
     },
     /// A delegation to a background agent: an unattended run whose own calls
     /// never come back for approval.
@@ -257,7 +312,9 @@ pub enum ToolActionPreview {
     ///
     /// Unlike the other variants this one is not derivable from the call's
     /// arguments alone — the policy is chat state — so it is built where the
-    /// spawn is gated rather than by [`ToolActionPreview::build`].
+    /// spawn is gated rather than by [`ToolActionPreview::build`]. It also
+    /// carries no `summary`: the task the model wrote already is the prose a
+    /// narration would restate.
     DelegateAgent {
         /// The child's self-contained task, as the model wrote it.
         task: String,
@@ -287,6 +344,7 @@ impl ToolActionPreview {
                     args,
                     cwd,
                     files,
+                    summary: clamped_summary(arguments),
                 })
             }
             // Approving a search without seeing its query is not consent to
@@ -295,12 +353,14 @@ impl ToolActionPreview {
             // before searching and a card should show what actually goes out.
             "search" => Some(Self::Search {
                 query: search_query(arguments)?,
+                summary: clamped_summary(arguments),
             }),
             "web_search" => Some(Self::WebSearch {
                 query: search_query(arguments)?,
                 domains: clamped_list(arguments.get("domains")),
                 start_published_at: clamped_field(arguments.get("start_published_at")),
                 end_published_at: clamped_field(arguments.get("end_published_at")),
+                summary: clamped_summary(arguments),
             }),
             // Approving a page fetch without seeing the URL is not consent to
             // fetching anything in particular. Trimmed like the queries above,
@@ -310,6 +370,7 @@ impl ToolActionPreview {
                     arguments.get("url")?.as_str()?.trim(),
                     MAX_ACTION_FIELD_CHARS,
                 )?,
+                summary: clamped_summary(arguments),
             }),
             // A workspace write gated in Ask mode names the file it will touch.
             // The content stays behind the boundary: the resource is the path,
@@ -317,9 +378,47 @@ impl ToolActionPreview {
             // preview a document.
             "write_file" => Some(Self::WriteFile {
                 path: clamp(arguments.get("path")?.as_str()?, MAX_ACTION_FIELD_CHARS)?,
+                summary: clamped_summary(arguments),
             }),
             _ => None,
         }
+    }
+
+    /// The model's own one-line account of what this call is doing, when it
+    /// wrote one.
+    ///
+    /// Display-only. Callers deciding consent, judge candidacy, or grant
+    /// identity must not read this — see the type's documentation.
+    #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        match self {
+            Self::Exec { summary, .. }
+            | Self::Search { summary, .. }
+            | Self::WebSearch { summary, .. }
+            | Self::WebExtract { summary, .. }
+            | Self::WriteFile { summary, .. } => summary.as_deref(),
+            Self::DelegateAgent { .. } => None,
+        }
+    }
+
+    /// The same action with its narration removed.
+    ///
+    /// This is the form an action takes when it is being compared rather than
+    /// shown. Two runs of one command narrated differently are one action, so
+    /// a standing grant keyed on the action must not stop matching because the
+    /// model chose different words the second time.
+    #[must_use]
+    pub fn without_summary(&self) -> Self {
+        let mut action = self.clone();
+        match &mut action {
+            Self::Exec { summary, .. }
+            | Self::Search { summary, .. }
+            | Self::WebSearch { summary, .. }
+            | Self::WebExtract { summary, .. }
+            | Self::WriteFile { summary, .. } => *summary = None,
+            Self::DelegateAgent { .. } => {}
+        }
+        action
     }
 
     /// Whether [`Self::build`] would reproduce `arguments` without losing
@@ -1091,6 +1190,20 @@ fn clamped_field(value: Option<&Value>) -> Option<String> {
     clamp(value?.as_str()?, MAX_ACTION_FIELD_CHARS)
 }
 
+/// Bound the model's own narration of a call.
+///
+/// Sanitized on the same terms as every other preview field — it is prose, but
+/// it is prose written by the call it describes, so it may not carry control
+/// characters or directional formatting that could forge card structure. Cut
+/// rather than dropped when over-long: a truncated sentence still says roughly
+/// what the call is doing, and the literal action is a click away regardless.
+fn clamped_summary(arguments: &Value) -> Option<String> {
+    clamp(
+        arguments.get("summary")?.as_str()?.trim(),
+        MAX_ACTION_SUMMARY_CHARS,
+    )
+}
+
 /// Bound a list of single-line preview fields: surplus entries are elided and
 /// unreadable or entirely-forbidden ones are dropped.
 fn clamped_list(value: Option<&Value>) -> Vec<String> {
@@ -1200,6 +1313,7 @@ mod tests {
             domains: Vec::new(),
             start_published_at: None,
             end_published_at: None,
+            summary: None,
         }
     }
 
@@ -1218,7 +1332,8 @@ mod tests {
         assert_eq!(
             ToolActionPreview::build("search", &json!({ "query": "revenue" })),
             Some(ToolActionPreview::Search {
-                query: "revenue".into()
+                query: "revenue".into(),
+                summary: None,
             })
         );
         // Trimmed, because the tool trims before searching.
@@ -1230,7 +1345,8 @@ mod tests {
         assert_eq!(
             ToolActionPreview::build("search", &json!({ "query": "revenue", "k": 8 })),
             Some(ToolActionPreview::Search {
-                query: "revenue".into()
+                query: "revenue".into(),
+                summary: None,
             })
         );
         // A query the card cannot show is no preview at all, rather than a card
@@ -1265,6 +1381,7 @@ mod tests {
                 domains: vec!["sec.gov".into(), "ft.com".into()],
                 start_published_at: Some("2024-01-01T00:00:00Z".into()),
                 end_published_at: None,
+                summary: None,
             })
         );
     }
@@ -1331,6 +1448,7 @@ mod tests {
                 args: vec!["-c".into(), "print(1)".into()],
                 cwd: ".".into(),
                 files: Vec::new(),
+                summary: None,
             })
         );
     }
@@ -1648,7 +1766,8 @@ mod tests {
         assert_eq!(
             preview,
             Some(ToolActionPreview::WriteFile {
-                path: "reports/q3.md".into()
+                path: "reports/q3.md".into(),
+                summary: None,
             })
         );
         // Wire shape: the serialized preview carries the path and never the
@@ -1928,7 +2047,11 @@ mod tests {
         let long = "a".repeat(MAX_ACTION_FIELD_CHARS * 2);
         let many: Vec<_> = (0..MAX_ACTION_ARGS * 2).map(|i| i.to_string()).collect();
         let Some(ToolActionPreview::Exec {
-            command, args, cwd, ..
+            command,
+            args,
+            cwd,
+            summary,
+            ..
         }) = ToolActionPreview::build(
             "exec",
             &serde_json::json!({
@@ -1936,6 +2059,9 @@ mod tests {
                 "args": many,
                 // Control characters could otherwise forge card structure.
                 "cwd": "scratch\n\u{1b}[31mapproved",
+                // Narration is prose, but it is prose the call wrote about
+                // itself: bounded to one line and stripped on the same terms.
+                "summary": format!("Running a check\u{1b}[31m {long}"),
             }),
         )
         else {
@@ -1944,6 +2070,9 @@ mod tests {
         assert_eq!(command.chars().count(), MAX_ACTION_FIELD_CHARS);
         assert_eq!(args.len(), MAX_ACTION_ARGS);
         assert_eq!(cwd, "scratch[31mapproved");
+        let summary = summary.expect("a narrated call keeps its narration");
+        assert_eq!(summary.chars().count(), MAX_ACTION_SUMMARY_CHARS);
+        assert!(summary.starts_with("Running a check[31m a"));
     }
 
     #[test]

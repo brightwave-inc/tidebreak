@@ -206,6 +206,18 @@ pub struct WaitForAgentsArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchArgs {
+    /// The model's own account of what this call is doing, shown to the user
+    /// in place of the raw arguments.
+    ///
+    /// Required in the schema so a model reliably writes one, `Option` here so
+    /// a call that omits it still runs. Display-only: see
+    /// [`crate::ToolActionPreview`].
+    #[schemars(
+        required,
+        length(max = crate::preview::MAX_ACTION_SUMMARY_CHARS),
+        description = crate::SUMMARY_ARGUMENT_DESCRIPTION
+    )]
+    pub summary: Option<String>,
     /// Focused public-web query.
     #[schemars(
         length(min = 1, max = MAX_WEB_SEARCH_QUERY_CHARS),
@@ -253,6 +265,18 @@ const fn default_web_search_results() -> usize {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebExtractArgs {
+    /// The model's own account of what this call is doing, shown to the user
+    /// in place of the raw arguments.
+    ///
+    /// Required in the schema so a model reliably writes one, `Option` here so
+    /// a call that omits it still runs. Display-only: see
+    /// [`crate::ToolActionPreview`].
+    #[schemars(
+        required,
+        length(max = crate::preview::MAX_ACTION_SUMMARY_CHARS),
+        description = crate::SUMMARY_ARGUMENT_DESCRIPTION
+    )]
+    pub summary: Option<String>,
     /// Exact public https page URL to fetch and extract.
     #[schemars(
         length(min = 1, max = MAX_WEB_EXTRACT_URL_BYTES),
@@ -274,6 +298,18 @@ struct SandboxReadDelegatedFileArgs {}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxExecArgs {
+    /// The model's own account of what this call is doing, shown to the user
+    /// in place of the raw arguments.
+    ///
+    /// Required in the schema so a model reliably writes one, `Option` here so
+    /// a call that omits it still runs. Display-only: see
+    /// [`crate::ToolActionPreview`].
+    #[schemars(
+        required,
+        length(max = crate::preview::MAX_ACTION_SUMMARY_CHARS),
+        description = crate::SUMMARY_ARGUMENT_DESCRIPTION
+    )]
+    pub summary: Option<String>,
     /// Executable name or path (argv[0] only — no spaces or shell syntax).
     #[schemars(
         length(min = 1, max = MAX_SANDBOX_EXEC_COMMAND_BYTES),

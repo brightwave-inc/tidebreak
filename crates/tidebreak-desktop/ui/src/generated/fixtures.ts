@@ -33,6 +33,7 @@ export const PENDING_APPROVAL = {
     "files": [
       "documents/report.pdf"
     ],
+    "summary": "Checking the repository status",
     "tool": "exec"
   },
   "turn_id": "00000000-0000-0000-0000-000000000002"

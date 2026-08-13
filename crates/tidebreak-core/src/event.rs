@@ -347,6 +347,7 @@ mod tests {
                     args: vec!["status".into()],
                     cwd: ".".into(),
                     files: vec!["documents/report.pdf".into()],
+                    summary: Some("Checking the repository status".into()),
                 }),
             },
             AgentEvent::ApprovalDecided {
@@ -375,6 +376,7 @@ mod tests {
                     args: vec!["status".into()],
                     cwd: ".".into(),
                     files: vec!["documents/report.pdf".into()],
+                    summary: Some("Checking the repository status".into()),
                 }),
                 result: Some(crate::preview::ToolResultPreview::Exec {
                     exit_code: Some(0),

@@ -232,7 +232,7 @@ pub use plan_mode::{
 pub use preview::{
     format_bytes, AgentActivityDetail, AnsweredUserQuestion, ExecDegradation, ResultEntry,
     ResultEntryKind, ResultFailure, ToolActionPreview, ToolResultPreview, MAX_RESULT_ENTRIES,
-    MAX_RESULT_ENTRY_CHARS,
+    MAX_RESULT_ENTRY_CHARS, SUMMARY_ARGUMENT_DESCRIPTION,
 };
 pub use provider::{
     provider_executed_tool_call_text, ChatMessage, ChatRequest, ContentBlock, MessageReasoning,

@@ -601,6 +601,7 @@ mod tests {
                 args: vec!["status".into()],
                 cwd: ".".into(),
                 files: vec!["documents/report.pdf".into()],
+                summary: Some("Checking the repository status".into()),
             }),
             can_approve: true,
             can_remember: true,

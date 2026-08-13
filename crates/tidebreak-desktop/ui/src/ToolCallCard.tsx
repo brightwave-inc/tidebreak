@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
 import { ScrollableContainer } from "./ScrollableContainer";
 import { ToolCardShell } from "./ToolCardShell";
-import { toolPreviewPresentation } from "./ToolPreview";
+import { toolPreviewHeadline, toolPreviewPresentation } from "./ToolPreview";
 import { useChatSessionStore } from "./ChatSessionStore";
 
 /**
@@ -262,10 +262,13 @@ const FALLBACK_TOOL: ToolPresentation = {
 /**
  * The card for a command the agent ran.
  *
- * The command is the title, in monospace: "Ran a command" is the same sentence
- * whether the agent listed a directory or rebuilt the workspace, so the only
- * useful headline is the command itself. It opens while the command is still
- * running; otherwise it collapses back to one line once the badge carries the
+ * The title is the agent's own sentence about what it is doing, because "Ran a
+ * command" is the same sentence whether it listed a directory or rebuilt the
+ * workspace, and an argument vector is not a sentence at all to a reader who
+ * does not read shell. A call that narrated nothing falls back to the command
+ * itself, in monospace. Either way the literal command and its output are in
+ * the body, one click away. It opens while the command is still running;
+ * otherwise it collapses back to one line once the badge carries the
  * outcome.
  *
  * Only tools that project a preview get a card. Everything else lives in the
@@ -279,6 +282,7 @@ export function ToolCommandCard({
 }: ToolCommandCardProps) {
   const presentation = toolCallPresentation(name, status);
   const command = toolPreviewPresentation(preview, result);
+  const headline = toolPreviewHeadline(preview);
   const running = presentation.tone === "running";
   // Live, unjournaled state: only a command that is still running can be the
   // one waiting on the image, and a settled card must never claim it is.
@@ -294,8 +298,8 @@ export function ToolCommandCard({
       <ToolCardShell
         label={`${presentation.label}: ${presentation.statusLabel}`}
         icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
-        title={command.headline}
-        titleClassName="font-mono"
+        title={headline.text}
+        titleClassName={headline.literal ? "font-mono" : undefined}
         badge={
           <>
             {result?.backend && (

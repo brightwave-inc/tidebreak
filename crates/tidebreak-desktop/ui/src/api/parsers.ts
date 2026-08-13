@@ -883,7 +883,7 @@ export function parseToolActionPreview(
   if (value.tool === "search") {
     const { query } = value;
     if (typeof query !== "string" || query.length === 0) return null;
-    return { tool: "search", query };
+    return { tool: "search", query, ...narration(value) };
   }
   if (value.tool === "web_search") {
     const { query, domains, start_published_at, end_published_at } = value;
@@ -903,19 +903,20 @@ export function parseToolActionPreview(
       domains,
       start_published_at,
       end_published_at,
+      ...narration(value),
     };
   }
   if (value.tool === "web_extract") {
     const { url } = value;
     if (typeof url !== "string" || url.length === 0) return null;
-    return { tool: "web_extract", url };
+    return { tool: "web_extract", url, ...narration(value) };
   }
   if (value.tool === "write_file") {
     // The path is the whole variant: which file the call will create or
     // replace. The content deliberately never crosses the boundary.
     const { path } = value;
     if (typeof path !== "string" || path.length === 0) return null;
-    return { tool: "write_file", path };
+    return { tool: "write_file", path, ...narration(value) };
   }
   if (value.tool === "delegate_agent") {
     // The task says what the unattended run will do; the network policy is
@@ -946,7 +947,35 @@ export function parseToolActionPreview(
   ) {
     return null;
   }
-  return { tool: "exec", command, args, cwd, files: staged };
+  return { tool: "exec", command, args, cwd, files: staged, ...narration(value) };
+}
+
+/**
+ * Longest narration a card will show, mirroring the server's own bound.
+ *
+ * A summary is the one prose field on a preview, so it is the one field a call
+ * could try to flood a card with. Anything longer than the server would ever
+ * send is not narration; the card falls back to the literal action instead.
+ */
+const MAX_SUMMARY_CHARS = 200;
+
+/**
+ * The call's own account of what it is doing, when it sent a usable one.
+ *
+ * Unlike every other field here a bad value costs only itself: narration is
+ * decoration over an action the card can already describe, so an unreadable
+ * one falls back to the literal form rather than dropping the whole preview.
+ */
+function narration(value: Record<string, unknown>): { summary?: string } {
+  const { summary } = value;
+  if (
+    typeof summary !== "string" ||
+    summary.length === 0 ||
+    summary.length > MAX_SUMMARY_CHARS
+  ) {
+    return {};
+  }
+  return { summary };
 }
 
 /**

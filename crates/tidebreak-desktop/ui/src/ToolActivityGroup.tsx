@@ -5,7 +5,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { toolCallPresentation, type ToolCallStatus } from "./ToolCallCard";
 import { ToolEntriesList } from "./ToolEntriesList";
 import { ToolIcon } from "./ToolIcon";
-import { toolPreviewPresentation } from "./ToolPreview";
+import { toolPreviewHeadline } from "./ToolPreview";
 import { ToolStatusIcon } from "./ToolStatusIcon";
 import { useTypewriterOnce } from "./useTypewriterOnce";
 import { Button } from "@/components/ui/button";
@@ -272,11 +272,12 @@ function railSignature(activities: readonly (ToolActivity | null)[]): string {
 function ToolActivityRow({ activity }: { activity: ToolActivity }) {
   const presentation = toolCallPresentation(activity.name, activity.status);
   // The action under the title, the way the group's cards say it: a search
-  // row reads as "Searched sources" over its query. A command's preview stays
-  // off the rail — its card below the group already leads with it.
+  // row reads as "Searched sources" over its query, or over the call's own
+  // sentence about it when it wrote one. A command's preview stays off the
+  // rail — its card below the group already leads with it.
   const headline =
     activity.preview && activity.preview.tool !== "exec"
-      ? toolPreviewPresentation(activity.preview).headline
+      ? toolPreviewHeadline(activity.preview).text
       : null;
 
   return (
