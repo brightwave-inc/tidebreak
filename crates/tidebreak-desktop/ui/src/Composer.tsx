@@ -16,8 +16,6 @@ import {
   Square,
   Wand2,
   X,
-  CornerUpRight,
-  ListPlus,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
@@ -78,6 +76,7 @@ import { DocumentIcon } from "@/components/document-table/DocumentIcon";
 import type { ImportedDocument } from "@/documents";
 import type { PluginInfo } from "./api";
 import { folderAccessLabel, folderReach } from "./FolderAccess";
+import { useUiStore } from "./UiStore";
 import type { ConnectedFolder } from "./host";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
@@ -306,17 +305,6 @@ export type ComposerProps = {
   steerStatus: string | null;
 };
 
-/** The mid-turn Enter behavior, remembered per install. */
-const SEND_MODE_KEY = "tidebreak.composer.sendMode";
-
-function storedSendMode(): "queue" | "steer" {
-  try {
-    return window.localStorage.getItem(SEND_MODE_KEY) === "steer" ? "steer" : "queue";
-  } catch {
-    return "queue";
-  }
-}
-
 export function Composer({
   activeTurnId,
   busy,
@@ -384,16 +372,8 @@ export function Composer({
   const { confirm, dialog: confirmDialog } = useConfirm();
   const inputDisabled = disabled;
   const active = busy && activeTurnId !== null;
-  const [sendMode, setSendMode] = useState<"queue" | "steer">(storedSendMode);
+  const sendMode = useUiStore((state) => state.activeTurnSendMode);
   const queueAvailable = onQueue !== undefined;
-  function pickSendMode(mode: "queue" | "steer") {
-    setSendMode(mode);
-    try {
-      window.localStorage.setItem(SEND_MODE_KEY, mode);
-    } catch {
-      // Preference-only; losing it costs one extra click.
-    }
-  }
   const hasDraft = Boolean(draft.trim());
   const steerHasUnsupportedCharacter = active && draft.includes("\0");
   const steerTooLong =
@@ -1119,51 +1099,24 @@ export function Composer({
           {active ? (
             <>
               {(hasDraft || steerPending) && (
-                <div className="flex items-center gap-1">
-                  <Button
-                    type="submit"
-                    variant="default"
-                    size="xs"
-                    className="h-8 min-w-[5rem] px-3 text-sm"
-                    aria-label={
-                      queueAvailable && sendMode === "queue"
-                        ? "Queue message for after this response"
-                        : "Redirect active response"
-                    }
-                    disabled={!canSubmit}
-                  >
-                    {steerPending
-                      ? "Sending…"
-                      : queueAvailable && sendMode === "queue"
-                        ? "Queue"
-                        : "Redirect"}
-                  </Button>
-                  {queueAvailable && (
-                    <WithTooltip
-                      label={
-                        sendMode === "queue"
-                          ? "Switch to Redirect: interject into the running response"
-                          : "Switch to Queue: run after this response finishes"
-                      }
-                    >
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon-8"
-                        aria-label="Switch send mode"
-                        onClick={() =>
-                          pickSendMode(sendMode === "queue" ? "steer" : "queue")
-                        }
-                      >
-                        {sendMode === "queue" ? (
-                          <CornerUpRight size={14} />
-                        ) : (
-                          <ListPlus size={14} />
-                        )}
-                      </Button>
-                    </WithTooltip>
-                  )}
-                </div>
+                <Button
+                  type="submit"
+                  variant="default"
+                  size="xs"
+                  className="h-8 min-w-[5rem] px-3 text-sm"
+                  aria-label={
+                    queueAvailable && sendMode === "queue"
+                      ? "Queue message for after this response"
+                      : "Steer active response"
+                  }
+                  disabled={!canSubmit}
+                >
+                  {steerPending
+                    ? "Sending…"
+                    : queueAvailable && sendMode === "queue"
+                      ? "Queue"
+                      : "Steer"}
+                </Button>
               )}
               <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
                 <Button

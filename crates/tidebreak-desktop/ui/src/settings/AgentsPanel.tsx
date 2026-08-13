@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import type { ApiClient } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useUiStore, type ActiveTurnSendMode } from "../UiStore";
 import {
   SettingsError,
   SettingsField,
@@ -19,6 +21,10 @@ const MIN_ERROR_CHECKIN = 1;
 const MAX_ERROR_CHECKIN = 100;
 
 export function AgentsPanel({ client }: { client: ApiClient }) {
+  const activeTurnSendMode = useUiStore((state) => state.activeTurnSendMode);
+  const setActiveTurnSendMode = useUiStore(
+    (state) => state.setActiveTurnSendMode,
+  );
   const [limit, setLimit] = useState("");
   const [checkinSteps, setCheckinSteps] = useState("");
   const [errorCheckin, setErrorCheckin] = useState("");
@@ -103,9 +109,49 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
   return (
     <SettingsPanel
       title="Agents"
-      description="Control how much delegated background work one conversation may run at once, and how often agents report back."
+      description="Choose how messages behave around active work, how much delegated work a conversation may run, and how often agents report back."
       busy={loading}
     >
+      <SettingsSection
+        title="While an agent is responding"
+        description="Choose what the single composer action does when you type during a running response."
+      >
+        <RadioGroup
+          aria-label="Default action while an agent is responding"
+          value={activeTurnSendMode}
+          onValueChange={(value) =>
+            setActiveTurnSendMode(value as ActiveTurnSendMode)
+          }
+          className="gap-3"
+        >
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border/70 p-3 transition-colors hover:bg-muted/40">
+            <RadioGroupItem
+              value="queue"
+              className="mt-0.5"
+              aria-label="Queue"
+            />
+            <span className="flex flex-col gap-0.5">
+              <span className="text-sm font-medium">Queue</span>
+              <span className="text-sm text-muted-foreground">
+                Run the message as its own turn after the current response.
+              </span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border/70 p-3 transition-colors hover:bg-muted/40">
+            <RadioGroupItem
+              value="steer"
+              className="mt-0.5"
+              aria-label="Steer"
+            />
+            <span className="flex flex-col gap-0.5">
+              <span className="text-sm font-medium">Steer</span>
+              <span className="text-sm text-muted-foreground">
+                Interrupt the current response and use the message as guidance.
+              </span>
+            </span>
+          </label>
+        </RadioGroup>
+      </SettingsSection>
       <SettingsSection>
         <SettingsField
           label="Active background agents per chat"
