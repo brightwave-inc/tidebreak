@@ -1618,11 +1618,20 @@ async fn xai_settings_publish_curated_and_explicit_model_capabilities() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let catalog: serde_json::Value = json_body(response).await;
+    let grok_ids: Vec<_> = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["provider"] == "xai")
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    assert!(grok_ids.contains(&"grok-4.6"));
+    assert!(grok_ids.contains(&"grok-4.5"));
     let grok = catalog["models"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["key"] == "xai::grok-4.5")
+        .find(|model| model["key"] == "xai::grok-4.6")
         .unwrap();
     assert!(grok["available"].as_bool().unwrap());
     let model = catalog["models"]
@@ -1687,7 +1696,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, tidebreak_router::RouteKind::Xai);
     assert_eq!(routes[0].base_url, None);
-    assert_eq!(routes[0].curated_models, ["grok-4.5"]);
+    assert_eq!(routes[0].curated_models, ["grok-4.6", "grok-4.5"]);
 
     let grok = providers::resolve_model_policy(&*store, "grok-4.5", false)
         .await

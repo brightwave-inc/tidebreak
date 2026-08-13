@@ -469,10 +469,23 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
-    // xAI publishes a 500,000-token input limit for Grok 4.5 but no output
-    // ceiling. Keep the output cap conservative until the exact model is
-    // exercised end to end. Its first-party Responses route carries image
+    // xAI publishes a 500,000-token input limit for Grok 4.6 and 4.5 but no
+    // output ceiling. Keep the output cap conservative until each row is
+    // exercised end to end. The first-party Responses route carries image
     // input and a low-through-xhigh reasoning scale.
+    ModelSpec {
+        id: "grok-4.6",
+        display_name: "Grok 4.6",
+        provider: ProviderKind::Xai,
+        verification: VerificationTier::Unverified,
+        recommended: true,
+        context_window: 500_000,
+        max_output_tokens: 32_768,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_XHIGH,
+    },
     ModelSpec {
         id: "grok-4.5",
         display_name: "Grok 4.5",
@@ -1089,13 +1102,17 @@ mod tests {
     }
 
     #[test]
-    fn grok_4_5_and_gemini_3_5_flash_are_curated_defaults() {
-        let grok = find_for(ProviderKind::Xai, "grok-4.5").unwrap();
-        assert_eq!(grok.context_window, 500_000);
-        assert_eq!(grok.max_output_tokens, 32_768);
-        assert!(grok.recommended);
-        assert!(grok.accepts(InputModality::Image));
-        assert_eq!(grok.reasoning_efforts, EFFORT_LOW_TO_XHIGH);
+    fn grok_4_6_grok_4_5_and_gemini_3_5_flash_are_curated_defaults() {
+        let grok_ids: Vec<_> = models_for(ProviderKind::Xai).map(|spec| spec.id).collect();
+        assert_eq!(grok_ids, ["grok-4.6", "grok-4.5"]);
+        for id in ["grok-4.6", "grok-4.5"] {
+            let grok = find_for(ProviderKind::Xai, id).unwrap();
+            assert_eq!(grok.context_window, 500_000);
+            assert_eq!(grok.max_output_tokens, 32_768);
+            assert!(grok.recommended);
+            assert!(grok.accepts(InputModality::Image));
+            assert_eq!(grok.reasoning_efforts, EFFORT_LOW_TO_XHIGH);
+        }
 
         assert!(
             find_for(ProviderKind::Gemini, "gemini-3.5-flash")

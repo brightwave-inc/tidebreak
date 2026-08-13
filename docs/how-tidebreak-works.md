@@ -154,11 +154,9 @@ reports what each role resolves to so a client can label the automatic choice.
 
 OpenAI-compatible endpoints and OpenRouter can register custom model IDs and
 their context and output limits in provider settings. Those models enter the
-same catalog with conservative text-only, non-reasoning capabilities. xAI has
-the curated Grok 4.5 row plus optional configured account models; each
-configured row records
-its own limits, image input support, reasoning support, and accepted effort
-levels. Existing unqualified model settings are migrated at the API boundary
+same catalog with conservative text-only, non-reasoning capabilities. xAI
+publishes the curated Grok 4.6 and Grok 4.5 rows when a key is connected.
+Existing unqualified model settings are migrated at the API boundary
 when exactly one configured provider owns the ID. Ambiguous IDs fail closed and
 must be reselected with their provider, so routing never depends on registry
 order.
