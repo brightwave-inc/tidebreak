@@ -261,6 +261,34 @@ describe("pickerRailEntries", () => {
     const rail = pickerRailEntries([...MODELS, gemini], [], null, true);
     expect(rail.map((entry) => entry.provider)).toEqual(["openai", "anthropic"]);
   });
+
+  it("places OpenRouter on the rail after Together", () => {
+    const together: ModelInfo = {
+      ...MODELS[0],
+      key: "together::kimi",
+      id: "kimi",
+      provider: "together",
+      available: true,
+    };
+    const openrouter: ModelInfo = {
+      ...MODELS[0],
+      key: "openrouter::anthropic/claude-sonnet-4",
+      id: "anthropic/claude-sonnet-4",
+      provider: "openrouter",
+      available: false,
+    };
+    const rail = pickerRailEntries(
+      [...MODELS, together, openrouter],
+      [],
+      null,
+    );
+    expect(rail.map((entry) => [entry.provider, entry.connected])).toEqual([
+      ["openai", true],
+      ["anthropic", true],
+      ["together", true],
+      ["openrouter", false],
+    ]);
+  });
 });
 
 describe("pickerProviderForSelection", () => {
