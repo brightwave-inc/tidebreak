@@ -325,6 +325,35 @@ describe("ChatView", () => {
     expect(screen.getByText("streamed answer")).toBeInTheDocument();
   });
 
+  it("does not restart scrolling for every streamed message update", async () => {
+    useChatSessionStore.getState().update((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: "t1",
+      messages: [
+        { id: "m1", role: "assistant", text: "streamed", sources: [] },
+      ],
+    }));
+    const scrollTo = vi.spyOn(Element.prototype, "scrollTo");
+    await renderChatView();
+    scrollTo.mockClear();
+
+    act(() => {
+      useChatSessionStore.getState().update((session) => ({
+        ...session,
+        messages: session.messages.map((message) =>
+          message.id === "m1" ? { ...message, text: "streamed answer" } : message,
+        ),
+      }));
+    });
+
+    expect(useChatSessionStore.getState().messages[0]).toMatchObject({
+      text: "streamed answer",
+    });
+    expect(scrollTo).not.toHaveBeenCalled();
+    scrollTo.mockRestore();
+  });
+
   it("leaves the sent-guidance notice standing when it clears the draft", async () => {
     useChatSessionStore.getState().update((session) => ({
       ...session,
