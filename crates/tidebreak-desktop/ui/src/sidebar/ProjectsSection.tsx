@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronRight,
@@ -25,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { NewProjectDialog } from "./NewProjectDialog";
 import { RecentChatRow } from "./RecentChatRow";
 import { useSidebarWidth } from "./primitives";
 
@@ -86,6 +88,7 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
     (state) => state.chatIdsWithPendingPrompts,
   );
   const isCompact = useSidebarWidth() === "compact";
+  const [creatingOpen, setCreatingOpen] = useState(false);
 
   // Icons-only leaves no room for a nested tree, the same reason the chat list
   // stands down at this width.
@@ -100,13 +103,20 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
         <button
           type="button"
           className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          aria-label={creatingProject ? "Creating…" : "New project"}
+          aria-label="New project"
           disabled={creatingProject || deletingProjectId !== null}
-          onClick={newProject}
+          onClick={() => setCreatingOpen(true)}
         >
           <Plus size={15} />
         </button>
       </div>
+
+      <NewProjectDialog
+        open={creatingOpen}
+        onOpenChange={setCreatingOpen}
+        onCreate={newProject}
+        creating={creatingProject}
+      />
 
       <div className="flex flex-col gap-0.5" aria-label="Projects">
         {projects.map((project) => {
@@ -165,9 +175,14 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
                     />
                   ))}
                   {held.length === 0 && (
-                    <p className="px-2 py-1 text-xs text-muted-foreground">
-                      No chats
-                    </p>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                      disabled={creatingChat || deletingChatId !== null}
+                      onClick={() => newChatInProject(project.id)}
+                    >
+                      New chat
+                    </button>
                   )}
                 </div>
               )}
@@ -259,6 +274,15 @@ function ProjectRow({
             expanded && "rotate-90",
           )}
         />
+      </button>
+      <button
+        type="button"
+        className="cursor-pointer rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:pointer-events-none"
+        aria-label={`New chat in ${title}`}
+        disabled={mutating}
+        onClick={onNewChat}
+      >
+        <SquarePen size={15} />
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

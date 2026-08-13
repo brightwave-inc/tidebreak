@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useChatListStore } from "./ChatListStore";
 import { usePendingPrompts } from "./PendingPrompts";
+import { useProjectListStore } from "./ProjectListStore";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useChatsSectionState } from "./sidebar/ChatsSection";
 import { useUiStore } from "./UiStore";
@@ -38,7 +39,26 @@ const chats = [
 ];
 
 const listChats = vi.fn(async () => chats);
-const createChat = vi.fn(async () => chats[0]);
+const createChat = vi.fn(async (_model?: unknown, projectId?: string | null) =>
+  projectId
+    ? {
+        id: "chat-new",
+        title: null,
+        model: null,
+        reasoning_effort: null,
+        project_id: projectId,
+        created_at: "2026-08-13T12:00:00Z",
+      }
+    : chats[0],
+);
+const listProjects = vi.fn(async () => [] as unknown[]);
+const createProject = vi.fn(async (title: string) => ({
+  id: "project-1",
+  title,
+  attachment_revision: 0,
+  root_attachments: [],
+  created_at: "2026-08-13T12:00:00Z",
+}));
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const listInbox = vi.fn(async () => [] as unknown[]);
@@ -92,6 +112,8 @@ vi.mock("./api", () => ({
     }));
     listChats = listChats;
     createChat = createChat;
+    listProjects = listProjects;
+    createProject = createProject;
     listPendingUserQuestions = listPendingUserQuestions;
     listPendingFolderAccessRequests = listPendingFolderAccessRequests;
     listInbox = listInbox;
@@ -221,6 +243,9 @@ beforeEach(() => {
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
   createChat.mockClear();
+  listProjects.mockClear();
+  listProjects.mockResolvedValue([]);
+  createProject.mockClear();
   listPendingUserQuestions.mockReset();
   listPendingUserQuestions.mockResolvedValue([]);
   listPendingFolderAccessRequests.mockReset();
@@ -238,6 +263,16 @@ beforeEach(() => {
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
   useChatListStore.setState({ chats: [], chatsLoaded: false, chatsError: null });
+  useProjectListStore.setState({
+    projects: [],
+    projectsLoaded: false,
+    creatingProject: false,
+    deletingProjectId: null,
+    renamingProjectId: null,
+    renameProjectDraft: "",
+    savingProjectTitle: false,
+    expandedProjectIds: [],
+  });
   useUiStore.setState({ sidebarCollapsed: false });
   // Module-level chrome state survives a render, so a test that collapsed or
   // filtered the list would otherwise decide the next one's rail.
@@ -581,5 +616,27 @@ describe("app shell", () => {
     await user.click(screen.getByRole("button", { name: "Back to app" }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+  });
+
+  it("creates a project from the dialog and opens a chat inside it", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountApp();
+    await screen.findByText("How can I help?");
+
+    await user.click(screen.getByRole("button", { name: "New project" }));
+    const name = await screen.findByRole("textbox", { name: "Project name" });
+    await user.type(name, "Research");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+
+    await waitFor(() =>
+      expect(createProject).toHaveBeenCalledExactlyOnceWith("Research"),
+    );
+    await waitFor(() =>
+      expect(createChat).toHaveBeenCalledWith(undefined, "project-1"),
+    );
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/p/project-1/c/chat-new"),
+    );
+    expect(screen.getByRole("button", { name: "Research" })).toBeInTheDocument();
   });
 });
