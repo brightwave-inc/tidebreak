@@ -50,6 +50,19 @@ function edit(root, path, mutate) {
   writeFileSync(target, after);
 }
 
+function editWorkflowJob(source, name, mutateJob) {
+  const marker = `  ${name}:\n`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing workflow job: ${name}`);
+  const remainder = source.slice(start + marker.length);
+  const next = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
+  const end = next === -1 ? source.length : start + marker.length + next;
+  const job = source.slice(start, end);
+  const mutated = mutateJob(job);
+  assert.notEqual(mutated, job, `mutation did not change job ${name}`);
+  return source.slice(0, start) + mutated + source.slice(end);
+}
+
 function runPolicy(root) {
   const env = {
     ...process.env,
@@ -202,6 +215,87 @@ const mutations = [
     file: "deploy/self-host/Dockerfile.dockerignore",
     expected: "Docker context is allowlisted",
     mutate: (source) => source.replace("**/id_*\n", ""),
+  },
+  {
+    name: "signing job pnpm pin",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(/version: 10(?:\.18\.3)?\n/, "version: latest\n"),
+      ),
+  },
+  {
+    name: "signing job lockfile install",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(
+          /      - name: Install UI dependencies\n        working-directory: crates\/tidebreak-desktop\/ui\n        run: pnpm install --frozen-lockfile(?: --ignore-scripts)?\n/,
+          "",
+        ),
+      ),
+  },
+  {
+    name: "signing job rust-cache writer",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(
+          /save-if: (?:false|\$\{\{ matrix\.arch == 'aarch64' \}\})/,
+          "save-if: true",
+        ),
+      ),
+  },
+  {
+    name: "signing job floating pnpm",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(/version: 10\.18\.3\n/, "version: 10\n"),
+      ),
+  },
+  {
+    name: "signing job lifecycle scripts",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(
+          "pnpm install --frozen-lockfile --ignore-scripts",
+          "pnpm install --frozen-lockfile",
+        ),
+      ),
+  },
+  {
+    name: "signing job installer order",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) => {
+        const install =
+          "      - name: Install UI dependencies\n        working-directory: crates/tidebreak-desktop/ui\n        run: pnpm install --frozen-lockfile --ignore-scripts\n";
+        assert.ok(job.includes(install));
+        return job.replace(install, "").replace(
+          "      - name: Validate production signing configuration\n",
+          `      - name: Validate production signing configuration\n${install}`,
+        );
+      }),
+  },
+  {
+    name: "production signing rust-cache save-if",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(
+          "save-if: false",
+          "save-if: ${{ matrix.arch == 'aarch64' }}",
+        ),
+      ),
   },
 ];
 

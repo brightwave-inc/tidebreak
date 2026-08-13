@@ -454,6 +454,39 @@ jobs:
             "target/$RELEASE_TARGET/release/"libtidebreak_desktop_lib.* \
             "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
 
+      # sccache, rust-cache, and the UI install run before any Apple or Tauri
+      # material is on disk. pnpm is pinned; lifecycle scripts stay off.
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          # Signed apps, DMGs, updater archives, and signatures remain outside
+          # both the Cargo download cache and the restore-only build cache.
+          cache-targets: false
+          # prepare_macos and cache-macos.yml are the writers. This job holds
+          # Apple and Tauri material, so it must not publish the cache.
+          save-if: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/tidebreak-desktop/ui
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
       - name: Validate production signing configuration
         env:
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
@@ -533,37 +566,6 @@ jobs:
         run: |
           rustup show
           rustup target add "${{ matrix.target }}"
-
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-
-      - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
-        with:
-          shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          # Signed apps, DMGs, updater archives, and signatures remain outside
-          # both the Cargo download cache and the restore-only build cache.
-          cache-targets: false
-          # The matrix shares these architecture-independent downloads. Use a
-          # single writer so simultaneous cold builds cannot race the save.
-          save-if: ${{ matrix.arch == 'aarch64' }}
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: 10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
-      - name: Install UI dependencies
-        working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile
 
       - name: Write tag-derived Tauri configuration
         env:
@@ -944,6 +946,38 @@ jobs:
             "target/$RELEASE_TARGET/release/"tidebreak_desktop_lib.* \
             "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
 
+      # sccache, rust-cache, and the UI install run before the updater key is
+      # loaded. pnpm is pinned; lifecycle scripts stay off.
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          # Installers, updater signatures, and signing material remain outside
+          # both the Cargo download cache and the restore-only build cache. The
+          # credential-free prerequisite is the single registry-cache writer.
+          cache-targets: false
+          save-if: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/tidebreak-desktop/ui
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
       # Authenticode code signing is deliberately absent: v1 Windows releases
       # ship unsigned installers. The Tauri updater key still signs the
       # artifact bytes for latest.json — that is artifact authenticity, not
@@ -968,36 +1002,6 @@ jobs:
         run: |
           rustup show
           rustup target add "${{ matrix.target }}"
-
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-
-      - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
-        with:
-          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          # Installers, updater signatures, and signing material remain outside
-          # both the Cargo download cache and the restore-only build cache. The
-          # credential-free prerequisite is the single registry-cache writer.
-          cache-targets: false
-          save-if: false
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: 10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
-      - name: Install UI dependencies
-        working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile
 
       - name: Write tag-derived Tauri configuration
         env:
