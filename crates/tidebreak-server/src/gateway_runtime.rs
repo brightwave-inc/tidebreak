@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use crate::connectors::{
     is_sign_in_required, CredentialVault, GatewayApp, GatewayAuth, GatewayAuthConfig,
-    GatewayConnection, GatewayOperationSummary, RESOURCE_LLM,
+    GatewayCatalogFetch, GatewayConnection, GatewayOperationSummary, MEMBER_CATALOG_V1,
+    RESOURCE_LLM,
 };
 use async_trait::async_trait;
 use serde::Serialize;
@@ -112,6 +113,14 @@ pub(crate) struct GatewayStatus {
     #[ts(optional)]
     pub(crate) installation_id: Option<String>,
     pub(crate) model_count: usize,
+    /// The member-catalog contract revision the last model sync read, or
+    /// `None` while unsynced or against a gateway that predates
+    /// `/api/v1/me/catalog`. The settings panel uses its absence (while
+    /// signed in with models) to note that the deployment is older than
+    /// this Tidebreak.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub(crate) member_catalog: Option<String>,
     pub(crate) sign_in: SignInProgress,
 }
 
@@ -135,6 +144,14 @@ pub(crate) struct GatewayAppInfo {
     pub(crate) app_kind: String,
     pub(crate) enabled: bool,
     pub(crate) mcp_endpoint_slugs: Vec<String>,
+    /// The gateway's readiness for this app when the member catalog reports
+    /// one: `ready`, `not_connected`, or `authorization_required`. `None`
+    /// against a gateway that predates the catalog — the panel then shows
+    /// no readiness rather than guessing. An unfamiliar value renders as
+    /// not-ready copy, never an error: the set is the gateway's to grow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub(crate) connection: Option<String>,
     /// How many live local-app grants bind this gateway app — the same
     /// "Used by N local apps" line the connected-apps page carries per record,
     /// so a user can see what a revocation here would break.
@@ -235,6 +252,7 @@ impl GatewayRuntime {
             Some(connection) => connection.stored_credentials().await?,
             None => None,
         };
+        let snapshot = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?;
         Ok(GatewayStatus {
             base_url,
             signed_in: credentials.is_some(),
@@ -244,9 +262,11 @@ impl GatewayRuntime {
             installation_id: credentials
                 .as_ref()
                 .map(|credentials| credentials.installation_id.clone()),
-            model_count: providers::gateway_models(&*self.store, &policy)
-                .await?
-                .len(),
+            model_count: snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.models.len())
+                .unwrap_or_default(),
+            member_catalog: snapshot.and_then(|snapshot| snapshot.member_catalog),
             sign_in: self.sign_in.lock().await.clone(),
         })
     }
@@ -256,11 +276,49 @@ impl GatewayRuntime {
     /// gateway without the JSON apps surface reports `supported: false`.
     pub(crate) async fn apps(&self) -> Result<GatewayApps> {
         let connection = self.managed_connection().await?;
-        let Some(apps) = connection.apps().await? else {
-            return Ok(GatewayApps {
-                supported: false,
-                apps: Vec::new(),
-            });
+        // The member catalog carries per-app readiness the older surface
+        // cannot express; prefer it, and degrade to `/api/v1/cli/apps`
+        // (readiness unknown) against a gateway that predates it. Always an
+        // unconditional fetch: this is the live projection a revoked grant
+        // must fall out of, so a cached revision would be a lie.
+        let apps: Vec<GatewayAppInfo> = match connection.catalog(None).await? {
+            GatewayCatalogFetch::Fresh { catalog, .. } => catalog
+                .apps
+                .into_iter()
+                .map(|app| GatewayAppInfo {
+                    used_by_app_count: 0,
+                    id: app.id,
+                    name: app.name,
+                    app_kind: app.app_kind,
+                    enabled: app.enabled,
+                    mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                    connection: Some(app.connection),
+                })
+                .collect(),
+            GatewayCatalogFetch::NotModified => {
+                return Err(AgentError::msg(
+                    "gateway answered an unconditional catalog fetch with 304",
+                ));
+            }
+            GatewayCatalogFetch::Unsupported => {
+                let Some(apps) = connection.apps().await? else {
+                    return Ok(GatewayApps {
+                        supported: false,
+                        apps: Vec::new(),
+                    });
+                };
+                apps.into_iter()
+                    .map(|app| GatewayAppInfo {
+                        used_by_app_count: 0,
+                        id: app.id,
+                        name: app.name,
+                        app_kind: app.app_kind,
+                        enabled: app.enabled,
+                        mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                        connection: None,
+                    })
+                    .collect()
+            }
         };
         // How many local mini-apps currently bind each gateway app: distinct
         // live grants naming the id. The binding grammar forbids a grant
@@ -287,13 +345,9 @@ impl GatewayRuntime {
             supported: true,
             apps: apps
                 .into_iter()
-                .map(|app| GatewayAppInfo {
-                    used_by_app_count: used_by.get(&app.id).copied().unwrap_or_default(),
-                    id: app.id,
-                    name: app.name,
-                    app_kind: app.app_kind,
-                    enabled: app.enabled,
-                    mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                .map(|mut app| {
+                    app.used_by_app_count = used_by.get(&app.id).copied().unwrap_or_default();
+                    app
                 })
                 .collect(),
         })
@@ -608,6 +662,8 @@ impl GatewayRuntime {
                         gateway_url: base_url,
                         models: Vec::new(),
                         model_protocols: Default::default(),
+                        member_catalog: None,
+                        catalog_etag: None,
                     },
                 )
                 .await?;
@@ -714,38 +770,102 @@ impl GatewayRuntime {
         let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
-        // Fetch the full entitled set: each row names the compatibility
-        // protocol the gateway serves it through, and route collection splits
-        // the snapshot across matching adapters. Fetched before the row lock
-        // is taken: the entitlement round-trip must not stall other writers.
+        // The stored snapshot's ETag makes an unchanged catalog a 304: the
+        // background loop runs this every few minutes, and most ticks change
+        // nothing. Read before the row lock — like the fetch itself, the
+        // conditional round-trip must not stall other writers.
+        let held = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?;
+        let held_etag = held
+            .as_ref()
+            .and_then(|snapshot| snapshot.catalog_etag.clone());
+        // Fetch the full entitled set before the row lock is taken. The
+        // member catalog is preferred: one envelope, merged protocols per
+        // model, and the alias list that matches curated rows. A gateway
+        // that predates it degrades to the per-protocol
+        // `/api/v1/cli/models` read.
         let mut model_protocols = std::collections::BTreeMap::new();
-        let models: Vec<CustomModelConfig> = connection
-            .models(None)
-            .await?
-            .into_iter()
-            .filter_map(|model| {
-                let Some(protocol) = providers::GatewayModelProtocol::parse(&model.protocol) else {
-                    tracing::debug!(
-                        "gateway model sync skipped a model with an unsupported inference protocol"
-                    );
-                    return None;
-                };
-                let id = model.id;
-                model_protocols.insert(id.clone(), protocol);
-                Some(CustomModelConfig {
-                    id,
-                    display_name: Some(model.name),
-                    // Carried so a deployment-aliased id can still be matched to
-                    // its curated row; gateways older than the field send none.
-                    upstream_id: model.upstream_id,
-                    context_window: clamp_u32(model.context_window, 32_768),
-                    max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
-                    input_modalities: vec![crate::model_registry::InputModality::Text],
-                    supports_reasoning: false,
-                    reasoning_efforts: Vec::new(),
+        let mut member_catalog = None;
+        let mut catalog_etag = None;
+        let models: Vec<CustomModelConfig> = match connection.catalog(held_etag.as_deref()).await? {
+            GatewayCatalogFetch::NotModified => {
+                // Nothing moved since the held revision; the snapshot the
+                // policy already honors stays as it is.
+                return Ok(held.map(|snapshot| snapshot.models.len()).unwrap_or_default());
+            }
+            GatewayCatalogFetch::Fresh { catalog, etag } => {
+                member_catalog = Some(MEMBER_CATALOG_V1.to_owned());
+                catalog_etag = etag;
+                catalog
+                    .models
+                    .into_iter()
+                    .filter_map(|model| {
+                        let protocols: Vec<_> = model
+                            .protocols
+                            .iter()
+                            .filter_map(|protocol| {
+                                providers::GatewayModelProtocol::parse(protocol)
+                            })
+                            .collect();
+                        // A dual-protocol model routes through Anthropic
+                        // Messages, the richer adapter; a model with no
+                        // protocol this client speaks is skipped, exactly as
+                        // on the older surface.
+                        let protocol = if protocols
+                            .contains(&providers::GatewayModelProtocol::AnthropicMessages)
+                        {
+                            providers::GatewayModelProtocol::AnthropicMessages
+                        } else {
+                            *protocols.first()?
+                        };
+                        let id = model.id;
+                        model_protocols.insert(id.clone(), protocol);
+                        Some(CustomModelConfig {
+                            id,
+                            display_name: Some(model.name),
+                            // The catalog reports gateway-id aliases instead
+                            // of the provider-side id; both exist to match a
+                            // curated row.
+                            upstream_id: None,
+                            aliases: model.aliases,
+                            context_window: clamp_u32(model.context_window, 32_768),
+                            max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+                            input_modalities: vec![crate::model_registry::InputModality::Text],
+                            supports_reasoning: false,
+                            reasoning_efforts: Vec::new(),
+                        })
+                    })
+                    .collect()
+            }
+            GatewayCatalogFetch::Unsupported => connection
+                .models(None)
+                .await?
+                .into_iter()
+                .filter_map(|model| {
+                    let Some(protocol) = providers::GatewayModelProtocol::parse(&model.protocol)
+                    else {
+                        tracing::debug!(
+                            "gateway model sync skipped a model with an unsupported inference protocol"
+                        );
+                        return None;
+                    };
+                    let id = model.id;
+                    model_protocols.insert(id.clone(), protocol);
+                    Some(CustomModelConfig {
+                        id,
+                        display_name: Some(model.name),
+                        // Carried so a deployment-aliased id can still be matched to
+                        // its curated row; gateways older than the field send none.
+                        upstream_id: model.upstream_id,
+                        aliases: Vec::new(),
+                        context_window: clamp_u32(model.context_window, 32_768),
+                        max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+                        input_modalities: vec![crate::model_registry::InputModality::Text],
+                        supports_reasoning: false,
+                        reasoning_efforts: Vec::new(),
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        };
         // The gateway is trusted for entitlements, not for shapes: the synced
         // set is held to the same bounds as user-entered custom models.
         providers::validate_custom_models(&models).map_err(|error| {
@@ -773,6 +893,8 @@ impl GatewayRuntime {
                 gateway_url: base_url,
                 models,
                 model_protocols,
+                member_catalog,
+                catalog_etag,
             },
         )
         .await?;
@@ -1317,6 +1439,39 @@ mod tests {
         minted: std::sync::Mutex<Vec<(String, Option<String>)>>,
         /// `(method, authorization)` per MCP endpoint request, in order.
         mcp_requests: std::sync::Mutex<Vec<(String, String)>>,
+        /// When set, `/api/v1/me/catalog` serves this body under a fixed
+        /// `ETag`; when `None` the route answers 404, the shape of a gateway
+        /// that predates the member catalog.
+        catalog: std::sync::Mutex<Option<Value>>,
+        /// How many catalog fetches arrived with a matching `If-None-Match`
+        /// and were answered 304.
+        catalog_not_modified: AtomicUsize,
+    }
+
+    const CATALOG_ETAG: &str = "W/\"catalog-rev-1\"";
+
+    async fn catalog(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Response {
+        let Some(body) = gateway.catalog.lock().unwrap().clone() else {
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        };
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(bearer.starts_with("Bearer mg_at_control_"), "{bearer}");
+        if headers
+            .get("if-none-match")
+            .and_then(|value| value.to_str().ok())
+            == Some(CATALOG_ETAG)
+        {
+            gateway.catalog_not_modified.fetch_add(1, Ordering::SeqCst);
+            return (
+                axum::http::StatusCode::NOT_MODIFIED,
+                [(axum::http::header::ETAG, CATALOG_ETAG)],
+            )
+                .into_response();
+        }
+        ([(axum::http::header::ETAG, CATALOG_ETAG)], Json(body)).into_response()
     }
 
     /// One entitled connected app aggregating the fixture's `tools` MCP
@@ -1477,6 +1632,7 @@ mod tests {
             .route("/oauth/revoke", post(revoke))
             .route("/api/v1/cli/models", get(models))
             .route("/api/v1/cli/apps", get(apps))
+            .route("/api/v1/me/catalog", get(catalog))
             .route("/mcp/{slug}", post(mcp_endpoint))
             .with_state(gateway);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1597,6 +1753,147 @@ mod tests {
             crate::providers::ProviderKind::ModelGateway
         );
         assert_eq!(policy.display_name, "Sample Claude");
+        // Synced through the degraded CLI reads: no catalog revision to stamp.
+        let snapshot = providers::read_gateway_snapshot(&*store).await.unwrap();
+        assert_eq!(snapshot.unwrap().member_catalog, None);
+    }
+
+    fn sample_catalog() -> Value {
+        json!({
+            "models": [
+                {
+                    "id": "sample-claude",
+                    "name": "Sample Claude",
+                    // Dual-protocol: one row, both surfaces, and the sync
+                    // must route it through Anthropic Messages.
+                    "protocols": ["anthropic_messages", "openai_responses"],
+                    "aliases": ["us.anthropic.claude-opus-5"],
+                    "supports_tools": true,
+                    "supports_vision": true,
+                    "context_window": 200000,
+                    "max_output_tokens": 8192,
+                    "provider_name": "Anthropic"
+                },
+                {
+                    "id": "sample-coder",
+                    "name": "Sample Coder",
+                    "protocols": ["openai_responses"],
+                    "supports_tools": true,
+                    "supports_vision": false,
+                    "context_window": null,
+                    "max_output_tokens": null,
+                    "provider_name": "Acme"
+                },
+                {
+                    "id": "sample-exotic",
+                    "name": "Sample Exotic",
+                    // A protocol this client does not speak: skipped, never
+                    // fatal — the set is the gateway's to grow.
+                    "protocols": ["grpc_frames"],
+                    "supports_tools": false,
+                    "supports_vision": false,
+                    "context_window": null,
+                    "max_output_tokens": null,
+                    "provider_name": "Acme"
+                }
+            ],
+            "apps": [{
+                "id": "app-1",
+                "name": "Tools",
+                "app_kind": "mcp_endpoint",
+                "enabled": true,
+                "mcp_endpoint_slugs": ["tools"],
+                "connection": "authorization_required"
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn sync_prefers_the_member_catalog_and_stamps_its_revision() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        // Two models the client can route; the exotic protocol is skipped.
+        assert_eq!(runtime.sync_models().await.unwrap(), 2);
+
+        let snapshot = providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .expect("the sync persisted a snapshot");
+        assert_eq!(snapshot.member_catalog.as_deref(), Some("v1"));
+        assert_eq!(snapshot.catalog_etag.as_deref(), Some(CATALOG_ETAG));
+        assert_eq!(
+            snapshot.model_protocols.get("sample-claude"),
+            Some(&providers::GatewayModelProtocol::AnthropicMessages),
+            "a dual-protocol model routes through Anthropic Messages"
+        );
+        assert_eq!(
+            snapshot.model_protocols.get("sample-coder"),
+            Some(&providers::GatewayModelProtocol::OpenaiResponses)
+        );
+        assert!(!snapshot.model_protocols.contains_key("sample-exotic"));
+
+        // The catalog's alias matches the curated registry row, so the
+        // policy carries curated capabilities under the gateway's own id.
+        let policy =
+            providers::resolve_model_policy(&*store, "model_gateway::sample-claude", false)
+                .await
+                .unwrap()
+                .expect("synced model resolves");
+        assert_eq!(policy.display_name, "Claude Opus 5");
+
+        // The status projection surfaces the catalog revision for the
+        // settings panel's older-gateway note.
+        let status = runtime.status().await.unwrap();
+        assert_eq!(status.member_catalog.as_deref(), Some("v1"));
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_catalog_answers_304_and_the_snapshot_stays() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        assert_eq!(runtime.sync_models().await.unwrap(), 2);
+        // The second tick sends the stored ETag and keeps the snapshot.
+        assert_eq!(runtime.sync_models().await.unwrap(), 2);
+        assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 1);
+        let snapshot = providers::read_gateway_snapshot(&*store).await.unwrap();
+        assert_eq!(snapshot.unwrap().models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn apps_carry_readiness_from_the_member_catalog() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, _store, _directory) = signed_in_runtime(&base).await;
+
+        let apps = runtime.apps().await.unwrap();
+        assert!(apps.supported);
+        assert_eq!(apps.apps.len(), 1);
+        assert_eq!(
+            apps.apps[0].connection.as_deref(),
+            Some("authorization_required")
+        );
+    }
+
+    #[tokio::test]
+    async fn apps_from_a_catalogless_gateway_carry_no_readiness() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, _store, _directory) = signed_in_runtime(&base).await;
+
+        let apps = runtime.apps().await.unwrap();
+        assert!(apps.supported);
+        assert_eq!(apps.apps.len(), 1);
+        assert_eq!(apps.apps[0].connection, None);
     }
 
     /// The boot-before-sign-in race: a status or sync read caches the
@@ -1705,6 +2002,8 @@ mod tests {
                     },
                 ],
                 model_protocols: Default::default(),
+                member_catalog: None,
+                catalog_etag: None,
             },
         )
         .await
@@ -3154,6 +3453,7 @@ mod tests {
                     gateway_version: "1".into(),
                     public_url: new_base.clone(),
                     auth_mode: "oauth".into(),
+                    surfaces: None,
                 },
                 identity: crate::connectors::GatewayIdentity {
                     user_id: "user-2".into(),

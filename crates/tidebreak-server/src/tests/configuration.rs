@@ -2243,6 +2243,8 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                 },
             ],
             model_protocols: Default::default(),
+            member_catalog: None,
+            catalog_etag: None,
         },
     )
     .await

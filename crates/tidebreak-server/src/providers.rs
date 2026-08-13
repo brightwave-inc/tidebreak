@@ -64,6 +64,16 @@ pub(crate) struct GatewayModelSnapshot {
     /// defaults to that protocol for backward compatibility.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) model_protocols: BTreeMap<String, GatewayModelProtocol>,
+    /// The member-catalog contract revision the last sync read (`"v1"`),
+    /// or `None` when the deployment predates `/api/v1/me/catalog` and the
+    /// sync degraded to the per-surface CLI reads. Drives the "older
+    /// gateway" note in settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) member_catalog: Option<String>,
+    /// The catalog `ETag` of this snapshot, sent as `If-None-Match` on the
+    /// next sync so an unchanged catalog costs a `304` instead of a body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) catalog_etag: Option<String>,
 }
 
 /// The compatibility protocol a managed gateway uses for one entitled model.
@@ -132,7 +142,7 @@ pub(crate) async fn gateway_models(
         .unwrap_or_default())
 }
 
-async fn gateway_snapshot_for_policy(
+pub(crate) async fn gateway_snapshot_for_policy(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<Option<GatewayModelSnapshot>> {
@@ -227,6 +237,8 @@ pub(crate) async fn retire_legacy_gateway_row(
             gateway_url,
             models: row.models,
             model_protocols: BTreeMap::new(),
+            member_catalog: None,
+            catalog_etag: None,
         },
     )
     .await?;
@@ -523,6 +535,14 @@ pub struct CustomModelConfig {
     /// a deployment-aliased id can still be recognized as a curated model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_id: Option<String>,
+    /// Alternate gateway ids that also resolve to this model — the
+    /// deployment-shaped spellings the member catalog reports, offered to
+    /// the curated registry the same way `upstream_id` is.
+    ///
+    /// Populated only by gateway model sync from a catalog-serving gateway;
+    /// a user-entered custom model leaves it empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// Context limit used by Tidebreak's reducer.
     #[serde(default = "default_custom_context_window")]
     pub context_window: u32,
@@ -546,6 +566,7 @@ impl Default for CustomModelConfig {
             id: String::new(),
             display_name: None,
             upstream_id: None,
+            aliases: Vec::new(),
             context_window: default_custom_context_window(),
             max_output_tokens: default_custom_max_output_tokens(),
             input_modalities: default_custom_input_modalities(),
@@ -646,9 +667,15 @@ impl ResolvedModelPolicy {
     fn gateway_for(model: &CustomModelConfig) -> Self {
         let mut policy = Self::custom_for(ProviderKind::ModelGateway, model);
         let Some(spec) = model_registry::find(&model.id).or_else(|| {
-            let upstream = model.upstream_id.as_deref()?;
-            model_registry::find(upstream)
-                .or_else(|| model_registry::find(&curated_id_candidate(upstream)))
+            model
+                .upstream_id
+                .as_deref()
+                .into_iter()
+                .chain(model.aliases.iter().map(String::as_str))
+                .find_map(|candidate| {
+                    model_registry::find(candidate)
+                        .or_else(|| model_registry::find(&curated_id_candidate(candidate)))
+                })
         }) else {
             return policy;
         };
@@ -711,6 +738,7 @@ impl ResolvedModelPolicy {
                 id: id.to_owned(),
                 display_name: None,
                 upstream_id: None,
+                aliases: Vec::new(),
                 context_window: default_custom_context_window(),
                 max_output_tokens: default_custom_max_output_tokens(),
                 input_modalities: default_custom_input_modalities(),
@@ -1265,6 +1293,24 @@ fn validate_configured_models_against(
             return Err(ServerError::bad_request(
                 "configured model display_name must be non-empty, bounded, and contain no control characters",
             ));
+        }
+        const MAX_MODEL_ALIASES: usize = 16;
+        if model.aliases.len() > MAX_MODEL_ALIASES {
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` carries more than {MAX_MODEL_ALIASES} aliases"
+            )));
+        }
+        // Aliases are only ever offered to the curated registry, but they are
+        // gateway-supplied, so they are held to the id grammar all the same.
+        if model.aliases.iter().any(|alias| {
+            alias.is_empty()
+                || alias.chars().count() > MAX_MODEL_ID_CHARS
+                || alias.chars().any(char::is_whitespace)
+                || alias.chars().any(char::is_control)
+        }) {
+            return Err(ServerError::bad_request(format!(
+                "configured model `{id}` carries an alias that is empty, oversized, or contains whitespace or control characters"
+            )));
         }
         if !(1_024..=MAX_CONTEXT_WINDOW).contains(&model.context_window) {
             return Err(ServerError::bad_request(format!(

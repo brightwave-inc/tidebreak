@@ -136,7 +136,30 @@ pub struct GatewayMeta {
     pub gateway_version: String,
     pub public_url: String,
     pub auth_mode: String,
+    /// The capability surfaces this deployment advertises. Absent on
+    /// gateways that predate the member-catalog contract; every consumer
+    /// must degrade rather than require it.
+    #[serde(default)]
+    pub surfaces: Option<GatewaySurfaces>,
 }
+
+/// The capability document a gateway advertises on `/api/v1/meta` and
+/// `/api/v1/cli/me`, read before choosing a code path. Both fields are open
+/// sets: an unknown catalog revision or denial code is ignored, never an
+/// error, so the gateway may grow the contract without a client release.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct GatewaySurfaces {
+    /// The member-catalog contract revision, `"v1"` today. Absent means the
+    /// deployment does not serve `/api/v1/me/catalog`.
+    #[serde(default)]
+    pub member_catalog: Option<String>,
+    /// The denial codes this deployment may emit on invoke.
+    #[serde(default)]
+    pub denial_codes: Vec<String>,
+}
+
+/// The member-catalog contract revision this client implements.
+pub const MEMBER_CATALOG_V1: &str = "v1";
 
 /// The authenticated user, from `/api/v1/cli/me`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -187,6 +210,70 @@ pub struct GatewayApp {
     pub app_kind: String,
     pub enabled: bool,
     pub mcp_endpoint_slugs: Vec<String>,
+}
+
+/// The member catalog from `/api/v1/me/catalog`: one envelope holding the
+/// entitled models and connected apps together, so the two lists cannot
+/// drift apart between separate fetches. Catalog membership uses the same
+/// entitlement predicate the gateway enforces at invoke.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayCatalog {
+    pub models: Vec<GatewayCatalogModel>,
+    pub apps: Vec<GatewayCatalogApp>,
+}
+
+/// One entitled model in the member catalog. Unlike the per-protocol rows of
+/// `/api/v1/cli/models`, a dual-protocol model appears once with both
+/// protocols listed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayCatalogModel {
+    pub id: String,
+    pub name: String,
+    /// The compatibility protocols this model is served through
+    /// (`anthropic_messages` / `openai_responses`). Open set: unknown values
+    /// are skipped, not fatal.
+    pub protocols: Vec<String>,
+    /// Alternate gateway ids that resolve to this model — deployment-shaped
+    /// spellings such as `us.anthropic.claude-opus-5`. Used to match a
+    /// curated registry row the way `upstream_id` does on the older surface.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub context_window: Option<i64>,
+    pub max_output_tokens: Option<i64>,
+    pub provider_name: String,
+}
+
+/// One entitled connected app in the member catalog, with its readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayCatalogApp {
+    pub id: String,
+    pub name: String,
+    pub app_kind: String,
+    pub enabled: bool,
+    pub mcp_endpoint_slugs: Vec<String>,
+    /// `ready`, `not_connected`, or `authorization_required` — whether the
+    /// caller can use the app now or must first connect it at the gateway.
+    /// Open set: an unknown value renders as not-ready, never an error.
+    pub connection: String,
+}
+
+/// What one member-catalog fetch came back as. Three outcomes because the
+/// caller has three different things to do: sync the fresh catalog, keep the
+/// snapshot it already has, or fall back to the older per-surface reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayCatalogFetch {
+    /// The gateway predates `/api/v1/me/catalog` (a 404 on the route).
+    Unsupported,
+    /// The catalog has not changed since the `If-None-Match` revision.
+    NotModified,
+    /// A fresh catalog, with the `ETag` to send on the next conditional
+    /// fetch when the gateway returned one.
+    Fresh {
+        catalog: GatewayCatalog,
+        etag: Option<String>,
+    },
 }
 
 /// One operation a gateway connected app declares, from
@@ -598,6 +685,45 @@ impl GatewayAuth {
         }
         let list: AppListResponse = decode_json(response, "app request").await?;
         Ok(Some(list.apps))
+    }
+
+    /// The member catalog from `/api/v1/me/catalog`: models and apps in one
+    /// envelope, from the same entitlement predicate invoke enforces.
+    ///
+    /// `if_none_match` is the `ETag` of the revision already held; a gateway
+    /// that still serves it answers `304` and the caller keeps its snapshot.
+    /// A gateway that predates the route answers `404`, reported as
+    /// [`GatewayCatalogFetch::Unsupported`] so the caller can degrade to the
+    /// older `/api/v1/cli/models` and `/api/v1/cli/apps` reads.
+    pub async fn catalog(
+        &self,
+        access_token: &str,
+        if_none_match: Option<&str>,
+    ) -> Result<GatewayCatalogFetch> {
+        let mut request = self
+            .http
+            .get(self.endpoint("/api/v1/me/catalog")?)
+            .bearer_auth(access_token);
+        if let Some(etag) = if_none_match {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| gateway_error("catalog request", error.without_url()))?;
+        match response.status() {
+            reqwest::StatusCode::NOT_FOUND => Ok(GatewayCatalogFetch::Unsupported),
+            reqwest::StatusCode::NOT_MODIFIED => Ok(GatewayCatalogFetch::NotModified),
+            _ => {
+                let etag = response
+                    .headers()
+                    .get(reqwest::header::ETAG)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let catalog = decode_json(response, "catalog request").await?;
+                Ok(GatewayCatalogFetch::Fresh { catalog, etag })
+            }
+        }
     }
 
     /// The operations one entitled connected app declares, or `None` against a
@@ -1254,6 +1380,13 @@ impl GatewayConnection {
     pub async fn apps(&self) -> Result<Option<Vec<GatewayApp>>> {
         let token = self.access_token(RESOURCE_CONTROL).await?;
         self.auth.apps(&token).await
+    }
+
+    /// The member catalog with a `control` token; `Unsupported` when the
+    /// gateway predates `/api/v1/me/catalog`.
+    pub async fn catalog(&self, if_none_match: Option<&str>) -> Result<GatewayCatalogFetch> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth.catalog(&token, if_none_match).await
     }
 
     /// One entitled app's declared operations with a `control` token; `None`

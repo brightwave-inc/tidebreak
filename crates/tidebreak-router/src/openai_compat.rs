@@ -158,7 +158,16 @@ impl ModelProvider for OpenAiCompatProvider {
             // Never forward the raw body — gateways sometimes echo key material
             // or request fragments, and `AgentError` strings reach the client.
             let retry_after = crate::sse::retry_after_hint(response.headers());
+            // A managed gateway names its designed refusals in a header; a
+            // known code renders as its own copy instead of a generic
+            // provider fault, and unknown codes fall through.
+            let gateway_code = crate::sse::gateway_denial_code(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
+            if let Some(denial) =
+                gateway_code.and_then(|code| crate::sse::classify_gateway_denial(&code, &body))
+            {
+                return Err(denial);
+            }
             return Err(classify_provider_error(
                 &self.provider_id,
                 status.as_u16(),

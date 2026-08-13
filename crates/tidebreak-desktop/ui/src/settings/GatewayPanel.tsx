@@ -15,6 +15,27 @@ import {
 const SIGN_IN_POLL_MS = 2_000;
 
 /**
+ * Readiness copy for one entitled app, from the gateway's member catalog.
+ * `ready` (and an absent value, on gateways that predate the catalog) render
+ * nothing; the named not-ready states get their own copy; anything
+ * unfamiliar renders as generic not-ready copy — the state set is the
+ * gateway's to grow, and an unknown value must degrade, not break.
+ */
+function appReadinessLabel(connection: string | undefined): string | null {
+  switch (connection) {
+    case undefined:
+    case "ready":
+      return null;
+    case "not_connected":
+      return "connect this app at your gateway to use it";
+    case "authorization_required":
+      return "authorize this app at your gateway to use it";
+    default:
+      return "not ready at your gateway";
+  }
+}
+
+/**
  * The Model Gateway section.
  *
  * Policy is the only gateway source: a profile connects through the
@@ -215,6 +236,16 @@ function ManagedGatewayPanel({
                 Installation {status.installation_id}
               </p>
             )}
+            {status.model_count > 0 && !status.member_catalog && (
+              // Soft note, never a block: an older gateway still signs in
+              // and still syncs models; what it cannot do is report app
+              // readiness or serve instant catalog updates.
+              <p className="text-muted-foreground text-xs">
+                This gateway is older than this Tidebreak. Models still sync,
+                but app readiness and instant catalog updates are unavailable
+                until the gateway is upgraded.
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
@@ -327,6 +358,11 @@ function ManagedGatewayPanel({
                       {!app.enabled && (
                         <span className="text-muted-foreground text-xs">
                           disabled
+                        </span>
+                      )}
+                      {appReadinessLabel(app.connection) && (
+                        <span className="text-muted-foreground text-xs">
+                          {appReadinessLabel(app.connection)}
                         </span>
                       )}
                     </div>

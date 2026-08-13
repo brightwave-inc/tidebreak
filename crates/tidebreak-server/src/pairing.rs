@@ -727,6 +727,8 @@ mod tests {
                     ..Default::default()
                 }],
                 model_protocols: Default::default(),
+                member_catalog: None,
+                catalog_etag: None,
             },
         )
         .await
