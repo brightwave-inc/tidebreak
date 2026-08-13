@@ -263,18 +263,26 @@ export function AppShell() {
     };
   }, [client, info]);
 
-  async function onNewProject() {
-    if (!client || projectMutationRef.current) return;
+  /**
+   * Create a named project and the first chat inside it.
+   *
+   * A project with no conversation is a folder the reader has to fill. The
+   * dialog already collected the name, so this does both writes and opens the
+   * chat rather than leaving an empty row in the rail.
+   */
+  async function onNewProject(title: string): Promise<boolean> {
+    const trimmed = title.trim();
+    if (!client || !trimmed || projectMutationRef.current) return false;
     projectMutationRef.current = true;
     projectListActions.setCreatingProject(true);
     try {
-      const created = await client.createProject("New project");
+      const created = await client.createProject(trimmed);
       projectListActions.prependProject(created);
-      // Named on creation rather than through a dialog: the row drops straight
-      // into its rename field, which is the same edit the menu offers later.
-      projectListActions.beginProjectRename(created);
+      await onNewChatInProject(created.id);
+      return true;
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not create the project."));
+      return false;
     } finally {
       projectMutationRef.current = false;
       projectListActions.setCreatingProject(false);
@@ -614,7 +622,7 @@ export function AppShell() {
           startRename: startChatRename,
           commitRename: (target) => void commitChatRename(target),
           cancelRename: cancelChatRename,
-          newProject: () => void onNewProject(),
+          newProject: (title) => onNewProject(title),
           deleteProject: (target) => void onDeleteProject(target),
           startProjectRename,
           commitProjectRename: (target) => void commitProjectRename(target),

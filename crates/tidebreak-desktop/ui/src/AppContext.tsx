@@ -52,8 +52,11 @@ export type AppContextValue = {
   startRename: (chat: Chat) => void;
   commitRename: (chat: Chat) => void;
   cancelRename: () => void;
-  /** Create a project and drop its rail row straight into its rename field. */
-  newProject: () => void;
+  /**
+   * Create a named project, start a chat inside it, and open that chat.
+   * Resolves `true` when the project exists so the create dialog can close.
+   */
+  newProject: (title: string) => Promise<boolean>;
   /**
    * Confirm, move the project's conversations back to Recents, then delete it.
    * The conversations survive: deleting a folder is not deleting its contents.
