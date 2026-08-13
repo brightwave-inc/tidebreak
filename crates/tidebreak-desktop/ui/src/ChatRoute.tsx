@@ -55,7 +55,7 @@ import {
   type ImageAttachment,
 } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
-import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
+import { modelForChat, textOnlyModelLabel } from "./ModelSelection";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import {
@@ -108,7 +108,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, providers, modelVisibilityOverrides, setStatus } =
+  const { client, models, defaultModelKey, providers, setStatus } =
     useApp();
   const modelSettingsNav = useModelSettingsNav();
   const { layout, openPanel } = usePanelNav();
@@ -659,7 +659,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   function renderChat(visible: boolean) {
     // The model selected right now: the reasoning levels it accepts.
-    const activeModel = modelForSelection(models, chat!.model);
+    const activeModel = modelForChat(models, chat!.model, defaultModelKey);
     // Only the levels the selected model accepts are offerable, and a model
     // that accepts none gets no selector at all.
     const efforts = activeModel?.reasoning_efforts ?? [];
@@ -733,9 +733,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               value={chat!.model}
               defaultKey={defaultModelKey}
               disabled={deletingChatId !== null}
-              visibilityOverrides={modelVisibilityOverrides}
               providers={providers}
-              onManageModels={modelSettingsNav.onManageModels}
               onSetUpProvider={modelSettingsNav.onSetUpProvider}
               onChange={onModelChange}
             />

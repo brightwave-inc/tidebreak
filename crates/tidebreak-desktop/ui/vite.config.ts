@@ -3,12 +3,13 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import { tidebreakDevListenPlugin } from "./vite-dev-listen";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), tidebreakDevListenPlugin()],
   // The spreadsheet viewer parses and calculates off the main thread. Those
   // workers are large enough to be split into chunks themselves, which the
   // default IIFE worker format cannot express.

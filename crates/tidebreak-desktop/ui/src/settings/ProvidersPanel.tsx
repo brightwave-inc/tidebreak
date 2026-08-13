@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ChevronRight } from "lucide-react";
 import { toast } from "sonner";
@@ -19,10 +19,6 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useConfirm } from "../components/ConfirmDialog";
-import {
-  isModelVisible,
-  type ModelVisibilityOverrides,
-} from "../modelVisibility";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { ProviderIcon } from "../ProviderIcons";
 import { providerLabel } from "../ModelSelection";
@@ -108,27 +104,6 @@ export function ProvidersPanel({
   const [expanded, setExpanded] = useState<Record<string, boolean>>(
     readExpandedProviders,
   );
-  const [overrides, setOverrides] = useState<ModelVisibilityOverrides>({});
-
-  // Visibility is a reader preference stored in settings, not part of the
-  // provider catalog, so the panel fetches it once for every card. A failure
-  // leaves the checklists showing catalog defaults, which is what a reader with
-  // no overrides sees anyway.
-  useEffect(() => {
-    let dropped = false;
-    void Promise.resolve()
-      .then(() => client.getSettings())
-      .then((settings) => {
-        if (!dropped) setOverrides(settings.model_visibility_overrides ?? {});
-      })
-      .catch(() => {
-        /* the cards still work against the catalog defaults */
-      });
-    return () => {
-      dropped = true;
-    };
-  }, [client]);
-
   const setExpandedFor = useCallback((kind: string, open: boolean) => {
     setExpanded((current) => {
       const next = { ...current, [kind]: open };
@@ -178,8 +153,6 @@ export function ProvidersPanel({
               client={client}
               onChanged={onChanged}
               catalogModels={models.filter((model) => model.provider === p.kind)}
-              overrides={overrides}
-              onOverridesChanged={setOverrides}
               expanded={expanded[p.kind] === true}
               onExpandedChange={(open) => setExpandedFor(p.kind, open)}
               deepLinked={expandProvider === p.kind}
@@ -198,8 +171,6 @@ function ProviderRow({
   client,
   onChanged,
   catalogModels,
-  overrides,
-  onOverridesChanged,
   expanded,
   onExpandedChange,
   deepLinked,
@@ -209,8 +180,6 @@ function ProviderRow({
   client: ApiClient;
   onChanged: () => void;
   catalogModels: ModelInfo[];
-  overrides: ModelVisibilityOverrides;
-  onOverridesChanged: (next: ModelVisibilityOverrides) => void;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
   deepLinked: boolean;
@@ -230,25 +199,15 @@ function ProviderRow({
   const acceptsBaseUrl =
     info.kind === "openai_compatible" || info.kind === "ollama";
   const requiresCredential = info.kind !== "ollama";
-  const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [pendingCredentialFocus, setPendingCredentialFocus] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const credentialRef = useRef<HTMLInputElement | null>(null);
   const connected =
     info.enabled && (info.has_credential || !requiresCredential);
-  const visibleCount = useMemo(
-    () =>
-      catalogModels.filter((model) => isModelVisible(model, overrides)).length,
-    [catalogModels, overrides],
-  );
   // A provider whose models are all user-configured — or served by a gateway —
-  // has no curated catalog rows here, so there is nothing to summarize or list.
+  // has no curated catalog rows here, so there is nothing to summarize.
   const summary =
-    catalogModels.length === 0
-      ? null
-      : connected
-        ? `${visibleCount} of ${catalogModels.length} models shown`
-        : `${catalogModels.length} models`;
+    catalogModels.length === 0 ? null : `${catalogModels.length} models`;
 
   const revealed = useRef(false);
   useEffect(() => {
@@ -267,53 +226,6 @@ function ProviderRow({
     setPendingCredentialFocus(false);
     credentialRef.current?.focus();
   }, [expanded, pendingCredentialFocus]);
-
-  /**
-   * Persist the reader's visibility choices. The map is deviations only and the
-   * server replaces it wholesale, so every write sends the complete desired set
-   * — and a model returned to its catalog default loses its entry rather than
-   * gaining a redundant one.
-   */
-  async function writeOverrides(
-    next: ModelVisibilityOverrides,
-    failure: string,
-  ) {
-    setVisibilitySaving(true);
-    try {
-      const settings = await client.putSettings({
-        model_visibility_overrides: next,
-      });
-      onOverridesChanged(settings.model_visibility_overrides ?? {});
-      // The shell holds its own copy of the overrides for the picker, so a
-      // write here is a catalog change as much as a credential save is.
-      onChanged();
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, failure));
-    } finally {
-      setVisibilitySaving(false);
-    }
-  }
-
-  async function setModelVisible(model: ModelInfo, visible: boolean) {
-    const next = { ...overrides };
-    if (visible === model.recommended) delete next[model.key];
-    else next[model.key] = visible ? "show" : "hide";
-    await writeOverrides(
-      next,
-      `Could not update which ${providerLabel(info.kind)} models the picker shows.`,
-    );
-  }
-
-  async function resetToRecommended() {
-    const owned = new Set<string>(catalogModels.map((model) => model.key));
-    const next = Object.fromEntries(
-      Object.entries(overrides).filter(([key]) => !owned.has(key)),
-    ) as ModelVisibilityOverrides;
-    await writeOverrides(
-      next,
-      `Could not reset the ${providerLabel(info.kind)} models.`,
-    );
-  }
 
   function openWithCredentialFocus() {
     setPendingCredentialFocus(true);
@@ -760,48 +672,6 @@ function ProviderRow({
             </>
           )}
           {error && <SettingsError>{error}</SettingsError>}
-          {catalogModels.length > 0 && (
-            <div className="flex flex-col gap-1 border-t border-border pt-4">
-              <div className="flex items-baseline justify-between gap-3">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Models in the picker
-                </h3>
-                <Button
-                  type="button"
-                  variant="link"
-                  className="h-auto p-0 text-xs"
-                  disabled={visibilitySaving}
-                  onClick={() => void resetToRecommended()}
-                >
-                  Reset to defaults
-                </Button>
-              </div>
-              {catalogModels.map((model) => {
-                const visible = isModelVisible(model, overrides);
-                return (
-                  <label
-                    key={model.key}
-                    className="flex items-center gap-2 rounded-md px-1 py-1.5 text-sm hover:bg-muted/40"
-                  >
-                    <Checkbox
-                      checked={visible}
-                      disabled={visibilitySaving}
-                      aria-label={`Show ${model.display_name}`}
-                      onCheckedChange={(checked) =>
-                        void setModelVisible(model, checked === true)
-                      }
-                    />
-                    <span className={cn(!visible && "text-muted-foreground")}>
-                      {model.display_name}
-                    </span>
-                  </label>
-                );
-              })}
-              <p className="pt-2 text-xs text-muted-foreground">
-                Hidden models stay usable in chats that already selected them.
-              </p>
-            </div>
-          )}
           {dialog}
         </div>
       )}

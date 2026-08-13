@@ -492,4 +492,70 @@ describe("Composer", () => {
     // A text-only model is only a problem for a turn that carries an image.
     expect(imageSendBlocker(images({ unsupportedModel: "Local Model" }))).toBeNull();
   });
+
+  it("shows last-turn usage left of Send even when the window is unknown", () => {
+    const usage = {
+      input_tokens: 12_000,
+      output_tokens: 800,
+      cache_read_input_tokens: 4_000,
+      cache_creation_input_tokens: 0,
+    };
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId="turn-2"
+        busy
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft=""
+        contextUsage={{
+          usage,
+          contextWindow: undefined,
+          modelName: "GPT-5.6 Sol",
+        }}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Context: 16,800 tokens used"');
+    expect(markup).not.toContain("% of");
+    expect(markup.indexOf("Context: 16,800 tokens used")).toBeLessThan(
+      markup.indexOf('aria-label="Stop response"'),
+    );
+  });
+
+  it("hides the context meter before any turn has usage", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId={null}
+        busy={false}
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft=""
+        contextUsage={{
+          usage: null,
+          contextWindow: 1_050_000,
+          modelName: "GPT-5.6 Sol",
+        }}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).not.toContain('aria-label="Context:');
+  });
 });

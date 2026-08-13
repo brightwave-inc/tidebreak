@@ -2,10 +2,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   firstAvailableModel,
-  hiddenModelCount,
   ModelMenu,
   ModelToolCapabilityChip,
   notConnectedProviders,
+  pickerProviderForSelection,
+  pickerRailEntries,
   reasoningEffortOptions,
   visibleModelGroups,
 } from "./ModelMenu";
@@ -70,7 +71,6 @@ function triggerMarkup(
       models={models}
       value={value}
       defaultKey={defaultKey ?? null}
-      onManageModels={() => {}}
       onSetUpProvider={() => {}}
       onChange={() => {}}
     />,
@@ -121,7 +121,6 @@ describe("ModelMenu", () => {
         models={MODELS}
         value={null}
         disabled
-        onManageModels={() => {}}
         onSetUpProvider={() => {}}
         onChange={() => {}}
       />,
@@ -191,38 +190,14 @@ describe("visibleModelGroups", () => {
     expect(anthropic?.models).toHaveLength(2);
   });
 
-  it("leaves out a model the catalog does not recommend", () => {
+  it("lists every catalog row for a connected provider", () => {
     const anthropic = visibleModelGroups([MODELS[0], HAIKU], null).find(
       (group) => group.provider === "anthropic",
     );
-    expect(anthropic?.models.map((model) => model.key)).toEqual([MODELS[0].key]);
-  });
-
-  it("lists a hidden model the reader overrode back on", () => {
-    const anthropic = visibleModelGroups([MODELS[0], HAIKU], null, {
-      [HAIKU.key]: "show",
-    }).find((group) => group.provider === "anthropic");
-    expect(anthropic?.models.map((model) => model.key)).toContain(HAIKU.key);
-  });
-
-  it("keeps the chat's own model listed however it is hidden", () => {
-    // Hiding is presentation, never a capability: the chat is pinned to this
-    // model and the picker that set it must still show it.
-    const anthropic = visibleModelGroups([MODELS[0], HAIKU], HAIKU.key, {
-      [HAIKU.key]: "hide",
-    }).find((group) => group.provider === "anthropic");
-    expect(anthropic?.models.map((model) => model.key)).toContain(HAIKU.key);
-  });
-});
-
-describe("hiddenModelCount", () => {
-  it("counts what the reader could run but cannot see", () => {
-    expect(hiddenModelCount([MODELS[0], HAIKU], null)).toBe(1);
-    // The chat's own model renders regardless, so counting it reads as a bug.
-    expect(hiddenModelCount([MODELS[0], HAIKU], HAIKU.key)).toBe(0);
-    expect(hiddenModelCount([MODELS[0], HAIKU], null, { [HAIKU.key]: "show" })).toBe(
-      0,
-    );
+    expect(anthropic?.models.map((model) => model.key)).toEqual([
+      MODELS[0].key,
+      HAIKU.key,
+    ]);
   });
 });
 
@@ -264,14 +239,58 @@ describe("notConnectedProviders", () => {
   });
 });
 
+describe("pickerRailEntries", () => {
+  const gemini: ModelInfo = {
+    ...MODELS[0],
+    key: "gemini::a",
+    provider: "gemini",
+    available: false,
+    recommended: true,
+  };
+
+  it("lists connected providers and ones still to set up", () => {
+    const rail = pickerRailEntries([...MODELS, gemini], [], null);
+    expect(rail.map((entry) => [entry.provider, entry.connected])).toEqual([
+      ["openai", true],
+      ["anthropic", true],
+      ["gemini", false],
+    ]);
+  });
+
+  it("omits unconfigured providers on a managed profile", () => {
+    const rail = pickerRailEntries([...MODELS, gemini], [], null, true);
+    expect(rail.map((entry) => entry.provider)).toEqual(["openai", "anthropic"]);
+  });
+});
+
+describe("pickerProviderForSelection", () => {
+  const groups = [
+    { provider: "openai" as const },
+    { provider: "anthropic" as const },
+  ];
+
+  it("opens on the selected model's provider", () => {
+    expect(
+      pickerProviderForSelection(groups, { provider: "anthropic" }),
+    ).toBe("anthropic");
+  });
+
+  it("falls back to the first visible group", () => {
+    expect(pickerProviderForSelection(groups, null)).toBe("openai");
+    expect(
+      pickerProviderForSelection(groups, { provider: "gemini" }),
+    ).toBe("openai");
+  });
+
+  it("is null when nothing is listed", () => {
+    expect(pickerProviderForSelection([], { provider: "openai" })).toBeNull();
+  });
+});
+
 describe("firstAvailableModel", () => {
-  it("lands in render order, not catalog order", () => {
-    // This fixture's OpenAI row is intentionally non-recommended, so the
-    // first visible row remains Anthropic even though OpenAI renders first.
+  it("lands in render order", () => {
     const [sonnet, gpt] = MODELS;
-    expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe(
-      "anthropic::claude-sonnet-4",
-    );
+    expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe("openai::gpt-4o");
   });
 
   it("is null when nothing can run", () => {
@@ -281,6 +300,13 @@ describe("firstAvailableModel", () => {
 });
 
 describe("ProviderIcon", () => {
+  it("draws the Grok/xAI ribbon, not a stroke X", () => {
+    const markup = renderToStaticMarkup(<ProviderIcon provider="xai" />);
+    expect(markup).toContain("M9.269");
+    expect(markup).not.toContain("strokeWidth");
+    expect(markup).not.toContain("M5 4l14 16");
+  });
+
   it("keeps an open model's vendor mark whatever endpoint serves it", () => {
     const throughGateway = renderToStaticMarkup(
       <ProviderIcon provider="model_gateway" modelId="kimi-k2.5" />,
@@ -309,7 +335,6 @@ describe("model marks", () => {
         models={[gatewayClaude]}
         value={gatewayClaude.key}
         defaultKey={null}
-        onManageModels={() => {}}
         onSetUpProvider={() => {}}
         onChange={() => {}}
       />,
