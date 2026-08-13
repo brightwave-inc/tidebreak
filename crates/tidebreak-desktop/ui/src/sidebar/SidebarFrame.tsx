@@ -47,13 +47,23 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
       <SidebarHeader>
         <button
           type="button"
-          className="inline-flex shrink-0 cursor-pointer items-center rounded-md p-1 text-foreground transition-opacity hover:opacity-70"
+          className="inline-flex min-w-0 shrink cursor-pointer items-center gap-2.5 rounded-md p-1 text-foreground transition-opacity hover:opacity-70"
           aria-label="Home"
           onClick={() => void navigate({ to: "/" })}
         >
-          {/* Square box around the wide mark, so the home button lines up with
-              the column of square rail buttons under it. */}
-          <Logomark width="28" height="28" />
+          {/* Compact keeps a square footprint so the home control lines up
+              with the column of square rail buttons under it. Expanded uses
+              the mark's own ratio beside the name, the same lockup as the
+              public site header. */}
+          <Logomark
+            width={isCompact ? "28" : "30"}
+            height={isCompact ? "28" : "16"}
+          />
+          {!isCompact && (
+            <span className="truncate font-mono text-sm font-medium leading-none">
+              Tidebreak
+            </span>
+          )}
         </button>
         <span className="grow" />
         {!isCompact && (
