@@ -26,10 +26,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Only the newest main tip is worth notarizing. Cancelling this run also
-  # cancels the reusable release.yml jobs it started, so a burst of merges
-  # does not queue a chain of stale staging publishes.
-  group: tidebreak-desktop-staging
+  # Unique per run so a later merge cannot cancel this caller — that would
+  # also cancel the reusable publish it started. The publish workflow
+  # serializes on its own group without dropping an in-flight notarization.
+  group: tidebreak-desktop-staging-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:

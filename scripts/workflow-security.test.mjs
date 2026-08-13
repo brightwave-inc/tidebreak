@@ -1296,6 +1296,7 @@ test("staging desktop publishes only under the staging prefix", () => {
     assert.doesNotMatch(stagingPublish, /^\s*pull_request(?:_target)?:/m);
     assert.match(stagingPublish, /^permissions:\n  contents: read$/m);
     assert.match(stagingPublish, /group: tidebreak-desktop-staging-build/);
+    assert.match(stagingPublish, /cancel-in-progress: false/);
     assert.doesNotMatch(stagingPublish, /tidebreak\/latest\.json/);
     assert.doesNotMatch(release, /^  workflow_call:\n/m);
   } else {

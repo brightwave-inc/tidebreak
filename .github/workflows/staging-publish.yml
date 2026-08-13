@@ -20,10 +20,11 @@ permissions:
   contents: read
 
 concurrency:
-  # Only the newest main tip is worth notarizing. Separate from production
-  # so a staging run cannot block or cancel a desktop release.
+  # Serialize staging publishes so two main tips cannot race latest.json.
+  # Do not cancel: a notarization already in flight should finish. Publish
+  # still refuses to advance latest.json if main has moved on.
   group: tidebreak-desktop-staging-build
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   validate_staging:

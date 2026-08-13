@@ -335,8 +335,10 @@ Tauri updater, and not a production `vMAJOR.MINOR.PATCH` tag.
 
 The caller is **Publish staging desktop**. It derives the version, then
 invokes the `workflow_call`-only **Publish staging desktop build** workflow
-with `channel: staging`. A burst of merges cancels the superseded staging
-run. Production's concurrency group is untouched. Staging artifacts live under
+with `channel: staging`. Staging publishes serialize so an in-flight
+notarization is not cancelled by the next merge; `latest.json` still only
+advances if that commit is still `main`. Production's concurrency group is
+untouched. Staging artifacts live under
 `https://downloads.brightwave.io/tidebreak/staging/`; the publish step
 refuses any other prefix and will not advance `latest.json` if `main` has
 already moved on.
