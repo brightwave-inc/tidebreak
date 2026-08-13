@@ -1,0 +1,5 @@
+# The sandbox image build context is the workspace root (`COPY . .`).
+# Git metadata is never a build input; excluding it keeps checkout
+# credentials (and the rest of .git) out of the daemon context.
+.git
+.git/**
