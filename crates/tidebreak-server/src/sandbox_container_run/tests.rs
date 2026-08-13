@@ -1013,20 +1013,18 @@ async fn stops_proxying_inference_at_the_runs_spend_budget() {
 /// move forward before the model call is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
-    // This test runs alongside hundreds of server tests, many with their own
-    // multi-thread runtimes and SQLite stores. Keep a hard bound for genuine
-    // transport hangs, but leave enough headroom for the loopback drive to be
-    // scheduled under full-suite CI contention.
-    tokio::time::timeout(Duration::from_secs(90), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "takes a while").await;
 
         let backend = MockBackend::spawning();
         let gate = Arc::new(StepGate::default());
         // Hold the first completion until the durable heartbeat is visible.
-        // This proves the same contract without making the assertion depend on
-        // several seconds of wall-clock sleeps while the full test binary is
-        // competing for CI runtime threads.
+        // The lease must outlast provision+attach — heartbeats only start once
+        // the container is driving — so a short lease expires under CI
+        // contention before the first tick and this loop never observes an
+        // extension. A short heartbeat still proves the expiry moved without
+        // sleeping through a full lease period.
         let provider = Arc::new(ScriptedProvider::gated(
             vec![
                 "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a b\"}".to_owned(),
@@ -1041,7 +1039,6 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             backend.clone(),
             resolver,
             SandboxContainerRunConfig {
-                lease: Duration::from_secs(2),
                 heartbeat: Duration::from_millis(100),
                 ..fast_config()
             },
@@ -1058,6 +1055,7 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             .lease_expires_at
             .expect("a claimed run has a lease expiry");
 
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let extended = loop {
             tokio::time::sleep(Duration::from_millis(25)).await;
             let run = store.get_agent_run(run_id).await.unwrap().unwrap();
@@ -1072,6 +1070,10 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             if expiry > initial {
                 break expiry;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "lease expiry {expiry} did not move past {initial} while the model call was held"
+            );
         };
         assert!(extended > initial);
 
