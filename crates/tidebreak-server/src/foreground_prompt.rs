@@ -481,7 +481,7 @@ pub(crate) fn compose_for_surface(
             .iter()
             .any(|name| tidebreak_core::is_computer_use_control_tool(name));
         let mut lines = vec![if acting {
-            "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_focus_window`, `computer_return_to_openwave`, and `computer_wait` to act."
+            "- This turn can see and operate apps on the user's display: `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content` to look; `computer_click`, `computer_type_text`, `computer_key_press`, `computer_scroll`, `computer_focus_window`, `computer_return_to_tidebreak`, and `computer_wait` to act."
         } else {
             "- This turn can see the user's display and read app content with `computer_list_windows`, `computer_capture_screen`, and `computer_read_app_content`; acting on apps is not available this turn."
         }];
@@ -981,7 +981,7 @@ mod tests {
             spec(tidebreak_core::COMPUTER_KEY_PRESS_TOOL),
             spec(tidebreak_core::COMPUTER_SCROLL_TOOL),
             spec(tidebreak_core::COMPUTER_FOCUS_WINDOW_TOOL),
-            spec(tidebreak_core::COMPUTER_RETURN_TO_OPENWAVE_TOOL),
+            spec(tidebreak_core::COMPUTER_RETURN_TO_TIDEBREAK_TOOL),
             spec(tidebreak_core::COMPUTER_WAIT_TOOL),
         ]);
         assert!(full.contains(COMPUTER_USE_HEADING));

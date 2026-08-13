@@ -29,14 +29,14 @@ use tidebreak_core::{
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
     validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
     validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
-    validate_computer_return_to_openwave_arguments, validate_computer_scroll_arguments,
+    validate_computer_return_to_tidebreak_arguments, validate_computer_scroll_arguments,
     validate_computer_type_text_arguments, validate_computer_wait_arguments, CallId, ChatId,
     ComputerCaptureScreenArgs, ComputerClickArgs, ComputerFocusWindowArgs, ComputerKeyPressArgs,
     ComputerListWindowsArgs, ComputerReadAppContentArgs, ComputerScrollArgs, ComputerTypeTextArgs,
     ComputerWaitArgs, ImageRef, ToolCallExecution, ToolCallRecord, ToolCallStatus,
     COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_FOCUS_WINDOW_TOOL,
     COMPUTER_KEY_PRESS_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
-    COMPUTER_RETURN_TO_OPENWAVE_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
+    COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
     COMPUTER_WAIT_TOOL, MAX_WAIT_SECONDS,
 };
 use tidebreak_host_broker::{
@@ -305,7 +305,7 @@ impl ComputerUseState {
 
 fn emit_state(app: &AppHandle, cu: &ComputerUseState) {
     if let Err(error) = app.emit(STATE_EVENT, cu.snapshot()) {
-        eprintln!("openwave-desktop: could not emit computer-use state: {error}");
+        eprintln!("tidebreak-desktop: could not emit computer-use state: {error}");
     }
 }
 
@@ -394,7 +394,7 @@ pub(crate) async fn recover_computer_use_operations(app: AppHandle) {
     loop {
         let failed = recover_once(&app).await;
         if failed {
-            eprintln!("openwave-desktop: computer-use executor deferred work");
+            eprintln!("tidebreak-desktop: computer-use executor deferred work");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -405,7 +405,7 @@ async fn recover_once(app: &AppHandle) -> bool {
     let receipts = match state.receipts.load_computer_uses() {
         Ok(receipts) => receipts,
         Err(error) => {
-            eprintln!("openwave-desktop: computer-use receipt recovery failed: {error}");
+            eprintln!("tidebreak-desktop: computer-use receipt recovery failed: {error}");
             return true;
         }
     };
@@ -414,7 +414,7 @@ async fn recover_once(app: &AppHandle) -> bool {
     let mut failed = false;
     for receipt in receipts {
         if let Err(error) = execute_receipt(app, &state, receipt).await {
-            eprintln!("openwave-desktop: computer-use receipt deferred: {error}");
+            eprintln!("tidebreak-desktop: computer-use receipt deferred: {error}");
             failed = true;
         }
     }
@@ -444,7 +444,7 @@ async fn recover_once(app: &AppHandle) -> bool {
         {
             let receipt = ComputerUseReceipt::new(chat.id, call.id, state.receipts.executor_id());
             if let Err(error) = execute_receipt(app, &state, receipt).await {
-                eprintln!("openwave-desktop: computer-use execution deferred: {error}");
+                eprintln!("tidebreak-desktop: computer-use execution deferred: {error}");
                 failed = true;
             }
         }
@@ -636,8 +636,8 @@ fn is_computer_use_call(call: &ToolCallRecord) -> bool {
         COMPUTER_KEY_PRESS_TOOL => validate_computer_key_press_arguments(&call.arguments),
         COMPUTER_SCROLL_TOOL => validate_computer_scroll_arguments(&call.arguments),
         COMPUTER_FOCUS_WINDOW_TOOL => validate_computer_focus_window_arguments(&call.arguments),
-        COMPUTER_RETURN_TO_OPENWAVE_TOOL => {
-            validate_computer_return_to_openwave_arguments(&call.arguments)
+        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => {
+            validate_computer_return_to_tidebreak_arguments(&call.arguments)
         }
         COMPUTER_WAIT_TOOL => validate_computer_wait_arguments(&call.arguments),
         _ => false,
@@ -650,10 +650,10 @@ fn is_computer_use_call(call: &ToolCallRecord) -> bool {
 #[derive(Debug)]
 enum CuAction {
     Broker(OperationRequest),
-    /// Return focus to OpenWave itself. Deliberately not a broker op: OpenWave
+    /// Return focus to Tidebreak itself. Deliberately not a broker op: Tidebreak
     /// is on the control blocklist, and focusing our own window is a local
     /// window-manager call, not synthesized input into another app.
-    ReturnToOpenwave,
+    ReturnToTidebreak,
     /// A bounded local pause. The broker exposes the same op clamped; keeping
     /// it local saves a round-trip and never reaches the helper either way.
     Wait(f64),
@@ -671,9 +671,9 @@ async fn execute_operation(
         Err(resolution) => return resolution,
     };
     match action {
-        CuAction::ReturnToOpenwave => {
+        CuAction::ReturnToTidebreak => {
             crate::deep_link::focus_main_window(app);
-            completed(serde_json::json!({ "status": "ok", "focused": "openwave" }))
+            completed(serde_json::json!({ "status": "ok", "focused": "tidebreak" }))
         }
         CuAction::Wait(seconds) => {
             let seconds = seconds.clamp(0.0, MAX_WAIT_SECONDS);
@@ -799,7 +799,7 @@ fn build_action(
                 window_id: args.window_id,
             }))
         }
-        COMPUTER_RETURN_TO_OPENWAVE_TOOL => Ok(CuAction::ReturnToOpenwave),
+        COMPUTER_RETURN_TO_TIDEBREAK_TOOL => Ok(CuAction::ReturnToTidebreak),
         COMPUTER_WAIT_TOOL => {
             let args: ComputerWaitArgs =
                 serde_json::from_value(call.arguments.clone()).map_err(|_| invalid())?;
@@ -907,7 +907,7 @@ async fn dispatch_broker(
         if is_blocked_control_bundle(bundle_id) {
             return unavailable(
                 "app_blocked",
-                "That application cannot be captured, read, or controlled by OpenWave.",
+                "That application cannot be captured, read, or controlled by Tidebreak.",
             );
         }
     }
@@ -971,7 +971,7 @@ fn map_broker_error(error: &BrokerClientError) -> BrokerFailure {
         ErrorCode::Denied => BrokerFailure::ConsentRequired,
         ErrorCode::OsPermissionDenied => BrokerFailure::Resolution(unavailable(
             "os_permission_required",
-            "macOS has not granted OpenWave Screen Recording and Accessibility. Ask the user to enable them in Settings, then retry.",
+            "macOS has not granted Tidebreak Screen Recording and Accessibility. Ask the user to enable them in Settings, then retry.",
         )),
         ErrorCode::StaleElement => BrokerFailure::Resolution(unavailable(
             "stale_element",
@@ -1059,7 +1059,7 @@ async fn dispatch_consent(
         ConsentDecision::Decline => {
             return unavailable(
                 "grant_declined",
-                "The user declined to let OpenWave use this app. Do not retry; ask how they want to proceed.",
+                "The user declined to let Tidebreak use this app. Do not retry; ask how they want to proceed.",
             );
         }
         ConsentDecision::Once | ConsentDecision::Chat => (capability, conversation_subject),
@@ -1145,7 +1145,7 @@ async fn revoke_once_grant(
         bundle_id: bundle_id.map(str::to_owned),
     });
     if let Err(error) = state.broker.control(revoke).await {
-        eprintln!("openwave-desktop: one-time computer-use grant was not withdrawn: {error}");
+        eprintln!("tidebreak-desktop: one-time computer-use grant was not withdrawn: {error}");
     }
 }
 
@@ -1714,9 +1714,9 @@ mod tests {
         assert!(matches!(
             build_action(
                 &cu,
-                &call(COMPUTER_RETURN_TO_OPENWAVE_TOOL, serde_json::json!({}))
+                &call(COMPUTER_RETURN_TO_TIDEBREAK_TOOL, serde_json::json!({}))
             ),
-            Ok(CuAction::ReturnToOpenwave)
+            Ok(CuAction::ReturnToTidebreak)
         ));
     }
 

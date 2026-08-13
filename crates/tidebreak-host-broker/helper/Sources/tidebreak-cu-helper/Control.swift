@@ -13,7 +13,7 @@ import Foundation
 /// The broker owns policy (the per-app control grant and the act-time
 /// consequential gate). This helper is a dumb executor — but it carries a
 /// defensive copy of the never-automate blocklist so a buggy or compromised
-/// broker cannot drive a terminal, OpenWave itself, or the system auth/login
+/// broker cannot drive a terminal, Tidebreak itself, or the system auth/login
 /// surfaces.
 enum Control {
     /// Returned to the broker for every control op. `usedFallback` is true when
@@ -43,7 +43,7 @@ enum Control {
     /// Bundle ids (exact, or as a dotted prefix) the helper will never act on.
     /// Mirrors the broker's blocklist — defense in depth, not the primary gate.
     static let blockedBundlePrefixes: [String] = [
-        // Never automate OpenWave itself (covers the desktop and any
+        // Never automate Tidebreak itself (covers the desktop and any
         // channel-suffixed variant).
         "io.brightwave.tidebreak",
         "io.brightwave.",
@@ -97,7 +97,7 @@ enum Control {
 
     /// Throw `operation_failed` when a request targets a blocked bundle. Shared
     /// by every op that names an app — capture and read as well as control, so
-    /// a compromised broker cannot read Terminal or OpenWave through the helper
+    /// a compromised broker cannot read Terminal or Tidebreak through the helper
     /// directly.
     static func ensureNotBlocked(_ bundleId: String?) throws {
         if let bundleId, isBlocked(bundleId) {
@@ -174,7 +174,7 @@ enum Control {
             throw HelperError(code: .invalidRequest, message: "click requires element_id or x/y")
         }
         // A raw point is global; confine it to the granted app's windows so a
-        // click cannot land on another app's (or OpenWave's own) surface.
+        // click cannot land on another app's (or Tidebreak's own) surface.
         try ensurePointInApp(point, app: app)
         try postMouseClick(at: point, button: button, clickCount: count)
         return Result(success: true, usedFallback: true, detail: "synthesized click at point")
@@ -508,7 +508,7 @@ enum Control {
 
     /// Refuse a coordinate target that does not fall inside an on-screen window
     /// owned by the granted app. A raw point is global; without this check a
-    /// click or scroll could land on another app's window — including OpenWave's
+    /// click or scroll could land on another app's window — including Tidebreak's
     /// own consent/Stop/Resume controls — while the broker's audit attributes it
     /// to the granted app. This is the confinement that makes a coordinate
     /// target no broader than an element target. AX frames and CGWindowList

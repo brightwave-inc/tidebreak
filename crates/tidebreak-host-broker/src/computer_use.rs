@@ -887,7 +887,7 @@ mod tests {
     /// body is the fake helper.
     fn fake_helper(tag: &str, body: &str) -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("openwave-cu-fake-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tidebreak-cu-fake-{tag}-{}", std::process::id()));
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path

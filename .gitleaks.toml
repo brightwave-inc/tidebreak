@@ -10,3 +10,17 @@ paths = [
   '''Cargo\.lock''',
   '''(.*?)(jpe?g|png|gif|svg|ico|webp)$''',
 ]
+
+# The debug-export scrubber deliberately carries a placeholder PEM fixture.
+# Its original commit predates the Tidebreak rename, so matching the immutable
+# historical fingerprint in `.gitleaksignore` would retain the retired product
+# name. Scope this exception to that commit, rule, and fixture body instead.
+[[rules]]
+id = "private-key"
+
+  [[rules.allowlists]]
+  description = "Historical debug-export credential scrubber fixture"
+  condition = "AND"
+  commits = ["92ee76f115a6d8dbe2602151007ca7b188f7606c"]
+  regexTarget = "line"
+  regexes = ['''LIVEPRIVATEKEYBODY''']

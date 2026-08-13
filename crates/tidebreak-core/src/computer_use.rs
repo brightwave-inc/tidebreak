@@ -39,8 +39,8 @@ pub const COMPUTER_KEY_PRESS_TOOL: &str = "computer_key_press";
 pub const COMPUTER_SCROLL_TOOL: &str = "computer_scroll";
 /// Bring an app (or one of its windows) to the front.
 pub const COMPUTER_FOCUS_WINDOW_TOOL: &str = "computer_focus_window";
-/// Return focus to the OpenWave window (e.g. to read the transcript).
-pub const COMPUTER_RETURN_TO_OPENWAVE_TOOL: &str = "computer_return_to_openwave";
+/// Return focus to the Tidebreak window (e.g. to read the transcript).
+pub const COMPUTER_RETURN_TO_TIDEBREAK_TOOL: &str = "computer_return_to_tidebreak";
 /// Wait a bounded number of seconds (e.g. for an app to finish an action).
 pub const COMPUTER_WAIT_TOOL: &str = "computer_wait";
 
@@ -66,7 +66,7 @@ pub const COMPUTER_USE_TOOLS: [&str; 10] = [
     COMPUTER_KEY_PRESS_TOOL,
     COMPUTER_SCROLL_TOOL,
     COMPUTER_FOCUS_WINDOW_TOOL,
-    COMPUTER_RETURN_TO_OPENWAVE_TOOL,
+    COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
     COMPUTER_WAIT_TOOL,
 ];
 
@@ -306,10 +306,10 @@ pub struct ComputerFocusWindowArgs {
     pub window_id: Option<u32>,
 }
 
-/// Canonical arguments for [`COMPUTER_RETURN_TO_OPENWAVE_TOOL`].
+/// Canonical arguments for [`COMPUTER_RETURN_TO_TIDEBREAK_TOOL`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ComputerReturnToOpenwaveArgs {}
+pub struct ComputerReturnToTidebreakArgs {}
 
 /// Canonical arguments for [`COMPUTER_WAIT_TOOL`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -361,8 +361,8 @@ validate_fn!(
     ComputerFocusWindowArgs
 );
 validate_fn!(
-    validate_computer_return_to_openwave_arguments,
-    ComputerReturnToOpenwaveArgs
+    validate_computer_return_to_tidebreak_arguments,
+    ComputerReturnToTidebreakArgs
 );
 
 /// Validate a `computer_capture_screen` payload.
@@ -514,12 +514,12 @@ pub fn computer_focus_window_tool_spec() -> ToolSpec {
     )
 }
 
-/// Tool contract for [`COMPUTER_RETURN_TO_OPENWAVE_TOOL`].
+/// Tool contract for [`COMPUTER_RETURN_TO_TIDEBREAK_TOOL`].
 #[must_use]
-pub fn computer_return_to_openwave_tool_spec() -> ToolSpec {
-    ToolSpec::for_args::<ComputerReturnToOpenwaveArgs>(
-        COMPUTER_RETURN_TO_OPENWAVE_TOOL,
-        "Return focus to the OpenWave window. Use after acting in another app when you need to read the transcript or report back.",
+pub fn computer_return_to_tidebreak_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<ComputerReturnToTidebreakArgs>(
+        COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
+        "Return focus to the Tidebreak window. Use after acting in another app when you need to read the transcript or report back.",
     )
 }
 
@@ -552,7 +552,7 @@ mod tests {
             COMPUTER_READ_APP_CONTENT_TOOL
         ));
         assert!(!is_computer_use_control_tool(
-            COMPUTER_RETURN_TO_OPENWAVE_TOOL
+            COMPUTER_RETURN_TO_TIDEBREAK_TOOL
         ));
         assert!(!is_computer_use_control_tool(COMPUTER_WAIT_TOOL));
         // Scroll and focus act (they synthesize input and move windows), so
@@ -650,7 +650,7 @@ mod tests {
             computer_key_press_tool_spec(),
             computer_scroll_tool_spec(),
             computer_focus_window_tool_spec(),
-            computer_return_to_openwave_tool_spec(),
+            computer_return_to_tidebreak_tool_spec(),
             computer_wait_tool_spec(),
         ] {
             assert_eq!(

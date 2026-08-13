@@ -56,7 +56,7 @@ const EMPTY: ComputerUseSnapshot = {
 };
 
 /**
- * The live computer-use surface: which app OpenWave is driving, whether the
+ * The live computer-use surface: which app Tidebreak is driving, whether the
  * user stopped it, and the asks waiting on a decision. The listener attaches
  * before the snapshot query runs, so a state change emitted while the query
  * is in flight is delivered to the handler rather than lost; a query that

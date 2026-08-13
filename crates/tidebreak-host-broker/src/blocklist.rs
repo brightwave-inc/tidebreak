@@ -12,7 +12,7 @@
 
 /// Blocked bundle ids and (trailing-dot) bundle-id prefixes.
 pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[
-    // OpenWave itself — the agent must never capture or drive the surface it
+    // Tidebreak itself — the agent must never capture or drive the surface it
     // is being watched through.
     "io.brightwave.tidebreak",
     "io.brightwave.",
@@ -111,7 +111,7 @@ mod tests {
         for allowed in [
             "xcom.apple.Terminal",
             "com.apple.Terminalized",
-            "io.brightwavex.openwave",
+            "io.brightwavex.tidebreak",
             "com.apple.Notes",
             "com.microsoft.Word",
             "com.jetbrainsx.intellij",

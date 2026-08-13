@@ -118,7 +118,7 @@ enum HelperErrorCode: String, Encodable {
     /// user's to resolve.
     case yielded = "yielded"
     /// A coordinate target falls outside every on-screen window the granted
-    /// app owns — acting there would drive a different app (or OpenWave's own
+    /// app owns — acting there would drive a different app (or Tidebreak's own
     /// consent surface). Refused, not acted on.
     case targetOutsideApp = "target_outside_app"
     /// The native API failed for some other reason.
