@@ -1220,18 +1220,42 @@ body {
   }
 }
 
+/* The composer floats as a glass bar rather than a boxed form. The
+   transcript fade underneath is painted by `.message-view`; this only
+   styles the bar itself. */
+.chat-composer {
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 1.375rem;
+  background: color-mix(in srgb, var(--background) 78%, transparent);
+  box-shadow: var(--shadow-lg);
+  -webkit-backdrop-filter: blur(16px) saturate(1.12);
+  backdrop-filter: blur(16px) saturate(1.12);
+}
+
+.chat-composer:focus-within {
+  border-color: color-mix(in srgb, var(--ring) 70%, var(--border));
+  box-shadow: var(--shadow-lg);
+}
+
+.chat-composer.is-dragging {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-lg);
+}
+
 /* ---------- Model menu (composer) ---------- */
 
 .model-menu-content {
   /* Bounded by the space Radix measured between the trigger and the viewport
-     edge, so the tail of the list is always reachable by scrolling. The
-     overflow override lives on the element as a utility class: this rule is in
-     `@layer components`, which loses to the base `overflow-hidden` utility. */
+     edge. Both columns scroll inside that box — the rail is often taller
+     than the model list, and without min-height:0 it stretches the menu
+     off the bottom of the window. */
+  display: flex;
+  min-height: 0;
   max-height: min(
     60vh,
     calc(var(--radix-dropdown-menu-content-available-height, 100vh) - 0.5rem)
   );
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 

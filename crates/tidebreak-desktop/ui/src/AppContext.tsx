@@ -8,7 +8,6 @@ import type {
   ProviderInfo,
 } from "./api";
 import type { DesktopUpdateState } from "./updates";
-import type { ModelVisibilityOverrides } from "./modelVisibility";
 
 /**
  * What the shell owns and every route needs: the connected client, the model
@@ -33,13 +32,6 @@ export type AppContextValue = {
    */
   defaultModelKey: string | null;
   providers: ProviderInfo[];
-  /**
-   * The reader's per-model visibility deviations from the curated set, as the
-   * settings surface last left them. Empty until settings load, and empty if
-   * they fail — which shows the curated set, the same thing an untouched
-   * install shows, rather than blocking the shell on a preference.
-   */
-  modelVisibilityOverrides: ModelVisibilityOverrides;
   refreshCatalog: () => Promise<void>;
   /** Reload the chat list after a failed fetch — the rail's retry. */
   refreshChats: () => Promise<void>;

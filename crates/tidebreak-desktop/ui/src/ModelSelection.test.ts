@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "./api";
 import {
   canonicalModelSelection,
+  modelForChat,
   modelForSelection,
   providerLabel,
 } from "./ModelSelection";
@@ -69,6 +70,19 @@ describe("typed model selection", () => {
   it("migrates only unambiguous legacy ids", () => {
     expect(canonicalModelSelection(models, "unique")).toBe("anthropic::unique");
     expect(canonicalModelSelection(models, "shared")).toBeNull();
+  });
+
+  it("follows the catalog default when the chat has no override", () => {
+    // A null chat.model is "use the default", not "no model" — the picker
+    // already names GPT-5.6 Sol that way, and the context meter has to
+    // resolve the same row or it has no window to read against.
+    expect(modelForChat(models, null, "anthropic::unique")?.key).toBe(
+      "anthropic::unique",
+    );
+    expect(modelForChat(models, "openai::shared", "anthropic::unique")?.key).toBe(
+      "openai::shared",
+    );
+    expect(modelForChat(models, "missing::model", "anthropic::unique")).toBeNull();
   });
 
   it("uses product-facing provider labels", () => {

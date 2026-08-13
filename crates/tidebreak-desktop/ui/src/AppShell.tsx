@@ -13,7 +13,7 @@ import {
   type ServerInfo,
 } from "./api";
 import { AppContextProvider } from "./AppContext";
-import type { ModelVisibilityOverrides } from "./modelVisibility";
+
 import { resolveServerInfo } from "./boot";
 import {
   deletionDescription,
@@ -99,8 +99,6 @@ export function AppShell() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [modelVisibilityOverrides, setModelVisibilityOverrides] =
-    useState<ModelVisibilityOverrides>({});
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [status, setStatus] = useState("starting…");
   const openChatId = useActiveChatId();
@@ -187,19 +185,14 @@ export function AppShell() {
     let cancelled = false;
     void (async () => {
       try {
-        const [catalog, providerList, settings] = await Promise.all([
+        const [catalog, providerList] = await Promise.all([
           client.listModels(),
           client.listProviders(),
-          // A preference must not be able to fail the boot the catalog just
-          // succeeded at: without it the picker shows the curated set, which
-          // is what an untouched install shows anyway.
-          client.getSettings().catch(() => null),
         ]);
         if (cancelled) return;
         setModels(catalog.models);
         setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
         setProviders(providerList.providers);
-        setModelVisibilityOverrides(settings?.model_visibility_overrides ?? {});
       } catch (err) {
         if (!cancelled) setBootError(String(err));
       }
@@ -433,15 +426,13 @@ export function AppShell() {
 
   async function refreshCatalog() {
     if (!client) return;
-    const [catalog, providerList, settings] = await Promise.all([
+    const [catalog, providerList] = await Promise.all([
       client.listModels(),
       client.listProviders(),
-      client.getSettings().catch(() => null),
     ]);
     setModels(catalog.models);
     setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
     setProviders(providerList.providers);
-    setModelVisibilityOverrides(settings?.model_visibility_overrides ?? {});
   }
 
   async function onNewChat() {
@@ -612,7 +603,6 @@ export function AppShell() {
           models,
           defaultModelKey,
           providers,
-          modelVisibilityOverrides,
           refreshCatalog,
           refreshChats,
           status,

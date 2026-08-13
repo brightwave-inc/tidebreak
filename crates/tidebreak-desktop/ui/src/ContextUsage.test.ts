@@ -23,7 +23,7 @@ describe("context occupancy", () => {
     expect(contextUsagePercent(USAGE, 200_000)).toBe(32);
   });
 
-  it("renders nothing when the model's window is unknown", () => {
+  it("has no percent when the model's window is unknown", () => {
     expect(contextUsagePercent(USAGE, undefined)).toBeNull();
     expect(contextUsagePercent(USAGE, 0)).toBeNull();
   });

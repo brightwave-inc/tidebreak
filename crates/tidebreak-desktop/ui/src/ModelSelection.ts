@@ -28,6 +28,21 @@ export function modelForSelection(
   return legacy.length === 1 ? legacy[0] : null;
 }
 
+/**
+ * The model a chat will run: its override, or the catalog default when the
+ * chat is following that default. A null override is not "no model".
+ */
+export function modelForChat(
+  models: ModelInfo[],
+  selection: string | null,
+  defaultKey: string | null,
+): ModelInfo | null {
+  const selected = modelForSelection(models, selection);
+  if (selected) return selected;
+  if (selection !== null) return null;
+  return modelForSelection(models, defaultKey);
+}
+
 /** Canonical provider-qualified key for a current or legacy selection. */
 export function canonicalModelSelection(
   models: ModelInfo[],

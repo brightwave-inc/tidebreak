@@ -11,16 +11,15 @@ import { cn } from "./lib/utils";
 /**
  * How much of the active model's context window the last turn accounted for.
  *
- * Renders nothing at all when there is nothing honest to say — no turn has
- * finished in this chat, or the selected model's window is unknown. A meter
- * that guesses is worse than no meter.
+ * Renders nothing only when no turn has finished. An unknown window still
+ * shows the used tokens — a missing denominator is not a missing reading.
  *
  * The denominator is the *currently selected* model, not the one that ran the
  * turn. Switching models mid-chat is a question about what will fit next, so
  * the reading moves the moment the selection does.
  *
- * Lives in the composer's action row so the reading sits beside the control
- * that spends the remaining window.
+ * Lives in the composer's send cluster as a ring, not a labeled chip: the
+ * magnitude is a glance, and the numbers wait on hover.
  */
 export function ContextUsageIndicator({
   usage,
@@ -32,11 +31,11 @@ export function ContextUsageIndicator({
   modelName: string | undefined;
 }) {
   if (!usage) return null;
-  const percent = contextUsagePercent(usage, contextWindow);
-  if (percent === null || contextWindow === undefined) return null;
 
   const used = contextTokens(usage);
-  const level = contextUsageLevel(percent);
+  const percent = contextUsagePercent(usage, contextWindow);
+  const metered = percent !== null && contextWindow !== undefined;
+  const level = metered ? contextUsageLevel(percent) : "normal";
   const parts = [
     { label: "In", tokens: usage.input_tokens },
     { label: "Out", tokens: usage.output_tokens },
@@ -46,37 +45,50 @@ export function ContextUsageIndicator({
 
   return (
     <WithTooltip
-      contentClassName="max-w-none px-3.5 py-3"
+      side="top"
+      align="end"
+      collisionPadding={12}
+      contentClassName="max-w-none max-h-[min(20rem,calc(100vh-1.5rem))] overflow-y-auto px-3.5 py-3"
       label={
-        <div className="w-52 space-y-2.5 text-left font-normal">
-          {modelName && (
+        <div className="w-56 space-y-2.5 text-left font-normal">
+          <div className="flex items-center justify-between gap-3">
             <div className="truncate text-xs font-medium leading-tight">
-              {modelName}
+              {modelName ?? "Context window"}
             </div>
-          )}
-          <div className="flex items-end justify-between gap-3">
-            <div className="font-mono text-2xl leading-none font-semibold tabular-nums tracking-tight">
-              {percent}
-              <span className="ml-0.5 text-sm font-medium opacity-60">%</span>
-            </div>
-            <div className="pb-0.5 text-right font-mono text-[11px] leading-snug tabular-nums opacity-80">
-              <div>
-                {formatTokenCount(used)}
-                <span className="mx-0.5 opacity-50">/</span>
-                {formatTokenCount(contextWindow)}
-              </div>
-              <div className="text-[10px] font-sans opacity-70">context used</div>
+            <div className="shrink-0 font-mono text-[11px] tabular-nums opacity-80">
+              {metered ? (
+                <>
+                  {percent}%
+                  <span className="mx-1 opacity-50">·</span>
+                  {formatTokenCount(used)}
+                  <span className="mx-0.5 opacity-50">/</span>
+                  {formatTokenCount(contextWindow)}
+                </>
+              ) : (
+                <>{used.toLocaleString()} tokens</>
+              )}
             </div>
           </div>
-          <div
-            className="h-1 w-full overflow-hidden rounded-full bg-primary-foreground/20"
-            aria-hidden="true"
-          >
+          {metered ? (
             <div
-              className="h-full rounded-full bg-primary-foreground/90"
-              style={{ width: `${percent}%` }}
-            />
-          </div>
+              className="h-1.5 w-full overflow-hidden rounded-full bg-primary-foreground/20"
+              aria-hidden="true"
+            >
+              <div
+                className={cn(
+                  "h-full rounded-full",
+                  level === "critical"
+                    ? "bg-destructive"
+                    : "bg-primary-foreground/90",
+                )}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+          ) : (
+            <p className="text-[11px] leading-snug opacity-70">
+              No published context window
+            </p>
+          )}
           {parts.length > 0 && (
             <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 border-t border-primary-foreground/15 pt-2 text-[11px] leading-relaxed">
               {parts.map((part) => (
@@ -92,46 +104,68 @@ export function ContextUsageIndicator({
         </div>
       }
     >
-      <span
+      <button
+        type="button"
         className={cn(
-          "flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium tabular-nums",
-          level === "critical"
-            ? "border-destructive/40 bg-destructive/10 text-destructive"
-            : level === "warning"
-              ? "border-warning-border bg-warning-background text-warning-foreground"
-              : "border-border bg-muted text-foreground",
+          "inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+          level === "critical" && "text-destructive hover:text-destructive",
+          level === "warning" && "text-warning-foreground hover:text-warning-foreground",
         )}
-        // The visible chip is a magnitude; the accessible name is the sentence
-        // a screen reader needs, since "34%" alone says nothing about of what.
         // A graphic with a text alternative rather than a live region: this
         // updates on every turn, and it is reference material, not an
         // announcement worth interrupting for.
-        role="img"
-        aria-label={`Context: ${percent}% of ${formatTokenCount(contextWindow)} tokens used`}
+        aria-label={
+          metered
+            ? `Context: ${percent}% of ${formatTokenCount(contextWindow)} tokens used`
+            : `Context: ${used.toLocaleString()} tokens used`
+        }
       >
-        <ContextUsageRing percent={percent} />
-        <span>{percent}%</span>
-        <span className="font-normal opacity-70">{formatTokenCount(used)}</span>
-      </span>
+        <ContextUsageRing percent={metered ? percent : null} />
+      </button>
     </WithTooltip>
   );
 }
 
 /**
- * A filled ring, drawn as a conic sweep over a muted track.
- *
- * Takes its colour from the chip via `currentColor`, so the threshold styling
- * lives in exactly one place.
+ * A stroked ring. Colour comes from the button via `currentColor`, so the
+ * warning and critical states live on the trigger, not here. No fill when
+ * there is no honest percent — the track still marks the slot.
  */
-function ContextUsageRing({ percent }: { percent: number }) {
-  const filled = `${percent * 3.6}deg`;
+function ContextUsageRing({ percent }: { percent: number | null }) {
+  const radius = 7.25;
+  const circumference = 2 * Math.PI * radius;
+  const offset =
+    percent === null
+      ? undefined
+      : circumference * (1 - Math.min(100, Math.max(0, percent)) / 100);
   return (
-    <span
+    <svg
+      viewBox="0 0 20 20"
+      className="size-5 -rotate-90"
       aria-hidden="true"
-      className="size-3.5 shrink-0 rounded-full"
-      style={{
-        background: `conic-gradient(currentColor 0deg ${filled}, color-mix(in oklch, currentColor 22%, transparent) ${filled} 360deg)`,
-      }}
-    />
+    >
+      <circle
+        cx="10"
+        cy="10"
+        r={radius}
+        fill="none"
+        stroke="currentColor"
+        strokeOpacity="0.22"
+        strokeWidth="2.5"
+      />
+      {offset !== undefined && (
+        <circle
+          cx="10"
+          cy="10"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+        />
+      )}
+    </svg>
   );
 }

@@ -12,7 +12,7 @@ import {
   formatTokenCount,
 } from "./ContextUsage";
 import type { ChatTerminalTurnSnapshot, RendererTurnUsage } from "./generated/wire";
-import { modelForSelection } from "./ModelSelection";
+import { modelForChat } from "./ModelSelection";
 import {
   Dialog,
   DialogContent,
@@ -46,10 +46,10 @@ export function ChatUsageDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { models } = useApp();
+  const { models, defaultModelKey } = useApp();
   const lastTurnUsage = useChatSessionStore((session) => session.lastTurnUsage);
   const [turns, setTurns] = useState<ChatTerminalTurnSnapshot[] | null>(null);
-  const model = modelForSelection(models, chat.model);
+  const model = modelForChat(models, chat.model, defaultModelKey);
   const contextWindow = model?.context_window ?? undefined;
   const percent = lastTurnUsage
     ? contextUsagePercent(lastTurnUsage, contextWindow)
