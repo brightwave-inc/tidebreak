@@ -1,11 +1,17 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ComposerToolsMenu } from "./ComposerToolsMenu";
 
-afterEach(cleanup);
+vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
@@ -60,6 +66,28 @@ it("still names an effort level the current model no longer accepts", async () =
   expect(screen.getByRole("menuitem", { name: /Reasoning/ })).toHaveTextContent(
     "Max",
   );
+});
+
+it("warns that changing reasoning effort may prevent cache reuse", async () => {
+  const onChange = vi.fn();
+  render(
+    <ComposerToolsMenu
+      disabled={false}
+      reasoning={{ levels: LEVELS, value: "high", onChange }}
+    />,
+  );
+
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Tools" }));
+  const reasoning = screen.getByRole("menuitem", { name: /Reasoning/ });
+  reasoning.focus();
+  await user.keyboard("{ArrowRight}{ArrowDown}{Enter}");
+
+  expect(onChange).toHaveBeenCalledWith("low");
+  expect(toast.warning).toHaveBeenCalledWith("Prompt cache may not be reused", {
+    description:
+      "This change may prevent prompt cache reuse, increasing cost and latency on the next turn.",
+  });
 });
 
 it("opens the network policy in a dialog the menu does not clip", async () => {

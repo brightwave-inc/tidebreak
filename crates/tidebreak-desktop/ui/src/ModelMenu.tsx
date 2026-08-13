@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { toast } from "sonner";
 import {
   Atom,
   Check,
@@ -33,6 +34,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+
+const CACHE_CHANGE_WARNING =
+  "This change may prevent prompt cache reuse, increasing cost and latency on the next turn.";
+
+function warnAboutPromptCacheChange() {
+  toast.warning("Prompt cache may not be reused", {
+    description: CACHE_CHANGE_WARNING,
+  });
+}
 
 /**
  * The order the vendors are listed in, ahead of any the catalog carries that
@@ -473,6 +483,9 @@ export function ModelMenu({
                     // dropped click.
                     onSelect={() => {
                       if (selected || !model.available) return;
+                      if (pillModel && pillModel.provider !== model.provider) {
+                        warnAboutPromptCacheChange();
+                      }
                       void onChange(model.key);
                     }}
                     className="flex items-center gap-2"
@@ -578,6 +591,7 @@ export function ReasoningEffortSubMenu({
           disabled={disabled}
           onSelect={() => {
             if (isDefault) return;
+            warnAboutPromptCacheChange();
             void onChange(null);
           }}
           className="flex items-center gap-2"
@@ -594,6 +608,7 @@ export function ReasoningEffortSubMenu({
               disabled={disabled}
               onSelect={() => {
                 if (selected) return;
+                warnAboutPromptCacheChange();
                 void onChange(option.value);
               }}
               className="flex items-center gap-2"
