@@ -48,9 +48,11 @@ type ApprovalCardProps = {
  * being decided; the longer sentence about what the action can reach explains
  * rather than asks, so it sits underneath. Below that, the exact action.
  *
- * The choices are selectable buttons followed by an explicit Submit action,
- * ordered narrowest grant first with the decline last. Exploring or selecting
- * a choice never executes the tool or persists a grant by itself.
+ * The choices are action buttons, ordered narrowest grant first with the
+ * decline last. Clicking a choice decides it. Keyboard arrows and number keys
+ * only move the highlight, so browsing the list does not execute the tool or
+ * persist a grant; Enter or Submit confirms the highlighted row. "More options"
+ * expands the hidden rungs without deciding.
  */
 export function ApprovalCard({
   callId,
@@ -113,6 +115,7 @@ export function ApprovalCard({
       return;
     }
     setHighlight(index);
+    onDecide(callId, option.decision, option.grant);
   };
 
   const submitSelected = () => {
@@ -217,7 +220,7 @@ export function ApprovalCard({
       )}
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
-          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · Submit confirms
+          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · click or Submit confirms
         </span>
         <Button
           size="sm"

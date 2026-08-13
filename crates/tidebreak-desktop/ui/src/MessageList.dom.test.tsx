@@ -68,7 +68,7 @@ afterEach(() => {
 });
 
 describe("approval card interactions", () => {
-  it("submits only the selected decision with the grant it names", async () => {
+  it("submits the decision named by the row that was clicked", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
@@ -81,18 +81,12 @@ describe("approval card interactions", () => {
     ]);
 
     await user.click(options[0]!);
-    expect(onDecide).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", null);
 
     await user.click(options[1]!);
-    expect(onDecide).toHaveBeenCalledTimes(1);
-    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
 
     await user.click(options[2]!);
-    expect(onDecide).toHaveBeenCalledTimes(2);
-    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
@@ -121,18 +115,18 @@ describe("approval card interactions", () => {
     composer.remove();
   });
 
-  it("selects from the keyboard and waits for explicit submit", async () => {
+  it("selects from the keyboard; Enter or Submit confirms the highlight", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
 
-    await user.keyboard("{ArrowDown}{Enter}");
+    await user.keyboard("{ArrowDown}");
     expect(onDecide).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Submit" }));
+    await user.keyboard("{Enter}");
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
 
     approvalChoices()[1]?.focus();
-    await user.keyboard("3{Enter}");
+    await user.keyboard("3");
     expect(onDecide).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
@@ -144,8 +138,6 @@ describe("approval card interactions", () => {
     render(card({ onDecide }));
 
     await user.keyboard("{ArrowUp}{Enter}");
-    expect(onDecide).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
@@ -172,7 +164,6 @@ describe("approval card interactions", () => {
       "Could not send your decision",
     );
     await user.click(approvalChoices()[0]!);
-    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
   });
 
@@ -329,9 +320,8 @@ describe("approval card interactions", () => {
       "aria-pressed",
       "true",
     );
-    await user.keyboard("{Enter}");
     expect(onDecide).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Submit" }));
+    await user.keyboard("{Enter}");
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
   });
 
@@ -368,8 +358,6 @@ describe("approval card interactions", () => {
     expect(screen.getByText(/# limited to sec.gov/)).toBeInTheDocument();
 
     await user.click(approvalChoices()[1]!);
-    expect(onDecide).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Submit" }));
     expect(onDecide).toHaveBeenLastCalledWith(
       "call-1",
       "approve",
