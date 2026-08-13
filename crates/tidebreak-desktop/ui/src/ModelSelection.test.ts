@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "./api";
 import {
   canonicalModelSelection,
+  modelForChat,
   modelForSelection,
   providerLabel,
 } from "./ModelSelection";
@@ -71,12 +72,26 @@ describe("typed model selection", () => {
     expect(canonicalModelSelection(models, "shared")).toBeNull();
   });
 
+  it("follows the catalog default when the chat has no override", () => {
+    // A null chat.model is "use the default", not "no model" — the picker
+    // already names GPT-5.6 Sol that way, and the context meter has to
+    // resolve the same row or it has no window to read against.
+    expect(modelForChat(models, null, "anthropic::unique")?.key).toBe(
+      "anthropic::unique",
+    );
+    expect(modelForChat(models, "openai::shared", "anthropic::unique")?.key).toBe(
+      "openai::shared",
+    );
+    expect(modelForChat(models, "missing::model", "anthropic::unique")).toBeNull();
+  });
+
   it("uses product-facing provider labels", () => {
     expect(providerLabel("openai")).toBe("OpenAI");
     expect(providerLabel("xai")).toBe("xAI");
     expect(providerLabel("gemini")).toBe("Google Gemini");
     expect(providerLabel("fireworks")).toBe("Fireworks AI");
     expect(providerLabel("together")).toBe("Together AI");
+    expect(providerLabel("openrouter")).toBe("OpenRouter");
     expect(providerLabel("ollama")).toBe("Ollama");
     expect(providerLabel("openai_compatible")).toBe("OpenAI-compatible");
   });

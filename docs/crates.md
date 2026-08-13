@@ -56,8 +56,8 @@ Major surfaces present today:
 ## `tidebreak-router` — model providers & routing 🟢
 
 Owns the concrete Anthropic, OpenAI Responses, xAI Responses, Gemini, and
-OpenAI-compatible provider adapters (including Fireworks, Together, Ollama,
-OpenRouter, vLLM, and LM Studio endpoints) plus a composite `Router`.
+OpenAI-compatible provider adapters (including Fireworks, Together, OpenRouter,
+Ollama, vLLM, and LM Studio endpoints) plus a composite `Router`.
 
 The `Router` is itself a `ModelProvider`, so the agent loop holds one provider
 contract and does not depend on a concrete backend. Two things define it:

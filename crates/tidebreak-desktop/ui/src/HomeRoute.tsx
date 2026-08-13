@@ -114,7 +114,7 @@ function isImportedDocument(
 
 export function HomeRoute() {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, providers, modelVisibilityOverrides } =
+  const { client, models, defaultModelKey, providers } =
     useApp();
   const modelSettingsNav = useModelSettingsNav();
   const creatingChat = useChatListStore((state) => state.creatingChat);
@@ -447,9 +447,7 @@ export function HomeRoute() {
                 value={effective.model}
                 defaultKey={defaultModelKey}
                 disabled={creatingChat}
-                visibilityOverrides={modelVisibilityOverrides}
                 providers={providers}
-                onManageModels={modelSettingsNav.onManageModels}
                 onSetUpProvider={modelSettingsNav.onSetUpProvider}
                 onChange={newChat.setModel}
               />

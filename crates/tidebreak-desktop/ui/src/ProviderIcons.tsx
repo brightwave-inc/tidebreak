@@ -57,15 +57,12 @@ export function XaiIcon(props: IconProps) {
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.4"
-      strokeLinecap="round"
+      fill="currentColor"
       aria-hidden="true"
       {...props}
     >
-      <path d="M5 4l14 16" />
-      <path d="M19 4L5 20" />
+      <path d="M9.269 15.284 17.248 9.361c.391-.29.95-.177 1.137.274 1.0 2.379.542 5.237-1.41 7.2-1.951 1.963-4.667 2.393-7.149 1.413l-2.712 1.262c3.89 2.673 8.612 2.012 11.563-.958 2.341-2.354 3.066-5.563 2.388-8.456l.006.006C20.088 5.851 21.313 4.152 23.822.678L20.699 3.749v-.01L9.267 15.286" />
+      <path d="M7.622 16.724c-2.791-2.682-2.31-6.832.072-9.225 1.761-1.771 4.647-2.494 7.166-1.431l2.705-1.257c-.487-.354-1.112-.735-1.829-1.003-3.24-1.34-7.118-.673-9.752 1.973C3.451 8.329 2.654 12.246 4.022 15.589c1.022 2.498-.653 4.265-2.341 6.049C1.083 22.27.483 22.902 0 23.572l7.62-6.846" />
     </svg>
   );
 }
@@ -196,6 +193,20 @@ export function FireworksIcon(props: IconProps) {
   );
 }
 
+export function OpenRouterIcon(props: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M12 2.2 20.4 7v10L12 21.8 3.6 17V7L12 2.2zm0 2.3L5.6 8v8L12 19.5 18.4 16V8L12 4.5zm0 3.1 4.2 2.4v4L12 16.4 7.8 14v-4L12 7.6z" />
+    </svg>
+  );
+}
+
 /**
  * Together AI. Its three lobes each carry a different brand color, so the fills
  * are per-path rather than one on the root.
@@ -272,5 +283,7 @@ export function ProviderIcon({
       return <FireworksIcon {...rest} />;
     case "together":
       return <TogetherIcon {...rest} />;
+    case "openrouter":
+      return <OpenRouterIcon {...rest} />;
   }
 }

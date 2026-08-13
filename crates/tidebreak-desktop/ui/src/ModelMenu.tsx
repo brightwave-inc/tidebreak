@@ -4,9 +4,7 @@ import {
   Atom,
   Check,
   ChevronDown,
-  ChevronRight,
   Gauge,
-  Info,
 } from "lucide-react";
 import type {
   ModelInfo,
@@ -20,9 +18,7 @@ import {
   modelForSelection,
   providerLabel,
 } from "./ModelSelection";
-import { isModelVisible, type ModelVisibilityOverrides } from "./modelVisibility";
 import { useManagedPolicy } from "./managedPolicy";
-import { useUiStore } from "./UiStore";
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "./ProviderIcons";
 import {
@@ -35,7 +31,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Switch } from "@/components/ui/switch";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -52,6 +47,8 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "gemini",
   "fireworks",
   "together",
+  "openrouter",
+  "ollama",
 ];
 
 /** Honest warning for routes Tidebreak must run without host tools. */
@@ -98,36 +95,94 @@ function groupByProvider(
 }
 
 /**
- * The groups the composer picker actually shows: providers with at least one
- * model that can run, holding the models that are effectively visible — plus,
- * whatever its visibility or availability, the row holding the current
- * selection, so an active override never vanishes from the menu that set it.
- * A provider with nothing usable renders as no group at all rather than a run
- * of disabled rows; discovery of the full registry belongs to the settings
- * Models surface, and the footer points at it.
+ * Which provider rail the picker should open on.
  *
- * Visibility filtering is presentation only. It never changes what a chat is
- * set to, and a chat pinned to a hidden model keeps running against it.
+ * Prefers the provider of the model that will run, then the first group the
+ * menu actually shows. `null` only when there is no group at all.
+ */
+export function pickerProviderForSelection(
+  groups: readonly { provider: ProviderKind }[],
+  selected: Pick<ModelInfo, "provider"> | null,
+): ProviderKind | null {
+  if (selected) {
+    const match = groups.find((group) => group.provider === selected.provider);
+    if (match) return match.provider;
+  }
+  return groups[0]?.provider ?? null;
+}
+
+/** One icon on the picker rail: connected providers and ones still to set up. */
+export type PickerRailEntry = {
+  provider: ProviderKind;
+  connected: boolean;
+  modelCount: number;
+};
+
+/**
+ * Every provider the catalog knows, in {@link PROVIDER_ORDER}.
+ *
+ * Connected groups (something can run) sit with the unconfigured ones so the
+ * rail is a map of the catalog rather than only what this install already
+ * unlocked. The gateway stays off the unconfigured side: it has no key to
+ * paste. A managed profile only lists what can already run.
+ */
+export function pickerRailEntries(
+  models: readonly ModelInfo[],
+  providers: readonly ProviderInfo[],
+  selectedKey: string | null,
+  managed: boolean = false,
+): PickerRailEntry[] {
+  const connected = visibleModelGroups(models, selectedKey).map(
+    (group) => ({
+      provider: group.provider,
+      connected: true,
+      modelCount: group.models.length,
+    }),
+  );
+  const seen = new Set(connected.map((entry) => entry.provider));
+  const unconfigured = notConnectedProviders(models, providers, managed)
+    .filter((entry) => !seen.has(entry.provider))
+    .map((entry) => ({
+      provider: entry.provider,
+      connected: false,
+      modelCount: entry.modelCount,
+    }));
+
+  const byProvider = new Map<ProviderKind, PickerRailEntry>();
+  for (const entry of [...connected, ...unconfigured]) {
+    byProvider.set(entry.provider, entry);
+  }
+
+  const ordered: PickerRailEntry[] = [];
+  for (const provider of PROVIDER_ORDER) {
+    const found = byProvider.get(provider);
+    if (found) {
+      ordered.push(found);
+      byProvider.delete(provider);
+    }
+  }
+  for (const found of byProvider.values()) {
+    ordered.push(found);
+  }
+  return ordered;
+}
+
+/**
+ * The groups the composer picker shows: every catalog row for a provider
+ * that can run something, plus the group holding the current selection even
+ * when that row cannot run. A provider with nothing usable is a rail icon
+ * that offers setup, not an empty model list.
  */
 export function visibleModelGroups(
   models: readonly ModelInfo[],
   selectedKey: string | null,
-  overrides: ModelVisibilityOverrides = {},
 ): { provider: ProviderKind; models: ModelInfo[] }[] {
-  return groupByProvider(models)
-    .map((group) => ({
-      provider: group.provider,
-      models: group.models.filter(
-        (model) =>
-          isModelVisible(model, overrides) || model.key === selectedKey,
-      ),
-    }))
-    .filter(
-      (group) =>
-        group.models.some((model) => model.available) ||
-        (selectedKey !== null &&
-          group.models.some((model) => model.key === selectedKey)),
-    );
+  return groupByProvider(models).filter(
+    (group) =>
+      group.models.some((model) => model.available) ||
+      (selectedKey !== null &&
+        group.models.some((model) => model.key === selectedKey)),
+  );
 }
 
 /**
@@ -164,82 +219,17 @@ export function notConnectedProviders(
 }
 
 /**
- * Models that could run right now but are not listed, which is what the footer
- * offers to undo. The current selection is excluded because the picker renders
- * it regardless — counting a row the reader can see as hidden reads as a bug.
- */
-export function hiddenModelCount(
-  models: readonly ModelInfo[],
-  selectedKey: string | null,
-  overrides: ModelVisibilityOverrides = {},
-): number {
-  return models.filter(
-    (model) =>
-      model.available &&
-      model.key !== selectedKey &&
-      !isModelVisible(model, overrides),
-  ).length;
-}
-
-/**
- * The model turning the Default switch off should land on: the first
- * available row *as the menu renders them*, so the selection visibly lands
- * at the top of the list rather than on whatever the catalog happened to
- * order first. `null` when nothing can run.
+ * The first available row *as the menu renders them*. `null` when nothing
+ * can run.
  */
 export function firstAvailableModel(
   models: readonly ModelInfo[],
   selectedKey: string | null,
-  overrides: ModelVisibilityOverrides = {},
 ): ModelInfo | null {
   return (
-    visibleModelGroups(models, selectedKey, overrides)
+    visibleModelGroups(models, selectedKey)
       .flatMap((group) => group.models)
       .find((model) => model.available) ?? null
-  );
-}
-
-/**
- * The row that reads as a mode rather than another model.
- *
- * A picker that offers "default" as one more entry never says what picking it
- * gets you. The switch makes the choice binary — a default, or an override —
- * and the tooltip names the model the default currently lands on, which is the
- * only thing the reader actually wanted to know.
- */
-export function DefaultRow({
-  isDefault,
-  tooltip,
-  disabled,
-  onToggle,
-}: {
-  isDefault: boolean;
-  tooltip: string;
-  disabled: boolean;
-  onToggle: (useDefault: boolean) => void;
-}) {
-  return (
-    <div
-      role="group"
-      className="bg-accent/40 flex items-center gap-2 rounded-sm px-2 py-2"
-    >
-      <span className="text-sm font-medium">Default</span>
-      <WithTooltip label={tooltip} side="top">
-        <button
-          type="button"
-          aria-label="About Default"
-          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring rounded-sm focus-visible:ring-2 focus-visible:outline-none"
-        >
-          <Info className="size-3.5" />
-        </button>
-      </WithTooltip>
-      <Switch
-        className="ml-auto"
-        checked={isDefault}
-        disabled={disabled}
-        onCheckedChange={onToggle}
-      />
-    </div>
   );
 }
 
@@ -254,13 +244,11 @@ export function DefaultRow({
  * cursor in its credential field.
  */
 export function useModelSettingsNav(): {
-  onManageModels: () => void;
   onSetUpProvider: (provider: ProviderKind) => void;
 } {
   const navigate = useNavigate();
   const providerSettingsPath: string = "/settings/providers";
   return {
-    onManageModels: () => void navigate({ to: providerSettingsPath }),
     onSetUpProvider: (provider) =>
       void navigate({
         to: providerSettingsPath,
@@ -270,31 +258,24 @@ export function useModelSettingsNav(): {
 }
 
 /**
- * Per-chat model selector for the message bar. `null` means follow the
- * global chat role — the model Settings names, or the server's own when
- * none is set.
+ * Per-chat model selector for the message bar.
  *
- * The trigger always names that model. "Default" is a mode, not a model,
- * and a fresh install has neither a configured provider nor a model that
- * can run, so the pill must not pretend one is selected.
+ * `null` still means the chat follows Settings, but the picker does not
+ * expose that as a mode. The trigger and the check both name the model that
+ * will actually run. A fresh install with nothing credentialed says
+ * "No model" rather than inventing a selection.
  *
  * `defaultKey` is the catalog key the server says that fallback resolves
- * to. It is only treated as selected when that row can actually run; the
- * boot default is still a catalog row when nothing is credentialed.
+ * to. It is only treated as selected when that row can actually run.
  *
- * The list is the curated one: recommended models, plus whatever the reader
- * has overridden, plus this chat's own model however it is flagged. The
- * footer and the "Not connected" rows are what make that acceptable — nothing
- * the picker leaves out is more than one click away.
+ * The list is every catalog row for the selected provider.
  */
 export function ModelMenu({
   models,
   value,
   defaultKey = null,
   disabled,
-  visibilityOverrides = {},
   providers = [],
-  onManageModels,
   onSetUpProvider,
   onChange,
 }: {
@@ -302,16 +283,8 @@ export function ModelMenu({
   value: string | null;
   defaultKey?: string | null;
   disabled?: boolean;
-  /**
-   * The reader's per-model deviations from the curated set. Empty until
-   * settings load, which shows the recommended set — the same thing a reader
-   * who has never touched the setting sees, so the list does not flicker.
-   */
-  visibilityOverrides?: ModelVisibilityOverrides;
-  /** Provider status, for the "Not connected" rows. Empty until it loads. */
+  /** Provider status, for the unconfigured rail icons. Empty until it loads. */
   providers?: ProviderInfo[];
-  /** Open the settings surface that lists every model. */
-  onManageModels: () => void;
   /** Open the settings card for a provider, on its credential field. */
   onSetUpProvider: (provider: ProviderKind) => void;
   onChange: (key: ModelSelectionKey | null) => void | Promise<void>;
@@ -326,41 +299,40 @@ export function ModelMenu({
   const usableDefault =
     resolvedDefault?.available === true ? resolvedDefault : null;
   const anyAvailable = models.some((model) => model.available);
-  const groups = visibleModelGroups(models, canonical, visibilityOverrides);
-  const unconfigured = notConnectedProviders(models, providers, managed);
-  const hiddenCount = hiddenModelCount(models, canonical, visibilityOverrides);
-  const notConnectedCollapsed = useUiStore(
-    (state) => state.modelMenuNotConnectedCollapsed,
-  );
-  const toggleNotConnected = useUiStore(
-    (state) => state.toggleModelMenuNotConnected,
-  );
+  const groups = visibleModelGroups(models, canonical);
+  const rail = pickerRailEntries(models, providers, canonical, managed);
 
   const label = isDefault
     ? (usableDefault?.display_name ?? "No model")
     : (known?.display_name ?? `${value} (unavailable)`);
   const triggerLabel =
     isDefault && !usableDefault ? "No model selected" : `Model: ${label}`;
-  const defaultTooltip = usableDefault
-    ? isDefault
-      ? `New turns run against ${usableDefault.display_name}.`
-      : `Override active. Toggle Default to go back to ${usableDefault.display_name}.`
-    : "Toggle Default to follow the model from Settings.";
-  // Following a default that cannot run is not a mode worth offering; an
-  // override still needs the switch so the chat can return to Settings.
-  const showDefaultSwitch = usableDefault !== null || !isDefault;
 
   // The mark of whatever will actually run, so the pill reads the same whether
-  // the model was chosen here or inherited.
+  // the model was chosen here or inherited from Settings.
   const pillModel = known ?? (isDefault ? usableDefault : null);
 
-  // Controlled so every path that changes the chat's model closes the menu —
-  // including the Default switch, which is a selection like any row but is not
-  // a menu item Radix would close for us.
   const [open, setOpen] = useState(false);
+  const [activeProvider, setActiveProvider] = useState<ProviderKind | null>(
+    () => pickerProviderForSelection(rail, known ?? usableDefault),
+  );
+  const activeRail =
+    rail.find((entry) => entry.provider === activeProvider) ?? rail[0] ?? null;
+  const activeGroup =
+    groups.find((group) => group.provider === activeRail?.provider) ?? null;
+  const showProviderRail = rail.length > 0;
+
+  function openMenu(next: boolean) {
+    if (next) {
+      setActiveProvider(
+        pickerProviderForSelection(rail, known ?? usableDefault),
+      );
+    }
+    setOpen(next);
+  }
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu open={open} onOpenChange={openMenu}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -385,61 +357,108 @@ export function ModelMenu({
       <DropdownMenuContent
         align="start"
         side="top"
-        className="model-menu-content w-80 overflow-y-auto p-0"
+        collisionPadding={12}
+        className="model-menu-content w-80 p-0"
       >
-        <div className="flex flex-col gap-1 p-1">
-          {showDefaultSwitch && (
-            <DefaultRow
-              isDefault={isDefault}
-              tooltip={defaultTooltip}
-              // With nothing available, turning the default off has nowhere to
-              // land — freeze the switch instead of letting it snap back;
-              // flipping back *to* the default must always stay possible.
-              disabled={Boolean(disabled) || (isDefault && !anyAvailable)}
-              onToggle={(useDefault) => {
-                if (useDefault) {
-                  void onChange(null);
-                  setOpen(false);
-                  return;
-                }
-                // Turning the default off has to land on something; the first
-                // model as the menu renders them, so the check appears at the
-                // top of the list rather than mid-scroll.
-                const first = firstAvailableModel(
-                  models,
-                  canonical,
-                  visibilityOverrides,
-                );
-                if (first) {
-                  void onChange(first.key);
-                  setOpen(false);
-                }
-              }}
-            />
+        {showProviderRail && (
+          <div
+            className="flex min-h-0 w-11 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border bg-muted/30 p-1"
+            role="tablist"
+            aria-label="Providers"
+          >
+            {rail.map((entry) => {
+              const selected = activeRail?.provider === entry.provider;
+              const mark = groups.find((group) => group.provider === entry.provider)
+                ?.models[0];
+              return (
+                <WithTooltip
+                  key={entry.provider}
+                  label={
+                    entry.connected
+                      ? providerLabel(entry.provider)
+                      : `Connect ${providerLabel(entry.provider)}`
+                  }
+                  side="right"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    aria-label={
+                      entry.connected
+                        ? providerLabel(entry.provider)
+                        : `Connect ${providerLabel(entry.provider)}`
+                    }
+                    className={cn(
+                      "relative flex size-9 items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      selected ? "bg-accent" : "hover:bg-accent/60",
+                      !entry.connected && "opacity-45 hover:opacity-80",
+                    )}
+                    onClick={() => setActiveProvider(entry.provider)}
+                  >
+                    <ProviderIcon
+                      provider={mark?.vendor ?? entry.provider}
+                      modelId={mark?.id}
+                      className="size-4"
+                    />
+                    {selected && (
+                      <span
+                        aria-hidden
+                        className="absolute -right-1 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-l-full bg-primary"
+                      />
+                    )}
+                  </button>
+                </WithTooltip>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1">
+          {!anyAvailable && (
+            <p className="text-muted-foreground px-2 py-2 text-sm">
+              {managed
+                ? "Models are provided by your organization's gateway. None are available yet — contact your administrator."
+                : "Configure a provider in Settings to choose a model."}
+            </p>
           )}
 
-          {!anyAvailable && (
+          {activeRail && !activeRail.connected && (
             <div>
-              {showDefaultSwitch && <DropdownMenuSeparator />}
-              <p className="text-muted-foreground px-2 py-2 text-sm">
-                {managed
-                  ? "Models are provided by your organization's gateway. None are available yet — contact your administrator."
-                  : "Configure a provider in Settings to choose a model."}
-              </p>
+              <div className="flex flex-col items-start gap-3 px-2 py-3">
+                <ProviderIcon
+                  provider={activeRail.provider}
+                  className="size-5"
+                />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">
+                    Connect {providerLabel(activeRail.provider)}
+                  </p>
+                  <p className="text-muted-foreground text-xs leading-relaxed">
+                    {activeRail.modelCount}{" "}
+                    {activeRail.modelCount === 1 ? "model" : "models"} ready
+                    after you add a key.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={disabled}
+                  onClick={() => {
+                    onSetUpProvider(activeRail.provider);
+                    setOpen(false);
+                  }}
+                >
+                  Set up
+                </Button>
+              </div>
             </div>
           )}
 
-          {groups.map((group, index) => (
-            <div key={group.provider}>
-              {(showDefaultSwitch || index > 0) && <DropdownMenuSeparator />}
-              {/* A plain header rather than a menu item: it names the run, and
-                  arrowing through the picker should land on models only. The
-                  same vendor can arrive from two providers (natively and via
-                  the gateway), so the divider alone reads as a duplicate. */}
-              <div className="text-muted-foreground px-2 py-1.5 text-xs font-medium tracking-wide uppercase">
-                {providerLabel(group.provider)}
-              </div>
-              {group.models.map((model) => {
+          {activeGroup && (
+            <div>
+              {activeGroup.models.map((model) => {
                 const selected = isDefault
                   ? usableDefault?.key === model.key
                   : canonical === model.key;
@@ -470,7 +489,7 @@ export function ModelMenu({
                 );
               })}
             </div>
-          ))}
+          )}
 
           {!isDefault && !known && (
             <div>
@@ -481,79 +500,8 @@ export function ModelMenu({
               </DropdownMenuItem>
             </div>
           )}
-
-          {unconfigured.length > 0 && (
-            <div>
-              <DropdownMenuSeparator />
-              {/* Deliberately a button rather than a menu item: the header and
-                  the setup rows are chrome around the options, and arrowing
-                  through the picker should land on models only. */}
-              <button
-                type="button"
-                aria-expanded={!notConnectedCollapsed}
-                onClick={() => toggleNotConnected()}
-                className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex w-full items-center gap-1 rounded-sm px-2 py-1.5 text-xs font-medium tracking-wide uppercase focus-visible:ring-2 focus-visible:outline-none"
-              >
-                <ChevronRight
-                  className={cn(
-                    "size-3 transition-transform motion-reduce:transition-none",
-                    !notConnectedCollapsed && "rotate-90",
-                  )}
-                />
-                Not connected
-              </button>
-              {!notConnectedCollapsed &&
-                unconfigured.map((entry) => (
-                  <div
-                    key={entry.provider}
-                    className="flex items-center gap-2 px-2 py-1.5"
-                  >
-                    <ProviderIcon
-                      provider={entry.provider}
-                      className="size-4 shrink-0 opacity-50"
-                    />
-                    <span className="text-muted-foreground truncate text-sm">
-                      {providerLabel(entry.provider)}
-                    </span>
-                    <span className="text-muted-foreground/70 text-xs whitespace-nowrap">
-                      {entry.modelCount}{" "}
-                      {entry.modelCount === 1 ? "model" : "models"}
-                    </span>
-                    <Button
-                      variant="outline"
-                      className="ml-auto h-6 rounded-full px-2.5 text-xs"
-                      disabled={disabled}
-                      onClick={() => {
-                        onSetUpProvider(entry.provider);
-                        setOpen(false);
-                      }}
-                    >
-                      Set up
-                    </Button>
-                  </div>
-                ))}
-            </div>
-          )}
-        </div>
-
-        {hiddenCount > 0 && (
-          <div className="border-border flex items-center gap-2 border-t px-3 py-2">
-            <span className="text-muted-foreground text-xs">
-              {hiddenCount} {hiddenCount === 1 ? "model" : "models"} hidden
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                onManageModels();
-                setOpen(false);
-              }}
-              className="text-muted-foreground hover:text-foreground focus-visible:ring-ring ml-auto flex items-center gap-1 rounded-sm text-xs font-medium focus-visible:ring-2 focus-visible:outline-none"
-            >
-              Manage models
-              <ChevronRight className="size-3" />
-            </button>
           </div>
-        )}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

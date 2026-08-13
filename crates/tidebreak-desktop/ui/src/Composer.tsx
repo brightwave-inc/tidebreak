@@ -829,8 +829,8 @@ export function Composer({
   return (
     <form
       className={cn(
-        "relative mx-auto flex w-full max-w-3xl flex-col gap-1 overflow-hidden rounded-xl border border-border bg-background p-4 shadow-sm transition-colors focus-within:border-ring focus-within:shadow-lg",
-        dragging && "border-primary shadow-lg",
+        "chat-composer relative mx-auto flex w-full max-w-3xl flex-col gap-1 overflow-hidden p-3.5 transition-colors",
+        dragging && "is-dragging",
       )}
       onSubmit={(event) => {
         event.preventDefault();
@@ -1064,16 +1064,6 @@ export function Composer({
           {/* The permission mode sits with the send cluster: it is what the
               next turn will be allowed to do, not another way to prepare it. */}
           {permissionMenu}
-          {/* Context usage lives in the composer's action row: the reading
-              answers "how much room is left for what I'm about to send", so
-              it belongs beside the control that sends it. */}
-          {contextUsage && (
-            <ContextUsageIndicator
-              usage={contextUsage.usage}
-              contextWindow={contextUsage.contextWindow}
-              modelName={contextUsage.modelName}
-            />
-          )}
           {/* The mic sits immediately before send: both act on the draft, so
               they belong in the same cluster, apart from the tools and
               model controls that only set the turn up. */}
@@ -1116,6 +1106,15 @@ export function Composer({
                 <Mic size={15} />
               </Button>
             </WithTooltip>
+          )}
+          {/* The ring sits beside send: it answers how much room is left for
+              the next turn, so it belongs with the control that spends it. */}
+          {contextUsage && (
+            <ContextUsageIndicator
+              usage={contextUsage.usage}
+              contextWindow={contextUsage.contextWindow}
+              modelName={contextUsage.modelName}
+            />
           )}
           {active ? (
             <>

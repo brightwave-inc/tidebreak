@@ -30,14 +30,16 @@ policy, not as unfinished work:
 1. **Tier 1** — one, maybe two providers. Full capability: provider-executed
    tools, images, caching semantics, first-class testing. Design advanced
    features against these and ship when they work here.
-2. **Tier 2** — OpenAI-compatible endpoints, Ollama, and other partial routes.
-   Chat completion, ordinary tool calls, failover. Advanced features are
-   best-effort or absent, and capability flags say so honestly. Gemini's
-   dormant vendor web-search path (`supports_vendor_web_search: false` until
-   grounding can coexist with host tools) is the pattern — generalize it
+2. **Tier 2** — OpenAI-compatible endpoints, Ollama, OpenRouter, and other
+   partial routes. Chat completion, ordinary tool calls, failover. Advanced
+   features are best-effort or absent, and capability flags say so honestly.
+   Gemini's dormant vendor web-search path (`supports_vendor_web_search: false`
+   until grounding can coexist with host tools) is the pattern — generalize it
    rather than lighting every feature everywhere. Ollama is a named local
    runtime on this tier: no key for a default daemon, custom model rows, and
-   the same flatten-on-switch rule as every other compatible route.
+   the same flatten-on-switch rule as every other compatible route. OpenRouter
+   is a named hosted aggregator: a fixed endpoint, an API key, custom model
+   rows, and the same conservative text-only contract.
 
 Refuse to invent per-provider special cases below the router. If a feature
 cannot be expressed through the existing `ModelProvider` trait plus registry

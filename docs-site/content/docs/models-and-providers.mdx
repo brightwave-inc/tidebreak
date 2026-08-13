@@ -20,6 +20,7 @@ Open **Settings → Providers**. Each provider is its own section: turn on
 | xAI | API key, plus the model IDs you want to use |
 | Fireworks AI | API key; Tidebreak uses `https://api.fireworks.ai/inference/v1` |
 | Together AI | API key; Tidebreak uses `https://api.together.ai/v1` |
+| OpenRouter | API key; Tidebreak uses `https://openrouter.ai/api/v1`, plus the model IDs you want to use |
 | Ollama | No key for a local daemon. Defaults to `http://127.0.0.1:11434/v1`, plus the model IDs you have already pulled |
 | OpenAI-compatible | Base URL, optional key, plus the model IDs you want to use |
 
@@ -38,8 +39,8 @@ settings.
 <Callout>
 If you would rather not store anything, the server also reads
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`,
-`FIREWORKS_API_KEY`, and `TOGETHER_API_KEY` from the environment as fallbacks
-when no credential is saved.
+`FIREWORKS_API_KEY`, `TOGETHER_API_KEY`, and `OPENROUTER_API_KEY` from the
+environment as fallbacks when no credential is saved.
 </Callout>
 
 ## Curated models
@@ -68,11 +69,16 @@ been confirmed on that exact provider/model pair.
 
 ## Custom models
 
-**xAI**, **Ollama**, and **OpenAI-compatible** do not come with a curated list.
-Add rows under the provider's **Models** section: a model ID, an optional
-display name, and context and max-output token counts. For xAI, you also
-declare whether the model takes image input, whether it is a reasoning model,
-and which reasoning-effort levels it accepts.
+**xAI**, **OpenRouter**, **Ollama**, and **OpenAI-compatible** do not come with
+a curated list. Add rows under the provider's **Models** section: a model ID,
+an optional display name, and context and max-output token counts. For xAI,
+you also declare whether the model takes image input, whether it is a
+reasoning model, and which reasoning-effort levels it accepts.
+
+**OpenRouter** is a hosted aggregator on the same OpenAI-compatible
+chat-completions path. Enable it, paste an API key, and add each model id
+you want to use (`anthropic/claude-sonnet-4` is the usual `vendor/model`
+shape). Requests always go to `https://openrouter.ai/api/v1`.
 
 **Ollama** talks to a local daemon over the same OpenAI-compatible
 chat-completions path. Enable it, add a model you have already pulled

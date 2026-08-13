@@ -26,9 +26,8 @@ export function contextTokens(usage: RendererTurnUsage): number {
  * nothing they can act on beyond what "full" already tells them, and the turn
  * totals can legitimately exceed the window on a long multi-step turn.
  *
- * Returns null when the denominator is unusable, which is the signal to render
- * nothing at all — a model whose context window we do not know cannot be
- * honestly metered.
+ * Returns null when the denominator is unusable. That is a missing percent,
+ * not a missing reading — used tokens are still honest without a window.
  */
 export function contextUsagePercent(
   usage: RendererTurnUsage,

@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ModelInfo, ProviderInfo } from "../api";
+import type { ApiClient, ProviderInfo } from "../api";
 import { ProvidersPanel } from "./ProvidersPanel";
 
 const compatible: ProviderInfo = {
@@ -273,10 +273,17 @@ describe("ProvidersPanel", () => {
       base_url: "https://api.together.ai/v1",
       models: [],
     };
+    const openrouter: ProviderInfo = {
+      kind: "openrouter",
+      enabled: false,
+      has_credential: false,
+      base_url: "https://openrouter.ai/api/v1",
+      models: [],
+    };
 
     renderPanel(
       <ProvidersPanel
-        providers={[fireworks, together]}
+        providers={[fireworks, together, openrouter]}
         client={{} as ApiClient}
         onChanged={vi.fn()}
       />,
@@ -284,13 +291,74 @@ describe("ProvidersPanel", () => {
 
     expect(screen.getByText("Fireworks AI")).toBeInTheDocument();
     expect(screen.getByText("Together AI")).toBeInTheDocument();
+    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
     expect(
       screen.getByText(/https:\/\/api\.fireworks\.ai\/inference\/v1/),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/https:\/\/api\.together\.ai\/v1/),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/https:\/\/openrouter\.ai\/api\/v1/),
+    ).toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/base URL/)).not.toBeInTheDocument();
+  });
+
+  it("saves an OpenRouter key and configured model without an endpoint override", async () => {
+    const openrouter: ProviderInfo = {
+      kind: "openrouter",
+      enabled: false,
+      has_credential: false,
+      base_url: "https://openrouter.ai/api/v1",
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue({
+      ...openrouter,
+      enabled: true,
+      has_credential: true,
+    });
+    const client = { putProvider } as unknown as ApiClient;
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[openrouter]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/https:\/\/openrouter\.ai\/api\/v1/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
+      target: { value: "anthropic/claude-sonnet-4" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("API key"), {
+      target: { value: "sk-or" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("openrouter", {
+        enabled: true,
+        credential: { type: "api_key", key: "sk-or" },
+        models: [
+          {
+            id: "anthropic/claude-sonnet-4",
+            display_name: undefined,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            reasoning_efforts: [],
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByPlaceholderText(/base URL/i)).not.toBeInTheDocument();
   });
 
   it("starts ChatGPT OAuth from the OpenAI provider row", async () => {
@@ -496,7 +564,7 @@ describe("ProvidersPanel", () => {
   });
 });
 
-describe("ProvidersPanel model visibility", () => {
+describe("ProvidersPanel", () => {
   const anthropic: ProviderInfo = {
     kind: "anthropic",
     enabled: true,
@@ -509,138 +577,16 @@ describe("ProvidersPanel model visibility", () => {
     has_credential: true,
     models: [],
   };
-  const model = (
-    key: string,
-    provider: ModelInfo["provider"],
-    display_name: string,
-    recommended: boolean,
-  ): ModelInfo =>
-    ({
-      key,
-      id: key.split("::")[1],
-      display_name,
-      provider,
-      vendor: null,
-      verification: "verified",
-      recommended,
-      available: true,
-      context_window: 200_000,
-      max_output_tokens: 64_000,
-      input_modalities: ["text"],
-      supports_reasoning: false,
-      reasoning_efforts: [],
-      supports_tools: true,
-      supports_structured_output: true,
-      multimodal: false,
-    }) as unknown as ModelInfo;
-
-  const models: ModelInfo[] = [
-    model("anthropic::opus-5", "anthropic", "Claude Opus 5", true),
-    model("anthropic::opus-4-8", "anthropic", "Claude Opus 4.8", false),
-    model("openai::gpt-5-mini", "openai", "GPT-5 mini", false),
-  ];
-
-  function clientWith(overrides: Record<string, "show" | "hide">) {
-    const putSettings = vi
-      .fn()
-      .mockImplementation((body: Record<string, unknown>) =>
-        Promise.resolve({
-          model_visibility_overrides: body.model_visibility_overrides,
-        }),
-      );
-    const getSettings = vi
-      .fn()
-      .mockResolvedValue({ model_visibility_overrides: overrides });
-    return {
-      putSettings,
-      getSettings,
-      client: {
-        getSettings,
-        putSettings,
-        // The OpenAI card resumes any sign-in the server is still holding.
-        getOpenaiChatgptStatus: vi.fn().mockResolvedValue({ signed_in: false }),
-      } as unknown as ApiClient,
-    };
-  }
-
-  it("writes the complete deviation map, never a redundant entry", async () => {
-    // A deviation for another provider is already stored: the write replaces
-    // the whole map, so losing it would silently unhide that model.
-    const { client, putSettings } = clientWith({
-      "openai::gpt-5-mini": "show",
-      "anthropic::opus-4-8": "show",
-    });
-
-    renderPanel(
-      <ProvidersPanel
-        providers={[anthropic]}
-        models={models}
-        client={client}
-        onChanged={vi.fn()}
-      />,
-    );
-
-    // Unchecking a model that is only visible because of an override returns
-    // it to its catalog default, which is the absence of a key.
-    const legacy = await screen.findByRole("checkbox", {
-      name: "Show Claude Opus 4.8",
-    });
-    await waitFor(() => expect(legacy).toBeChecked());
-    fireEvent.click(legacy);
-    await waitFor(() =>
-      expect(putSettings).toHaveBeenCalledWith({
-        model_visibility_overrides: { "openai::gpt-5-mini": "show" },
-      }),
-    );
-
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "Show Claude Opus 5" }),
-    );
-    await waitFor(() =>
-      expect(putSettings).toHaveBeenLastCalledWith({
-        model_visibility_overrides: {
-          "openai::gpt-5-mini": "show",
-          "anthropic::opus-5": "hide",
-        },
-      }),
-    );
-  });
-
-  it("resets only the card's own provider keys", async () => {
-    const { client, putSettings } = clientWith({
-      "anthropic::opus-5": "hide",
-      "anthropic::opus-4-8": "show",
-      "openai::gpt-5-mini": "show",
-    });
-
-    renderPanel(
-      <ProvidersPanel
-        providers={[anthropic, openai]}
-        models={models}
-        client={client}
-        onChanged={vi.fn()}
-      />,
-    );
-
-    const [reset] = await screen.findAllByRole("button", {
-      name: "Reset to defaults",
-    });
-    fireEvent.click(reset);
-
-    await waitFor(() =>
-      expect(putSettings).toHaveBeenCalledWith({
-        model_visibility_overrides: { "openai::gpt-5-mini": "show" },
-      }),
-    );
-  });
 
   it("expands the card a deep link names", async () => {
-    const { client } = clientWith({});
+    const client = {
+      getOpenaiChatgptStatus: vi.fn().mockResolvedValue({ signed_in: false }),
+    } as unknown as ApiClient;
 
     render(
       <ProvidersPanel
         providers={[anthropic, openai]}
-        models={models}
+        models={[]}
         client={client}
         onChanged={vi.fn()}
         expandProvider="openai"
