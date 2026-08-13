@@ -804,6 +804,31 @@ function sandboxPublishControls(publish) {
   };
 }
 
+function sandboxPublishTrigger(publish) {
+  return {
+    tagPush: /^on:\n  push:\n    tags: \["v\*"\]\n    branches: \[main\]\n  schedule:/m.test(
+      publish,
+    ),
+    publishedRelease:
+      /^on:\n  release:\n    types: \[published\]\n  push:\n    branches: \[main\]\n  schedule:/m.test(
+        publish,
+      ),
+  };
+}
+
+function assertSandboxPublishReleaseEvent(publish) {
+  const resolve = workflowJob(publish, "resolve");
+  assert.match(
+    publish,
+    /^on:\n  release:\n    types: \[published\]\n  push:\n    branches: \[main\]\n  schedule:/m,
+  );
+  assert.match(resolve, /EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+  assert.match(resolve, /RELEASE_TAG: \$\{\{ github\.event\.release\.tag_name \}\}/);
+  assert.match(resolve, /github\.event\.release|RELEASE_TAG/);
+  assert.match(resolve, /prerelease/);
+  assert.doesNotMatch(publish, /^\s*tags: \["v\*"\]/m);
+}
+
 function assertSandboxPublishMainOnly(controls) {
   assert.ok(
     controls.hasDefaultBranchEnv,
@@ -838,13 +863,20 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   const publish = workflows["publish-sandbox-image.yml"];
   assert.ok(publish);
 
-  // Version tags, main pushes (scoped in-workflow to the image inputs), the
-  // weekly patch-flush schedule, and manual dispatch publish; a pull request
-  // never can.
-  assert.match(
-    publish,
-    /^on:\n  push:\n    tags: \["v\*"\]\n    branches: \[main\]\n  schedule:\n(?:    #.*\n)*    - cron: "43 4 \* \* 4"\n  workflow_dispatch:/m,
+  // Current: a `v*` tag push runs this workflow from the tagged commit.
+  // Next: a published GitHub Release runs the default-branch workflow, so
+  // an old or hostile tag YAML cannot publish. Accept either until the
+  // trigger change lands.
+  const trigger = sandboxPublishTrigger(publish);
+  assert.ok(
+    trigger.tagPush || trigger.publishedRelease,
+    "sandbox images publish from a v* tag push or a published GitHub Release",
   );
+  if (trigger.publishedRelease) {
+    assertSandboxPublishReleaseEvent(publish);
+  }
+  assert.match(publish, /cron: "43 4 \* \* 4"/);
+  assert.match(publish, /^  workflow_dispatch:/m);
   assert.doesNotMatch(publish, /^\s*pull_request(?:_target)?:/m);
 
   // Dispatch/schedule must run the default-branch workflow. Every publish,
