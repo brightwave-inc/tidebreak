@@ -1243,7 +1243,7 @@ impl GatewayConnection {
                 return Ok(cached.token.clone());
             }
         }
-        let token = self
+        let token = match self
             .auth
             .refresh(
                 &credentials.refresh_token,
@@ -1251,7 +1251,14 @@ impl GatewayConnection {
                 &credentials.installation_id,
                 None,
             )
-            .await?;
+            .await
+        {
+            Ok(token) => token,
+            Err(error) => {
+                self.retire_refused_session(&error).await;
+                return Err(error);
+            }
+        };
         credentials.refresh_token = token.refresh_token.clone();
         credentials.access_tokens.insert(
             resource.to_string(),
@@ -1349,7 +1356,7 @@ impl GatewayConnection {
         resource: &str,
         context: &str,
     ) -> Result<TokenSet> {
-        let token = self
+        let token = match self
             .auth
             .refresh(
                 &credentials.refresh_token,
@@ -1357,10 +1364,35 @@ impl GatewayConnection {
                 &credentials.installation_id,
                 Some(context),
             )
-            .await?;
+            .await
+        {
+            Ok(token) => token,
+            Err(error) => {
+                self.retire_refused_session(&error).await;
+                return Err(error);
+            }
+        };
         credentials.refresh_token = token.refresh_token.clone();
         self.vault.save(credentials).await?;
         Ok(token)
+    }
+
+    /// Retire the stored session after a refresh the gateway refused as
+    /// sign-in-required (`invalid_grant`): that session can never mint
+    /// again — expired, revoked, or caught by refresh-token reuse
+    /// detection — so leaving it stored would keep the status surface
+    /// reporting a signed-in session whose every call fails. Local clear
+    /// only: revoking a refresh token the gateway already refuses buys
+    /// nothing. Best effort, and never masks the refusal itself — an
+    /// unclearable vault degrades to the old behavior, a stored session
+    /// that keeps failing until the user reconnects.
+    async fn retire_refused_session(&self, error: &AgentError) {
+        if !is_sign_in_required(error) {
+            return;
+        }
+        if let Err(clear_error) = self.vault.clear().await {
+            tracing::warn!("could not clear a gateway session refused at refresh: {clear_error}");
+        }
     }
 
     /// Live identity check with a `control` token.

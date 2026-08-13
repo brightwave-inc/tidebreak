@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tidebreak_core::{Result as CoreResult, SecretProvider};
 use tidebreak_server::connectors::{
-    is_sign_in_required, CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayConnection,
-    GatewayInvokeOutcome, RESOURCE_CONTROL, RESOURCE_LLM,
+    is_sign_in_required, CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayCatalogFetch,
+    GatewayConnection, GatewayInvokeOutcome, RESOURCE_CONTROL, RESOURCE_LLM,
 };
 
 const INSTALLATION: &str = "11111111-2222-3333-4444-555555555555";
@@ -65,6 +65,9 @@ struct FakeGateway {
     corrupt_state: AtomicBool,
     /// Serve 404 for `/api/v1/cli/apps`, like a gateway that predates it.
     apps_unsupported: AtomicBool,
+    /// Serve 404 for `/api/v1/me/catalog`, like a gateway that predates the
+    /// member catalog while still serving the per-surface reads.
+    member_catalog_unsupported: AtomicBool,
     /// Serve 404 for the per-app catalog read, like a gateway that predates
     /// it while still listing entitlements.
     catalogs_unsupported: AtomicBool,
@@ -321,6 +324,52 @@ async fn apps(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Re
     .into_response()
 }
 
+const CATALOG_ETAG: &str = "\"catalog-rev-1\"";
+
+async fn member_catalog(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Response {
+    if gateway.member_catalog_unsupported.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if bearer_resource(&gateway, &headers).as_deref() != Some("control") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(CATALOG_ETAG)
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [(axum::http::header::ETAG, CATALOG_ETAG)],
+        )
+            .into_response();
+    }
+    (
+        [(axum::http::header::ETAG, CATALOG_ETAG)],
+        Json(json!({
+            "models": [{
+                "id": "claude-opus-5",
+                "name": "Claude Opus 5",
+                "protocols": ["anthropic_messages", "openai_responses"],
+                "supports_tools": true,
+                "supports_vision": true,
+                "context_window": 200000,
+                "max_output_tokens": 64000,
+                "provider_name": "Anthropic",
+            }],
+            "apps": [{
+                "id": "app-incident",
+                "name": "Incident API",
+                "app_kind": "rest_api",
+                "enabled": true,
+                "mcp_endpoint_slugs": ["example-security-tools"],
+                "connection": "authorization_required",
+            }],
+        })),
+    )
+        .into_response()
+}
+
 async fn app_operations(
     State(gateway): State<Arc<FakeGateway>>,
     axum::extract::Path(app_id): axum::extract::Path<String>,
@@ -400,6 +449,7 @@ async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
         .route("/api/v1/cli/me", get(me))
         .route("/api/v1/cli/models", get(models))
         .route("/api/v1/cli/apps", get(apps))
+        .route("/api/v1/me/catalog", get(member_catalog))
         .route("/api/v1/cli/apps/{app_id}/operations", get(app_operations))
         .route(
             "/api/apps/shared/{shared_app_id}/invoke",
@@ -511,6 +561,15 @@ async fn a_stale_refresh_token_reads_as_signed_out() {
         .await
         .expect_err("superseded refresh token must fail");
     assert!(is_sign_in_required(&error), "{error}");
+
+    // The refusal retires the stored session: the status surface must read
+    // signed-out and offer reconnect, not report a session whose every call
+    // fails.
+    assert!(stale_connection
+        .stored_credentials()
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -681,6 +740,49 @@ async fn apps_lists_entitlements_and_degrades_when_the_surface_is_missing() {
     // error and not an empty entitlement list.
     gateway.apps_unsupported.store(true, Ordering::SeqCst);
     assert_eq!(connection.apps().await.unwrap(), None);
+}
+
+/// The member catalog is the envelope both the settings panel and the MCP
+/// endpoint mounts read entitlements from, so its wire shape — one fetch
+/// carrying models, apps, per-app readiness, and an `ETag` — is a contract.
+/// It has to degrade to `Unsupported` against a gateway that predates it,
+/// which is what sends callers back to the per-surface reads.
+#[tokio::test]
+async fn member_catalog_reads_one_envelope_and_degrades_when_missing() {
+    let (gateway, connection) = signed_in_connection().await;
+
+    let GatewayCatalogFetch::Fresh { catalog, etag } = connection.catalog(None).await.unwrap()
+    else {
+        panic!("expected a fresh catalog");
+    };
+    assert_eq!(catalog.models.len(), 1);
+    assert_eq!(
+        catalog.models[0].protocols,
+        ["anthropic_messages", "openai_responses"]
+    );
+    assert_eq!(catalog.apps.len(), 1);
+    assert_eq!(
+        catalog.apps[0].mcp_endpoint_slugs,
+        ["example-security-tools"]
+    );
+    assert_eq!(catalog.apps[0].connection, "authorization_required");
+
+    // A conditional refetch with the held revision keeps the snapshot.
+    let etag = etag.expect("catalog carried an ETag");
+    assert_eq!(
+        connection.catalog(Some(&etag)).await.unwrap(),
+        GatewayCatalogFetch::NotModified
+    );
+
+    // A gateway predating the route reads as unsupported, not an error —
+    // that answer is what degrades callers to the per-surface reads.
+    gateway
+        .member_catalog_unsupported
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        connection.catalog(None).await.unwrap(),
+        GatewayCatalogFetch::Unsupported
+    );
 }
 
 /// The per-app catalog read is what a gateway binding's fingerprint is taken

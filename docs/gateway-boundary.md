@@ -119,10 +119,11 @@ cached access tokens — lives in the profile's secret store under
   one.** A committed re-pair revokes at the old gateway (bounded, best
   effort) and clears locally; only then is the new session stored.
 - **`invalid_grant` means sign in again, not retry.** Refresh-token reuse
-  detection or revocation surfaces as a reconnect affordance. Known edge:
-  the credential is not auto-cleared on that failure, so the status surface
-  keeps reporting a signed-in session whose calls fail until the user
-  reconnects or disconnects.
+  detection or revocation surfaces as a reconnect affordance, and the
+  refused session is retired on the spot: the stored credential is cleared
+  (locally — revoking a token the gateway already refuses buys nothing), so
+  the status surface reports signed-out rather than a signed-in session
+  whose every call fails.
 
 ## What crosses the wire
 
