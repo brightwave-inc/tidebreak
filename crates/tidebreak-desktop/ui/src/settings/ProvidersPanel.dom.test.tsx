@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ModelInfo, ProviderInfo } from "../api";
+import type { ApiClient, ProviderInfo } from "../api";
 import { ProvidersPanel } from "./ProvidersPanel";
 
 const compatible: ProviderInfo = {

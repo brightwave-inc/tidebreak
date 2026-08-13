@@ -17,7 +17,7 @@ import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { ProviderIcon } from "../ProviderIcons";
