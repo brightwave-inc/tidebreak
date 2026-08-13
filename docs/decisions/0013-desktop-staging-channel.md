@@ -70,8 +70,9 @@ because the feeds are already isolated by URL and bundle id.
 
 Concurrency:
 
-- The staging workflow's group is `tidebreak-desktop-staging` with
-  `cancel-in-progress: true`. Only the newest `main` tip is worth notarizing.
+- The staging caller uses a per-run group so a later merge cannot cancel it.
+  The publish workflow serializes on `tidebreak-desktop-staging-build` with
+  `cancel-in-progress: false`, so an in-flight notarization finishes.
 - That run invokes a `workflow_call`-only staging publish workflow with
   `channel: staging`. The called run uses its own staging group so it cannot
   share or cancel `tidebreak-desktop-production-release`.
