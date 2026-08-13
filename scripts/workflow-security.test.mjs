@@ -1292,6 +1292,7 @@ test("staging desktop publishes only under the staging prefix", () => {
   const stagingPublish = workflows["staging-publish.yml"];
   if (stagingPublish) {
     assert.match(stagingPublish, /^on:\n  workflow_call:\n/m);
+    assert.doesNotMatch(stagingPublish, /github\.event_name == 'workflow_call'/);
     assert.doesNotMatch(stagingPublish, /^\s*pull_request(?:_target)?:/m);
     assert.match(stagingPublish, /^permissions:\n  contents: read$/m);
     assert.match(stagingPublish, /group: tidebreak-desktop-staging-build/);
