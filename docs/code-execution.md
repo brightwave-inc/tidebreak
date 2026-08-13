@@ -119,20 +119,24 @@ destination reachable, the surface cannot present it as a full boundary.
   therefore reports it as a *conditional* boundary with that requirement inline,
   never an unconditional green one.
 
-- **Docker — `boundary` for "no network", `not_enforced` otherwise.** The
-  container backend enforces exactly one policy class. A policy that permits
-  nothing — what a conversation set to "no network" compiles to — creates the
-  container with `--network none`, so it has no interface but loopback: no
-  route, no name resolution, nothing to negotiate with. That is externally
-  enforced by the runtime with no exception left open, so the row is derived
-  from an `EgressEnforcement` declaration like the vendors', not asserted.
-  Every other class is enforced by nothing: an allowlist is not compiled into
-  container networking at all, and the container runs on the runtime's default
-  network with ordinary outbound access. That half stays `not_enforced` — the
-  absence of a boundary rather than a weaker one, and distinct from
-  `unconfirmed`, which describes a policy that *was* sent. Restricting the
-  remaining classes needs the per-container internal network plus egress proxy
-  the sandbox-agent container tier already runs; that is a later slice.
+- **Docker — `boundary` for "no network", `not_enforced` for every other
+  class.** The container backend can enforce exactly one policy class as
+  written. A policy that permits nothing — what a conversation set to "no
+  network" compiles to — creates the container with `--network none`, so it
+  has no interface but loopback: no route, no name resolution, nothing to
+  negotiate with. That is externally enforced by the runtime with no exception
+  left open, so the row is derived from an `EgressEnforcement` declaration
+  like the vendors', not asserted. An allowlist ("package managers only",
+  custom hosts) cannot be honored yet: compiling it onto the runtime's default
+  network would treat it as the open internet (LAN, `host.docker.internal`,
+  cloud metadata). Those policies therefore also create the container with
+  `--network none` — a refusal of the grants, not enforcement of them — and
+  the row stays `not_enforced` so the surface cannot read them as a working
+  restriction. That is distinct from `unconfirmed`, which describes a policy
+  that *was* sent. Only open egress (no policy) leaves the container on the
+  runtime's default network. Honoring the remaining classes needs the
+  per-container internal network plus egress proxy the sandbox-agent container
+  tier already runs; that is a later slice.
 
 Because the container row depends on the policy and not only on the backend,
 the settings surface renders it for the host-level `egress` value it displays.
@@ -233,16 +237,18 @@ packages and writes scratch, and the surface a read-only root would protect is
 the container's own ephemeral layer.
 
 The chat's network policy reaches container creation, but only its strictest
-class is enforced there: "no network" creates the container with `--network
-none`, and every other class runs on the runtime's default network — see the
-enforcement disclosure above. The container a chat is using is bound to the
-policy it was created under, on two axes. The pooled session records the
-policy's fingerprint, so editing the policy destroys the container and creates
-a replacement instead of reusing one with stale networking. The configuration
-label a container carries records its network shape, so a container found by
-its deterministic name — after a host restart, or from a second window, where
-no pooled handle exists — is replaced rather than adopted when its networking
-does not match.
+class is enforced there as written: "no network" creates the container with
+`--network none`. Every other *restrictive* class also creates the container
+with `--network none` rather than the runtime's default network — a
+fail-closed refusal, not a working allowlist — and only open egress leaves
+the default network in place. See the enforcement disclosure above. The
+container a chat is using is bound to the policy it was created under, on two
+axes. The pooled session records the policy's fingerprint, so editing the
+policy destroys the container and creates a replacement instead of reusing
+one with stale networking. The configuration label a container carries
+records its network shape, so a container found by its deterministic name —
+after a host restart, or from a second window, where no pooled handle exists
+— is replaced rather than adopted when its networking does not match.
 
 ## Connected folders in local exec
 
