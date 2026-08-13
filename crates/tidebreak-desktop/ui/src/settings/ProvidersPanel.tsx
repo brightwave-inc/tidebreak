@@ -8,13 +8,11 @@ import type {
   ModelInfo,
   ProviderInfo,
   ProviderKind,
-  ReasoningEffort,
 } from "../api";
 import { openInBrowser } from "../openInBrowser";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
@@ -27,13 +25,6 @@ const CHATGPT_SIGN_IN_POLL_MS = 2_000;
 // Matches the server's sign-in window; polling past it can only report a
 // timeout the server has already recorded.
 const CHATGPT_SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
-const XAI_REASONING_EFFORTS: readonly ReasoningEffort[] = [
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-];
 
 function newConfiguredModel(): CustomModelConfig {
   return {
@@ -193,7 +184,6 @@ function ProviderRow({
   const { confirm, dialog } = useConfirm();
   const hasConfigurableModels =
     info.kind === "openai_compatible" ||
-    info.kind === "xai" ||
     info.kind === "openrouter" ||
     info.kind === "ollama";
   const acceptsBaseUrl =
@@ -372,6 +362,25 @@ function ProviderRow({
               onCheckedChange={(checked) => void save(checked)}
             />
           </div>
+          {info.kind === "xai" && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Requests go directly to api.x.ai/v1.
+              </p>
+              {catalogModels.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-sm font-medium">Models</span>
+                  <ul className="space-y-1">
+                    {catalogModels.map((model) => (
+                      <li className="text-sm" key={model.key}>
+                        {model.display_name}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
           {hasConfigurableModels && (
             <>
               {acceptsBaseUrl && (
@@ -385,11 +394,6 @@ function ProviderRow({
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                 />
-              )}
-              {info.kind === "xai" && (
-                <p className="text-xs text-muted-foreground">
-                  Requests go directly to api.x.ai/v1.
-                </p>
               )}
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-3">
@@ -407,13 +411,11 @@ function ProviderRow({
                 </div>
                 {models.length === 0 && (
                   <p className="text-xs text-muted-foreground">
-                    {info.kind === "xai"
-                      ? "Grok 4.5 is ready when you connect xAI. Add any additional account models here, including their limits and supported capabilities."
-                      : info.kind === "ollama"
-                        ? "Add each model already pulled in Ollama. qwen3:0.6b is a small tool-calling option for a first test."
-                        : info.kind === "openrouter"
-                          ? "Add each OpenRouter model id (for example anthropic/claude-sonnet-4). Custom models start with conservative text-only, non-reasoning capabilities."
-                          : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
+                    {info.kind === "ollama"
+                      ? "Add each model already pulled in Ollama. qwen3:0.6b is a small tool-calling option for a first test."
+                      : info.kind === "openrouter"
+                        ? "Add each OpenRouter model id (for example anthropic/claude-sonnet-4). Custom models start with conservative text-only, non-reasoning capabilities."
+                        : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
                   </p>
                 )}
                 {models.map((model, index) => (
@@ -498,99 +500,6 @@ function ProviderRow({
                         />
                       </label>
                     </div>
-                    {info.kind === "xai" && (
-                      <div className="grid gap-2 rounded-md bg-muted/40 p-2 text-xs">
-                        <label className="flex items-center gap-2">
-                          <Checkbox
-                            checked={
-                              model.input_modalities?.includes("image") ?? false
-                            }
-                            disabled={saving}
-                            onCheckedChange={(checked) =>
-                              setModels((current) =>
-                                current.map((item, itemIndex) =>
-                                  itemIndex === index
-                                    ? {
-                                        ...item,
-                                        input_modalities:
-                                          checked === true
-                                            ? ["text", "image"]
-                                            : ["text"],
-                                      }
-                                    : item,
-                                ),
-                              )
-                            }
-                          />
-                          Image input
-                        </label>
-                        <label className="flex items-center gap-2">
-                          <Checkbox
-                            checked={model.supports_reasoning ?? false}
-                            disabled={saving}
-                            onCheckedChange={(checked) =>
-                              setModels((current) =>
-                                current.map((item, itemIndex) =>
-                                  itemIndex === index
-                                    ? {
-                                        ...item,
-                                        supports_reasoning: checked === true,
-                                        reasoning_efforts:
-                                          checked === true
-                                            ? item.reasoning_efforts ?? []
-                                            : [],
-                                      }
-                                    : item,
-                                ),
-                              )
-                            }
-                          />
-                          Reasoning model
-                        </label>
-                        {model.supports_reasoning && (
-                          <div className="grid gap-1">
-                            <span className="text-muted-foreground">
-                              Supported reasoning efforts
-                            </span>
-                            <div className="flex flex-wrap gap-3">
-                              {XAI_REASONING_EFFORTS.map((effort) => (
-                                <label
-                                  className="flex items-center gap-1.5"
-                                  key={effort}
-                                >
-                                  <Checkbox
-                                    checked={
-                                      model.reasoning_efforts?.includes(effort) ??
-                                      false
-                                    }
-                                    disabled={saving}
-                                    onCheckedChange={(checked) =>
-                                      setModels((current) =>
-                                        current.map((item, itemIndex) => {
-                                          if (itemIndex !== index) return item;
-                                          const selected = new Set(
-                                            item.reasoning_efforts ?? [],
-                                          );
-                                          if (checked === true) selected.add(effort);
-                                          else selected.delete(effort);
-                                          return {
-                                            ...item,
-                                            reasoning_efforts: XAI_REASONING_EFFORTS.filter(
-                                              (candidate) => selected.has(candidate),
-                                            ),
-                                          };
-                                        }),
-                                      )
-                                    }
-                                  />
-                                  {effort}
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
                     <Button
                       type="button"
                       variant="outline"

@@ -127,34 +127,74 @@ describe("ProvidersPanel", () => {
     expect("display_name" in sent.models[0]).toBe(false);
   });
 
-  it("configures xAI model capabilities without an endpoint override", async () => {
+  it("lists curated Grok models and saves an xAI key without custom registration", async () => {
     const xai: ProviderInfo = {
       kind: "xai",
       enabled: false,
       has_credential: false,
       models: [],
     };
-    const putProvider = vi.fn().mockResolvedValue(xai);
+    const putProvider = vi.fn().mockResolvedValue({
+      ...xai,
+      enabled: true,
+      has_credential: true,
+    });
     const client = { putProvider } as unknown as ApiClient;
 
     renderPanel(
-      <ProvidersPanel providers={[xai]} client={client} onChanged={vi.fn()} />,
+      <ProvidersPanel
+        providers={[xai]}
+        models={[
+          {
+            key: "xai::grok-4.6",
+            id: "grok-4.6",
+            display_name: "Grok 4.6",
+            provider: "xai",
+            vendor: null,
+            verification: "unverified",
+            available: false,
+            context_window: 500_000,
+            max_output_tokens: 32_768,
+            input_modalities: ["text", "image"],
+            supports_reasoning: true,
+            supports_tools: true,
+            supports_structured_output: false,
+            reasoning_efforts: ["low", "medium", "high", "xhigh"],
+            multimodal: true,
+            recommended: true,
+          },
+          {
+            key: "xai::grok-4.5",
+            id: "grok-4.5",
+            display_name: "Grok 4.5",
+            provider: "xai",
+            vendor: null,
+            verification: "unverified",
+            available: false,
+            context_window: 500_000,
+            max_output_tokens: 32_768,
+            input_modalities: ["text", "image"],
+            supports_reasoning: true,
+            supports_tools: true,
+            supports_structured_output: false,
+            reasoning_efforts: ["low", "medium", "high", "xhigh"],
+            multimodal: true,
+            recommended: true,
+          },
+        ]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
-    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
-      target: { value: "grok-account-model" },
-    });
+    expect(screen.getByText("Grok 4.6")).toBeInTheDocument();
+    expect(screen.getByText("Grok 4.5")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add model" }),
+    ).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("API key"), {
       target: { value: "xai-key" },
     });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Image input" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reasoning model" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "none" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "low" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "medium" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "high" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "xhigh" }));
     fireEvent.click(
       screen.getByRole("button", { name: "Save configuration" }),
     );
@@ -163,17 +203,6 @@ describe("ProvidersPanel", () => {
       expect(putProvider).toHaveBeenCalledWith("xai", {
         enabled: true,
         credential: { type: "api_key", key: "xai-key" },
-        models: [
-          {
-            id: "grok-account-model",
-            display_name: undefined,
-            context_window: 32_768,
-            max_output_tokens: 4_096,
-            input_modalities: ["text", "image"],
-            supports_reasoning: true,
-            reasoning_efforts: ["none", "low", "medium", "high", "xhigh"],
-          },
-        ],
       }),
     );
     expect(screen.queryByPlaceholderText(/base URL/i)).not.toBeInTheDocument();
@@ -187,6 +216,12 @@ describe("ProvidersPanel", () => {
           {
             // `base_url` is omitted, not null, exactly as the server sends it.
             kind: "anthropic",
+            enabled: false,
+            has_credential: false,
+            models: [],
+          },
+          {
+            kind: "xai",
             enabled: false,
             has_credential: false,
             models: [],

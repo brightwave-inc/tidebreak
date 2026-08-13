@@ -335,6 +335,18 @@ describe("ProviderIcon", () => {
     expect(markup).not.toContain("M5 4l14 16");
   });
 
+  it("draws the Ollama llama and the OpenRouter mark", () => {
+    const ollama = renderToStaticMarkup(<ProviderIcon provider="ollama" />);
+    expect(ollama).toContain("M16.361 10.26");
+    expect(ollama).not.toContain("lucide");
+
+    const openrouter = renderToStaticMarkup(
+      <ProviderIcon provider="openrouter" />,
+    );
+    expect(openrouter).toContain("#7624F4");
+    expect(openrouter).toContain("M303.9475 17.1993");
+  });
+
   it("keeps an open model's vendor mark whatever endpoint serves it", () => {
     const throughGateway = renderToStaticMarkup(
       <ProviderIcon provider="model_gateway" modelId="kimi-k2.5" />,
