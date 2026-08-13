@@ -8,6 +8,7 @@ on:
     paths:
       - .cargo/**
       - .github/workflows/release.yml
+      - .github/workflows/staging-publish.yml
       - .github/workflows/staging.yml
       - Cargo.lock
       - Cargo.toml
@@ -69,7 +70,7 @@ jobs:
   publish:
     name: publish staging
     needs: resolve
-    uses: ./.github/workflows/release.yml
+    uses: ./.github/workflows/staging-publish.yml
     permissions:
       contents: read
       id-token: write

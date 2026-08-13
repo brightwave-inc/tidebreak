@@ -72,7 +72,7 @@ Concurrency:
 
 - The staging workflow's group is `tidebreak-desktop-staging` with
   `cancel-in-progress: true`. Only the newest `main` tip is worth notarizing.
-- That run invokes the production workflow as a reusable workflow with
+- That run invokes a `workflow_call`-only staging publish workflow with
   `channel: staging`. The called run uses its own staging group so it cannot
   share or cancel `tidebreak-desktop-production-release`.
 - At publish time, staging refuses any S3 key outside `tidebreak/staging/` and
