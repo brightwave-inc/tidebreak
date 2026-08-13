@@ -3,6 +3,8 @@ name: Publish sandbox agent images
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
     && format('Publish sandbox images {0}', inputs.image_tag)
+    || github.event_name == 'release'
+    && format('Publish sandbox images {0}', github.event.release.tag_name)
     || format('Publish sandbox images {0}', github.ref_name) }}
 
 # Builds the two sandbox-agent image variants from
@@ -15,21 +17,22 @@ run-name: >-
 #
 # Publishes happen on four triggers:
 #
-#   - a `v*` release tag push (the release cadence);
+#   - a published, non-prerelease GitHub Release (the release cadence).
+#     `release` events run this file from the default branch, not from the
+#     tag, so a hostile or stale tag YAML cannot publish;
 #   - a push to `main` that touches the image inputs — the agent crate
 #     (including its Dockerfile and documents-requirements.txt), the
 #     exec-documents scripts, or this workflow — scoped by the `resolve` job
-#     below rather than an `on.push.paths` filter, because a `paths` filter
-#     combined with a `tags` filter would also gate the tag trigger;
+#     below rather than an `on.push.paths` filter;
 #   - a weekly scheduled rebuild, so Debian security patches and the
 #     vulnerability gate flush through even when nothing in-repo changes;
 #   - manual dispatch with an explicit release-style tag.
 #
 # Publication source is the default branch only. Manual dispatch and the
 # weekly schedule must run this workflow from that branch; every publish
-# (including a v* tag) refuses a SHA that is not an ancestor of it. The
-# build checkout does not persist credentials, and the image dockerignore
-# keeps `.git` out of the `COPY . .` context.
+# (including a release tag's commit) refuses a SHA that is not an ancestor
+# of it. The build checkout does not persist credentials, and the image
+# dockerignore keeps `.git` out of the `COPY . .` context.
 #
 # Release publishes keep human `vX.Y.Z` tags. Scheduled and main-push rebuilds
 # mint `main-<utc date>-<short sha>-r<run number>` instead:
@@ -73,8 +76,9 @@ run-name: >-
 # a one-time manual toggle in the GHCR package settings.
 
 on:
+  release:
+    types: [published]
   push:
-    tags: ["v*"]
     branches: [main]
   schedule:
     # Weekly patch flush: Thursday 04:43 UTC, off the busy on-the-hour and
@@ -93,7 +97,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tidebreak-sandbox-image-${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
+  group: tidebreak-sandbox-image-${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -119,6 +123,8 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
           SOURCE_REF: ${{ github.ref }}
           SOURCE_REF_NAME: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
@@ -142,6 +148,15 @@ jobs:
                 exit 1
               }
               ;;
+            release)
+              # `release` events already load this file from the default
+              # branch. The tree we build is the tag commit (`github.sha`);
+              # it still has to sit on the default branch, checked below.
+              [[ "$RELEASE_DRAFT" == "false" && "$RELEASE_PRERELEASE" == "false" ]] || {
+                echo "Sandbox image publication requires a published, non-prerelease GitHub Release." >&2
+                exit 1
+              }
+              ;;
             push)
               ;;
             *)
@@ -160,6 +175,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
           DISPATCH_TAG: ${{ inputs.image_tag }}
           PUSH_BASE_SHA: ${{ github.event.before }}
           PUSH_HEAD_SHA: ${{ github.event.after }}
@@ -182,34 +198,33 @@ jobs:
               image_tag="$rebuild_tag"
               publish=true
               ;;
+            release)
+              image_tag="$RELEASE_TAG"
+              [[ "$image_tag" =~ $release_pattern ]] || {
+                echo "Release image tag must look like vX.Y.Z (optional pre-release suffix): $image_tag" >&2
+                exit 1
+              }
+              publish=true
+              ;;
             push)
-              if [[ "$REF_TYPE" == tag ]]; then
-                image_tag="$REF_NAME"
-                [[ "$image_tag" =~ $release_pattern ]] || {
-                  echo "Release image tag must look like vX.Y.Z (optional pre-release suffix): $image_tag" >&2
-                  exit 1
-                }
+              image_tag="$rebuild_tag"
+              if [[ -z "$PUSH_BASE_SHA" || -z "$PUSH_HEAD_SHA" || "$PUSH_BASE_SHA" =~ ^0+$ || "$PUSH_HEAD_SHA" =~ ^0+$ ]]; then
+                echo "missing comparison range; rebuilding conservatively" >&2
                 publish=true
               else
-                image_tag="$rebuild_tag"
-                if [[ -z "$PUSH_BASE_SHA" || -z "$PUSH_HEAD_SHA" || "$PUSH_BASE_SHA" =~ ^0+$ || "$PUSH_HEAD_SHA" =~ ^0+$ ]]; then
-                  echo "missing comparison range; rebuilding conservatively" >&2
-                  publish=true
-                else
-                  git diff --no-renames --name-only -z "$PUSH_BASE_SHA..$PUSH_HEAD_SHA" \
-                    > "$RUNNER_TEMP/changed-files"
-                  while IFS= read -r -d '' file; do
-                    case "$file" in
-                      # Everything the published images are built from: the
-                      # agent crate (Dockerfile and documents-requirements.txt
-                      # included), the exec-documents scripts baked into the
-                      # documents variant, and this workflow itself.
-                      crates/tidebreak-sandbox-agent/*|scripts/exec-documents/*|.github/workflows/publish-sandbox-image.yml)
-                        publish=true
-                        ;;
-                    esac
-                  done < "$RUNNER_TEMP/changed-files"
-                fi
+                git diff --no-renames --name-only -z "$PUSH_BASE_SHA..$PUSH_HEAD_SHA" \
+                  > "$RUNNER_TEMP/changed-files"
+                while IFS= read -r -d '' file; do
+                  case "$file" in
+                    # Everything the published images are built from: the
+                    # agent crate (Dockerfile and documents-requirements.txt
+                    # included), the exec-documents scripts baked into the
+                    # documents variant, and this workflow itself.
+                    crates/tidebreak-sandbox-agent/*|scripts/exec-documents/*|.github/workflows/publish-sandbox-image.yml)
+                      publish=true
+                      ;;
+                  esac
+                done < "$RUNNER_TEMP/changed-files"
               fi
               ;;
             *)

@@ -863,18 +863,12 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
   const publish = workflows["publish-sandbox-image.yml"];
   assert.ok(publish);
 
-  // Current: a `v*` tag push runs this workflow from the tagged commit.
-  // Next: a published GitHub Release runs the default-branch workflow, so
-  // an old or hostile tag YAML cannot publish. Accept either until the
-  // trigger change lands.
-  const trigger = sandboxPublishTrigger(publish);
-  assert.ok(
-    trigger.tagPush || trigger.publishedRelease,
-    "sandbox images publish from a v* tag push or a published GitHub Release",
-  );
-  if (trigger.publishedRelease) {
-    assertSandboxPublishReleaseEvent(publish);
-  }
+  // A published GitHub Release runs this file from the default branch.
+  // A `v*` tag push would run the tagged commit's YAML instead, so it is
+  // not a trigger.
+  assert.ok(sandboxPublishTrigger(publish).publishedRelease);
+  assert.ok(!sandboxPublishTrigger(publish).tagPush);
+  assertSandboxPublishReleaseEvent(publish);
   assert.match(publish, /cron: "43 4 \* \* 4"/);
   assert.match(publish, /^  workflow_dispatch:/m);
   assert.doesNotMatch(publish, /^\s*pull_request(?:_target)?:/m);
