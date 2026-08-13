@@ -36,6 +36,12 @@ export type ChatListStore = {
    * settled name rather than replaying the animation.
    */
   derivedTitleChatId: string | null;
+  /**
+   * Titles learned from the live chat socket but not yet confirmed by a list
+   * read. This closes two renderer races: the notice can beat the initial list,
+   * and an older list request can finish after the notice with a stale null.
+   */
+  streamedTitles: Record<string, string>;
   setChats: (chats: Chat[]) => void;
   /**
    * Record that fetching the list failed. The load is still settled — the
@@ -44,8 +50,12 @@ export type ChatListStore = {
    * list is in hand stays: a failed refresh is no reason to blank it.
    */
   failChatsLoad: (error: string) => void;
-  /** Replace a chat in the list by id. */
-  replaceChat: (chat: Chat) => void;
+  /**
+   * Replace a chat in the list by id. `titleAuthoritative` is for the rename
+   * endpoint: its nullable title is intentional, while unrelated mutation
+   * responses may race an autotitle write and return an older null.
+   */
+  replaceChat: (chat: Chat, titleAuthoritative?: boolean) => void;
   /** Take a title the server derived, and mark it as newly arrived. */
   applyDerivedTitle: (chatId: string, title: string) => void;
   /** Forget the arrival, so the name is just the name from here on. */
@@ -71,12 +81,46 @@ export function createChatListStore() {
     renameChatDraft: "",
     savingTitle: false,
     derivedTitleChatId: null,
-    setChats: (chats) => set({ chats, chatsLoaded: true }),
+    streamedTitles: {},
+    setChats: (chats) =>
+      set((state) => {
+        const streamedTitles = { ...state.streamedTitles };
+        const merged = chats.map((chat) => {
+          const streamed = streamedTitles[chat.id];
+          if (streamed === undefined) return chat;
+          if (chat.title !== null) {
+            // The list has caught up (or carries a later manual rename), so it
+            // is authoritative from here on.
+            delete streamedTitles[chat.id];
+            return chat;
+          }
+          return { ...chat, title: streamed };
+        });
+        return { chats: merged, chatsLoaded: true, streamedTitles };
+      }),
     failChatsLoad: (error) => set({ chatsLoaded: true, chatsError: error }),
-    replaceChat: (chat) =>
-      set((state) => ({
-        chats: state.chats.map((item) => (item.id === chat.id ? chat : item)),
-      })),
+    replaceChat: (chat, titleAuthoritative = false) =>
+      set((state) => {
+        const streamedTitles = { ...state.streamedTitles };
+        const streamed = streamedTitles[chat.id];
+        let replacement = chat;
+        if (chat.title !== null || titleAuthoritative) {
+          // A stored name, manual rename, or deliberate clear supersedes the
+          // background derivation and prevents it resurfacing on a stale list.
+          delete streamedTitles[chat.id];
+        } else if (streamed !== undefined) {
+          // Model, permission, folder, and other metadata mutations can race
+          // the title write and return an older null. Preserve what the socket
+          // already proved was stored.
+          replacement = { ...chat, title: streamed };
+        }
+        return {
+          chats: state.chats.map((item) =>
+            item.id === chat.id ? replacement : item,
+          ),
+          streamedTitles,
+        };
+      }),
     applyDerivedTitle: (chatId, title) =>
       set((state) => {
         const known = state.chats.find((item) => item.id === chatId);
@@ -84,12 +128,20 @@ export function createChatListStore() {
         // current name on every connect — that is what covers a title stored
         // before the renderer was listening — so without this, reconnecting
         // would replay the animation for a name that has been there all along.
-        if (!known || known.title === title) return {};
+        if (known?.title === title) {
+          // A reconnect restatement still proves this durable title is newer
+          // than any in-flight mutation response that may carry an older null.
+          // Keep that protection without replaying the arrival animation.
+          return {
+            streamedTitles: { ...state.streamedTitles, [chatId]: title },
+          };
+        }
         return {
           chats: state.chats.map((item) =>
             item.id === chatId ? { ...item, title } : item,
           ),
           derivedTitleChatId: chatId,
+          streamedTitles: { ...state.streamedTitles, [chatId]: title },
         };
       }),
     clearDerivedTitle: () => set({ derivedTitleChatId: null }),

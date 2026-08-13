@@ -19,7 +19,11 @@ function chat(id: string, title: string | null): Chat {
 }
 
 beforeEach(() => {
-  useChatListStore.setState({ chats: [], derivedTitleChatId: null });
+  useChatListStore.setState({
+    chats: [],
+    derivedTitleChatId: null,
+    streamedTitles: {},
+  });
 });
 
 describe("a title the server derived", () => {
@@ -46,16 +50,72 @@ describe("a title the server derived", () => {
     store.setChats([chat("chat-1", "Q3 revenue reconciliation")]);
     store.applyDerivedTitle("chat-1", "Q3 revenue reconciliation");
 
-    expect(useChatListStore.getState().derivedTitleChatId).toBeNull();
+    const state = useChatListStore.getState();
+    expect(state.derivedTitleChatId).toBeNull();
+    expect(state.streamedTitles).toEqual({
+      "chat-1": "Q3 revenue reconciliation",
+    });
   });
 
-  it("is ignored for a chat this window does not have", () => {
+  it("survives arriving before the initial chat list", () => {
     const store = useChatListStore.getState();
-    store.setChats([chat("chat-1", null)]);
-    store.applyDerivedTitle("chat-elsewhere", "Some other conversation");
+    store.applyDerivedTitle("chat-1", "Q3 revenue reconciliation");
+    store.setChats([chat("chat-1", null), chat("chat-2", null)]);
 
     const state = useChatListStore.getState();
-    expect(state.chats).toEqual([chat("chat-1", null)]);
-    expect(state.derivedTitleChatId).toBeNull();
+    expect(state.chats.map((item) => item.title)).toEqual([
+      "Q3 revenue reconciliation",
+      null,
+    ]);
+    expect(state.derivedTitleChatId).toBe("chat-1");
+  });
+
+  it("is not overwritten when an older list request finishes afterward", () => {
+    const store = useChatListStore.getState();
+    store.setChats([chat("chat-1", null)]);
+    store.applyDerivedTitle("chat-1", "Q3 revenue reconciliation");
+    store.setChats([chat("chat-1", null)]);
+
+    expect(useChatListStore.getState().chats[0].title).toBe(
+      "Q3 revenue reconciliation",
+    );
+  });
+
+  it("does not resurrect a derivation over a later authoritative rename", () => {
+    const store = useChatListStore.getState();
+    store.setChats([chat("chat-1", null)]);
+    store.applyDerivedTitle("chat-1", "Q3 revenue reconciliation");
+    store.replaceChat(chat("chat-1", "Ledger work"), true);
+    store.setChats([chat("chat-1", "Ledger work")]);
+
+    const state = useChatListStore.getState();
+    expect(state.chats[0].title).toBe("Ledger work");
+    expect(state.streamedTitles).toEqual({});
+  });
+
+  it("survives an unrelated mutation response that raced the title write", () => {
+    const store = useChatListStore.getState();
+    store.setChats([chat("chat-1", null)]);
+    store.applyDerivedTitle("chat-1", "Q3 revenue reconciliation");
+    store.replaceChat({
+      ...chat("chat-1", null),
+      permission_mode: "allow",
+    });
+
+    expect(useChatListStore.getState().chats[0].title).toBe(
+      "Q3 revenue reconciliation",
+    );
+  });
+
+  it("honors a deliberate manual clear after a derived title", () => {
+    const store = useChatListStore.getState();
+    store.setChats([chat("chat-1", null)]);
+    store.applyDerivedTitle("chat-1", "Q3 revenue reconciliation");
+    store.replaceChat(chat("chat-1", null), true);
+    store.setChats([chat("chat-1", null)]);
+
+    const state = useChatListStore.getState();
+    expect(state.chats[0].title).toBeNull();
+    expect(state.streamedTitles).toEqual({});
   });
 });
