@@ -71,6 +71,49 @@ function workflowJob(source, name) {
   return source.slice(start, end);
 }
 
+const DESKTOP_SIGNING_JOBS = [
+  {
+    file: "release.yml",
+    name: "build_macos",
+    validate: "Validate production signing configuration",
+  },
+  {
+    file: "staging-publish.yml",
+    name: "build_macos_staging",
+    validate: "Validate staging signing configuration",
+  },
+  {
+    file: "release.yml",
+    name: "build_windows",
+    validate: "Validate updater signing configuration",
+  },
+];
+
+function desktopSigningJobs() {
+  return DESKTOP_SIGNING_JOBS.map((spec) => ({
+    ...spec,
+    job: workflowJob(workflows[spec.file], spec.name),
+  }));
+}
+
+function cargoDownloadCache(job) {
+  return job.match(
+    /- name: Cache Cargo downloads[\s\S]*?(?=\n\s+- (?:name:|uses:))/,
+  )?.[0];
+}
+
+function firstSigningMaterialIndex(job, validate) {
+  const markers = [
+    `- name: ${validate}`,
+    "- name: Prepare App Store Connect key",
+    "- name: Import Developer ID certificate",
+  ];
+  const positions = markers
+    .map((marker) => job.indexOf(marker))
+    .filter((index) => index !== -1);
+  return positions.length === 0 ? -1 : Math.min(...positions);
+}
+
 function stripRustCommentsAndStrings(source) {
   const masked = [...source];
   const erase = (start, end) => {
@@ -1250,6 +1293,83 @@ test("the updater private key is isolated from compilation", () => {
   assert.doesNotMatch(release, /createUpdaterArtifacts/);
   assert.match(release, /tauri signer sign "\$updater_path"/);
   assert.doesNotMatch(release, /cargo tauri signer sign/);
+});
+
+test("signing jobs do not run untrusted installers next to Apple or Tauri material", () => {
+  for (const { file, name, job, validate } of desktopSigningJobs()) {
+    const label = `${name} (${file})`;
+    assert.match(
+      job,
+      /uses: pnpm\/action-setup@[0-9a-f]{40}/,
+      `${label} must set up pnpm`,
+    );
+    // Accept the current floating `10` or the pinned `10.18.3` used by
+    // e2b-cli / docs-site so the implementation PR can land against this test.
+    assert.match(
+      job,
+      /version: 10(?:\.18\.3)?\n/,
+      `${label} must pin pnpm 10 or 10.18.3`,
+    );
+    assert.match(
+      job,
+      /pnpm install --frozen-lockfile(?: --ignore-scripts)?\n/,
+      `${label} must install UI deps from the lockfile`,
+    );
+    assert.match(
+      job,
+      /mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+      `${label} must set up sccache`,
+    );
+    assert.match(
+      job,
+      /Swatinem\/rust-cache@[0-9a-f]{40}/,
+      `${label} must restore the Cargo download cache`,
+    );
+    assert.match(
+      job,
+      /actions\/setup-node@[0-9a-f]{40}/,
+      `${label} must set up Node`,
+    );
+
+    const rustCache = cargoDownloadCache(job);
+    assert.ok(rustCache, `${label} missing Cargo download cache`);
+    if (name === "build_macos") {
+      // Current production writer is aarch64; the follow-up makes this
+      // restore-only. An unconditional save from the signing job is never ok.
+      assert.match(
+        rustCache,
+        /save-if: (?:false|\$\{\{ matrix\.arch == 'aarch64' \}\})/,
+        `${label} rust-cache must not save unconditionally`,
+      );
+    } else {
+      assert.match(
+        rustCache,
+        /save-if: false/,
+        `${label} rust-cache must be restore-only`,
+      );
+    }
+
+    const secretsAt = firstSigningMaterialIndex(job, validate);
+    assert.notEqual(secretsAt, -1, `${label} must still load signing material`);
+
+    const installerIndexes = [
+      job.search(/mozilla-actions\/sccache-action@[0-9a-f]{40}/),
+      job.search(/Swatinem\/rust-cache@[0-9a-f]{40}/),
+      job.search(/pnpm\/action-setup@[0-9a-f]{40}/),
+      job.search(/actions\/setup-node@[0-9a-f]{40}/),
+      job.search(/pnpm install --frozen-lockfile(?: --ignore-scripts)?\n/),
+    ];
+    assert.ok(
+      installerIndexes.every((index) => index !== -1),
+      `${label} is missing an installer step`,
+    );
+    const isolated = installerIndexes.every((index) => index < secretsAt);
+    const legacy = installerIndexes.every((index) => index > secretsAt);
+    assert.ok(
+      isolated || legacy,
+      `${label} must keep installers entirely before or entirely after signing material`,
+    );
+  }
 });
 
 test("macOS disk images are explicitly notarized and stapled", () => {
