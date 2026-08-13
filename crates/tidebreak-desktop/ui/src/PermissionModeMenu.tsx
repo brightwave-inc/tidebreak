@@ -33,7 +33,6 @@ const ASK_PERMISSION_MODE_OPTION = {
   description:
     "Ask before edits and actions that leave the workspace. Allowlists you've saved still run without asking.",
   icon: ShieldCheck,
-  elevated: false,
 } as const;
 
 const PERMISSION_MODE_SCALE: {
@@ -41,8 +40,6 @@ const PERMISSION_MODE_SCALE: {
   label: string;
   description: string;
   icon: typeof ShieldCheck;
-  /** Elevated autonomy gets an accent so it is legible at a glance. */
-  elevated: boolean;
 }[] = [
   {
     value: "plan",
@@ -50,7 +47,6 @@ const PERMISSION_MODE_SCALE: {
     description:
       "Read-only: the agent explores and proposes a plan. Nothing is edited or run until you switch modes.",
     icon: Eye,
-    elevated: false,
   },
   ASK_PERMISSION_MODE_OPTION,
   {
@@ -59,14 +55,12 @@ const PERMISSION_MODE_SCALE: {
     description:
       "Workspace edits run on their own; anything that leaves the workspace still asks.",
     icon: Zap,
-    elevated: true,
   },
   {
     value: "allow",
     label: "Allow all",
     description: "Everything runs without asking, in this chat only.",
     icon: ShieldOff,
-    elevated: true,
   },
 ];
 
@@ -92,10 +86,9 @@ export function permissionModeOption(mode: PermissionMode | null) {
  * so a chat that was deliberately dialed back stays that way if the default
  * ever changes.
  *
- * An elevated mode accents the trigger's text and icon rather than its
- * background: the row reads as one set of controls, and the one that has been
- * dialed up should stand out within it without becoming a second kind of
- * object.
+ * The mode icons stay in the same neutral palette as the rest of the app
+ * chrome. Selection, rather than autonomy level, supplies the visual emphasis;
+ * higher-autonomy choices are normal operating modes, not warning states.
  *
  * A managed profile may assert a permission-mode ceiling. Modes above it
  * render locked — decided elsewhere rather than silently missing — and the
@@ -173,17 +166,12 @@ export function PermissionModeMenu({
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
-          className={cn("h-8 gap-1.5", current.elevated && "text-warning-foreground")}
+          className="h-8 gap-1.5"
           disabled={controlsDisabled}
           aria-label={`Permissions: ${current.label}`}
           aria-busy={saving}
         >
-          <CurrentIcon
-            className={cn(
-              "size-4",
-              current.elevated ? "text-warning-foreground" : "text-muted-foreground",
-            )}
-          />
+          <CurrentIcon className="size-4 text-foreground" />
           {current.label}
           <ChevronDown className="size-4 opacity-50" />
         </Button>
@@ -208,8 +196,8 @@ export function PermissionModeMenu({
                   <OptionIcon
                     className={cn(
                       "size-4",
-                      option.elevated && !locked
-                        ? "text-warning-foreground"
+                      selected && !locked
+                        ? "text-foreground"
                         : "text-muted-foreground",
                     )}
                   />
