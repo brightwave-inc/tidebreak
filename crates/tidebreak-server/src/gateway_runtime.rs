@@ -276,49 +276,11 @@ impl GatewayRuntime {
     /// gateway without the JSON apps surface reports `supported: false`.
     pub(crate) async fn apps(&self) -> Result<GatewayApps> {
         let connection = self.managed_connection().await?;
-        // The member catalog carries per-app readiness the older surface
-        // cannot express; prefer it, and degrade to `/api/v1/cli/apps`
-        // (readiness unknown) against a gateway that predates it. Always an
-        // unconditional fetch: this is the live projection a revoked grant
-        // must fall out of, so a cached revision would be a lie.
-        let apps: Vec<GatewayAppInfo> = match connection.catalog(None).await? {
-            GatewayCatalogFetch::Fresh { catalog, .. } => catalog
-                .apps
-                .into_iter()
-                .map(|app| GatewayAppInfo {
-                    used_by_app_count: 0,
-                    id: app.id,
-                    name: app.name,
-                    app_kind: app.app_kind,
-                    enabled: app.enabled,
-                    mcp_endpoint_slugs: app.mcp_endpoint_slugs,
-                    connection: Some(app.connection),
-                })
-                .collect(),
-            GatewayCatalogFetch::NotModified => {
-                return Err(AgentError::msg(
-                    "gateway answered an unconditional catalog fetch with 304",
-                ));
-            }
-            GatewayCatalogFetch::Unsupported => {
-                let Some(apps) = connection.apps().await? else {
-                    return Ok(GatewayApps {
-                        supported: false,
-                        apps: Vec::new(),
-                    });
-                };
-                apps.into_iter()
-                    .map(|app| GatewayAppInfo {
-                        used_by_app_count: 0,
-                        id: app.id,
-                        name: app.name,
-                        app_kind: app.app_kind,
-                        enabled: app.enabled,
-                        mcp_endpoint_slugs: app.mcp_endpoint_slugs,
-                        connection: None,
-                    })
-                    .collect()
-            }
+        let Some(apps) = Self::entitled_apps(&connection).await? else {
+            return Ok(GatewayApps {
+                supported: false,
+                apps: Vec::new(),
+            });
         };
         // How many local mini-apps currently bind each gateway app: distinct
         // live grants naming the id. The binding grammar forbids a grant
@@ -353,19 +315,63 @@ impl GatewayRuntime {
         })
     }
 
+    /// The entitled connected apps, or `None` when the gateway serves
+    /// neither apps surface.
+    ///
+    /// The member catalog carries per-app readiness the older surface
+    /// cannot express; prefer it, and degrade to `/api/v1/cli/apps`
+    /// (readiness unknown) against a gateway that predates it. Always an
+    /// unconditional fetch: this is the live projection a revoked grant
+    /// must fall out of, so a cached revision would be a lie.
+    async fn entitled_apps(connection: &GatewayConnection) -> Result<Option<Vec<GatewayAppInfo>>> {
+        match connection.catalog(None).await? {
+            GatewayCatalogFetch::Fresh { catalog, .. } => Ok(Some(
+                catalog
+                    .apps
+                    .into_iter()
+                    .map(|app| GatewayAppInfo {
+                        used_by_app_count: 0,
+                        id: app.id,
+                        name: app.name,
+                        app_kind: app.app_kind,
+                        enabled: app.enabled,
+                        mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                        connection: Some(app.connection),
+                    })
+                    .collect(),
+            )),
+            GatewayCatalogFetch::NotModified => Err(AgentError::msg(
+                "gateway answered an unconditional catalog fetch with 304",
+            )),
+            GatewayCatalogFetch::Unsupported => Ok(connection.apps().await?.map(|apps| {
+                apps.into_iter()
+                    .map(|app| GatewayAppInfo {
+                        used_by_app_count: 0,
+                        id: app.id,
+                        name: app.name,
+                        app_kind: app.app_kind,
+                        enabled: app.enabled,
+                        mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                        connection: None,
+                    })
+                    .collect()
+            })),
+        }
+    }
+
     /// Mount newly entitled gateway MCP endpoints into the configured server
     /// set — mount-by-default for a managed profile, where the organization
     /// already curated the entitlements.
     ///
-    /// The entitlement source is the same `/api/v1/cli/apps` read the
-    /// settings panel lists, so server and UI cannot disagree about what is
-    /// entitled. Endpoints the user explicitly unmounted are remembered by
-    /// the MCP runtime and never re-mounted here; a repeat reconcile with no
-    /// new entitlements changes nothing. Every state where a reconcile cannot
-    /// run — unmanaged profile, misconfigured policy, no session for the
-    /// policy's deployment, a gateway predating the apps surface — is
-    /// "nothing to do", not an error, so callers may run this on every
-    /// trigger without gating.
+    /// The entitlement source is [`entitled_apps`](Self::entitled_apps) — the
+    /// same read the settings panel lists, so server and UI cannot disagree
+    /// about what is entitled. Endpoints the user explicitly unmounted are
+    /// remembered by the MCP runtime and never re-mounted here; a repeat
+    /// reconcile with no new entitlements changes nothing. Every state where
+    /// a reconcile cannot run — unmanaged profile, misconfigured policy, no
+    /// session for the policy's deployment, a gateway predating the apps
+    /// surface — is "nothing to do", not an error, so callers may run this on
+    /// every trigger without gating.
     pub(crate) async fn reconcile_endpoint_mounts(
         &self,
         mcp: &crate::mcp_config::McpRuntime,
@@ -377,7 +383,7 @@ impl GatewayRuntime {
         if connection.stored_credentials().await?.is_none() {
             return Ok(());
         }
-        let Some(apps) = connection.apps().await? else {
+        let Some(apps) = Self::entitled_apps(&connection).await? else {
             return Ok(());
         };
         let entitled: Vec<String> = apps
