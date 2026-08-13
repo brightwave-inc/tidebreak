@@ -925,9 +925,12 @@ mod tests {
             foreground.input_schema["properties"]["domains"]["maxItems"],
             20
         );
+        // The narration is required of the model too: a card that leads with
+        // a sentence only when the model felt like writing one is a card that
+        // reads differently call to call.
         assert_eq!(
             foreground.input_schema["required"],
-            serde_json::json!(["query"])
+            serde_json::json!(["summary", "query"])
         );
         assert_eq!(
             foreground.input_schema["properties"]["start_published_at"],
