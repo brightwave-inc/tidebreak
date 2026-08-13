@@ -37,8 +37,9 @@ build of `main`, not a debug build and not a GitHub Release.
 | Staging    | Tidebreak [staging]   | `io.brightwave.tidebreak.staging`   | blue  | `tidebreak.staging` | `tidebreak-staging`  | relevant push to `main`      |
 
 The three channels do not share a single-instance lock, app-data directory,
-keychain service, deep-link scheme, or updater feed. Staging therefore runs
-beside both a debug window and an installed release. A staging binary answers
+keychain service, deep-link scheme, updater feed, or updater signing key.
+Staging therefore runs beside both a debug window and an installed release.
+A staging binary answers
 only `tidebreak-staging://`; it does not register or honor `tidebreak://`, so
 it cannot steal production pairing links the way an early debug build used to.
 
@@ -65,8 +66,11 @@ https://downloads.brightwave.io/tidebreak/staging/releases/v0.0.0-staging.N/
 Production `latest.json` and `tidebreak/releases/` are unreachable from this
 channel. The GitHub environment is `desktop-staging`, with an IAM role scoped
 to `tidebreak/staging/`. Apple signing material may be copied into that
-environment; the updater public key is the same committed key production uses,
-because the feeds are already isolated by URL and bundle id.
+environment. The updater keypair is not shared with production: staging
+commits its own `plugins.updater.pubkey` in `tauri.staging.conf.json`, and
+`desktop-staging` holds a matching `TAURI_SIGNING_PRIVATE_KEY` that must
+never be copied from `desktop-production`. A stolen staging key must not
+verify on production clients.
 
 Concurrency:
 
@@ -127,6 +131,14 @@ perfect, and a yellow `Publish desktop release` run on every merge would make
 the production signal harder to see. A thin caller workflow keeps the
 production trigger list intact.
 
+### Share the production updater signing key
+
+Isolating the feed URL and bundle id was thought to be enough, so staging
+would sign with production's committed public key. Rejected: a leaked
+`desktop-staging` private key would then verify on production clients. The
+feeds being separate does not stop a client from accepting a signature its
+embedded public key trusts.
+
 ### Do nothing
 
 Testers would keep using debug builds or published releases. That leaves `main`
@@ -136,10 +148,14 @@ only way to tell two Tidebreaks apart.
 ## Consequences
 
 Operators must create a `desktop-staging` GitHub environment before the first
-staging publish, copy the Apple and Tauri signing secrets into it, and grant
-its AWS role only `tidebreak/staging/*` plus CloudFront invalidation for those
-paths. A role that can also write `tidebreak/latest.json` would make a
-publish-guard bug a production incident.
+staging publish, copy the Apple signing secrets into it, generate a distinct
+Tauri updater keypair, commit only the public key in
+`tauri.staging.conf.json`, and store that pair's private key and password in
+the staging environment. Copying `TAURI_SIGNING_PRIVATE_KEY` from
+`desktop-production` is forbidden. Grant its AWS role only
+`tidebreak/staging/*` plus CloudFront invalidation for those paths. A role
+that can also write `tidebreak/latest.json` would make a publish-guard bug a
+production incident.
 
 Staging installs are disposable relative to production. They will pick up
 pre-v1 schema epoch resets from `main` and rebuild their local profile. That
@@ -164,6 +180,8 @@ release line (LTS, beta) needs a fourth identity.
   base URL, and refuses a production version under the staging base URL.
 - The staging publish step refuses any S3 key that does not start with
   `tidebreak/staging/`.
+- Staging overlay `plugins.updater.pubkey` exists and is not equal to
+  production's committed updater public key.
 - The staging caller workflow contains `secrets: inherit` and does not contain
   `secrets.`.
 - A newer staging version may replace `latest.json`; an older one may not.

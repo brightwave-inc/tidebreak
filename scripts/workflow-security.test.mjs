@@ -1428,6 +1428,18 @@ test("staging desktop publishes only under the staging prefix", () => {
     ),
   );
   assert.equal(stagingOverlay.identifier, "io.brightwave.tidebreak.staging");
+  const stagingPubkey = stagingOverlay.plugins.updater.pubkey;
+  const productionPubkey = tauriConfig.plugins.updater.pubkey;
+  assert.ok(stagingPubkey, "staging overlay must set plugins.updater.pubkey");
+  assert.notEqual(
+    stagingPubkey,
+    productionPubkey,
+    "staging must not share the production updater public key",
+  );
+  assert.match(
+    Buffer.from(stagingPubkey, "base64").toString("utf8"),
+    /minisign public key/,
+  );
   assert.deepEqual(stagingOverlay.plugins.updater.endpoints, [
     "https://downloads.brightwave.io/tidebreak/staging/latest.json",
   ]);
