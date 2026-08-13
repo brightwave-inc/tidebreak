@@ -59,19 +59,23 @@
 //!
 //! # Egress
 //!
-//! Only the strictest policy class is enforced. A policy that permits nothing
-//! — the chat's "no network" setting — creates the container with
-//! `--network none`, so it has no interface but loopback: no route, no DNS,
-//! nothing to negotiate with. That is an external boundary, enforced by the
-//! runtime rather than by anything inside the container.
+//! Only the strictest policy class is enforced as written. A policy that
+//! permits nothing — the chat's "no network" setting — creates the container
+//! with `--network none`, so it has no interface but loopback: no route, no
+//! DNS, nothing to negotiate with. That is an external boundary, enforced by
+//! the runtime rather than by anything inside the container.
 //!
-//! Every other class is **not** enforced. An allowlist would need a
-//! per-container internal network and the egress proxy the sandbox-agent
-//! container tier already runs; until that lands, a container created under an
-//! allowlist policy runs on the runtime's default network with ordinary
-//! outbound access, and this backend declares no enforcement for it rather
-//! than implying one. [`DockerExecutionProvider::egress_enforcement`] states
-//! the split, and the settings surface derives its disclosure from it.
+//! Every other *restrictive* class is **refused**, not widened. An allowlist
+//! would need a per-container internal network and the egress proxy the
+//! sandbox-agent container tier already runs. Until that lands, compiling a
+//! "package managers only" (or any other) allowlist onto the runtime's default
+//! network would treat it as the open internet — LAN, `host.docker.internal`,
+//! cloud metadata. This backend therefore fails closed to `--network none` for
+//! any configured policy, and [`DockerExecutionProvider::egress_enforcement`]
+//! declares enforcement only when the requested policy actually permits
+//! nothing, so the settings surface cannot read an unenforceable allowlist as
+//! a working restriction. Only the absence of a policy — open egress — leaves
+//! the container on the runtime's default network.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -278,38 +282,32 @@ pub struct DockerExecutionProvider {
 
 /// How a configured egress policy compiles into container networking.
 ///
-/// Only two shapes exist today, and the gap between them is the whole of this
-/// backend's egress story: a policy that permits nothing becomes a container
-/// with no network, and everything else becomes the runtime's default network.
+/// Only two shapes exist today. Any configured policy — deny-all, or an
+/// allowlist this backend cannot honor — becomes a container with no network.
+/// Only the absence of a policy (open egress) uses the runtime's default
+/// network. A "package managers only" allowlist on the default bridge would be
+/// the open internet, which is worse than refusing the grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContainerNetwork {
     /// `--network none`: loopback only. Nothing in the container can reach a
     /// destination, resolve a name, or route to the host.
     None,
-    /// The runtime's default network — ordinary outbound access. No part of
-    /// the configured policy is applied.
+    /// The runtime's default network — ordinary outbound access. Used only
+    /// when no policy was configured.
     Default,
 }
 
 /// Compile the host policy into the container's network shape.
 ///
-/// A policy that permits nothing at all is the only class this backend can
-/// enforce with a creation-time flag, and it is exactly the class the chat's
-/// "no network" setting produces (an allowlist with no grants on either axis).
-/// Any policy with a grant in it needs a proxy topology that does not exist
-/// here yet, so it compiles to the default network and is disclosed as
-/// unenforced rather than partially applied.
+/// A policy that permits nothing is the only class this backend can enforce
+/// as written (`--network none`). Any other configured policy needs a proxy
+/// topology that does not exist here yet, so it also compiles to
+/// `--network none` rather than the default bridge. Only `None` — open
+/// egress — leaves the runtime's default network in place.
 fn container_network(policy: Option<&EgressPolicy>) -> ContainerNetwork {
     match policy {
         None => ContainerNetwork::Default,
-        Some(EgressPolicy::BlockAll) => ContainerNetwork::None,
-        Some(EgressPolicy::Allowlist(allowlist)) => {
-            if allowlist.is_empty() {
-                ContainerNetwork::None
-            } else {
-                ContainerNetwork::Default
-            }
-        }
+        Some(_) => ContainerNetwork::None,
     }
 }
 
@@ -345,11 +343,12 @@ impl DockerExecutionProvider {
 
     /// Apply an egress policy to every container this provider creates.
     ///
-    /// Only a policy that permits nothing is compiled into anything: it
-    /// becomes `--network none`. A policy with grants in it is accepted and
-    /// deliberately *not* applied — this backend has no way to enforce a
-    /// partial allowlist yet, and [`Self::egress_enforcement`] says so, so a
-    /// caller passing one is not told it was enforced.
+    /// A policy that permits nothing becomes `--network none`. A policy with
+    /// grants in it is accepted and also compiled to `--network none`: this
+    /// backend cannot honor a partial allowlist yet, and putting that
+    /// container on the default bridge would be the open internet.
+    /// [`Self::egress_enforcement`] still withholds a declaration for the
+    /// grantful case, so a caller is not told the allowlist was enforced.
     #[must_use]
     pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Self {
         self.egress = Some(policy);
@@ -364,17 +363,22 @@ impl DockerExecutionProvider {
 
     /// Host knowledge about what container networking enforces for `policy`.
     ///
-    /// `None` is the honest answer for every policy this backend does not
-    /// compile into container creation: nothing is applied, so there is no
-    /// enforcement to declare and the surface must not borrow one. A policy
-    /// that permits nothing becomes `--network none`, which is enforced by the
-    /// runtime outside the container and leaves no exception open — no name
-    /// resolution, no host route, nothing a curated carve-out could hide in.
+    /// A policy that permits nothing becomes `--network none`, which is
+    /// enforced by the runtime outside the container and leaves no exception
+    /// open — no name resolution, no host route, nothing a curated carve-out
+    /// could hide in. A policy with grants is also created with
+    /// `--network none` (fail closed), but that is a refusal of the grants,
+    /// not enforcement of them: `None` is the honest answer so the surface
+    /// cannot read "package managers only" as a working restriction. Open
+    /// egress (`None`) applies nothing and declares nothing.
     #[must_use]
     pub fn egress_enforcement(policy: Option<&EgressPolicy>) -> Option<EgressEnforcement> {
-        match container_network(policy) {
-            ContainerNetwork::None => Some(EgressEnforcement::external(Vec::new())),
-            ContainerNetwork::Default => None,
+        match policy {
+            Some(EgressPolicy::BlockAll) => Some(EgressEnforcement::external(Vec::new())),
+            Some(EgressPolicy::Allowlist(allowlist)) if allowlist.is_empty() => {
+                Some(EgressEnforcement::external(Vec::new()))
+            }
+            Some(EgressPolicy::Allowlist(_)) | None => None,
         }
     }
 
@@ -597,10 +601,11 @@ impl DockerExecutionProvider {
             "--workdir".to_owned(),
             WORKSPACE_ROOT.to_owned(),
         ];
-        // The one part of the egress policy this backend can enforce.
-        // Deliberately absent — rather than spelled as the runtime's default
-        // network by name — when nothing is enforced, so a host that runs its
-        // containers on a custom default network keeps it.
+        // `--network none` for every configured policy: the one class this
+        // backend can enforce as written, and the fail-closed shape for every
+        // class it cannot. Deliberately absent — rather than spelled as the
+        // runtime's default network by name — when the policy is open, so a
+        // host that runs its containers on a custom default network keeps it.
         if self.container_network() == ContainerNetwork::None {
             args.extend(["--network".to_owned(), "none".to_owned()]);
         }
@@ -763,11 +768,10 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
     /// The pooled container is bound to the policy it was created under, so a
     /// policy change replaces it instead of reusing a container whose
     /// networking no longer matches. The fingerprint is over the policy
-    /// itself, not over the network shape it compiles to: a container created
-    /// under an unenforced allowlist and one created under open egress are
-    /// networked identically today, but conflating them would mean a chat that
-    /// moved between those settings kept a container the *next* slice's
-    /// enforcement would have replaced.
+    /// itself, not over the network shape it compiles to: a grantful allowlist
+    /// and deny-all both compile to `--network none` today, but conflating
+    /// them would mean a chat that moved between those settings kept a
+    /// container the *next* slice's enforcement would have replaced.
     fn egress_fingerprint(&self) -> [u8; 32] {
         egress_policy_fingerprint(self.egress.as_ref())
     }
@@ -1463,12 +1467,14 @@ mod tests {
             .verifies_image_integrity());
     }
 
-    /// The security boundary this backend does enforce. A policy that permits
-    /// nothing must reach the runtime as `--network none`; a policy with
-    /// grants in it must not silently borrow that enforcement, and must not
-    /// name a network either — the container keeps the runtime's default.
+    /// The security boundary this backend does enforce, and the fail-closed
+    /// shape for every policy it cannot. A policy that permits nothing must
+    /// reach the runtime as `--network none`. A policy with grants must also
+    /// reach the runtime as `--network none` — never the default bridge —
+    /// and must not borrow a declaration that the grants were enforced. Only
+    /// open egress (no policy) may omit `--network`.
     #[test]
-    fn a_deny_all_policy_creates_the_container_with_no_network() {
+    fn docker_network_fails_closed_instead_of_using_the_default_bridge() {
         let network = |args: &[String]| {
             args.iter()
                 .position(|arg| arg == "--network")
@@ -1493,22 +1499,30 @@ mod tests {
             assert!(enforcement.exceptions().is_empty());
         }
 
-        // No policy, and a policy this backend cannot enforce, both leave the
-        // container on the runtime's default network — and declare nothing.
+        // A non-empty allowlist is what "package managers only" and custom
+        // host lists compile to. The default bridge would be the open
+        // internet — LAN, host.docker.internal, cloud metadata — so this
+        // backend refuses the grants rather than widening them. A regression
+        // that puts this policy on the default bridge fails here.
         let allowlist = EgressPolicy::Allowlist(EgressAllowlist::new(
             vec![DomainPattern::parse("pypi.org").unwrap()],
             Vec::new(),
         ));
-        for open in [None, Some(allowlist)] {
-            let provider = match open {
-                Some(policy) => provider().with_egress_policy(policy),
-                None => provider(),
-            };
-            assert_eq!(network(&provider.run_args("chat-123")), None);
-            assert!(
-                DockerExecutionProvider::egress_enforcement(provider.egress_policy()).is_none()
-            );
-        }
+        let packages = provider().with_egress_policy(allowlist);
+        assert_eq!(
+            network(&packages.run_args("chat-123")).as_deref(),
+            Some("none"),
+        );
+        assert!(
+            DockerExecutionProvider::egress_enforcement(packages.egress_policy()).is_none(),
+            "refusing an allowlist is not the same as enforcing it"
+        );
+
+        // Open egress is the one class that may use the runtime's default
+        // network — and it declares nothing.
+        let open = provider();
+        assert_eq!(network(&open.run_args("chat-123")), None);
+        assert!(DockerExecutionProvider::egress_enforcement(open.egress_policy()).is_none());
     }
 
     /// Two mechanisms keep a container from outliving the policy it was
@@ -1525,9 +1539,9 @@ mod tests {
         ));
 
         assert_ne!(open.egress_fingerprint(), blocked.egress_fingerprint());
-        // An allowlist is not enforced yet, but it is still a distinct policy:
-        // conflating it with open egress would leave a stale container behind
-        // the moment it becomes enforceable.
+        // An allowlist is not honored yet, but it is still a distinct policy:
+        // conflating it with deny-all would leave a stale container behind
+        // the moment the grants become enforceable.
         assert_ne!(open.egress_fingerprint(), allowlist.egress_fingerprint());
         assert_ne!(blocked.egress_fingerprint(), allowlist.egress_fingerprint());
 
@@ -1539,14 +1553,20 @@ mod tests {
             blocked.credential_fingerprint()
         );
 
-        // Adoption is keyed on the network shape, so a no-network container
-        // and an ordinary one can never be adopted for each other.
+        // Adoption is keyed on the network shape. Open uses the default
+        // network; deny-all and a refused allowlist both compile to
+        // `--network none`, so they may adopt each other (both have no
+        // route) and neither may adopt an open container.
         assert_ne!(
             open.configuration_identity(),
             blocked.configuration_identity()
         );
-        assert_eq!(
+        assert_ne!(
             open.configuration_identity(),
+            allowlist.configuration_identity()
+        );
+        assert_eq!(
+            blocked.configuration_identity(),
             allowlist.configuration_identity()
         );
     }
