@@ -278,4 +278,68 @@ describe("GatewayPanel", () => {
       await screen.findByText(/browser authorization timed out/),
     ).toBeInTheDocument();
   });
+
+  it("soft-warns about a gateway older than this Tidebreak, and stays quiet on a current one", async () => {
+    // A synced snapshot with no member-catalog revision is the older-gateway
+    // shape; the note is informational and nothing is disabled by it.
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+    });
+    render(managedPanel(client));
+    expect(
+      await screen.findByText(/older than this Tidebreak/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sync with gateway/ }),
+    ).toBeEnabled();
+    cleanup();
+
+    const current = api({
+      getGatewayStatus: vi
+        .fn()
+        .mockResolvedValue({ ...signedIn, member_catalog: "v1" }),
+    });
+    render(managedPanel(current));
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
+    expect(screen.queryByText(/older than this Tidebreak/)).toBeNull();
+  });
+
+  it("labels an entitled app the gateway reports as not ready", async () => {
+    const client = api({
+      getGatewayStatus: vi
+        .fn()
+        .mockResolvedValue({ ...signedIn, member_catalog: "v1" }),
+      getGatewayApps: vi.fn().mockResolvedValue({
+        supported: true,
+        apps: [
+          {
+            id: "app-1",
+            name: "Tools",
+            app_kind: "mcp_endpoint",
+            enabled: true,
+            mcp_endpoint_slugs: ["tools"],
+            connection: "authorization_required",
+            used_by_app_count: 0,
+          },
+          {
+            id: "app-2",
+            name: "Monitors",
+            app_kind: "rest_api",
+            enabled: true,
+            mcp_endpoint_slugs: [],
+            connection: "ready",
+            used_by_app_count: 0,
+          },
+        ],
+      }),
+    });
+    render(managedPanel(client));
+
+    expect(
+      await screen.findByText(/authorize this app at your gateway/),
+    ).toBeInTheDocument();
+    // A ready app carries no readiness copy at all.
+    expect(screen.queryByText(/not ready at your gateway/)).toBeNull();
+    expect(screen.getByText("Monitors")).toBeInTheDocument();
+  });
 });

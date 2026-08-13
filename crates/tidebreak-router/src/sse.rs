@@ -480,6 +480,93 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
     Some(wait.to_std().unwrap_or(Duration::ZERO).min(MAX_RETRY_AFTER))
 }
 
+/// The response header a managed model gateway stamps its designed denial
+/// code on (`x-model-gateway-error`). The body spells the code differently
+/// per compatibility protocol, so the header is the one spelling a client
+/// can read without knowing which protocol the request rode.
+pub const GATEWAY_ERROR_HEADER: &str = "x-model-gateway-error";
+
+/// The gateway denial code on a response, when the origin stamped one.
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+#[must_use]
+pub fn gateway_denial_code(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    Some(headers.get(GATEWAY_ERROR_HEADER)?.to_str().ok()?.to_owned())
+}
+
+/// Turn a known gateway denial into its designed, user-facing error, or
+/// `None` for a code this client has not learned — the caller then falls
+/// back to [`classify_provider_error`], so the code set stays open on the
+/// gateway side without a client release riding every addition.
+///
+/// The distinction earns its keep on two codes. `model_not_granted` arrives
+/// as a 404 (so coding harnesses do not read it as a credential problem),
+/// which the generic classifier would render as a provider fault rather
+/// than "an administrator revoked this". The subscription codes arrive as
+/// 403, which the generic classifier would render as *re-authenticate* —
+/// exactly the wrong advice, since the session is fine and the fix lives at
+/// the gateway's account page.
+#[must_use]
+pub fn classify_gateway_denial(
+    code: &str,
+    body: &str,
+) -> Option<tidebreak_core::error::AgentError> {
+    use tidebreak_core::error::AgentError;
+
+    // The gateway's own message is designed to be shown to the user, but the
+    // body is still an untrusted network payload: accept its strings only at
+    // toast-sized lengths, and fall back to this client's own copy.
+    const MAX_DENIAL_MESSAGE_CHARS: usize = 240;
+    const MAX_DENIAL_RESOURCE_CHARS: usize = 100;
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(provider_error_message)
+        .map(str::trim)
+        .filter(|message| {
+            !message.is_empty() && message.chars().count() <= MAX_DENIAL_MESSAGE_CHARS
+        });
+    // The model the denial is about: top-level on the Anthropic protocol,
+    // inside `error` on the OpenAI protocol.
+    let resource = parsed
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("resource")
+                .or_else(|| value.get("error")?.get("resource"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .filter(|resource| {
+            !resource.is_empty() && resource.chars().count() <= MAX_DENIAL_RESOURCE_CHARS
+        });
+
+    match code {
+        "model_not_granted" => Some(AgentError::Message(match resource {
+            Some(model) => format!(
+                "You no longer have access to {model} on your gateway — an administrator may have revoked it. Pick another model."
+            ),
+            None => "You no longer have access to this model on your gateway — an administrator may have revoked it. Pick another model.".to_owned(),
+        })),
+        "model_not_found" => Some(AgentError::Message(
+            message.map_or_else(
+                || "Your gateway does not serve this model. Refresh the model list and pick another.".to_owned(),
+                str::to_owned,
+            ),
+        )),
+        "subscription_connection_required" | "subscription_client_incompatible" => {
+            Some(AgentError::Message(message.map_or_else(
+                || "Your gateway needs a provider subscription connected before this model can run. Connect it from the gateway's account page.".to_owned(),
+                str::to_owned,
+            )))
+        }
+        _ => None,
+    }
+}
+
 /// Classify a provider HTTP error, detecting prompt-too-long patterns that the
 /// agent loop can retry with a tighter context budget.
 ///
@@ -908,5 +995,82 @@ mod tests {
             assert!(!in_band.contains(marker));
             assert!(!in_band.contains("provider echoed"));
         }
+    }
+
+    /// The gateway spells `code`/`resource` top-level on the Anthropic
+    /// protocol and inside `error` on the OpenAI protocol; both must name
+    /// the revoked model in the designed copy.
+    #[test]
+    fn a_gateway_revocation_names_the_model_on_both_protocols() {
+        let anthropic = serde_json::json!({
+            "type": "error",
+            "error": {"type": "not_found_error", "message": "You no longer have access to this model."},
+            "code": "model_not_granted",
+            "resource": "claude-opus-5",
+        })
+        .to_string();
+        let error = classify_gateway_denial("model_not_granted", &anthropic)
+            .expect("a known denial classifies");
+        assert!(matches!(
+            error,
+            tidebreak_core::error::AgentError::Message(_)
+        ));
+        assert!(error.to_string().contains("claude-opus-5"));
+        assert!(error.to_string().contains("no longer have access"));
+
+        let openai = serde_json::json!({
+            "error": {
+                "type": "not_found_error",
+                "message": "You no longer have access to this model.",
+                "code": "model_not_granted",
+                "resource": "acme-coder",
+            }
+        })
+        .to_string();
+        let error = classify_gateway_denial("model_not_granted", &openai)
+            .expect("a known denial classifies");
+        assert!(error.to_string().contains("acme-coder"));
+    }
+
+    /// A subscription denial is a 403 the generic classifier would read as
+    /// re-authenticate — the wrong advice, since the fix lives at the
+    /// gateway's account page. The gateway's own message rides through.
+    #[test]
+    fn a_subscription_denial_is_not_an_authentication_error() {
+        let body = serde_json::json!({
+            "error": {
+                "type": "subscription_connection_required",
+                "message": "Connect your provider subscription from the Account page, then retry this model request.",
+                "code": "subscription_connection_required",
+            }
+        })
+        .to_string();
+        let error = classify_gateway_denial("subscription_connection_required", &body)
+            .expect("a known denial classifies");
+        assert!(matches!(
+            error,
+            tidebreak_core::error::AgentError::Message(_)
+        ));
+        assert!(error.to_string().contains("Account page"));
+    }
+
+    /// Unknown codes and oversized payloads fall back rather than break:
+    /// the denial-code set is the gateway's to grow, and the body is an
+    /// untrusted network payload even when the header names a known code.
+    #[test]
+    fn unknown_denial_codes_and_oversized_copy_degrade() {
+        assert!(classify_gateway_denial("model_disabled_next_quarter", "{}").is_none());
+
+        let oversized = serde_json::json!({
+            "error": {"message": "x".repeat(4096), "code": "model_not_found"},
+        })
+        .to_string();
+        let error = classify_gateway_denial("model_not_found", &oversized)
+            .expect("a known denial classifies");
+        assert!(
+            error.to_string().contains("Refresh the model list"),
+            "an oversized message yields this client's own copy"
+        );
+        assert!(!error.to_string().contains("xxxx"));
     }
 }

@@ -1024,6 +1024,15 @@ display_name?: string | null,
  */
 upstream_id?: string | null, 
 /**
+ * Alternate gateway ids that also resolve to this model — the
+ * deployment-shaped spellings the member catalog reports, offered to
+ * the curated registry the same way `upstream_id` is.
+ *
+ * Populated only by gateway model sync from a catalog-serving gateway;
+ * a user-entered custom model leaves it empty.
+ */
+aliases?: Array<string>, 
+/**
  * Context limit used by Tidebreak's reducer.
  */
 context_window: number, 
@@ -1188,6 +1197,14 @@ export type FolderAccess = "read" | "read_write";
  */
 export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabled: boolean, mcp_endpoint_slugs: Array<string>, 
 /**
+ * The gateway's readiness for this app when the member catalog reports
+ * one: `ready`, `not_connected`, or `authorization_required`. `None`
+ * against a gateway that predates the catalog — the panel then shows
+ * no readiness rather than guessing. An unfamiliar value renders as
+ * not-ready copy, never an error: the set is the gateway's to grow.
+ */
+connection?: string, 
+/**
  * How many live local-app grants bind this gateway app — the same
  * "Used by N local apps" line the connected-apps page carries per record,
  * so a user can see what a revocation here would break.
@@ -1213,7 +1230,15 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
  * with a usable URL (the retired `configured`/`enabled` bits collapsed into
  * its presence).
  */
-export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
+export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, 
+/**
+ * The member-catalog contract revision the last model sync read, or
+ * `None` while unsynced or against a gateway that predates
+ * `/api/v1/me/catalog`. The settings panel uses its absence (while
+ * signed in with models) to note that the deployment is older than
+ * this Tidebreak.
+ */
+member_catalog?: string, sign_in: SignInProgress, };
 
 /**
  * How far a standing grant reaches.
