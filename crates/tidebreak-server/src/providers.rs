@@ -680,17 +680,7 @@ impl ResolvedModelPolicy {
     /// custom treatment.
     fn gateway_for(model: &CustomModelConfig) -> Self {
         let mut policy = Self::custom_for(ProviderKind::ModelGateway, model);
-        let Some(spec) = model_registry::find(&model.id).or_else(|| {
-            model
-                .upstream_id
-                .as_deref()
-                .into_iter()
-                .chain(model.aliases.iter().map(String::as_str))
-                .find_map(|candidate| {
-                    model_registry::find(candidate)
-                        .or_else(|| model_registry::find(&curated_id_candidate(candidate)))
-                })
-        }) else {
+        let Some(spec) = gateway_curated_spec(model) else {
             return policy;
         };
         policy.display_name = spec.display_name.to_owned();
@@ -790,6 +780,57 @@ fn curated_id_candidate(upstream_id: &str) -> String {
         }
     }
     strip_version_suffix(candidate).to_owned()
+}
+
+/// The curated direct-vendor model represented by one gateway entitlement.
+///
+/// Gateways are free to use deployment-local ids, so equality on `model.id`
+/// is not enough. Sync supplies upstream aliases for exactly this purpose;
+/// the same deliberately narrow normalization that attributes capabilities
+/// also identifies a safe route-equivalent migration target.
+fn gateway_curated_spec(model: &CustomModelConfig) -> Option<&'static ModelSpec> {
+    model_registry::find(&model.id).or_else(|| {
+        model
+            .upstream_id
+            .as_deref()
+            .into_iter()
+            .chain(model.aliases.iter().map(String::as_str))
+            .find_map(|candidate| {
+                model_registry::find(candidate)
+                    .or_else(|| model_registry::find(&curated_id_candidate(candidate)))
+            })
+    })
+}
+
+/// The one entitled gateway route equivalent to a curated selection.
+///
+/// `None` means either no equivalent exists or the catalog is ambiguous. A
+/// caller must leave the saved selection unresolved in both cases so the
+/// reader chooses deliberately instead of Tidebreak guessing between routes.
+pub(crate) async fn unique_gateway_equivalent(
+    store: &dyn Store,
+    policy: &crate::managed_policy::ManagedPolicy,
+    selection: &str,
+) -> Result<Option<String>> {
+    let Some((provider, id)) = model_registry::parse_selection_key(selection) else {
+        return Ok(None);
+    };
+    if provider == ProviderKind::ModelGateway {
+        return Ok(None);
+    }
+    let Some(spec) = model_registry::find_for(provider, id) else {
+        return Ok(None);
+    };
+    let mut matches = gateway_models(store, policy)
+        .await?
+        .into_iter()
+        .filter(|model| gateway_curated_spec(model).is_some_and(|candidate| candidate == spec))
+        .map(|model| model_registry::selection_key(ProviderKind::ModelGateway, &model.id));
+    let first = matches.next();
+    Ok(match (first, matches.next()) {
+        (Some(key), None) => Some(key),
+        _ => None,
+    })
 }
 
 /// Drop a trailing `-v<digits>` or `-v<digits>:<digits>` — the revision marker

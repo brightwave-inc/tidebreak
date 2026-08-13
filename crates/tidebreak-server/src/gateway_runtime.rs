@@ -795,8 +795,15 @@ impl GatewayRuntime {
         let models: Vec<CustomModelConfig> = match connection.catalog(held_etag.as_deref()).await? {
             GatewayCatalogFetch::NotModified => {
                 // Nothing moved since the held revision; the snapshot the
-                // policy already honors stays as it is.
-                return Ok(held.map(|snapshot| snapshot.models.len()).unwrap_or_default());
+                // policy already honors stays as it is. Selection migration
+                // is local upgrade work, though, so it must still run when
+                // the first sync after an app update gets a 304.
+                let count = held
+                    .as_ref()
+                    .map(|snapshot| snapshot.models.len())
+                    .unwrap_or_default();
+                self.migrate_canonical_model_selections(&policy).await?;
+                return Ok(count);
             }
             GatewayCatalogFetch::Fresh { catalog, etag } => {
                 member_catalog = Some(MEMBER_CATALOG_V1.to_owned());
@@ -904,7 +911,47 @@ impl GatewayRuntime {
             },
         )
         .await?;
+        self.migrate_canonical_model_selections(&policy).await?;
         Ok(count)
+    }
+
+    /// Move saved curated selections onto their unique entitled gateway
+    /// equivalent after a managed catalog sync.
+    ///
+    /// A foreground turn has already frozen its model before this can run, so
+    /// the migration applies only to later turns. Unmatched and ambiguous
+    /// selections stay unresolved, which makes the picker ask rather than
+    /// silently choosing a different model.
+    async fn migrate_canonical_model_selections(
+        &self,
+        policy: &crate::managed_policy::ManagedPolicy,
+    ) -> Result<()> {
+        if let Some(selection) =
+            crate::model_roles::read_selection(&*self.store, crate::model_roles::ModelRole::Chat)
+                .await?
+        {
+            if let Some(equivalent) =
+                providers::unique_gateway_equivalent(&*self.store, policy, &selection).await?
+            {
+                crate::model_roles::write_selection(
+                    &*self.store,
+                    crate::model_roles::ModelRole::Chat,
+                    Some(&equivalent),
+                )
+                .await?;
+            }
+        }
+        for chat in self.store.list_chats().await? {
+            let Some(selection) = chat.model.as_deref() else {
+                continue;
+            };
+            if let Some(equivalent) =
+                providers::unique_gateway_equivalent(&*self.store, policy, selection).await?
+            {
+                self.store.set_chat_model(chat.id, Some(equivalent)).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Keep the entitled-model snapshot fresh without a manual refresh: sync
@@ -1858,6 +1905,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_migrates_unique_canonical_chat_selections_to_the_gateway() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let pinned = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("anthropic::claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&pinned).await.unwrap();
+
+        runtime.sync_models().await.unwrap();
+
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("model_gateway::sample-claude")
+        );
+        assert_eq!(
+            store
+                .get_chat(pinned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("model_gateway::sample-claude")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_leaves_ambiguous_or_unmatched_chat_selections_for_the_picker() {
+        let gateway = Arc::new(FakeGateway::default());
+        let mut catalog = sample_catalog();
+        catalog["models"].as_array_mut().unwrap().push(json!({
+            "id": "sample-claude-backup",
+            "name": "Sample Claude Backup",
+            "protocols": ["anthropic_messages"],
+            "aliases": ["claude-opus-5"],
+            "supports_tools": true,
+            "supports_vision": true,
+            "context_window": 200000,
+            "max_output_tokens": 8192,
+            "provider_name": "Anthropic"
+        }));
+        *gateway.catalog.lock().unwrap() = Some(catalog);
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        let ambiguous = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("anthropic::claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        let unmatched = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            model: Some("openai::gpt-5.6-sol".into()),
+            created_at: ambiguous.created_at + chrono::Duration::milliseconds(1),
+            ..ambiguous.clone()
+        };
+        store.create_chat(&ambiguous).await.unwrap();
+        store.create_chat(&unmatched).await.unwrap();
+
+        runtime.sync_models().await.unwrap();
+
+        assert_eq!(
+            store
+                .get_chat(ambiguous.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+        assert_eq!(
+            store
+                .get_chat(unmatched.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("openai::gpt-5.6-sol")
+        );
+    }
+
+    #[tokio::test]
     async fn an_unchanged_catalog_answers_304_and_the_snapshot_stays() {
         let gateway = Arc::new(FakeGateway::default());
         *gateway.catalog.lock().unwrap() = Some(sample_catalog());
@@ -1871,6 +2032,44 @@ mod tests {
         assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 1);
         let snapshot = providers::read_gateway_snapshot(&*store).await.unwrap();
         assert_eq!(snapshot.unwrap().models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_catalog_still_migrates_a_saved_canonical_selection() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        runtime.sync_models().await.unwrap();
+        let pinned = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("anthropic::claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&pinned).await.unwrap();
+
+        runtime.sync_models().await.unwrap();
+
+        assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_chat(pinned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("model_gateway::sample-claude")
+        );
     }
 
     #[tokio::test]

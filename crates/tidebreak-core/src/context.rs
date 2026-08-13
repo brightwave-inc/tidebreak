@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use crate::model::Role;
-use crate::provider::{ChatMessage, ContentBlock};
+use crate::provider::{ChatMessage, ContentBlock, MessageReasoning};
 
 const TEXT_OVERHEAD: usize = 7;
 const TOOL_USE_OVERHEAD: usize = 30;
@@ -742,11 +742,15 @@ fn merge_adjacent_roles(messages: &mut Vec<ChatMessage>) {
     while i + 1 < messages.len() {
         if messages[i].role == messages[i + 1].role {
             let next = messages.remove(i + 1);
-            // The absorbed message's reasoning cannot ride along: appending
-            // its content after the surviving message's blocks would move its
-            // thinking prefix away from the front, and partial or reordered
-            // replay is worse than none. The surviving message keeps its own
-            // reasoning, which still prefixes its own content.
+            // Neither message's reasoning can ride along. Provider-native
+            // thinking is signed against the exact assistant response that
+            // produced it; appending the absorbed content changes the
+            // surviving response just as surely as moving the absorbed
+            // message's prefix away from its own content. Anthropic rejects
+            // that reconstructed response as modified thinking state. Drop
+            // the whole side channel whenever repair merges messages: plain
+            // content remains valid history, partial native replay does not.
+            messages[i].reasoning = MessageReasoning::default();
             messages[i].content.extend(next.content);
         } else {
             i += 1;
@@ -1217,6 +1221,32 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[0].content.len(), 2);
+    }
+
+    #[test]
+    fn merging_assistant_messages_drops_signed_reasoning() {
+        let mut first = assistant_msg("first response");
+        first.reasoning = MessageReasoning::captured(
+            ReasoningOrigin {
+                provider: Some(crate::provider::ProviderId::new("anthropic")),
+                model: "claude-opus-5".into(),
+            },
+            vec![json!({
+                "type": "thinking",
+                "thinking": "plan",
+                "signature": "sig"
+            })],
+        );
+        let mut messages = vec![first, assistant_msg("later response")];
+
+        merge_adjacent_roles(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.len(), 2);
+        assert!(
+            messages[0].reasoning.is_empty(),
+            "merged content is not the response the provider signed"
+        );
     }
 
     // ── Image blocks ───────────────────────────────────────────────
