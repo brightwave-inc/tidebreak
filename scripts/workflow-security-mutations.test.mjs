@@ -249,6 +249,54 @@ const mutations = [
         ),
       ),
   },
+  {
+    name: "signing job floating pnpm",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(/version: 10\.18\.3\n/, "version: 10\n"),
+      ),
+  },
+  {
+    name: "signing job lifecycle scripts",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(
+          "pnpm install --frozen-lockfile --ignore-scripts",
+          "pnpm install --frozen-lockfile",
+        ),
+      ),
+  },
+  {
+    name: "signing job installer order",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) => {
+        const install =
+          "      - name: Install UI dependencies\n        working-directory: crates/tidebreak-desktop/ui\n        run: pnpm install --frozen-lockfile --ignore-scripts\n";
+        assert.ok(job.includes(install));
+        return job.replace(install, "").replace(
+          "      - name: Validate production signing configuration\n",
+          `      - name: Validate production signing configuration\n${install}`,
+        );
+      }),
+  },
+  {
+    name: "production signing rust-cache save-if",
+    file: ".github/workflows/release.yml",
+    expected: "signing jobs do not run untrusted installers",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_macos", (job) =>
+        job.replace(
+          "save-if: false",
+          "save-if: ${{ matrix.arch == 'aarch64' }}",
+        ),
+      ),
+  },
 ];
 
 test("workflow-security controls fail closed under targeted mutations", async (t) => {

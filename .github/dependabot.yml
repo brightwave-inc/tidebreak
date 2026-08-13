@@ -20,9 +20,10 @@ updates:
           - minor
           - patch
 
-  # Desktop UI dependencies. These install with lifecycle scripts inside the
-  # release signing job and ship in the notarized app, so they need the same
-  # automated upgrade path as the Cargo graph.
+  # Desktop UI dependencies. These ship in the notarized app, so they need the
+  # same automated upgrade path as the Cargo graph. The signing job installs
+  # them with --ignore-scripts so lifecycle hooks never run next to Apple or
+  # Tauri material.
   - package-ecosystem: npm
     directory: "/crates/tidebreak-desktop/ui"
     schedule:

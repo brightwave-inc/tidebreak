@@ -1303,17 +1303,15 @@ test("signing jobs do not run untrusted installers next to Apple or Tauri materi
       /uses: pnpm\/action-setup@[0-9a-f]{40}/,
       `${label} must set up pnpm`,
     );
-    // Accept the current floating `10` or the pinned `10.18.3` used by
-    // e2b-cli / docs-site so the implementation PR can land against this test.
     assert.match(
       job,
-      /version: 10(?:\.18\.3)?\n/,
-      `${label} must pin pnpm 10 or 10.18.3`,
+      /version: 10\.18\.3\n/,
+      `${label} must pin pnpm 10.18.3`,
     );
     assert.match(
       job,
-      /pnpm install --frozen-lockfile(?: --ignore-scripts)?\n/,
-      `${label} must install UI deps from the lockfile`,
+      /pnpm install --frozen-lockfile --ignore-scripts\n/,
+      `${label} must install UI deps without lifecycle scripts`,
     );
     assert.match(
       job,
@@ -1333,21 +1331,11 @@ test("signing jobs do not run untrusted installers next to Apple or Tauri materi
 
     const rustCache = cargoDownloadCache(job);
     assert.ok(rustCache, `${label} missing Cargo download cache`);
-    if (name === "build_macos") {
-      // Current production writer is aarch64; the follow-up makes this
-      // restore-only. An unconditional save from the signing job is never ok.
-      assert.match(
-        rustCache,
-        /save-if: (?:false|\$\{\{ matrix\.arch == 'aarch64' \}\})/,
-        `${label} rust-cache must not save unconditionally`,
-      );
-    } else {
-      assert.match(
-        rustCache,
-        /save-if: false/,
-        `${label} rust-cache must be restore-only`,
-      );
-    }
+    assert.match(
+      rustCache,
+      /save-if: false/,
+      `${label} rust-cache must be restore-only`,
+    );
 
     const secretsAt = firstSigningMaterialIndex(job, validate);
     assert.notEqual(secretsAt, -1, `${label} must still load signing material`);
@@ -1357,17 +1345,15 @@ test("signing jobs do not run untrusted installers next to Apple or Tauri materi
       job.search(/Swatinem\/rust-cache@[0-9a-f]{40}/),
       job.search(/pnpm\/action-setup@[0-9a-f]{40}/),
       job.search(/actions\/setup-node@[0-9a-f]{40}/),
-      job.search(/pnpm install --frozen-lockfile(?: --ignore-scripts)?\n/),
+      job.search(/pnpm install --frozen-lockfile --ignore-scripts\n/),
     ];
     assert.ok(
       installerIndexes.every((index) => index !== -1),
       `${label} is missing an installer step`,
     );
-    const isolated = installerIndexes.every((index) => index < secretsAt);
-    const legacy = installerIndexes.every((index) => index > secretsAt);
     assert.ok(
-      isolated || legacy,
-      `${label} must keep installers entirely before or entirely after signing material`,
+      installerIndexes.every((index) => index < secretsAt),
+      `${label} must finish installers before signing material is loaded`,
     );
   }
 });
