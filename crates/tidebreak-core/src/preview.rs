@@ -38,6 +38,12 @@ pub const MAX_ACTION_ARGS: usize = 32;
 /// not doing the job the field exists for.
 pub const MAX_ACTION_SUMMARY_CHARS: usize = 200;
 
+/// The argument name every preview-carrying tool uses for its narration.
+///
+/// Named once because the schema gate keys on it: the registry relaxes this
+/// one field out of `required` before enforcing a tool's advertised schema.
+pub const SUMMARY_ARGUMENT_NAME: &str = "summary";
+
 /// What every preview-carrying tool tells the model its `summary` argument is
 /// for.
 ///

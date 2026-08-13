@@ -48,6 +48,7 @@ impl RegisteredSpec {
         // `$schema` and are 2020-12. MCP servers may declare an older supported
         // dialect explicitly, so honor that declaration instead of applying
         // 2020-12 semantics to (for example) draft-07 tuple-form `items`.
+        let enforced = enforceable_schema(&spec.input_schema);
         let validator = match advertised_schema_draft(&spec.input_schema) {
             Ok(draft) => {
                 let unsupported = unsupported_schema_keywords(&spec.input_schema, draft);
@@ -58,10 +59,7 @@ impl RegisteredSpec {
                         "tool argument schema contains unsupported keywords; ignoring them while enforcing supported constraints"
                     );
                 }
-                match jsonschema::options()
-                    .with_draft(draft)
-                    .build(&spec.input_schema)
-                {
+                match jsonschema::options().with_draft(draft).build(&enforced) {
                     Ok(validator) => SchemaValidator::Compiled(validator),
                     Err(error) => {
                         tracing::warn!(
@@ -102,6 +100,44 @@ impl RegisteredSpec {
     fn is_advertisable(&self) -> bool {
         matches!(self.validator, SchemaValidator::Compiled(_))
     }
+}
+
+/// The schema a call is actually held to: the advertised one, with the
+/// display-only narration argument relaxed out of `required`.
+///
+/// `summary` is advertised as required so models reliably write one, but a call
+/// that omits it is still a valid call — the narration is display-only and no
+/// execution path reads it (see
+/// `docs/decisions/0015-tool-call-narration.md`). Refusing such a call would
+/// spend a model round trip correcting a field that changes nothing but a card
+/// headline. The relaxation is keyed on our own argument description so a
+/// mounted MCP server whose tool genuinely requires a `summary` keeps its
+/// contract enforced.
+fn enforceable_schema(schema: &Value) -> std::borrow::Cow<'_, Value> {
+    let ours = schema
+        .get("properties")
+        .and_then(|properties| properties.get(crate::preview::SUMMARY_ARGUMENT_NAME))
+        .and_then(|summary| summary.get("description"))
+        .and_then(Value::as_str)
+        .is_some_and(|description| description == crate::SUMMARY_ARGUMENT_DESCRIPTION);
+    let required = schema.get("required").and_then(Value::as_array);
+    let (Some(required), true) = (required, ours) else {
+        return std::borrow::Cow::Borrowed(schema);
+    };
+    if !required
+        .iter()
+        .any(|name| name.as_str() == Some(crate::preview::SUMMARY_ARGUMENT_NAME))
+    {
+        return std::borrow::Cow::Borrowed(schema);
+    }
+    let kept: Vec<Value> = required
+        .iter()
+        .filter(|name| name.as_str() != Some(crate::preview::SUMMARY_ARGUMENT_NAME))
+        .cloned()
+        .collect();
+    let mut relaxed = schema.clone();
+    relaxed["required"] = Value::Array(kept);
+    std::borrow::Cow::Owned(relaxed)
 }
 
 fn advertised_schema_draft(schema: &Value) -> std::result::Result<jsonschema::Draft, String> {

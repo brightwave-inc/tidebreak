@@ -55,10 +55,19 @@ narrated call remains exactly describable and stays grantable), and the
 background-run activity timeline, which keeps argv this round.
 
 The argument is **required in each tool's JSON schema** so models reliably write
-one, and **tolerated in code** (`Option<String>`, absent deserializes as `None`)
-so a call that omits it still runs and falls back to today's literal headline.
-Note that a schemars-derived field carrying `#[serde(default)]` is dropped from
-`required`, so the tolerance comes from `Option` alone.
+one, and **tolerated in code** so a call that omits it still runs and falls back
+to today's literal headline. Tolerance takes two pieces, because the advertised
+schema is not decorative here: the field is `Option<String>` so serde accepts a
+call without it, *and* the registry's schema gate — which holds every call to
+the schema the model was shown, before the approval gate — compiles its
+validator against the advertised schema with `summary` relaxed out of
+`required`. Without that second piece a model that forgot the narration would
+have its call refused and spend a round trip re-sending it, which is a high
+price for a card headline. The relaxation is keyed on this crate's own argument
+description, so a mounted MCP tool whose `summary` is genuinely load-bearing
+keeps its contract enforced. Note also that a schemars-derived field carrying
+`#[serde(default)]` is dropped from `required`, so the advertised requirement
+comes from `#[schemars(required)]` on a plain `Option`.
 
 `delegate_agent` takes no summary: its `task` field already is the prose.
 
@@ -111,3 +120,6 @@ would demand a *server*-derived line, not this one.
   *result* card and would pass every card-level test — this is the case that
   catches it.
 - A bounds test: an over-long summary is clamped by `build()`.
+- A schema-gate test: a call omitting the narration is not refused, a foreign
+  tool's own required `summary` still is, and a narration of the wrong type
+  still fails. Relaxing `required` too broadly, or not at all, fails here.
