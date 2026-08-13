@@ -293,8 +293,6 @@ describe("ChatView", () => {
       screen.getByRole("group", { name: "Approval choices" }),
     ).getAllByRole("button");
     await userEvent.click(choices[0]!);
-    expect(client.decideApproval).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
 
     await waitFor(() =>
       expect(client.decideApproval).toHaveBeenCalledWith(
