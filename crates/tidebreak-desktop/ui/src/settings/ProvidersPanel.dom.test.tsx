@@ -273,10 +273,17 @@ describe("ProvidersPanel", () => {
       base_url: "https://api.together.ai/v1",
       models: [],
     };
+    const openrouter: ProviderInfo = {
+      kind: "openrouter",
+      enabled: false,
+      has_credential: false,
+      base_url: "https://openrouter.ai/api/v1",
+      models: [],
+    };
 
     renderPanel(
       <ProvidersPanel
-        providers={[fireworks, together]}
+        providers={[fireworks, together, openrouter]}
         client={{} as ApiClient}
         onChanged={vi.fn()}
       />,
@@ -284,13 +291,74 @@ describe("ProvidersPanel", () => {
 
     expect(screen.getByText("Fireworks AI")).toBeInTheDocument();
     expect(screen.getByText("Together AI")).toBeInTheDocument();
+    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
     expect(
       screen.getByText(/https:\/\/api\.fireworks\.ai\/inference\/v1/),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/https:\/\/api\.together\.ai\/v1/),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/https:\/\/openrouter\.ai\/api\/v1/),
+    ).toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/base URL/)).not.toBeInTheDocument();
+  });
+
+  it("saves an OpenRouter key and configured model without an endpoint override", async () => {
+    const openrouter: ProviderInfo = {
+      kind: "openrouter",
+      enabled: false,
+      has_credential: false,
+      base_url: "https://openrouter.ai/api/v1",
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue({
+      ...openrouter,
+      enabled: true,
+      has_credential: true,
+    });
+    const client = { putProvider } as unknown as ApiClient;
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[openrouter]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/https:\/\/openrouter\.ai\/api\/v1/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
+      target: { value: "anthropic/claude-sonnet-4" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("API key"), {
+      target: { value: "sk-or" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("openrouter", {
+        enabled: true,
+        credential: { type: "api_key", key: "sk-or" },
+        models: [
+          {
+            id: "anthropic/claude-sonnet-4",
+            display_name: undefined,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            reasoning_efforts: [],
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByPlaceholderText(/base URL/i)).not.toBeInTheDocument();
   });
 
   it("starts ChatGPT OAuth from the OpenAI provider row", async () => {

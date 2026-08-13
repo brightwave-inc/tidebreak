@@ -72,6 +72,8 @@ pub enum RouteKind {
     Fireworks,
     /// Together AI over the shared OpenAI-compatible adapter.
     Together,
+    /// OpenRouter over the shared OpenAI-compatible adapter.
+    Openrouter,
     /// A local Ollama daemon over the shared OpenAI-compatible adapter.
     Ollama,
     /// Any OpenAI-compatible Chat Completions gateway.
@@ -98,6 +100,7 @@ impl RouteKind {
             RouteKind::Xai => "xai",
             RouteKind::Fireworks => "fireworks",
             RouteKind::Together => "together",
+            RouteKind::Openrouter => "openrouter",
             RouteKind::Ollama => "ollama",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
@@ -122,6 +125,7 @@ impl RouteKind {
             "xai" => Some(Self::Xai),
             "fireworks" => Some(Self::Fireworks),
             "together" => Some(Self::Together),
+            "openrouter" => Some(Self::Openrouter),
             "ollama" => Some(Self::Ollama),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
@@ -225,6 +229,7 @@ impl Router {
             RouteKind::Gemini,
             RouteKind::Fireworks,
             RouteKind::Together,
+            RouteKind::Openrouter,
             RouteKind::Ollama,
             RouteKind::ModelGateway,
             RouteKind::ModelGatewayOpenai,
@@ -389,6 +394,7 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         #[cfg(feature = "openai-compat")]
         RouteKind::Fireworks
         | RouteKind::Together
+        | RouteKind::Openrouter
         | RouteKind::Ollama
         | RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
@@ -422,6 +428,7 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         #[cfg(not(feature = "openai-compat"))]
         RouteKind::Fireworks
         | RouteKind::Together
+        | RouteKind::Openrouter
         | RouteKind::Ollama
         | RouteKind::OpenaiCompatible => None,
     }
@@ -602,6 +609,32 @@ mod tests {
         );
         assert_eq!(router.select("qwen3:0.6b"), Some(RouteKind::Ollama));
         assert_eq!(router.select("llama3.2:1b"), None);
+    }
+
+    #[test]
+    fn openrouter_serves_only_configured_models() {
+        let router = Router::build(vec![route(
+            RouteKind::Openrouter,
+            "sk-or",
+            &["anthropic/claude-sonnet-4"],
+            Some("https://openrouter.ai/api/v1"),
+        )]);
+        assert_eq!(
+            router.select_for(
+                Some(&ProviderId::new("openrouter")),
+                "anthropic/claude-sonnet-4"
+            ),
+            Some(RouteKind::Openrouter)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("openrouter")), "openai/gpt-4o"),
+            None
+        );
+        assert_eq!(
+            router.select("anthropic/claude-sonnet-4"),
+            Some(RouteKind::Openrouter)
+        );
+        assert_eq!(router.select("openai/gpt-4o"), None);
     }
 
     #[test]

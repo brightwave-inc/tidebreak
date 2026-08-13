@@ -254,6 +254,7 @@ impl ModelSpec {
                     | "google/gemma-4-31B-it"
             ),
             ProviderKind::Xai
+            | ProviderKind::Openrouter
             | ProviderKind::Ollama
             | ProviderKind::OpenaiCompatible
             | ProviderKind::ModelGateway => false,
@@ -1000,7 +1001,9 @@ mod tests {
             ProviderKind::Gemini => true,
             ProviderKind::Fireworks => true,
             ProviderKind::Together => true,
-            ProviderKind::Ollama | ProviderKind::OpenaiCompatible => false,
+            ProviderKind::Openrouter | ProviderKind::Ollama | ProviderKind::OpenaiCompatible => {
+                false
+            }
             ProviderKind::ModelGateway => true,
         }
     }
@@ -1242,6 +1245,7 @@ mod tests {
                         spec.provider,
                         ProviderKind::Fireworks
                             | ProviderKind::Together
+                            | ProviderKind::Openrouter
                             | ProviderKind::Ollama
                             | ProviderKind::OpenaiCompatible
                             | ProviderKind::ModelGateway
