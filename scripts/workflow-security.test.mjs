@@ -1258,6 +1258,62 @@ test("the packaged updater trusts the production signing key and endpoint", () =
   ]);
 });
 
+test("staging desktop publishes only under the staging prefix", () => {
+  const staging = workflows["staging.yml"];
+  assert.ok(staging);
+  assert.match(staging, /^on:\n  push:\n    branches: \[main\]/m);
+  assert.match(staging, /^  workflow_dispatch:$/m);
+  assert.doesNotMatch(staging, /^\s*pull_request(?:_target)?:/m);
+  assert.match(staging, /^permissions:\n  contents: read$/m);
+  assert.match(staging, /group: tidebreak-desktop-staging/);
+  assert.match(staging, /cancel-in-progress: true/);
+  assert.match(staging, /uses: \.\/\.github\/workflows\/release\.yml/);
+  assert.match(staging, /channel: staging/);
+  assert.match(staging, /secrets: inherit/);
+  assert.doesNotMatch(staging, /secrets\./);
+  assert.doesNotMatch(staging, /desktop-production|tidebreak\/latest\.json/);
+
+  const release = workflows["release.yml"];
+  assert.match(release, /^  workflow_call:\n/m);
+  assert.match(
+    release,
+    /inputs\.channel == 'staging'\n      && 'tidebreak-desktop-staging-build'/,
+  );
+  assert.match(
+    release,
+    /cancel-in-progress: \$\{\{ inputs\.channel == 'staging' \}\}/,
+  );
+
+  const publishStaging = workflowJob(release, "publish_staging");
+  assert.match(publishStaging, /environment:\n      name: desktop-staging/);
+  assert.match(
+    publishStaging,
+    /RELEASE_BASE_URL: https:\/\/downloads\.brightwave\.io\/tidebreak\/staging/,
+  );
+  assert.match(publishStaging, /--channel staging/);
+  assert.match(publishStaging, /tidebreak\/staging\/latest\.json/);
+  assert.match(publishStaging, /desktop-channel\.mjs --assert-key staging/);
+  assert.doesNotMatch(
+    publishStaging,
+    /s3:\/\/\$DOWNLOADS_S3_BUCKET\/tidebreak\/latest\.json/,
+  );
+  assert.doesNotMatch(publishStaging, /tidebreak\/releases\/v\$TIDEBREAK_VERSION/);
+
+  const stagingOverlay = JSON.parse(
+    readFileSync(
+      repositoryFile("crates", "tidebreak-desktop", "tauri.staging.conf.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(stagingOverlay.identifier, "io.brightwave.tidebreak.staging");
+  assert.deepEqual(stagingOverlay.plugins.updater.endpoints, [
+    "https://downloads.brightwave.io/tidebreak/staging/latest.json",
+  ]);
+  assert.deepEqual(stagingOverlay.plugins["deep-link"].desktop.schemes, [
+    "tidebreak-staging",
+  ]);
+});
+
 test("updater transition policy rejects unsafe ordering mutations", () => {
   // The shutdown-before-install boundary #1907 replaced. Kept as a fixture to
   // prove the policy no longer admits it now that the barrier is mandatory.

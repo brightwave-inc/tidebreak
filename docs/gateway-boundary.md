@@ -61,7 +61,7 @@ Policy resolution has three tiers, strongest first:
 
 Pairing starts from the gateway's own web UI: a link of exactly one shape,
 `tidebreak://provision?gateway=<base url>` (`tidebreak-dev://` in debug
-builds). A deep link is an unauthenticated remote trigger — any page can
+builds, `tidebreak-staging://` in the packaged staging app). A deep link is an unauthenticated remote trigger — any page can
 raise one, and a custom scheme carries no provenance — so the boundary rule
 is that **the link never writes anything**:
 

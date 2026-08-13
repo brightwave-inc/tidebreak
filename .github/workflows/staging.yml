@@ -1,0 +1,80 @@
+name: Publish staging desktop
+
+run-name: Publish staging desktop ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .cargo/**
+      - .github/workflows/release.yml
+      - .github/workflows/staging.yml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
+      - legal/**
+      - plugins/**
+      - rust-toolchain.toml
+      - scripts/**
+      - skills/**
+      - LICENSE
+      - NOTICE
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Only the newest main tip is worth notarizing. Cancelling this run also
+  # cancels the reusable release.yml jobs it started, so a burst of merges
+  # does not queue a chain of stale staging publishes.
+  group: tidebreak-desktop-staging
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    name: resolve staging version
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Derive the staging product version
+        id: version
+        env:
+          STAGING_RUN_NUMBER: ${{ github.run_number }}
+          STAGING_SHA: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$STAGING_SHA" || {
+            echo "The resolved commit changed while checking out staging." >&2
+            exit 1
+          }
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$STAGING_SHA" origin/main || {
+            echo "Staging commit $STAGING_SHA is not on main." >&2
+            exit 1
+          }
+          version="$(node scripts/staging-version.mjs --from-run-number "$STAGING_RUN_NUMBER")"
+          {
+            echo "sha=$STAGING_SHA"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: publish staging
+    needs: resolve
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+    with:
+      channel: staging
+      sha: ${{ needs.resolve.outputs.sha }}
+      version: ${{ needs.resolve.outputs.version }}

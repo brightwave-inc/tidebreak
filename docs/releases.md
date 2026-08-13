@@ -256,8 +256,8 @@ Packaged macOS apps check `latest.json` 15 seconds after launch and every five
 minutes. When a newer signed version is available, the Tauri updater downloads
 and installs it in place, then emits a ready state to the UI. The user must
 choose **Restart to update** before Tidebreak relaunches; the app never
-interrupts active work automatically. Development and unsupported-platform
-builds do not contact the production update feed.
+interrupts active work automatically. Development builds do not contact an update feed. Packaged staging builds
+check the staging feed under `/tidebreak/staging/latest.json` instead.
 
 The first release containing this client integration is a bootstrap release:
 older installed binaries have no updater and therefore cannot discover it.
@@ -318,6 +318,35 @@ The IAM role must trust GitHub's OIDC provider with the environment subject
 `repo:brightwave-inc/tidebreak:environment:desktop-production`. Grant only the
 S3 permissions needed beneath `tidebreak/` and CloudFront invalidation access for
 the configured distribution. No long-lived AWS access key belongs in GitHub.
+
+### Staging desktop from main
+
+Every relevant push to `main` also publishes a packaged **staging** app, a
+third desktop identity that can run beside both `cargo tauri dev` and an
+installed release. The contract is recorded in
+[decision record 13](decisions/0013-desktop-staging-channel.md).
+
+Staging is a release-profile build with a blue icon, product name
+`Tidebreak [staging]`, identifier `io.brightwave.tidebreak.staging`, keychain
+service `tidebreak.staging`, and the `tidebreak-staging://` scheme. It does
+not share a single-instance lock, app-data directory, or updater feed with
+production. Its versions are `0.0.0-staging.{run_number}` — monotonic for the
+Tauri updater, and not a production `vMAJOR.MINOR.PATCH` tag.
+
+The caller is **Publish staging desktop**. It derives the version, then
+invokes this workflow as a reusable workflow with `channel: staging`. A burst
+of merges cancels the superseded staging run. Production's concurrency group
+is untouched. Staging artifacts live under
+`https://downloads.brightwave.io/tidebreak/staging/`; the publish step
+refuses any other prefix and will not advance `latest.json` if `main` has
+already moved on.
+
+Create a GitHub environment named `desktop-staging`. Copy the Apple and Tauri
+signing secrets from `desktop-production`. Point `AWS_RELEASE_ROLE_ARN` at a
+role whose GitHub OIDC subject is
+`repo:brightwave-inc/tidebreak:environment:desktop-staging` and whose S3
+write access is only `tidebreak/staging/*`. A role that can also write
+`tidebreak/latest.json` would make a publish-guard bug a production incident.
 
 Before the first public release, protect the environment as appropriate, verify
 all configuration values, and exercise the workflow with the intended first

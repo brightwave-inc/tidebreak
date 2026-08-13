@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tidebreak [staging]",
+  "identifier": "io.brightwave.tidebreak.staging",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tidebreak [staging]"
+      }
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["tidebreak-staging"]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://downloads.brightwave.io/tidebreak/staging/latest.json"
+      ]
+    }
+  },
+  "bundle": {
+    "icon": [
+      "icons/staging/32x32.png",
+      "icons/staging/128x128.png",
+      "icons/staging/128x128@2x.png",
+      "icons/staging/icon.icns",
+      "icons/staging/icon.ico",
+      "icons/staging/icon.png"
+    ]
+  }
+}
