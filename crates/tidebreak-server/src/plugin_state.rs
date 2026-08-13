@@ -6,12 +6,17 @@
 //! preference uses (the chat model, the background-agent ceiling), because a
 //! handful of booleans does not earn a table of its own.
 //!
-//! Everything defaults to enabled, so only a *disabled* component is
-//! persisted. That keeps the row proportional to what the user actually turned
-//! off, and it gives the plugin gate the behavior the product wants for free:
-//! a plugin's flag is a gate *over* its members' own flags rather than a
-//! rewrite of them, so re-enabling a bundle restores exactly the member
-//! choices that were in place when it was switched off.
+//! Built-in and hand-authored packages default to enabled: only a *disabled*
+//! component is persisted. That keeps the row proportional to what the user
+//! actually turned off, and it gives the plugin gate the behavior the product
+//! wants for free: a plugin's flag is a gate *over* its members' own flags
+//! rather than a rewrite of them, so re-enabling a bundle restores exactly the
+//! member choices that were in place when it was switched off.
+//!
+//! A public import is the exception. The installer records the new plugin as
+//! disabled before anything can start its bundled MCP servers; enabling it is
+//! the consent to launch them. Absent still means enabled, so that recording
+//! has to be a stored `false`, not a change to this default.
 //!
 //! A disabled component must actually bite, which means both consumers read
 //! this: the workspace staging pass never writes it into a sandbox, and the

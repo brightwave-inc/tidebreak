@@ -344,11 +344,9 @@ impl McpServerDefinition {
                 "MCP server definition has no command to spawn",
             ));
         };
-        // A plugin's `./`-relative command names a file inside the package and
-        // is resolved against the package root before the child is built;
-        // everything else — including a plugin's bare command name — keeps the
-        // platform resolution every other stdio server gets, so the two paths
-        // cannot drift.
+        // A plugin's command must be `./`-relative and is resolved against
+        // the package root before the child is built. User-configured servers
+        // keep the platform resolution they already had; a plugin never does.
         let program = match &self.launch {
             Some(launch) => crate::plugin_mcp::resolve_command(program, &launch.root)
                 .map_err(AgentError::config)?,

@@ -375,17 +375,18 @@ fn resolve_cwd(
 
 /// The program a plugin's stdio server is launched as.
 ///
-/// A `./`-relative command names a file inside the package, so it is resolved
-/// against the plugin root here rather than left for the child to resolve. On
-/// Unix the child would resolve it against its *working directory*, which is
+/// Only a `./`-relative command is accepted: it names a file inside the
+/// package and is resolved against the plugin root. On Unix a relative program
+/// would otherwise resolve against the child's *working directory*, which is
 /// the wrong answer the moment a server configures a `cwd` — and a
 /// `${PLUGIN_DATA}`-anchored one puts it outside the package entirely. On
 /// Windows a relative program resolves against the host process's directory,
-/// which is never right. A bare name is left alone and gets exactly the
-/// platform resolution every other stdio server's command gets.
+/// which is never right. A bare PATH name is refused even if a stale retained
+/// `mcp.json` still carries one, so an imported plugin cannot launch
+/// `python3`, `bash`, or `osascript` on the host.
 pub(crate) fn resolve_command(command: &str, root: &Path) -> Result<PathBuf, &'static str> {
     let Some(relative) = command.strip_prefix("./") else {
-        return Ok(PathBuf::from(command));
+        return Err("plugin MCP server command must be a ./ path inside the plugin");
     };
     let resolved = std::fs::canonicalize(root.join(relative))
         .map_err(|_| "plugin MCP server executable was not found inside the plugin")?;
@@ -625,5 +626,27 @@ mod tests {
         assert!(first
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')));
+    }
+
+    /// Contract: launch resolves `./` against the plugin root and refuses a
+    /// bare PATH name, even if a retained `mcp.json` still carries one.
+    #[test]
+    fn plugin_stdio_commands_must_resolve_inside_the_plugin_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("serve");
+        std::fs::write(&bin, b"#!").unwrap();
+
+        assert_eq!(
+            resolve_command("./serve", root.path()).unwrap(),
+            std::fs::canonicalize(&bin).unwrap()
+        );
+
+        for banned in ["python3", "bash", "osascript", "cmd", "powershell", "serve"] {
+            assert!(
+                resolve_command(banned, root.path()).is_err(),
+                "{banned} must not launch from PATH"
+            );
+        }
+        assert!(resolve_command("./missing", root.path()).is_err());
     }
 }

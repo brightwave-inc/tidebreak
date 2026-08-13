@@ -314,8 +314,8 @@ const MAX_MCP_LIST_ENTRIES: usize = 64;
 /// here starts a process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpStdioServer {
-    /// One executable token: a bare program name resolved by the platform, or
-    /// a `./`-relative path inside the plugin. Never expanded.
+    /// One executable token: a `./`-relative path inside the plugin. Never a
+    /// bare PATH name, and never expanded.
     pub command: String,
     pub args: Vec<String>,
     /// Literal package data, not a secret mechanism — the specification is
@@ -639,10 +639,12 @@ fn is_loopback_host(url: &url::Url) -> bool {
     }
 }
 
-/// Whether `command` is the single executable token the specification allows:
-/// a bare program name the platform resolves, or a `./`-relative path that
-/// stays inside the plugin. No placeholder is expanded in a command, so one
-/// appearing here would be launched literally and is refused instead.
+/// Whether `command` is a `./`-relative path that stays inside the plugin.
+///
+/// Bare PATH names (`python3`, `bash`, `osascript`, `cmd`) are refused: an
+/// imported plugin must not launch a host interpreter by name. No placeholder
+/// is expanded in a command, so one appearing here would be launched literally
+/// and is refused instead.
 fn is_valid_command_token(command: &str) -> bool {
     if command.is_empty()
         || command.len() > MAX_MCP_STRING_BYTES
@@ -653,10 +655,9 @@ fn is_valid_command_token(command: &str) -> bool {
     {
         return false;
     }
-    match command.strip_prefix("./") {
-        Some(relative) => is_contained_relative_path(relative),
-        None => !command.contains('/') && command != "." && command != "..",
-    }
+    command
+        .strip_prefix("./")
+        .is_some_and(is_contained_relative_path)
 }
 
 /// Whether `cwd` names a directory inside one of the two roots it may be
@@ -1087,6 +1088,30 @@ mod tests {
             .config
             .servers
             .is_empty());
+    }
+
+    /// Contract: a plugin stdio command is a `./` path inside the package.
+    /// Bare host interpreters are dropped as a bad entry, not launched.
+    #[test]
+    fn plugin_stdio_commands_must_be_relative_paths_inside_the_plugin() {
+        for banned in ["python3", "bash", "osascript", "cmd", "powershell", "serve"] {
+            let parsed = parse_plugin_mcp_config(&mcp(&format!(
+                "{{\"{banned}\": {{\"type\": \"stdio\", \"command\": \"{banned}\"}}}}"
+            )))
+            .expect("a file whose entries are bad is still a valid file");
+            assert!(
+                parsed.config.servers.is_empty(),
+                "{banned} must not be a plugin MCP command"
+            );
+            assert_eq!(parsed.skipped.len(), 1, "{banned}");
+        }
+
+        let parsed = parse_plugin_mcp_config(&mcp(
+            "{\"local\": {\"type\": \"stdio\", \"command\": \"./bin/serve\"}}",
+        ))
+        .unwrap();
+        assert_eq!(parsed.config.servers.len(), 1);
+        assert!(parsed.skipped.is_empty());
     }
 
     /// Contract: expansion is one pass over the text. Replacement text is

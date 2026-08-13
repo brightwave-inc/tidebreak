@@ -3551,6 +3551,7 @@ async fn installs_a_single_skill_plugin_end_to_end() {
         .find(|plugin| plugin["name"] == "meeting-notes")
         .unwrap();
     assert_eq!(plugin["origin"], "user");
+    assert_eq!(plugin["enabled"], false);
     assert_eq!(plugin["skills"][0]["name"], "meeting-notes");
     assert_eq!(plugin["compatibility"]["status"], "compatible");
 }
@@ -3934,6 +3935,7 @@ async fn retains_validated_mcp_servers_and_derives_the_badge() {
              \"args\": [\"--root\", \"${{PLUGIN_ROOT}}\"]}}, \
            \"remote\": {{\"type\": \"streamable-http\", \
              \"url\": \"https://mcp.example.com/v1\"}}, \
+           \"host-rce\": {{\"type\": \"stdio\", \"command\": \"python3\"}}, \
            \"bogus\": {{\"type\": \"stdio\", \"command\": \"serve\", \"retries\": 3}}}}}}"
     );
     let archive = plugin_archive(&[
@@ -3973,7 +3975,7 @@ async fn retains_validated_mcp_servers_and_derives_the_badge() {
             .iter()
             .map(|entry| entry["path"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["mcp.json#bogus"]
+        ["mcp.json#bogus", "mcp.json#host-rce"]
     );
 
     // Only the entries that validated are written back.
@@ -3998,10 +4000,113 @@ async fn retains_validated_mcp_servers_and_derives_the_badge() {
         .iter()
         .find(|plugin| plugin["name"] == "reporting")
         .unwrap();
+    assert_eq!(plugin["enabled"], false);
     assert!(plugin["capabilities"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("mcp")));
+}
+
+/// Contract: a public import that ships `mcp.json` is recorded off, so the
+/// install-time reconcile does not start its servers. Enabling the plugin is
+/// what connects them. Reverting either half — default-on at install, or
+/// starting MCP without the enable flag — fails this.
+#[tokio::test]
+async fn imported_plugin_mcp_does_not_start_until_enabled() {
+    let (dir, store) = temp_db_store("plugin-mcp-autostart.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let manifest = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_SCHEMA}\", \"name\": \"toolbox\", \
+          \"description\": \"Bundled tools.\"}}"
+    );
+    let mcp_config = format!(
+        "{{\"$schema\": \"{AGENT_PLUGIN_MCP_SCHEMA}\", \"mcpServers\": {{\
+           \"local\": {{\"type\": \"stdio\", \"command\": \"./serve\"}}}}}}"
+    );
+    let archive = plugin_archive(&[
+        ("pkg/plugin.json", manifest.as_bytes()),
+        ("pkg/mcp.json", mcp_config.as_bytes()),
+        (
+            "pkg/skills/toolbox-notes/SKILL.md",
+            b"---\nname: toolbox-notes\ndescription: Notes.\n---\nBody.\n",
+        ),
+    ]);
+
+    let secrets = Arc::new(MemSecrets::default());
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let exec = Arc::new(
+        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            secrets,
+            dir.path().join("scratch"),
+        )
+        .with_user_skills(Some(dir.path().join("skills")))
+        .with_user_plugins(Some(dir.path().join("plugins")))
+        .with_plugin_archive_fetcher(Arc::new(FixedPluginArchiveFetcher {
+            expected_url: "https://example.com/toolbox-1.0.0.zip".to_owned(),
+            archive: Arc::new(archive),
+        })),
+    );
+    state.code_execution = Some(exec.clone());
+    state
+        .mcp
+        .set_plugin_catalog(Arc::new(crate::plugin_mcp::InstalledPluginMcpCatalog::new(
+            exec,
+            store,
+            dir.path().join("plugin-data"),
+        )));
+    let token = state.token.clone();
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+
+    let response = post_plugin_install(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "source": {
+                "kind": "archive",
+                "url": "https://example.com/toolbox-1.0.0.zip",
+                "revision": "1.0.0"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let catalog = get_plugins(&router, &bearer).await;
+    let plugin = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == "toolbox")
+        .unwrap();
+    assert_eq!(plugin["enabled"], false);
+    assert!(get_mcp_servers(&router, &bearer).await["servers"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let response = put_plugins_enabled(
+        &router,
+        &bearer,
+        serde_json::json!({"plugins": {"toolbox": true}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(listed["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["servers"][0]["name"], "toolbox-local");
+    assert_eq!(listed["servers"][0]["plugin"], "toolbox");
 }
 
 /// Contract: a top-level problem in `mcp.json` disables that plugin's MCP

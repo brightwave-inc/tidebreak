@@ -232,8 +232,9 @@ pub async fn post_plugin_install(
                 ServerError::internal("plugin files could not be installed")
             }
         })?;
-    // A freshly installed plugin may ship bundled MCP servers; bring them up
-    // now rather than at the next restart.
+    // The import is recorded disabled, so this reconcile will not start any
+    // bundled MCP servers. It still has to run: an overlapping uninstall, or
+    // a previous enable flag for this name, can change the derived set.
     state.mcp.reconcile_plugin_servers().await;
     Ok((StatusCode::CREATED, Json(installed)))
 }
