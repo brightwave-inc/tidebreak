@@ -1183,6 +1183,9 @@ async fn providers_list_and_put_roundtrip() {
     assert!(providers
         .iter()
         .any(|p| p["kind"] == "together" && p["base_url"] == "https://api.together.ai/v1"));
+    assert!(providers
+        .iter()
+        .any(|p| { p["kind"] == "ollama" && p["base_url"] == "http://127.0.0.1:11434/v1" }));
     assert!(providers.iter().any(|p| p["kind"] == "openai_compatible"));
 
     let put = router
@@ -2637,6 +2640,117 @@ async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
             "moonshotai/Kimi-K3"
         ),
         Some(tidebreak_router::RouteKind::Together)
+    );
+}
+
+#[tokio::test]
+async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
+
+    assert!(
+        !providers::provider_is_usable(
+            &*store,
+            &*secrets,
+            providers::ProviderKind::Ollama,
+            &policy
+        )
+        .await
+        .unwrap(),
+        "a disabled Ollama card is not a route"
+    );
+
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Ollama,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: vec![providers::CustomModelConfig {
+                id: "qwen3:0.6b".into(),
+                display_name: Some("Qwen 3 0.6B".into()),
+                ..providers::CustomModelConfig::default()
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::Ollama,
+        &policy
+    )
+    .await
+    .unwrap());
+    assert!(
+        !providers::has_credential(&*secrets, providers::ProviderKind::Ollama).await,
+        "usability must not invent a stored credential"
+    );
+
+    let listed = providers::list_providers(&*store, &*secrets, &policy)
+        .await
+        .unwrap();
+    let ollama = listed
+        .iter()
+        .find(|info| info.kind == providers::ProviderKind::Ollama)
+        .expect("Ollama is a first-class provider");
+    assert!(ollama.enabled);
+    assert!(!ollama.has_credential);
+    assert_eq!(
+        ollama.base_url.as_deref(),
+        Some("http://127.0.0.1:11434/v1")
+    );
+
+    let catalog = providers::catalog_models(&*store, &*secrets, &policy)
+        .await
+        .unwrap();
+    let model = catalog
+        .iter()
+        .find(|entry| entry.policy.key == "ollama::qwen3:0.6b")
+        .expect("the configured Ollama model is in the catalog");
+    assert!(model.available);
+    assert_eq!(model.policy.display_name, "Qwen 3 0.6B");
+    assert!(model.policy.supports_tools);
+    assert!(!model.policy.supports_reasoning);
+
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let route = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::Ollama)
+        .expect("an enabled Ollama daemon is a route");
+    assert_eq!(route.api_key, "ollama");
+    assert_eq!(route.base_url.as_deref(), Some("http://127.0.0.1:11434/v1"));
+    assert_eq!(route.curated_models, ["qwen3:0.6b"]);
+
+    let router = tidebreak_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&tidebreak_core::ProviderId::new("ollama")),
+            "qwen3:0.6b"
+        ),
+        Some(tidebreak_router::RouteKind::Ollama)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&tidebreak_core::ProviderId::new("ollama")),
+            "llama3.2:1b"
+        ),
+        None
     );
 }
 

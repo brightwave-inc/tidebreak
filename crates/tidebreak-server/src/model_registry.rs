@@ -253,9 +253,10 @@ impl ModelSpec {
                     | "nvidia/nemotron-3-ultra-550b-a55b"
                     | "google/gemma-4-31B-it"
             ),
-            ProviderKind::Xai | ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway => {
-                false
-            }
+            ProviderKind::Xai
+            | ProviderKind::Ollama
+            | ProviderKind::OpenaiCompatible
+            | ProviderKind::ModelGateway => false,
         }
     }
 }
@@ -999,7 +1000,7 @@ mod tests {
             ProviderKind::Gemini => true,
             ProviderKind::Fireworks => true,
             ProviderKind::Together => true,
-            ProviderKind::OpenaiCompatible => false,
+            ProviderKind::Ollama | ProviderKind::OpenaiCompatible => false,
             ProviderKind::ModelGateway => true,
         }
     }
@@ -1241,6 +1242,7 @@ mod tests {
                         spec.provider,
                         ProviderKind::Fireworks
                             | ProviderKind::Together
+                            | ProviderKind::Ollama
                             | ProviderKind::OpenaiCompatible
                             | ProviderKind::ModelGateway
                     ),

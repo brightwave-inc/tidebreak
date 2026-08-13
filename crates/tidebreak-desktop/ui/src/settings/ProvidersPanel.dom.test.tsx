@@ -202,6 +202,62 @@ describe("ProvidersPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("saves an Ollama daemon without a credential", async () => {
+    const ollama: ProviderInfo = {
+      kind: "ollama",
+      enabled: false,
+      has_credential: false,
+      base_url: "http://127.0.0.1:11434/v1",
+      models: [],
+    };
+    const putProvider = vi.fn().mockResolvedValue({
+      ...ollama,
+      enabled: true,
+    });
+    const client = { putProvider } as unknown as ApiClient;
+
+    renderPanel(
+      <ProvidersPanel
+        providers={[ollama]}
+        client={client}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Ollama")).toBeInTheDocument();
+    expect(
+      screen.getByText("No API key required for a local Ollama"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("API key (optional)"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
+      target: { value: "qwen3:0.6b" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save configuration" }),
+    );
+
+    await waitFor(() =>
+      expect(putProvider).toHaveBeenCalledWith("ollama", {
+        enabled: true,
+        base_url: "http://127.0.0.1:11434/v1",
+        models: [
+          {
+            id: "qwen3:0.6b",
+            display_name: undefined,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            reasoning_efforts: [],
+          },
+        ],
+      }),
+    );
+  });
+
   it("shows fixed endpoints for direct compatible presets without editing them", () => {
     const fireworks: ProviderInfo = {
       kind: "fireworks",

@@ -67,6 +67,8 @@ export function providerLabel(provider: ProviderKind): string {
       return "Fireworks AI";
     case "together":
       return "Together AI";
+    case "ollama":
+      return "Ollama";
     case "openai_compatible":
       return "OpenAI-compatible";
     case "model_gateway":

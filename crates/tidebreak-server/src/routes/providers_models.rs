@@ -91,6 +91,9 @@ fn unknown_model_message(value: &str) -> String {
         Some((ProviderKind::OpenaiCompatible, id)) => {
             format!("model `{id}` is not configured under OpenAI-compatible models")
         }
+        Some((ProviderKind::Ollama, id)) => {
+            format!("model `{id}` is not configured under Ollama models")
+        }
         Some((provider, id)) => {
             format!("model `{id}` is not registered for provider `{provider}`")
         }

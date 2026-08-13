@@ -264,6 +264,7 @@ export function ProviderIcon({
       return <XaiIcon {...rest} />;
     case "gemini":
       return <GeminiIcon {...rest} />;
+    case "ollama":
     case "openai_compatible":
     case "model_gateway":
       return <OpenModelIcon {...rest} />;

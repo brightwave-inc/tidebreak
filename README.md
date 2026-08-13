@@ -123,7 +123,7 @@ platform differences below first.
 
 Provider credentials go in the OS keychain, not in the database and not in a
 config file you might commit. Tidebreak talks to Anthropic, OpenAI and
-OpenAI-compatible endpoints, Google Gemini, and xAI.
+OpenAI-compatible endpoints, Google Gemini, xAI, and a local Ollama daemon.
 
 The conversation journal is provider-neutral, so a chat can move from Claude to
 Gemini to GPT and back without starting over — useful when a provider is rate
@@ -296,7 +296,7 @@ end-to-end, less technical tour of the runtime and its state machines, see
 | Crate | What it is |
 | --- | --- |
 | [`tidebreak-core`](crates/tidebreak-core) | agent loop, tools, event stream, storage traits |
-| [`tidebreak-router`](crates/tidebreak-router) | Anthropic, OpenAI, Google, and xAI providers + model routing |
+| [`tidebreak-router`](crates/tidebreak-router) | Anthropic, OpenAI, Google, xAI, and OpenAI-compatible providers + model routing |
 | [`tidebreak-host-broker`](crates/tidebreak-host-broker) | consented access to folders on the host |
 | [`tidebreak-code-execution`](crates/tidebreak-code-execution) | provider-neutral command execution + native, Docker, and managed backends |
 | [`tidebreak-egress`](crates/tidebreak-egress) | egress policy decisions for outbound network access |
