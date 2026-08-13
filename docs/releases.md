@@ -329,9 +329,10 @@ installed release. The contract is recorded in
 Staging is a release-profile build with a blue icon, product name
 `Tidebreak [staging]`, identifier `io.brightwave.tidebreak.staging`, keychain
 service `tidebreak.staging`, and the `tidebreak-staging://` scheme. It does
-not share a single-instance lock, app-data directory, or updater feed with
-production. Its versions are `0.0.0-staging.{run_number}` — monotonic for the
-Tauri updater, and not a production `vMAJOR.MINOR.PATCH` tag.
+not share a single-instance lock, app-data directory, updater feed, or
+updater signing key with production. Its versions are
+`0.0.0-staging.{run_number}` — monotonic for the Tauri updater, and not a
+production `vMAJOR.MINOR.PATCH` tag.
 
 The caller is **Publish staging desktop**. It derives the version, then
 invokes the `workflow_call`-only **Publish staging desktop build** workflow
@@ -343,8 +344,15 @@ untouched. Staging artifacts live under
 refuses any other prefix and will not advance `latest.json` if `main` has
 already moved on.
 
-Create a GitHub environment named `desktop-staging`. Copy the Apple and Tauri
-signing secrets from `desktop-production`. Point `AWS_RELEASE_ROLE_ARN` at a
+Create a GitHub environment named `desktop-staging`. Copy the Apple signing
+secrets from `desktop-production`. Do **not** copy
+`TAURI_SIGNING_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: a
+stolen staging key must not verify on production clients. Staging has its
+own updater keypair. The public half is committed in
+`crates/tidebreak-desktop/tauri.staging.conf.json`. Set the staging
+environment's `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to that pair's private key and
+password. Point `AWS_RELEASE_ROLE_ARN` at a
 role whose GitHub OIDC subject is
 `repo:brightwave-inc/tidebreak:environment:desktop-staging` and whose S3
 write access is only `tidebreak/staging/*`. A role that can also write
