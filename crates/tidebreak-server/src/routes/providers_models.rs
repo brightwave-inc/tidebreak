@@ -543,6 +543,14 @@ pub async fn put_model_role(
         }
         None => None,
     };
+    // The chat role shares its durable selection with gateway catalog
+    // migration. Serialize those two writers so an explicit user choice made
+    // during sync cannot be replaced by the migration's stale read.
+    let _gateway_write = if role == ModelRole::Chat {
+        Some(providers::GATEWAY_STATE_WRITES.lock().await)
+    } else {
+        None
+    };
     model_roles::write_selection(&*state.store, role, selection.as_deref()).await?;
     let resolved_key = resolved_role_key(&state, role, selection.as_deref()).await?;
     Ok(Json(ModelRoleInfo {

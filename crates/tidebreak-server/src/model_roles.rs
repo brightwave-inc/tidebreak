@@ -247,8 +247,9 @@ fn selection_keys(models: &[providers::CustomModelConfig]) -> Vec<String> {
 }
 
 /// The chat role's effective policy for `selection` under `managed`: the
-/// selection itself while its provider can serve it, else the first entitled
-/// gateway model.
+/// selection itself while its provider can serve it. When there is no stored
+/// chat selection, an unusable boot default falls back to the first entitled
+/// gateway model; an explicit stored selection never does.
 ///
 /// This is one function on purpose. The roles read labels the default with it
 /// and the turn-accept seam freezes a model from it, so the model a client
@@ -270,6 +271,17 @@ pub async fn effective_chat_policy(
         if providers::provider_is_usable(store, secrets, policy.provider, managed).await? {
             return Ok(Some(policy));
         }
+    }
+    // Catalog sync migrates an explicit direct-provider selection only when
+    // exactly one canonically equivalent gateway route exists. If that
+    // migration left the pin alone, it was ambiguous or unmatched: choosing
+    // the gateway's first unrelated row here would erase the distinction and
+    // run a foreground turn on a model the user did not select. Preserve the
+    // unresolved result so the role label is empty and turn validation asks
+    // the user to make a deliberate choice. Only an implicit process boot
+    // default retains the automatic managed fallback below.
+    if read_selection(store, ModelRole::Chat).await?.is_some() {
+        return Ok(None);
     }
     for key in gateway_listed(store, managed).await? {
         if let Some(policy) = usable_policy(store, secrets, managed, &key).await? {

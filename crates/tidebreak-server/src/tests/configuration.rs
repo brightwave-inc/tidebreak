@@ -1924,9 +1924,9 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
 /// Roles resolve on read, against whatever the user has credentialed: the
 /// ordered defaults skip providers that cannot serve a request, a pin overrides
 /// them, and enabling a provider changes the answer without a restart. When the
-/// profile flips to managed, both roles' reads re-route to entitled gateway
-/// models rather than reporting selections no turn could serve — and a message
-/// sent against the stale default runs on the re-routed model.
+/// profile flips to managed, utility re-routes to an entitled gateway model.
+/// An unresolved explicit chat pin remains unresolved until the user chooses,
+/// while an implicit boot default may still use the gateway's first model.
 #[tokio::test]
 async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -2180,11 +2180,9 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "openai::gpt-5.6-sol"
     );
 
-    // A managed flip with a BYOK chat pin carried in from before it: the pin
-    // stays stored — a profile returned to the open experience gets it back —
-    // but both roles' effective resolutions move to entitled gateway models.
-    // Chat lands on the first model the gateway lists (the row the composer
-    // picker offers first); utility keeps #901's cheapest-first walk.
+    // A managed flip with a BYOK chat pin carried in from before it. Catalog
+    // sync normally migrates a unique canonical match; this direct snapshot
+    // setup represents an ambiguous or unmatched pin left unresolved.
     configure_provider("openai", serde_json::json!({"enabled": true})).await;
     let pinned = put_role(
         "chat",
@@ -2234,8 +2232,8 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         &*store,
         &providers::GatewayModelSnapshot {
             gateway_url: "https://corp.gateway/".to_string(),
-            // Flagship-first, as a gateway well might list them: chat takes
-            // the gateway's first pick, utility must not.
+            // Flagship-first, as a gateway well might list them: an implicit
+            // chat default takes the first pick, while utility must not.
             models: vec![
                 providers::CustomModelConfig {
                     id: "gateway-flagship".to_string(),
@@ -2265,17 +2263,14 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let roles = role_rows().await;
     let chat = role_row(&roles, "chat");
     assert_eq!(chat["selection"], "openai::gpt-5.6-sol");
-    assert_eq!(chat["resolved_key"], "model_gateway::gateway-flagship");
+    assert_eq!(chat["resolved_key"], serde_json::Value::Null);
     assert_eq!(
         role_row(&roles, "utility")["resolved_key"],
         "model_gateway::gateway-haiku"
     );
 
-    // The label is what the turn gets: a message sent against that stale BYOK
-    // default is accepted and frozen on the gateway model the roles read
-    // named, not refused with `model_provider_unavailable`. This is the
-    // field-reported failure — remove the re-route from the accept path and
-    // this send 409s.
+    // The unresolved global pin must not silently become the gateway's first
+    // unrelated model when a turn is admitted.
     let chat_response = router
         .clone()
         .oneshot(
@@ -2291,13 +2286,52 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap();
     assert_eq!(chat_response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(chat_response).await;
-    let turn_id = TurnId::new();
     assert_eq!(
-        send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await,
+        send_message_with_id(&router, &bearer, chat.id, TurnId::new(), "hello").await,
+        StatusCode::CONFLICT
+    );
+
+    // Clearing the explicit selection restores automatic behavior. The boot
+    // default is process state rather than persisted user intent, so managed
+    // chat may fall back to the gateway's first entitled model.
+    let cleared = put_role("chat", serde_json::json!({"selection": null})).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let cleared: serde_json::Value = json_body(cleared).await;
+    assert_eq!(cleared["resolved_key"], "model_gateway::gateway-flagship");
+    let fallback_chat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fallback_chat_response.status(), StatusCode::CREATED);
+    let fallback_chat: Chat = json_body(fallback_chat_response).await;
+    let fallback_turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(
+            &router,
+            &bearer,
+            fallback_chat.id,
+            fallback_turn_id,
+            "hello"
+        )
+        .await,
         StatusCode::ACCEPTED
     );
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        store
+            .get_turn_run(fallback_turn_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model,
         "model_gateway::gateway-flagship"
     );
 

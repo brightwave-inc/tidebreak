@@ -349,6 +349,7 @@ pub async fn patch_chat(
     // default resolves to.
     refuse_permission_mode_over_ceiling(&state, body.permission_mode.flatten()).await?;
     let title = body.title.map(normalize_chat_title).transpose()?;
+    let updates_model = body.model.is_some();
 
     // The move lands first, because it is the one field that can be refused on
     // durable state rather than on its own value, and because the chat read
@@ -381,6 +382,16 @@ pub async fn patch_chat(
     }
 
     let mut chat = store.require_chat(id).await?;
+
+    // Gateway catalog sync may migrate this row's model to a unique
+    // route-equivalent gateway key. Serialize that migration with explicit
+    // user model changes so whichever operation acquires the lock last wins
+    // from a current value rather than overwriting an in-flight choice.
+    let _model_write = if updates_model {
+        Some(crate::providers::GATEWAY_STATE_WRITES.lock().await)
+    } else {
+        None
+    };
 
     if !store
         .update_chat_metadata(

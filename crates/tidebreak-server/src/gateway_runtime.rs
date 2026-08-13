@@ -66,6 +66,15 @@ pub(crate) struct GatewayRuntime {
     /// shell through [`crate::register_pending_pairing`] — the renderer can
     /// read and dismiss it, never set it or choose its URL.
     pending_pairing: Mutex<Option<PendingPairing>>,
+    #[cfg(test)]
+    migration_pause: Mutex<Option<Arc<MigrationPause>>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MigrationPause {
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 /// The shell-registered pairing a sign-in may commit.
@@ -174,6 +183,8 @@ impl GatewayRuntime {
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
             pending_pairing: Mutex::new(None),
+            #[cfg(test)]
+            migration_pause: Mutex::new(None),
         })
     }
 
@@ -802,6 +813,8 @@ impl GatewayRuntime {
                     .as_ref()
                     .map(|snapshot| snapshot.models.len())
                     .unwrap_or_default();
+                let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
+                let policy = self.recheck_sync_policy(&base_url)?;
                 self.migrate_canonical_model_selections(&policy).await?;
                 return Ok(count);
             }
@@ -890,16 +903,7 @@ impl GatewayRuntime {
         // push) may have re-pointed the deployment while it was in flight.
         // Re-resolve under the lock and refuse to stamp a snapshot the new
         // policy never entitled.
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
-        if policy.gateway_url.as_deref() != Some(base_url.as_str()) {
-            // A benign, retryable race — the deployment was re-pointed while
-            // the fetch was in flight — not an internal fault. The stable
-            // kind lets clients branch on it, as with `managed_profile`.
-            return Err(crate::error::ServerError::conflict_kind(
-                "gateway_changed",
-                "the model gateway configuration changed during model sync",
-            ));
-        }
+        let policy = self.recheck_sync_policy(&base_url)?;
         providers::write_gateway_snapshot(
             &*self.store,
             &providers::GatewayModelSnapshot {
@@ -913,6 +917,23 @@ impl GatewayRuntime {
         .await?;
         self.migrate_canonical_model_selections(&policy).await?;
         Ok(count)
+    }
+
+    fn recheck_sync_policy(
+        &self,
+        base_url: &str,
+    ) -> std::result::Result<crate::managed_policy::ManagedPolicy, crate::error::ServerError> {
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        if policy.gateway_url.as_deref() != Some(base_url) {
+            // A benign, retryable race — the deployment was re-pointed while
+            // the fetch was in flight — not an internal fault. The stable
+            // kind lets clients branch on it, as with `managed_profile`.
+            return Err(crate::error::ServerError::conflict_kind(
+                "gateway_changed",
+                "the model gateway configuration changed during model sync",
+            ));
+        }
+        Ok(policy)
     }
 
     /// Move saved curated selections onto their unique entitled gateway
@@ -933,12 +954,22 @@ impl GatewayRuntime {
             if let Some(equivalent) =
                 providers::unique_gateway_equivalent(&*self.store, policy, &selection).await?
             {
-                crate::model_roles::write_selection(
+                self.pause_migration_for_test().await;
+                if crate::model_roles::read_selection(
                     &*self.store,
                     crate::model_roles::ModelRole::Chat,
-                    Some(&equivalent),
                 )
-                .await?;
+                .await?
+                .as_deref()
+                    == Some(selection.as_str())
+                {
+                    crate::model_roles::write_selection(
+                        &*self.store,
+                        crate::model_roles::ModelRole::Chat,
+                        Some(&equivalent),
+                    )
+                    .await?;
+                }
             }
         }
         for chat in self.store.list_chats().await? {
@@ -948,11 +979,33 @@ impl GatewayRuntime {
             if let Some(equivalent) =
                 providers::unique_gateway_equivalent(&*self.store, policy, selection).await?
             {
-                self.store.set_chat_model(chat.id, Some(equivalent)).await?;
+                self.pause_migration_for_test().await;
+                if self
+                    .store
+                    .get_chat(chat.id)
+                    .await?
+                    .and_then(|current| current.model)
+                    .as_deref()
+                    == Some(selection)
+                {
+                    self.store.set_chat_model(chat.id, Some(equivalent)).await?;
+                }
             }
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    async fn pause_migration_for_test(&self) {
+        let pause = self.migration_pause.lock().await.take();
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn pause_migration_for_test(&self) {}
 
     /// Keep the entitled-model snapshot fresh without a manual refresh: sync
     /// once immediately (the boot case) and then on a long interval, for as
@@ -1955,6 +2008,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_does_not_overwrite_a_newer_global_selection() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.migration_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("openai::gpt-5.6-sol"),
+        )
+        .await
+        .unwrap();
+        pause.release.notify_one();
+        sync.await.unwrap().unwrap();
+
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("openai::gpt-5.6-sol")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_does_not_overwrite_a_newer_chat_selection_or_running_turn_model() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        let chat = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("anthropic::claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = tidebreak_core::TurnId::new();
+        assert!(matches!(
+            store
+                .accept_turn(turn_id, chat.id, "anthropic::claude-opus-5", "hello")
+                .await
+                .unwrap(),
+            tidebreak_core::AcceptTurnOutcome::Accepted(_)
+        ));
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.migration_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        store
+            .set_chat_model(chat.id, Some("openai::gpt-5.6-sol".into()))
+            .await
+            .unwrap();
+        pause.release.notify_one();
+        sync.await.unwrap().unwrap();
+
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("openai::gpt-5.6-sol")
+        );
+        assert_eq!(
+            store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+            "anthropic::claude-opus-5",
+            "selection migration must not rewrite the model frozen into a running turn"
+        );
+    }
+
+    #[tokio::test]
     async fn sync_leaves_ambiguous_or_unmatched_chat_selections_for_the_picker() {
         let gateway = Arc::new(FakeGateway::default());
         let mut catalog = sample_catalog();
@@ -2070,6 +2226,77 @@ mod tests {
                 .as_deref(),
             Some("model_gateway::sample-claude")
         );
+    }
+
+    #[tokio::test]
+    async fn a_304_sync_racing_a_policy_repoint_refuses_selection_migration() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+
+        struct SwappableOs(std::sync::Mutex<String>);
+
+        impl crate::managed_policy::OsPolicySource for SwappableOs {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some(self.0.lock().unwrap().clone()))
+            }
+        }
+
+        let (seed_runtime, store, directory) = signed_in_runtime(&base).await;
+        seed_runtime.sync_models().await.unwrap();
+        drop(seed_runtime);
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let os = Arc::new(SwappableOs(std::sync::Mutex::new(base.clone())));
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            os.clone(),
+        );
+        let held = providers::GATEWAY_STATE_WRITES.lock().await;
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        while gateway.catalog_not_modified.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        *os.0.lock().unwrap() = "https://gateway-b.test".to_owned();
+        drop(held);
+
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("a 304 sync must recheck policy before migration");
+        assert_eq!(error.kind(), "gateway_changed");
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+        drop(directory);
     }
 
     #[tokio::test]

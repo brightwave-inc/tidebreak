@@ -231,6 +231,15 @@ pub async fn put_settings(
     if let Some(Some(model)) = body.model.as_mut() {
         *model = validate_model_selection(&state, model, false).await?;
     }
+    // Gateway catalog sync may migrate the saved chat selection to a unique
+    // route-equivalent gateway key. Serialize an explicit user update with
+    // that migration so the later lock winner is also the durable winner;
+    // neither side can overwrite a choice made while it was in flight.
+    let _model_write = if body.model.is_some() {
+        Some(crate::providers::GATEWAY_STATE_WRITES.lock().await)
+    } else {
+        None
+    };
     match body.model {
         // Absent: leave the model unchanged.
         None => {}
