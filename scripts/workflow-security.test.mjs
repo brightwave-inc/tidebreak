@@ -793,33 +793,53 @@ test("sandbox images are scanned before push and the pin loop never touches main
   const publish = workflows["publish-sandbox-image.yml"];
   const build = workflowJob(publish, "build");
   const pin = workflowJob(publish, "pin");
+  const scanJob = publish.includes("\n  scan:\n")
+    ? workflowJob(publish, "scan")
+    : null;
+  const scanner = scanJob ?? build;
 
   // The scanner is a checksum-pinned binary release, not a third-party
-  // action, and it runs between build and push on both variants.
-  assert.match(build, /trivy_\$\{TRIVY_VERSION\}_\$\{asset\}\.tar\.gz/);
-  assert.match(build, /sha256sum --check/);
+  // action. It may still live in `build` (scan-before-arch-push) or in a
+  // packages:read `scan` job that gates the version-tag manifest — both
+  // keep trivy off any token that can publish the user-facing tag.
+  assert.match(scanner, /trivy_\$\{TRIVY_VERSION\}_\$\{asset\}\.tar\.gz/);
+  assert.match(scanner, /sha256sum --check/);
   assert.match(publish, /^  TRIVY_VERSION: \d+\.\d+\.\d+$/m);
-  const scanIndex = build.indexOf("Scan both variants before push");
-  assert.notEqual(scanIndex, -1);
-  assert.ok(
-    build.indexOf("Build both image variants") < scanIndex &&
-      scanIndex < build.indexOf("Push per-architecture tags"),
-    "the scan must gate the per-arch push",
-  );
+  if (scanJob === null) {
+    const scanIndex = build.indexOf("Scan both variants before push");
+    assert.notEqual(scanIndex, -1);
+    assert.ok(
+      build.indexOf("Build both image variants") < scanIndex &&
+        scanIndex < build.indexOf("Push per-architecture tags"),
+      "the scan must gate the per-arch push",
+    );
+  } else {
+    assert.doesNotMatch(build, /trivy/i);
+    assert.match(
+      scanJob,
+      /^    permissions:\n      contents: read\n      packages: read$/m,
+    );
+    assert.doesNotMatch(scanJob, /packages: write/);
+    assert.doesNotMatch(scanJob, /actions\/checkout/);
+    assert.match(
+      workflowJob(publish, "manifest"),
+      /needs: \[resolve, build, scan\]/,
+    );
+  }
 
   // Policy: the run summary carries the full all-severities report, but the
   // publish fails only on fixable CRITICAL vulnerabilities or any secret. A
   // broader gate would drown in LibreOffice CVE noise and be ignored.
   assert.match(
-    build,
+    scanner,
     /trivy image --timeout 15m --scanners vuln,secret \\\n\s+--format table --output "\$report" "\$image"/,
   );
   assert.match(
-    build,
+    scanner,
     /trivy image --timeout 15m --scanners vuln \\\n\s+--severity CRITICAL --ignore-unfixed --exit-code 1 "\$image"/,
   );
   assert.match(
-    build,
+    scanner,
     /trivy image --timeout 15m --scanners secret --exit-code 1 "\$image"/,
   );
 
