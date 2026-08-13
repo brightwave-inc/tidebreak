@@ -93,8 +93,8 @@ pub const MAX_ACTIVITY_EXEC_OUTPUT_CHARS: usize = 2_000;
 /// A bounded headline for one background-agent activity step.
 ///
 /// This is deliberately smaller than [`ToolActionPreview`]. The command,
-/// arguments, and query are model-authored text: they are bounded for safe
-/// single-line presentation, but may repeat any information the background
+/// arguments, query, and summary are model-authored text: they are bounded for
+/// safe single-line presentation, but may repeat any information the background
 /// agent already saw and are therefore outside the host-field non-disclosure
 /// guarantee. The projection copies no stored result text except a settled
 /// `exec` receipt's bounded tail — see [`Self::with_exec_result`] — and never
@@ -103,7 +103,9 @@ pub const MAX_ACTIVITY_EXEC_OUTPUT_CHARS: usize = 2_000;
 /// admitted delegated file.
 ///
 /// Command and search fields use the foreground approval-card projection so
-/// both surfaces share the same sanitization.
+/// both surfaces share the same sanitization. The summary is projected the
+/// same way but shown only here and on the result card, never on an approval
+/// card — see `docs/decisions/0015-tool-call-narration.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentActivityDetail {
@@ -113,6 +115,13 @@ pub enum AgentActivityDetail {
     Exec {
         command: String,
         args: Vec<String>,
+        /// The model's own sentence about this step, when it wrote one.
+        ///
+        /// Display-only, exactly as on [`ToolActionPreview`]: nothing in the
+        /// background path reads it, and no step's identity depends on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         exit_code: Option<i32>,
@@ -121,8 +130,16 @@ pub enum AgentActivityDetail {
         output: Option<String>,
     },
     /// One public-web query, trimmed and bounded like its approval preview.
+    ///
+    /// No narration: a search step is a single rail row with no body to open,
+    /// so a sentence here would displace the query rather than lead it, and
+    /// the literal action has to stay reachable.
     Search { query: String },
     /// The bounded leaf name of the one canonically admitted delegated file.
+    ///
+    /// No narration: this headline comes from the host's admission record
+    /// rather than from model-authored arguments, so there is nothing the model
+    /// wrote to show.
     File { name: String },
 }
 
@@ -136,9 +153,15 @@ impl AgentActivityDetail {
     #[must_use]
     pub fn build(tool_name: &str, arguments: &Value) -> Option<Self> {
         match ToolActionPreview::build(tool_name, arguments) {
-            Some(ToolActionPreview::Exec { command, args, .. }) => Some(Self::Exec {
+            Some(ToolActionPreview::Exec {
                 command,
                 args,
+                summary,
+                ..
+            }) => Some(Self::Exec {
+                command,
+                args,
+                summary,
                 exit_code: None,
                 output: None,
             }),
@@ -178,7 +201,13 @@ impl AgentActivityDetail {
     /// split mid-codepoint.
     #[must_use]
     pub fn with_exec_result(self, result: &str) -> Self {
-        let Self::Exec { command, args, .. } = self else {
+        let Self::Exec {
+            command,
+            args,
+            summary,
+            ..
+        } = self
+        else {
             return self;
         };
         let exit_code = result
@@ -189,6 +218,7 @@ impl AgentActivityDetail {
         Self::Exec {
             command,
             args,
+            summary,
             exit_code,
             output: receipt_tail(result, MAX_ACTIVITY_EXEC_OUTPUT_CHARS),
         }
@@ -1473,6 +1503,7 @@ mod tests {
                 Some(AgentActivityDetail::Exec {
                     command: "python".into(),
                     args: vec!["safearg".into()],
+                    summary: None,
                     exit_code: None,
                     output: None,
                 }),
@@ -1484,6 +1515,23 @@ mod tests {
                 Some(AgentActivityDetail::Exec {
                     command: "cat".into(),
                     args: vec!["/Users/alice/private.txt".into()],
+                    summary: None,
+                    exit_code: None,
+                    output: None,
+                }),
+            ),
+            (
+                "a background step carries the model's own sentence, bounded",
+                crate::SANDBOX_EXEC_TOOL,
+                json!({
+                    "command": "python3",
+                    "args": ["report.py"],
+                    "summary": "\u{202e}Rebuilding the quarterly report",
+                }),
+                Some(AgentActivityDetail::Exec {
+                    command: "python3".into(),
+                    args: vec!["report.py".into()],
+                    summary: Some("Rebuilding the quarterly report".into()),
                     exit_code: None,
                     output: None,
                 }),
@@ -1503,6 +1551,7 @@ mod tests {
                     args: (0..MAX_ACTION_ARGS)
                         .map(|index| format!("arg-{index}"))
                         .collect(),
+                    summary: None,
                     exit_code: None,
                     output: None,
                 }),
@@ -1538,6 +1587,7 @@ mod tests {
                 Some(AgentActivityDetail::Exec {
                     command: "leftright".into(),
                     args: Vec::new(),
+                    summary: None,
                     exit_code: None,
                     output: None,
                 }),
@@ -1558,9 +1608,14 @@ mod tests {
             })
         );
 
+        // The narration is carried through settling, not re-derived: a receipt
+        // cannot recover a sentence the model wrote at call time, so a
+        // reconstruction that dropped it would blank the headline the moment a
+        // step finished — the state a reader looks at most.
         let base = AgentActivityDetail::Exec {
             command: "python3".into(),
             args: vec!["report.py".into()],
+            summary: Some("Rebuilding the quarterly report".into()),
             exit_code: None,
             output: None,
         };
@@ -1579,6 +1634,7 @@ mod tests {
                 AgentActivityDetail::Exec {
                     command: "python3".into(),
                     args: vec!["report.py".into()],
+                    summary: Some("Rebuilding the quarterly report".into()),
                     exit_code,
                     output: Some(result.into()),
                 },
@@ -1597,6 +1653,7 @@ mod tests {
         let base = AgentActivityDetail::Exec {
             command: "python3".into(),
             args: Vec::new(),
+            summary: None,
             exit_code: None,
             output: None,
         };

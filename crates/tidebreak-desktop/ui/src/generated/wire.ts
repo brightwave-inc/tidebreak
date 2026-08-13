@@ -12,8 +12,8 @@
  * A bounded headline for one background-agent activity step.
  *
  * This is deliberately smaller than [`ToolActionPreview`]. The command,
- * arguments, and query are model-authored text: they are bounded for safe
- * single-line presentation, but may repeat any information the background
+ * arguments, query, and summary are model-authored text: they are bounded for
+ * safe single-line presentation, but may repeat any information the background
  * agent already saw and are therefore outside the host-field non-disclosure
  * guarantee. The projection copies no stored result text except a settled
  * `exec` receipt's bounded tail — see [`Self::with_exec_result`] — and never
@@ -22,9 +22,18 @@
  * admitted delegated file.
  *
  * Command and search fields use the foreground approval-card projection so
- * both surfaces share the same sanitization.
+ * both surfaces share the same sanitization. The summary is projected the
+ * same way but shown only here and on the result card, never on an approval
+ * card — see `docs/decisions/0015-tool-call-narration.md`.
  */
-export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, exit_code?: number, output?: string, } | { "kind": "search", query: string, } | { "kind": "file", name: string, };
+export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, 
+/**
+ * The model's own sentence about this step, when it wrote one.
+ *
+ * Display-only, exactly as on [`ToolActionPreview`]: nothing in the
+ * background path reads it, and no step's identity depends on it.
+ */
+summary?: string, exit_code?: number, output?: string, } | { "kind": "search", query: string, } | { "kind": "file", name: string, };
 
 /**
  * One renderer-safe entry in a background run's ordered activity history.
