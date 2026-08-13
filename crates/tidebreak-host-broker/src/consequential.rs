@@ -59,6 +59,11 @@ pub enum Consequence {
 /// close, decline, confirm, accept, archive, block, report, approve) are NOT
 /// here. Asking again on those is the over-asking failure mode — see decision
 /// record 0010.
+///
+/// Locale bound: this lexicon is English. That is a deliberate accepted
+/// bound (decision record 0010), not an omission to fill with a translation
+/// dictionary. Navigation words in other languages remaining untripped is
+/// the same over-ask tradeoff as keeping the English list short.
 const RISK_ACTION_WORDS: &[&str] = &[
     "send",
     "resend",
@@ -133,7 +138,7 @@ const MAX_LABEL_IN_REASON: usize = 80;
 /// `label`.
 pub fn classify(op: ControlOp, role: Option<&str>, label: Option<&str>) -> Consequence {
     match op {
-        ControlOp::Click => classify_click(label),
+        ControlOp::Click => classify_click(role, label),
         ControlOp::TypeText => classify_type_text(role, label),
         // A key press has no element label to classify; the broker gates the
         // commit-shaped keys separately via [`key_press_needs_confirmation`].
@@ -158,7 +163,17 @@ pub fn key_press_needs_confirmation(key: &str, has_modifier: bool) -> bool {
     )
 }
 
-fn classify_click(label: Option<&str>) -> Consequence {
+fn classify_click(role: Option<&str>, label: Option<&str>) -> Consequence {
+    // Icon-only activatable controls have no label the lexicon can read, so
+    // they cannot be classified as navigation and must not fail open as
+    // Benign. See decision record 0010.
+    if is_activatable_control_role(role) && label_missing_or_empty(label) {
+        return Consequence::Consequential {
+            reason: "This control has no accessible label, so it cannot be \
+                     classified as navigation."
+                .to_string(),
+        };
+    }
     let Some(label) = label else {
         return Consequence::Benign;
     };
@@ -172,6 +187,22 @@ fn classify_click(label: Option<&str>) -> Consequence {
         };
     }
     Consequence::Benign
+}
+
+/// Buttons, menu items, and links — the activatable roles a click can fire.
+/// Matches the AX names and any role whose lowercase form contains those
+/// tokens, so a future UIA backend's `Button` / `MenuItem` / `Hyperlink`
+/// strings take the same path.
+fn is_activatable_control_role(role: Option<&str>) -> bool {
+    let Some(role) = role else {
+        return false;
+    };
+    let lower = role.to_lowercase();
+    lower.contains("button") || lower.contains("menuitem") || lower.contains("link")
+}
+
+fn label_missing_or_empty(label: Option<&str>) -> bool {
+    label.is_none_or(|label| label.trim().is_empty())
 }
 
 fn classify_type_text(role: Option<&str>, label: Option<&str>) -> Consequence {
@@ -321,11 +352,29 @@ mod tests {
     }
 
     #[test]
-    fn click_with_no_label_is_benign() {
+    fn unlabeled_activatable_click_is_consequential() {
+        for role in ["AXButton", "AXMenuItem", "AXLink", "Button", "menuitem"] {
+            let verdict = classify(ControlOp::Click, Some(role), None);
+            assert!(
+                is_consequential(&verdict),
+                "expected unlabeled {role:?} click to be consequential",
+            );
+        }
+        assert!(is_consequential(&classify(
+            ControlOp::Click,
+            Some("AXButton"),
+            Some(""),
+        )));
+        // A labeled navigation button is still the over-ask we refuse.
         assert_eq!(
-            classify(ControlOp::Click, Some("AXButton"), None),
-            Consequence::Benign
+            classify(ControlOp::Click, Some("AXButton"), Some("Cancel")),
+            Consequence::Benign,
         );
+    }
+
+    #[test]
+    fn unlabeled_click_without_activatable_role_is_benign() {
+        assert_eq!(classify(ControlOp::Click, None, None), Consequence::Benign);
         assert_eq!(
             classify(ControlOp::Click, None, Some("")),
             Consequence::Benign

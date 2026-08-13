@@ -224,6 +224,32 @@ impl Shared {
             eprintln!("tidebreak host broker could not persist audit event: {error}");
         }
     }
+
+    /// Drop a one-shot grant after the operation it authorized finished.
+    /// Missing or standing grants are no-ops. One-shots are never persisted,
+    /// so this is a memory-only retain — a failed no-op rewrite of the
+    /// standing table must not leave the row live.
+    fn consume_single_use_grant(&self, grant_id: Option<GrantId>) -> Result<(), BrokerError> {
+        let Some(grant_id) = grant_id else {
+            return Ok(());
+        };
+        if self.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        let mut current = self.state.lock().map_err(|_| BrokerError::StatePoisoned)?;
+        if self.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        if !current
+            .grants
+            .iter()
+            .any(|grant| grant.id() == grant_id && grant.is_single_use())
+        {
+            return Ok(());
+        }
+        current.grants.retain(|grant| grant.id() != grant_id);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -731,17 +757,18 @@ struct OperationAudit {
 
 impl OperationAudit {
     fn from_envelope(envelope: &OperationEnvelope) -> Self {
-        // Input synthesis (click / type / key) is a host mutation: its intent
-        // record must be durable before any event is synthesized, and the op
-        // refuses when the record cannot be made durable. Scroll and focus
-        // are reversible view changes authorized on the read capability, so
-        // like the folder reads they are completion-recorded only.
+        // Input synthesis (click / type / key / scroll / focus) is a host
+        // mutation: its intent record must be durable before any event is
+        // synthesized, and the op refuses when the record cannot be made
+        // durable. Scroll warps the cursor; focus raises a window.
         let mutates = matches!(
             envelope.request,
             OperationRequest::WriteFile(_)
                 | OperationRequest::CuClick { .. }
                 | OperationRequest::CuTypeText { .. }
                 | OperationRequest::CuKeyPress { .. }
+                | OperationRequest::CuScroll { .. }
+                | OperationRequest::CuFocusWindow { .. }
         );
         let (operation, capability, target) = match &envelope.request {
             OperationRequest::ListRoots => (
@@ -931,6 +958,31 @@ impl Broker {
         staging: PathBuf,
     ) -> Self {
         Self::with_components(policy, true, audit, backend, prepare_cu_staging(staging))
+    }
+
+    /// Test hook: durable state plus an injected computer-use backend.
+    #[cfg(test)]
+    pub(crate) fn test_open_with_computer_use(
+        policy: RootPolicy,
+        data_dir: &Path,
+        audit: Arc<dyn AuditSink>,
+        backend: Arc<dyn ComputerUseBackend>,
+        staging: PathBuf,
+    ) -> Result<Self, BrokerError> {
+        let state_file = StateFile::open(data_dir)?;
+        let state = state_file.load(&policy, true)?;
+        Ok(Self {
+            shared: Arc::new(Shared {
+                policy,
+                execute_commands: true,
+                state: Mutex::new(state),
+                state_file: Some(state_file),
+                audit,
+                failed_closed: AtomicBool::new(false),
+                computer_use: backend,
+                cu_staging: prepare_cu_staging(staging),
+            }),
+        })
     }
 
     /// Open durable broker state under the application-private data directory.
@@ -1726,11 +1778,32 @@ impl Controller {
         let scope = cu_grant_scope(request.capability, request.bundle_id.as_deref())?;
         let mut state = self.lock_state()?;
         let mut next = state.clone();
-        if let Some(existing) = next.grants.iter().find(|grant| {
+        let same_tuple = |grant: &Grant| {
             grant.subject() == request.subject
                 && grant.capability() == request.capability
                 && *grant.scope() == scope
-        }) {
+        };
+        // A standing grant already covers this tuple. Once is weaker: reuse
+        // the standing row rather than stacking a one-shot beside it.
+        if let Some(existing) = next
+            .grants
+            .iter()
+            .find(|grant| same_tuple(grant) && !grant.is_single_use())
+        {
+            return Ok(CuGrantAppResult {
+                granted: false,
+                grant_id: existing.id(),
+            });
+        }
+        if !request.single_use {
+            // Standing consent replaces any leftover one-shot at this tuple.
+            next.grants
+                .retain(|grant| !(same_tuple(grant) && grant.is_single_use()));
+        } else if let Some(existing) = next
+            .grants
+            .iter()
+            .find(|grant| same_tuple(grant) && grant.is_single_use())
+        {
             return Ok(CuGrantAppResult {
                 granted: false,
                 grant_id: existing.id(),
@@ -1743,6 +1816,11 @@ impl Controller {
             scope,
             ConsentRecord::new(request.consent, Utc::now()),
         )?;
+        let grant = if request.single_use {
+            grant.into_single_use()
+        } else {
+            grant
+        };
         let grant_id = grant.id();
         next.grants.push(grant);
         self.commit_state(&mut state, next)?;
@@ -1766,7 +1844,22 @@ impl Controller {
         });
         let revoked = next.grants.len() != before;
         if revoked {
-            self.commit_state(&mut state, next)?;
+            let dropped_only_shots = state
+                .grants
+                .iter()
+                .filter(|grant| {
+                    grant.subject() == request.subject
+                        && grant.capability() == request.capability
+                        && *grant.scope() == scope
+                })
+                .all(Grant::is_single_use);
+            if dropped_only_shots {
+                // One-shots are not on disk. Do not gate forgetting them on a
+                // rewrite of the standing table.
+                *state = next;
+            } else {
+                self.commit_state(&mut state, next)?;
+            }
         }
         Ok(revoked)
     }
@@ -1883,9 +1976,12 @@ impl Controller {
         let result = self
             .perform_confirmed_action(&pending, bundle_id, target, op)
             .map_err(error_response);
+        if let Ok((_, grant_id)) = &result {
+            let _ = self.shared.consume_single_use_grant(Some(*grant_id));
+        }
         self.shared
             .record_completion(&audit.completion(request_id, result.as_ref().err()));
-        result
+        result.map(|(meta, _)| meta)
     }
 
     /// Re-authorize, re-describe, and finally dispatch a confirmed action.
@@ -1897,14 +1993,14 @@ impl Controller {
         bundle_id: &str,
         target: &ElementTarget,
         op: ControlOp,
-    ) -> Result<ControlMeta, BrokerError> {
+    ) -> Result<(ControlMeta, GrantId), BrokerError> {
         if is_blocked_control_bundle(bundle_id) {
             return Err(BrokerError::BlockedApp);
         }
-        {
+        let grant_id = {
             let state = self.lock_state()?;
-            authorize_computer_use(&state, pending.context, Capability::ControlApp, bundle_id)?;
-        }
+            authorize_computer_use(&state, pending.context, Capability::ControlApp, bundle_id)?
+        };
         // The confirmation is honored only while the element still
         // reports the label the user approved. A UI that shifted under
         // the prompt — or a hijacked page that swapped the button —
@@ -1966,6 +2062,7 @@ impl Controller {
                 .key_press(bundle_id, key, modifiers.as_deref()),
         }
         .map_err(BrokerError::ComputerUse)
+        .map(|meta| (meta, grant_id))
     }
 
     fn hello(&self) -> HelloResult {
@@ -2020,6 +2117,11 @@ impl Operator {
             }
         }
         let (result, grant_id) = self.execute(envelope);
+        // A confirmation hold is not terminal: the one-shot must cover the
+        // confirm that follows. Any other outcome spends it.
+        if !matches!(result, Ok(OperationResult::CuNeedsConfirmation(_))) {
+            let _ = self.shared.consume_single_use_grant(grant_id);
+        }
         let result = result.map_err(error_response);
         self.record_completion(request_id, audit, grant_id, &result);
         response_envelope(request_id, result)
@@ -2185,7 +2287,7 @@ impl Operator {
             actor: metadata.actor,
             operation,
             target: metadata.target,
-            outcome: audit_outcome(error),
+            outcome: operation_audit_outcome(result),
             capability: Some(metadata.capability),
             grant_id,
             error_code: error.map(|error| error.code),
@@ -2364,6 +2466,19 @@ impl Operator {
         Ok(grant_id)
     }
 
+    /// A one-shot is spent when the authorizing op fails after the grant
+    /// check. Confirmation holds stay live (they return `Ok`).
+    fn spend_once_on_failure<T>(
+        &self,
+        grant_id: GrantId,
+        result: Result<T, BrokerError>,
+    ) -> Result<T, BrokerError> {
+        if result.is_err() {
+            let _ = self.shared.consume_single_use_grant(Some(grant_id));
+        }
+        result
+    }
+
     /// Every computer-use handler below follows the same spine: validate and
     /// bound the request, hard-refuse a blocked bundle, authorize against the
     /// live grants (deny-by-default, consent-card signal on a miss), and only
@@ -2405,11 +2520,13 @@ impl Operator {
             }
             .ok_or(BrokerError::Denied)?
         };
-        let windows = self
-            .shared
-            .computer_use
-            .list_windows(bundle_id.as_deref())
-            .map_err(BrokerError::ComputerUse)?;
+        let windows = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .list_windows(bundle_id.as_deref())
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuListWindows { windows }, Some(grant_id)))
     }
 
@@ -2468,11 +2585,13 @@ impl Operator {
                 .unwrap_or_default(),
             CaptureTarget::Display { .. } => Vec::new(),
         };
-        let meta = self
-            .shared
-            .computer_use
-            .capture_with_marks(&backend_target, &out_path, &marks)
-            .map_err(BrokerError::ComputerUse)?;
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .capture_with_marks(&backend_target, &out_path, &marks)
+                .map_err(BrokerError::ComputerUse),
+        )?;
         {
             let mut state = self.lock_state()?;
             state.handoffs.insert(
@@ -2511,15 +2630,17 @@ impl Operator {
             let state = self.lock_state()?;
             authorize_computer_use(&state, context, Capability::ReadAppContent, &bundle_id)?
         };
-        let tree = self
-            .shared
-            .computer_use
-            .read_ax_tree(
-                &bundle_id,
-                Some(max_depth.map_or(MAX_CU_AX_DEPTH, |depth| depth.min(MAX_CU_AX_DEPTH))),
-                Some(max_nodes.map_or(MAX_CU_AX_NODES, |nodes| nodes.min(MAX_CU_AX_NODES))),
-            )
-            .map_err(BrokerError::ComputerUse)?;
+        let tree = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .read_ax_tree(
+                    &bundle_id,
+                    Some(max_depth.map_or(MAX_CU_AX_DEPTH, |depth| depth.min(MAX_CU_AX_DEPTH))),
+                    Some(max_nodes.map_or(MAX_CU_AX_NODES, |nodes| nodes.min(MAX_CU_AX_NODES))),
+                )
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuReadAppContent(tree), Some(grant_id)))
     }
 
@@ -2543,25 +2664,30 @@ impl Operator {
             let state = self.lock_state()?;
             authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
-        if let Some(held) = self.consequential_gate(
-            context,
-            ControlOp::Click,
-            &bundle_id,
-            &target,
-            PendingActionKind::Click {
-                bundle_id: bundle_id.clone(),
-                target: target.clone(),
-                button: button.clone(),
-                click_count,
-            },
+        if let Some(held) = self.spend_once_on_failure(
+            grant_id,
+            self.consequential_gate(
+                context,
+                ControlOp::Click,
+                &bundle_id,
+                &target,
+                PendingActionKind::Click {
+                    bundle_id: bundle_id.clone(),
+                    target: target.clone(),
+                    button: button.clone(),
+                    click_count,
+                },
+            ),
         )? {
             return Ok((held, Some(grant_id)));
         }
-        let meta = self
-            .shared
-            .computer_use
-            .click(&bundle_id, &target, button.as_deref(), click_count)
-            .map_err(BrokerError::ComputerUse)?;
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .click(&bundle_id, &target, button.as_deref(), click_count)
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuClick(meta), Some(grant_id)))
     }
 
@@ -2584,24 +2710,29 @@ impl Operator {
             let state = self.lock_state()?;
             authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
-        if let Some(held) = self.consequential_gate(
-            context,
-            ControlOp::TypeText,
-            &bundle_id,
-            &target,
-            PendingActionKind::TypeText {
-                bundle_id: bundle_id.clone(),
-                text: text.clone(),
-                target: target.clone(),
-            },
+        if let Some(held) = self.spend_once_on_failure(
+            grant_id,
+            self.consequential_gate(
+                context,
+                ControlOp::TypeText,
+                &bundle_id,
+                &target,
+                PendingActionKind::TypeText {
+                    bundle_id: bundle_id.clone(),
+                    text: text.clone(),
+                    target: target.clone(),
+                },
+            ),
         )? {
             return Ok((held, Some(grant_id)));
         }
-        let meta = self
-            .shared
-            .computer_use
-            .type_text(&bundle_id, &text, &target)
-            .map_err(BrokerError::ComputerUse)?;
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .type_text(&bundle_id, &text, &target)
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuTypeText(meta), Some(grant_id)))
     }
 
@@ -2727,30 +2858,35 @@ impl Operator {
                 }
                 _ => key.clone(),
             };
-            if let Some(held) = self.hold_for_confirmation(
-                context,
-                &bundle_id,
-                PendingActionKind::KeyPress {
-                    bundle_id: bundle_id.clone(),
-                    key: key.clone(),
-                    modifiers: modifiers.clone(),
-                },
-                Some(truncate_label(&label)),
-                // A key press has no element, so no fingerprint to bind.
-                None,
-                format!(
-                    "This presses \u{201c}{}\u{201d}, a keyboard shortcut that can commit an action (send, delete, or quit) with no undo.",
-                    truncate_label(&label)
+            if let Some(held) = self.spend_once_on_failure(
+                grant_id,
+                self.hold_for_confirmation(
+                    context,
+                    &bundle_id,
+                    PendingActionKind::KeyPress {
+                        bundle_id: bundle_id.clone(),
+                        key: key.clone(),
+                        modifiers: modifiers.clone(),
+                    },
+                    Some(truncate_label(&label)),
+                    // A key press has no element, so no fingerprint to bind.
+                    None,
+                    format!(
+                        "This presses \u{201c}{}\u{201d}, a keyboard shortcut that can commit an action (send, delete, or quit) with no undo.",
+                        truncate_label(&label)
+                    ),
                 ),
             )? {
                 return Ok((held, Some(grant_id)));
             }
         }
-        let meta = self
-            .shared
-            .computer_use
-            .key_press(&bundle_id, &key, modifiers.as_deref())
-            .map_err(BrokerError::ComputerUse)?;
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .key_press(&bundle_id, &key, modifiers.as_deref())
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuKeyPress(meta), Some(grant_id)))
     }
 
@@ -2779,11 +2915,13 @@ impl Operator {
             let state = self.lock_state()?;
             authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
-        let meta = self
-            .shared
-            .computer_use
-            .scroll(&bundle_id, &target, dx, dy)
-            .map_err(BrokerError::ComputerUse)?;
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .scroll(&bundle_id, &target, dx, dy)
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuScroll(meta), Some(grant_id)))
     }
 
@@ -2801,11 +2939,13 @@ impl Operator {
             let state = self.lock_state()?;
             authorize_computer_use(&state, context, Capability::ControlApp, &bundle_id)?
         };
-        let meta = self
-            .shared
-            .computer_use
-            .focus_window(&bundle_id, window_id)
-            .map_err(BrokerError::ComputerUse)?;
+        let meta = self.spend_once_on_failure(
+            grant_id,
+            self.shared
+                .computer_use
+                .focus_window(&bundle_id, window_id)
+                .map_err(BrokerError::ComputerUse),
+        )?;
         Ok((OperationResult::CuFocusWindow(meta), Some(grant_id)))
     }
 
@@ -3079,7 +3219,9 @@ fn list_cu_app_grants(state: &State, subject: GrantSubject) -> Vec<GrantStatemen
         .grants
         .iter()
         .filter(|grant| {
-            grant.subject() == subject && matches!(grant.scope(), Scope::App { .. } | Scope::Screen)
+            !grant.is_single_use()
+                && grant.subject() == subject
+                && matches!(grant.scope(), Scope::App { .. } | Scope::Screen)
         })
         .map(|grant| GrantStatementSummary {
             grant_id: grant.id(),
@@ -3253,7 +3395,7 @@ fn error_response(error: BrokerError) -> ErrorResponse {
                 true,
             ),
             BackendErrorKind::Yielded => (
-                ErrorCode::Denied,
+                ErrorCode::Yielded,
                 "a system security surface owns the foreground",
                 false,
             ),
@@ -3311,6 +3453,15 @@ fn audit_outcome(error: Option<&ErrorResponse>) -> AuditOutcome {
         None => AuditOutcome::Allowed,
         Some(ErrorCode::Denied) => AuditOutcome::Denied,
         Some(_) => AuditOutcome::Failed,
+    }
+}
+
+/// Completion outcome for an operator result. A hold is not an executed
+/// action: [`AuditOutcome::Held`] is distinct from [`AuditOutcome::Allowed`].
+fn operation_audit_outcome(result: &Result<OperationResult, ErrorResponse>) -> AuditOutcome {
+    match result {
+        Ok(OperationResult::CuNeedsConfirmation(_)) => AuditOutcome::Held,
+        _ => audit_outcome(result.as_ref().err()),
     }
 }
 
@@ -4258,6 +4409,7 @@ fn list_grant_statements(state: &State) -> Result<Vec<GrantStatementSummary>, Er
     let live = state
         .grants
         .iter()
+        .filter(|grant| !grant.is_single_use())
         .map(|grant| (grant, None::<&UnavailableRoot>));
     let dormant = state
         .unavailable

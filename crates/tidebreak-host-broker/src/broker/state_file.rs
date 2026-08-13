@@ -172,6 +172,10 @@ impl StateFile {
         }
 
         let mut grants = persisted.grants;
+        // One-shot computer-use grants are session-only. A file that somehow
+        // still carries one (an older binary, a crash mid-write) must not
+        // resurrect it as standing consent.
+        grants.retain(|grant| !grant.is_single_use());
         if persisted.version < 4 && execute_commands {
             carry_forward_exec_grants(&mut grants)?;
         }
@@ -351,6 +355,7 @@ impl StateFile {
                 })
         }));
         let mut grants = state.grants.clone();
+        grants.retain(|grant| !grant.is_single_use());
         grants.extend(
             state
                 .unavailable

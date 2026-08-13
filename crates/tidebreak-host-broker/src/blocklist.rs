@@ -16,9 +16,35 @@ pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[
     // is being watched through.
     "io.brightwave.tidebreak",
     "io.brightwave.",
-    // Terminals: shell access would bypass the sandboxed exec path entirely.
+    // Terminals, IDEs, editors, and command launchers: a ControlApp grant
+    // over any of these reaches unsandboxed local execution (focus the
+    // integrated shell, type a command, press Return) and would bypass the
+    // sandboxed exec path. A bundle-id list cannot enumerate every app that
+    // embeds a shell; this is the common class. See decision record 0010.
     "com.apple.Terminal",
     "com.googlecode.iterm2",
+    "dev.warp.",
+    "net.kovidgoyal.kitty",
+    "org.alacritty",
+    "io.alacritty",
+    "com.github.wez.wezterm",
+    "com.mitchellh.ghostty",
+    "com.microsoft.VSCode",
+    "com.microsoft.VSCodeInsiders",
+    "com.visualstudio.code.oss",
+    // Cursor's stable ToDesktop-issued bundle id (not a com.cursor.* id).
+    "com.todesktop.230313mzl4w4u92",
+    "com.exafunction.windsurf",
+    "com.apple.dt.Xcode",
+    "com.jetbrains.",
+    "com.sublimetext.",
+    "com.panic.Nova",
+    "com.google.android.studio",
+    "dev.zed.Zed",
+    "org.gnu.Emacs",
+    "org.vim.MacVim",
+    "com.runningwithcrayons.Alfred",
+    "com.raycast.macos",
     // OS security and credential surfaces.
     "com.apple.loginwindow",
     "com.apple.SecurityAgent",
@@ -53,6 +79,28 @@ mod tests {
             "com.apple.Terminal",
             "com.apple.Terminal.helper",
             "com.apple.SecurityAgent",
+            "dev.warp.Warp-Stable",
+            "net.kovidgoyal.kitty",
+            "org.alacritty",
+            "io.alacritty",
+            "com.github.wez.wezterm",
+            "com.mitchellh.ghostty",
+            "com.microsoft.VSCode",
+            "com.microsoft.VSCodeInsiders",
+            "com.visualstudio.code.oss",
+            "com.todesktop.230313mzl4w4u92",
+            "com.exafunction.windsurf",
+            "com.apple.dt.Xcode",
+            "com.jetbrains.intellij",
+            "com.jetbrains.CLion",
+            "com.sublimetext.4",
+            "com.panic.Nova",
+            "com.google.android.studio",
+            "dev.zed.Zed",
+            "org.gnu.Emacs",
+            "org.vim.MacVim",
+            "com.runningwithcrayons.Alfred",
+            "com.raycast.macos",
         ] {
             assert!(is_blocked_control_bundle(blocked), "{blocked}");
         }
@@ -65,6 +113,8 @@ mod tests {
             "com.apple.Terminalized",
             "io.brightwavex.openwave",
             "com.apple.Notes",
+            "com.microsoft.Word",
+            "com.jetbrainsx.intellij",
             "com.example.Mail",
             "",
         ] {

@@ -214,6 +214,11 @@ pub struct CuGrantAppRequest {
     /// [`crate::ConsentMethod::PermissionDialog`] is accepted, matching the
     /// per-app approval card.
     pub consent: ConsentMethod,
+    /// One-shot consent: authorize the next matching operation, then forget
+    /// the grant. Session-only — never persisted — so a crash cannot promote
+    /// it into a standing grant. Absent on the wire means standing (`false`).
+    #[serde(default)]
+    pub single_use: bool,
 }
 
 /// Idempotent computer-use grant withdrawal for one exact capability + scope.
@@ -657,6 +662,10 @@ pub enum ErrorCode {
     /// label changed since it was read. Retryable: re-read the accessibility
     /// tree and re-issue against the fresh element.
     StaleElement,
+    /// A control op backed off because a security surface owns the foreground.
+    /// Distinct from [`ErrorCode::Denied`]: the remedy is to back off, never a
+    /// per-app consent card.
+    Yielded,
 }
 
 /// Safe error payload; it never embeds an absolute path or raw OS error text.

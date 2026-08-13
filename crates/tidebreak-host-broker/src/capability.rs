@@ -147,6 +147,12 @@ pub struct Grant {
     capability: Capability,
     scope: Scope,
     consent: ConsentRecord,
+    /// Session-only one-shot consent. Never written to the durable grant
+    /// table; the broker consumes it when the operation it authorized
+    /// reaches a terminal result (a confirmation hold is not terminal).
+    /// See decision record 0010.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    single_use: bool,
 }
 
 impl Grant {
@@ -164,7 +170,15 @@ impl Grant {
             capability,
             scope,
             consent,
+            single_use: false,
         })
+    }
+
+    /// Mark this grant as a one-shot that must not survive the process or
+    /// outlive the operation it authorizes.
+    pub(crate) fn into_single_use(mut self) -> Self {
+        self.single_use = true;
+        self
     }
 
     /// Stable identity recorded in operation receipts and audit entries.
@@ -191,6 +205,11 @@ impl Grant {
     pub const fn consent(&self) -> &ConsentRecord {
         &self.consent
     }
+
+    /// Whether this grant is a session-only one-shot.
+    pub const fn is_single_use(&self) -> bool {
+        self.single_use
+    }
 }
 
 impl<'de> Deserialize<'de> for Grant {
@@ -205,17 +224,24 @@ impl<'de> Deserialize<'de> for Grant {
             capability: Capability,
             scope: Scope,
             consent: ConsentRecord,
+            #[serde(default)]
+            single_use: bool,
         }
 
         let wire = WireGrant::deserialize(deserializer)?;
-        Self::from_consent(
+        let grant = Self::from_consent(
             wire.id,
             wire.subject,
             wire.capability,
             wire.scope,
             wire.consent,
         )
-        .map_err(D::Error::custom)
+        .map_err(D::Error::custom)?;
+        Ok(if wire.single_use {
+            grant.into_single_use()
+        } else {
+            grant
+        })
     }
 }
 

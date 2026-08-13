@@ -4453,7 +4453,10 @@ struct StubCuBackend {
     clicked: Mutex<Vec<(String, Option<String>)>>,
     typed: Mutex<Vec<String>>,
     keys: Mutex<Vec<String>>,
+    scrolled: Mutex<Vec<String>>,
+    focused: Mutex<Vec<String>>,
     capture_png: Vec<u8>,
+    fail_click: Mutex<Option<BackendErrorKind>>,
 }
 
 impl StubCuBackend {
@@ -4486,6 +4489,14 @@ impl StubCuBackend {
 
     fn keys(&self) -> Vec<String> {
         self.keys.lock().unwrap().clone()
+    }
+
+    fn scrolls(&self) -> Vec<String> {
+        self.scrolled.lock().unwrap().clone()
+    }
+
+    fn focuses(&self) -> Vec<String> {
+        self.focused.lock().unwrap().clone()
     }
 
     /// One interactive button in a tiny AX tree, so Set-of-Marks extraction
@@ -4568,6 +4579,12 @@ impl ComputerUseBackend for StubCuBackend {
         _button: Option<&str>,
         _click_count: Option<u32>,
     ) -> Result<ControlMeta, BackendError> {
+        if let Some(kind) = *self.fail_click.lock().unwrap() {
+            return Err(BackendError {
+                kind,
+                message: "injected click failure".to_owned(),
+            });
+        }
         self.clicked
             .lock()
             .unwrap()
@@ -4609,11 +4626,12 @@ impl ComputerUseBackend for StubCuBackend {
 
     fn scroll(
         &self,
-        _bundle_id: &str,
+        bundle_id: &str,
         _target: &ElementTarget,
         _dx: Option<f64>,
         _dy: Option<f64>,
     ) -> Result<ControlMeta, BackendError> {
+        self.scrolled.lock().unwrap().push(bundle_id.to_owned());
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
@@ -4623,9 +4641,10 @@ impl ComputerUseBackend for StubCuBackend {
 
     fn focus_window(
         &self,
-        _bundle_id: &str,
+        bundle_id: &str,
         _window_id: Option<u32>,
     ) -> Result<ControlMeta, BackendError> {
+        self.focused.lock().unwrap().push(bundle_id.to_owned());
         Ok(ControlMeta {
             success: true,
             used_fallback: false,
@@ -4693,12 +4712,26 @@ impl CuFixture {
     }
 
     fn grant(&self, capability: Capability, bundle_id: Option<&str>) -> CuGrantAppResult {
+        self.grant_with(capability, bundle_id, false)
+    }
+
+    fn grant_once(&self, capability: Capability, bundle_id: Option<&str>) -> CuGrantAppResult {
+        self.grant_with(capability, bundle_id, true)
+    }
+
+    fn grant_with(
+        &self,
+        capability: Capability,
+        bundle_id: Option<&str>,
+        single_use: bool,
+    ) -> CuGrantAppResult {
         let result = self
             .control(ControlRequest::CuGrantApp(CuGrantAppRequest {
                 subject: self.subject,
                 capability,
                 bundle_id: bundle_id.map(str::to_owned),
                 consent: ConsentMethod::PermissionDialog,
+                single_use,
             }))
             .unwrap();
         let ControlResult::CuGrantApp(result) = result else {
@@ -4719,6 +4752,17 @@ impl CuFixture {
             click_count: None,
         })
     }
+}
+
+#[test]
+fn a_yielded_backend_error_surfaces_as_yielded_not_denied() {
+    let response = error_response(BrokerError::ComputerUse(BackendError {
+        kind: BackendErrorKind::Yielded,
+        message: "helper wording is not the contract".to_owned(),
+    }));
+    assert_eq!(response.code, ErrorCode::Yielded);
+    assert_ne!(response.code, ErrorCode::Denied);
+    assert!(!response.retryable);
 }
 
 #[test]
@@ -4756,6 +4800,7 @@ fn blocked_bundles_refuse_control_ops_and_grants_even_with_a_grant_present() {
                 capability: Capability::ControlApp,
                 bundle_id: Some(blocked.to_owned()),
                 consent: ConsentMethod::PermissionDialog,
+                single_use: false,
             }))
             .unwrap_err();
         assert_eq!(grant_error.code, ErrorCode::Denied, "{blocked}");
@@ -4938,6 +4983,7 @@ fn control_grants_cover_reads_but_read_grants_never_cover_control() {
             capability: Capability::ReadAppContent,
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
+            single_use: false,
         }))
         .unwrap();
     assert!(matches!(granted, ControlResult::CuGrantApp(_)));
@@ -4984,6 +5030,7 @@ fn an_unrecordable_control_op_never_reaches_the_backend() {
             capability: Capability::ControlApp,
             bundle_id: Some("com.example.app".to_owned()),
             consent: ConsentMethod::PermissionDialog,
+            single_use: false,
         }),
     }))
     .unwrap();
@@ -5269,4 +5316,343 @@ fn every_computer_use_op_lands_in_the_audit_trail_desensitized() {
     assert!(events.iter().any(|event| {
         event.operation == AuditOperation::CuCaptureScreen && event.outcome == AuditOutcome::Allowed
     }));
+}
+
+#[test]
+fn a_once_grant_authorizes_exactly_one_terminal_op() {
+    let fixture = cu_setup();
+    assert!(
+        fixture
+            .grant_once(Capability::ControlApp, Some("com.example.app"))
+            .granted
+    );
+    // Default stub label is "Cancel" — benign, so the click fires now.
+    fixture.click("com.example.app").unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.clicks().len() == 1);
+}
+
+#[test]
+fn a_once_grant_covers_a_confirmation_hold_then_is_consumed() {
+    let fixture = cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+    fixture.backend.set_fingerprint("fp1");
+
+    let OperationResult::CuNeedsConfirmation(held) = fixture.click("com.example.app").unwrap()
+    else {
+        panic!("expected a confirmation hold")
+    };
+    // One-shots stay out of the management listing even while they still
+    // authorize the held confirm.
+    let listed = fixture
+        .control(ControlRequest::CuListAppGrants(CuListAppGrantsRequest {
+            subject: fixture.subject,
+        }))
+        .unwrap();
+    let ControlResult::CuListAppGrants { grants } = listed else {
+        panic!("unexpected control result")
+    };
+    assert!(grants.is_empty());
+
+    fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn a_standing_grant_replaces_a_leftover_once_grant() {
+    let fixture = cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    let standing = fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    assert!(standing.granted);
+    let listed = fixture
+        .control(ControlRequest::CuListAppGrants(CuListAppGrantsRequest {
+            subject: fixture.subject,
+        }))
+        .unwrap();
+    let ControlResult::CuListAppGrants { grants } = listed else {
+        panic!("unexpected control result")
+    };
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].grant_id, standing.grant_id);
+    fixture.click("com.example.app").unwrap();
+    fixture.click("com.example.app").unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 2);
+}
+
+#[test]
+fn a_once_grant_does_not_survive_broker_reload() {
+    let (temp, broker, _, state_dir) = durable_setup();
+    let subject = GrantSubject::conversation(Uuid::new_v4()).unwrap();
+    let standing = Grant::from_consent(
+        GrantId::new(),
+        subject,
+        Capability::ControlApp,
+        Scope::App {
+            bundle_id: "com.example.mail".to_owned(),
+        },
+        ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+    )
+    .unwrap();
+    let once = Grant::from_consent(
+        GrantId::new(),
+        subject,
+        Capability::ControlApp,
+        Scope::App {
+            bundle_id: "com.example.notes".to_owned(),
+        },
+        ConsentRecord::new(ConsentMethod::PermissionDialog, Utc::now()),
+    )
+    .unwrap()
+    .into_single_use();
+    let standing_id = standing.id();
+    {
+        let mut state = broker.shared.state.lock().unwrap();
+        state.grants.push(standing);
+        state.grants.push(once);
+        broker
+            .shared
+            .state_file
+            .as_ref()
+            .expect("durable broker")
+            .save(&state)
+            .unwrap();
+    }
+    drop(broker);
+    let reloaded = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    let grants = reloaded.shared.state.lock().unwrap().grants.clone();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].id(), standing_id);
+    assert!(!grants[0].is_single_use());
+}
+
+fn durable_cu_setup() -> CuFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = StubCuBackend::available();
+    let audit = Arc::new(CollectingAudit::default());
+    let state_dir = temp.path().join("app-data/host-broker");
+    let broker = Broker::test_open_with_computer_use(
+        test_policy(&temp),
+        &state_dir,
+        audit.clone(),
+        backend.clone(),
+        temp.path().join("cu-staging"),
+    )
+    .unwrap();
+    let conversation = Uuid::new_v4();
+    CuFixture {
+        _temp: temp,
+        broker,
+        backend,
+        audit,
+        subject: GrantSubject::conversation(conversation).unwrap(),
+        context: ExecutionContext::standalone(conversation).unwrap(),
+    }
+}
+
+#[test]
+fn a_failed_save_does_not_keep_a_consumed_once_grant() {
+    let fixture = durable_cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    fixture
+        .broker
+        .shared
+        .state_file
+        .as_ref()
+        .unwrap()
+        .fail_after_saves(0);
+    fixture.click("com.example.app").unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn a_failed_save_does_not_block_revoking_an_once_grant() {
+    let fixture = durable_cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    fixture
+        .broker
+        .shared
+        .state_file
+        .as_ref()
+        .unwrap()
+        .fail_after_saves(0);
+    let revoked = fixture
+        .control(ControlRequest::CuRevokeApp(CuRevokeAppRequest {
+            subject: fixture.subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some("com.example.app".to_owned()),
+        }))
+        .unwrap();
+    assert!(matches!(
+        revoked,
+        ControlResult::CuRevokeApp { revoked: true }
+    ));
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+}
+
+#[test]
+fn a_post_authorize_error_spends_an_once_grant() {
+    let fixture = cu_setup();
+    fixture.grant_once(Capability::ControlApp, Some("com.example.app"));
+    *fixture.backend.fail_click.lock().unwrap() = Some(BackendErrorKind::Yielded);
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Yielded);
+    *fixture.backend.fail_click.lock().unwrap() = None;
+    let error = fixture.click("com.example.app").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Denied);
+    assert!(fixture.backend.clicks().is_empty());
+}
+
+#[test]
+fn a_held_click_is_audited_as_held_not_allowed() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+    fixture.backend.set_label("Send");
+
+    let result = fixture.click("com.example.app").unwrap();
+    let OperationResult::CuNeedsConfirmation(held) = result else {
+        panic!("expected a confirmation hold, got {result:?}")
+    };
+    assert!(fixture.backend.clicks().is_empty());
+
+    {
+        let events = fixture.audit.events.lock().unwrap();
+        let click: Vec<_> = events
+            .iter()
+            .filter(|event| event.operation == AuditOperation::CuClick)
+            .map(|event| event.outcome)
+            .collect();
+        assert_eq!(click, [AuditOutcome::Attempted, AuditOutcome::Held]);
+        assert!(!events.iter().any(|event| {
+            event.operation == AuditOperation::CuClick && event.outcome == AuditOutcome::Allowed
+        }));
+    }
+
+    fixture
+        .control(ControlRequest::CuConfirmControlAction(
+            CuConfirmControlActionRequest {
+                confirmation_id: held.confirmation_id,
+            },
+        ))
+        .unwrap();
+    assert_eq!(fixture.backend.clicks().len(), 1);
+
+    let events = fixture.audit.events.lock().unwrap();
+    let click: Vec<_> = events
+        .iter()
+        .filter(|event| event.operation == AuditOperation::CuClick)
+        .map(|event| event.outcome)
+        .collect();
+    assert_eq!(
+        click,
+        [
+            AuditOutcome::Attempted,
+            AuditOutcome::Held,
+            AuditOutcome::Attempted,
+            AuditOutcome::Allowed,
+        ]
+    );
+}
+
+#[test]
+fn scroll_and_focus_record_intent_before_act() {
+    let fixture = cu_setup();
+    fixture.grant(Capability::ControlApp, Some("com.example.app"));
+
+    fixture
+        .operate(OperationRequest::CuScroll {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire::default(),
+            dx: None,
+            dy: Some(40.0),
+        })
+        .unwrap();
+    fixture
+        .operate(OperationRequest::CuFocusWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: Some(7),
+        })
+        .unwrap();
+    assert_eq!(fixture.backend.scrolls(), ["com.example.app"]);
+    assert_eq!(fixture.backend.focuses(), ["com.example.app"]);
+
+    let events = fixture.audit.events.lock().unwrap();
+    for operation in [AuditOperation::CuScroll, AuditOperation::CuFocusWindow] {
+        let intent = events
+            .iter()
+            .position(|event| {
+                event.operation == operation && event.outcome == AuditOutcome::Attempted
+            })
+            .expect("a durable intent record precedes input synthesis");
+        let completion = events
+            .iter()
+            .position(|event| {
+                event.operation == operation && event.outcome == AuditOutcome::Allowed
+            })
+            .expect("the op records its completion");
+        assert!(intent < completion);
+        assert_eq!(events[intent].request_id, events[completion].request_id);
+    }
+}
+
+#[test]
+fn an_unrecordable_scroll_or_focus_never_reaches_the_backend() {
+    let fixture = cu_setup();
+    let broken = Arc::new(BreakableAudit::default());
+    let broker = Broker::test_with_computer_use(
+        test_policy(&fixture._temp),
+        broken.clone(),
+        fixture.backend.clone(),
+        fixture._temp.path().join("cu-staging-broken"),
+    );
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let granted = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::CuGrantApp(CuGrantAppRequest {
+            subject,
+            capability: Capability::ControlApp,
+            bundle_id: Some("com.example.app".to_owned()),
+            consent: ConsentMethod::PermissionDialog,
+            single_use: false,
+        }),
+    }))
+    .unwrap();
+    assert!(matches!(granted, ControlResult::CuGrantApp(_)));
+
+    broken.broken.store(true, Ordering::SeqCst);
+    for request in [
+        OperationRequest::CuScroll {
+            bundle_id: "com.example.app".to_owned(),
+            target: ElementTargetWire::default(),
+            dx: None,
+            dy: Some(40.0),
+        },
+        OperationRequest::CuFocusWindow {
+            bundle_id: "com.example.app".to_owned(),
+            window_id: Some(7),
+        },
+    ] {
+        let error = operate(&broker.operator(), context, request).unwrap_err();
+        assert_eq!(error.code, ErrorCode::AuditUnavailable);
+        assert!(error.retryable);
+    }
+    assert!(fixture.backend.scrolls().is_empty());
+    assert!(fixture.backend.focuses().is_empty());
 }
