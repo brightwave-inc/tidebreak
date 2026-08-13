@@ -123,7 +123,8 @@ platform differences below first.
 
 Provider credentials go in the OS keychain, not in the database and not in a
 config file you might commit. Tidebreak talks to Anthropic, OpenAI and
-OpenAI-compatible endpoints, Google Gemini, xAI, and a local Ollama daemon.
+OpenAI-compatible endpoints, Google Gemini, xAI, OpenRouter, and a local
+Ollama daemon.
 
 The conversation journal is provider-neutral, so a chat can move from Claude to
 Gemini to GPT and back without starting over — useful when a provider is rate

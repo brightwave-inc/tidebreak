@@ -1185,6 +1185,9 @@ async fn providers_list_and_put_roundtrip() {
         .any(|p| p["kind"] == "together" && p["base_url"] == "https://api.together.ai/v1"));
     assert!(providers
         .iter()
+        .any(|p| { p["kind"] == "openrouter" && p["base_url"] == "https://openrouter.ai/api/v1" }));
+    assert!(providers
+        .iter()
         .any(|p| { p["kind"] == "ollama" && p["base_url"] == "http://127.0.0.1:11434/v1" }));
     assert!(providers.iter().any(|p| p["kind"] == "openai_compatible"));
 
@@ -2749,6 +2752,112 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
         router.select_for(
             Some(&tidebreak_core::ProviderId::new("ollama")),
             "llama3.2:1b"
+        ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn openrouter_uses_its_fixed_endpoint_and_serves_only_configured_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
+
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Openrouter,
+        &providers::ProviderCredential::api_key("sk-or"),
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Openrouter,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: Some("https://attacker.invalid/v1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "anthropic/claude-sonnet-4".into(),
+                display_name: Some("Claude Sonnet 4".into()),
+                ..providers::CustomModelConfig::default()
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::Openrouter,
+        &policy
+    )
+    .await
+    .unwrap());
+
+    let listed = providers::list_providers(&*store, &*secrets, &policy)
+        .await
+        .unwrap();
+    let openrouter = listed
+        .iter()
+        .find(|info| info.kind == providers::ProviderKind::Openrouter)
+        .expect("OpenRouter is a first-class provider");
+    assert!(openrouter.enabled);
+    assert!(openrouter.has_credential);
+    assert_eq!(
+        openrouter.base_url.as_deref(),
+        Some("https://openrouter.ai/api/v1")
+    );
+
+    let catalog = providers::catalog_models(&*store, &*secrets, &policy)
+        .await
+        .unwrap();
+    let model = catalog
+        .iter()
+        .find(|entry| entry.policy.key == "openrouter::anthropic/claude-sonnet-4")
+        .expect("the configured OpenRouter model is in the catalog");
+    assert!(model.available);
+    assert_eq!(model.policy.display_name, "Claude Sonnet 4");
+    assert!(model.policy.supports_tools);
+    assert!(!model.policy.supports_reasoning);
+    assert!(!model.policy.supports_vendor_web_search);
+
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let route = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::Openrouter)
+        .expect("an enabled OpenRouter key is a route");
+    assert_eq!(route.api_key, "sk-or");
+    assert_eq!(
+        route.base_url.as_deref(),
+        Some("https://openrouter.ai/api/v1")
+    );
+    assert_eq!(route.curated_models, ["anthropic/claude-sonnet-4"]);
+
+    let router = tidebreak_router::Router::build(routes);
+    assert_eq!(
+        router.select_for(
+            Some(&tidebreak_core::ProviderId::new("openrouter")),
+            "anthropic/claude-sonnet-4"
+        ),
+        Some(tidebreak_router::RouteKind::Openrouter)
+    );
+    assert_eq!(
+        router.select_for(
+            Some(&tidebreak_core::ProviderId::new("openrouter")),
+            "openai/gpt-4o"
         ),
         None
     );

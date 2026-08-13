@@ -225,6 +225,7 @@ function ProviderRow({
   const hasConfigurableModels =
     info.kind === "openai_compatible" ||
     info.kind === "xai" ||
+    info.kind === "openrouter" ||
     info.kind === "ollama";
   const acceptsBaseUrl =
     info.kind === "openai_compatible" || info.kind === "ollama";
@@ -498,7 +499,9 @@ function ProviderRow({
                       ? "Grok 4.5 is ready when you connect xAI. Add any additional account models here, including their limits and supported capabilities."
                       : info.kind === "ollama"
                         ? "Add each model already pulled in Ollama. qwen3:0.6b is a small tool-calling option for a first test."
-                        : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
+                        : info.kind === "openrouter"
+                          ? "Add each OpenRouter model id (for example anthropic/claude-sonnet-4). Custom models start with conservative text-only, non-reasoning capabilities."
+                          : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
                   </p>
                 )}
                 {models.map((model, index) => (
@@ -693,7 +696,9 @@ function ProviderRow({
               </div>
             </>
           )}
-          {(info.kind === "fireworks" || info.kind === "together") &&
+          {(info.kind === "fireworks" ||
+            info.kind === "together" ||
+            info.kind === "openrouter") &&
             info.base_url && (
               <p className="text-xs text-muted-foreground">
                 Requests use the provider&apos;s fixed endpoint: {info.base_url}

@@ -196,6 +196,20 @@ export function FireworksIcon(props: IconProps) {
   );
 }
 
+export function OpenRouterIcon(props: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M12 2.2 20.4 7v10L12 21.8 3.6 17V7L12 2.2zm0 2.3L5.6 8v8L12 19.5 18.4 16V8L12 4.5zm0 3.1 4.2 2.4v4L12 16.4 7.8 14v-4L12 7.6z" />
+    </svg>
+  );
+}
+
 /**
  * Together AI. Its three lobes each carry a different brand color, so the fills
  * are per-path rather than one on the root.
@@ -272,5 +286,7 @@ export function ProviderIcon({
       return <FireworksIcon {...rest} />;
     case "together":
       return <TogetherIcon {...rest} />;
+    case "openrouter":
+      return <OpenRouterIcon {...rest} />;
   }
 }

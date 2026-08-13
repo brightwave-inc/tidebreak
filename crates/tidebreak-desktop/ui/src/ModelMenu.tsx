@@ -52,6 +52,7 @@ const PROVIDER_ORDER: readonly ProviderKind[] = [
   "gemini",
   "fireworks",
   "together",
+  "openrouter",
 ];
 
 /** Honest warning for routes Tidebreak must run without host tools. */

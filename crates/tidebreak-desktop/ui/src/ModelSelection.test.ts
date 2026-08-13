@@ -77,6 +77,7 @@ describe("typed model selection", () => {
     expect(providerLabel("gemini")).toBe("Google Gemini");
     expect(providerLabel("fireworks")).toBe("Fireworks AI");
     expect(providerLabel("together")).toBe("Together AI");
+    expect(providerLabel("openrouter")).toBe("OpenRouter");
     expect(providerLabel("ollama")).toBe("Ollama");
     expect(providerLabel("openai_compatible")).toBe("OpenAI-compatible");
   });

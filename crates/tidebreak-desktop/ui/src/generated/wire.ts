@@ -2017,7 +2017,7 @@ models: Array<CustomModelConfig>, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "ollama" | "openai_compatible" | "model_gateway";
+export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "openrouter" | "ollama" | "openai_compatible" | "model_gateway";
 
 /**
  * One message accepted while its chat had a live turn, waiting its turn.

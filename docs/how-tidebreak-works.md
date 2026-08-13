@@ -152,10 +152,11 @@ than fails: when nothing resolves for `utility`, the work that would have used
 it is skipped instead of falling back to the conversation's model. `GET /models`
 reports what each role resolves to so a client can label the automatic choice.
 
-OpenAI-compatible endpoints can register custom model IDs and their context and
-output limits in provider settings. Those models enter the same catalog with
-conservative text-only, non-reasoning capabilities. xAI has the curated Grok
-4.5 row plus optional configured account models; each configured row records
+OpenAI-compatible endpoints and OpenRouter can register custom model IDs and
+their context and output limits in provider settings. Those models enter the
+same catalog with conservative text-only, non-reasoning capabilities. xAI has
+the curated Grok 4.5 row plus optional configured account models; each
+configured row records
 its own limits, image input support, reasoning support, and accepted effort
 levels. Existing unqualified model settings are migrated at the API boundary
 when exactly one configured provider owns the ID. Ambiguous IDs fail closed and
@@ -303,8 +304,8 @@ independently reauthorizes its live grant. Resolve checks attachment authority
 again, which discards content if a detach won while the read was in flight. A
 crash after possible broker dispatch becomes a safe unavailable result instead
 of another read.
-The model router supports Anthropic, OpenAI, xAI, Gemini, Ollama, and
-OpenAI-compatible endpoints. It fails closed: if no enabled provider that is
+The model router supports Anthropic, OpenAI, xAI, Gemini, OpenRouter, Ollama,
+and OpenAI-compatible endpoints. It fails closed: if no enabled provider that is
 ready to serve the selected model can be used, no model request is sent.
 
 ### Tool calls are small state machines too

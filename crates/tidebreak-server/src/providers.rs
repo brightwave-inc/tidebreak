@@ -263,9 +263,11 @@ pub enum ProviderKind {
     Fireworks,
     /// Together AI's hosted OpenAI-compatible Chat Completions API.
     Together,
+    /// OpenRouter's hosted OpenAI-compatible Chat Completions API.
+    Openrouter,
     /// A local Ollama daemon over the shared OpenAI-compatible transport.
     Ollama,
-    /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
+    /// Any OpenAI-compatible Chat Completions gateway (vLLM, LM Studio, …).
     OpenaiCompatible,
     /// A signed-in model-gateway deployment: entitled models synced from the
     /// gateway, inference through each model's Anthropic- or OpenAI-compatible
@@ -282,6 +284,7 @@ impl ProviderKind {
         ProviderKind::Gemini,
         ProviderKind::Fireworks,
         ProviderKind::Together,
+        ProviderKind::Openrouter,
         ProviderKind::Ollama,
         ProviderKind::OpenaiCompatible,
         ProviderKind::ModelGateway,
@@ -296,6 +299,7 @@ impl ProviderKind {
             ProviderKind::Gemini => "gemini",
             ProviderKind::Fireworks => "fireworks",
             ProviderKind::Together => "together",
+            ProviderKind::Openrouter => "openrouter",
             ProviderKind::Ollama => "ollama",
             ProviderKind::OpenaiCompatible => "openai_compatible",
             ProviderKind::ModelGateway => "model_gateway",
@@ -311,6 +315,7 @@ impl ProviderKind {
             "gemini" => Some(Self::Gemini),
             "fireworks" => Some(Self::Fireworks),
             "together" => Some(Self::Together),
+            "openrouter" => Some(Self::Openrouter),
             "ollama" => Some(Self::Ollama),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "model_gateway" => Some(Self::ModelGateway),
@@ -324,6 +329,7 @@ impl ProviderKind {
         match self {
             Self::Fireworks => Some("https://api.fireworks.ai/inference/v1"),
             Self::Together => Some("https://api.together.ai/v1"),
+            Self::Openrouter => Some("https://openrouter.ai/api/v1"),
             Self::Ollama => Some("http://127.0.0.1:11434/v1"),
             _ => None,
         }
@@ -331,20 +337,27 @@ impl ProviderKind {
 
     /// Whether [`default_base_url`] is the only legal endpoint.
     pub const fn has_fixed_endpoint(self) -> bool {
-        matches!(self, Self::Fireworks | Self::Together)
+        matches!(self, Self::Fireworks | Self::Together | Self::Openrouter)
     }
 
     /// Whether this route speaks the shared OpenAI-compatible transport.
     pub const fn uses_openai_compatible_transport(self) -> bool {
         matches!(
             self,
-            Self::Fireworks | Self::Together | Self::Ollama | Self::OpenaiCompatible
+            Self::Fireworks
+                | Self::Together
+                | Self::Openrouter
+                | Self::Ollama
+                | Self::OpenaiCompatible
         )
     }
 
     /// Whether the reader can register model rows beside the endpoint.
     pub const fn accepts_configured_models(self) -> bool {
-        matches!(self, Self::OpenaiCompatible | Self::Xai | Self::Ollama)
+        matches!(
+            self,
+            Self::OpenaiCompatible | Self::Xai | Self::Openrouter | Self::Ollama
+        )
     }
 
     /// Whether a stored or env credential is required before the route is
@@ -389,6 +402,7 @@ impl ProviderKind {
                     | ProviderKind::Gemini
                     | ProviderKind::Fireworks
                     | ProviderKind::Together
+                    | ProviderKind::Openrouter
                     | ProviderKind::Ollama
                     | ProviderKind::OpenaiCompatible
             ),
@@ -897,7 +911,7 @@ pub struct ProviderUpdate {
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
     /// Replacement configured-model list. Valid for `openai_compatible`,
-    /// Ollama, and first-party xAI.
+    /// OpenRouter, Ollama, and first-party xAI.
     #[serde(default)]
     pub models: Option<Vec<CustomModelConfig>>,
 }
@@ -1366,6 +1380,9 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         ProviderKind::Together => std::env::var("TOGETHER_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
+        ProviderKind::Openrouter => std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
         ProviderKind::Ollama | ProviderKind::OpenaiCompatible => None,
         // Gateway tokens rotate; they are supplied per request by the route's
         // token source, never resolved into a static key.
@@ -1388,6 +1405,7 @@ pub fn route_kind(kind: ProviderKind) -> tidebreak_router::RouteKind {
         ProviderKind::Gemini => tidebreak_router::RouteKind::Gemini,
         ProviderKind::Fireworks => tidebreak_router::RouteKind::Fireworks,
         ProviderKind::Together => tidebreak_router::RouteKind::Together,
+        ProviderKind::Openrouter => tidebreak_router::RouteKind::Openrouter,
         ProviderKind::Ollama => tidebreak_router::RouteKind::Ollama,
         ProviderKind::OpenaiCompatible => tidebreak_router::RouteKind::OpenaiCompatible,
         ProviderKind::ModelGateway => tidebreak_router::RouteKind::ModelGateway,
@@ -1642,6 +1660,7 @@ pub async fn resolve_model_policy(
         .collect::<Vec<_>>();
     for provider in [
         ProviderKind::Xai,
+        ProviderKind::Openrouter,
         ProviderKind::Ollama,
         ProviderKind::OpenaiCompatible,
     ] {
@@ -1954,6 +1973,23 @@ mod tests {
         assert_eq!(
             ProviderKind::Together.default_base_url(),
             Some("https://api.together.ai/v1")
+        );
+        assert_eq!(
+            ProviderKind::parse("openrouter"),
+            Some(ProviderKind::Openrouter)
+        );
+        assert_eq!(
+            ProviderKind::Openrouter.default_base_url(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert!(ProviderKind::Openrouter.has_fixed_endpoint());
+        assert!(ProviderKind::Openrouter.requires_credential());
+        assert!(ProviderKind::Openrouter.accepts_configured_models());
+        assert_eq!(
+            ProviderKind::Openrouter
+                .effective_base_url(Some("https://attacker.invalid/v1"))
+                .as_deref(),
+            Some("https://openrouter.ai/api/v1")
         );
         assert_eq!(ProviderKind::parse("ollama"), Some(ProviderKind::Ollama));
         assert_eq!(
