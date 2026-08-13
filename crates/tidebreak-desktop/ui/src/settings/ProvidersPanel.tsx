@@ -223,12 +223,18 @@ function ProviderRow({
   const [error, setError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
   const hasConfigurableModels =
-    info.kind === "openai_compatible" || info.kind === "xai";
+    info.kind === "openai_compatible" ||
+    info.kind === "xai" ||
+    info.kind === "ollama";
+  const acceptsBaseUrl =
+    info.kind === "openai_compatible" || info.kind === "ollama";
+  const requiresCredential = info.kind !== "ollama";
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [pendingCredentialFocus, setPendingCredentialFocus] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const credentialRef = useRef<HTMLInputElement | null>(null);
-  const connected = info.has_credential && info.enabled;
+  const connected =
+    info.enabled && (info.has_credential || !requiresCredential);
   const visibleCount = useMemo(
     () =>
       catalogModels.filter((model) => isModelVisible(model, overrides)).length,
@@ -324,7 +330,7 @@ function ProviderRow({
         models?: CustomModelConfig[];
       } = { enabled };
       if (hasConfigurableModels) {
-        if (info.kind === "openai_compatible") {
+        if (acceptsBaseUrl) {
           body.base_url = baseUrl.trim() || null;
         }
         body.models = models.map((model) => ({
@@ -455,10 +461,14 @@ function ProviderRow({
           </div>
           {hasConfigurableModels && (
             <>
-              {info.kind === "openai_compatible" && (
+              {acceptsBaseUrl && (
                 <Input
                   type="text"
-                  placeholder="base URL (e.g. http://127.0.0.1:1234/v1)"
+                  placeholder={
+                    info.kind === "ollama"
+                      ? "base URL (default http://127.0.0.1:11434/v1)"
+                      : "base URL (e.g. http://127.0.0.1:1234/v1)"
+                  }
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                 />
@@ -486,7 +496,9 @@ function ProviderRow({
                   <p className="text-xs text-muted-foreground">
                     {info.kind === "xai"
                       ? "Grok 4.5 is ready when you connect xAI. Add any additional account models here, including their limits and supported capabilities."
-                      : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
+                      : info.kind === "ollama"
+                        ? "Add each model already pulled in Ollama. qwen3:0.6b is a small tool-calling option for a first test."
+                        : "Add each model this endpoint serves. Custom models start with conservative text-only, non-reasoning capabilities."}
                   </p>
                 )}
                 {models.map((model, index) => (
@@ -706,7 +718,9 @@ function ProviderRow({
               <Input
                 ref={credentialRef}
                 type="password"
-                placeholder="API key"
+                placeholder={
+                  info.kind === "ollama" ? "API key (optional)" : "API key"
+                }
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
                 autoComplete="off"
@@ -717,6 +731,7 @@ function ProviderRow({
                   disabled={
                     saving ||
                     (!info.has_credential &&
+                      requiresCredential &&
                       info.kind !== "openai_compatible" &&
                       !key.trim()) ||
                     (hasConfigurableModels &&
@@ -790,7 +805,11 @@ function ProviderRow({
 }
 
 function credentialStatusLabel(info: ProviderInfo): string {
-  if (!info.has_credential) return "No credential";
+  if (!info.has_credential) {
+    return info.kind === "ollama"
+      ? "No API key required for a local Ollama"
+      : "No credential";
+  }
   if (info.kind === "openai" && info.auth_mode === "chatgpt") {
     return "Signed in with ChatGPT";
   }

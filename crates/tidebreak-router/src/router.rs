@@ -72,6 +72,8 @@ pub enum RouteKind {
     Fireworks,
     /// Together AI over the shared OpenAI-compatible adapter.
     Together,
+    /// A local Ollama daemon over the shared OpenAI-compatible adapter.
+    Ollama,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
     /// Google Gemini Developer API (native GenerateContent protocol).
@@ -96,6 +98,7 @@ impl RouteKind {
             RouteKind::Xai => "xai",
             RouteKind::Fireworks => "fireworks",
             RouteKind::Together => "together",
+            RouteKind::Ollama => "ollama",
             RouteKind::OpenaiCompatible => "openai_compatible",
             RouteKind::Gemini => "gemini",
             RouteKind::ModelGateway => "model_gateway",
@@ -119,6 +122,7 @@ impl RouteKind {
             "xai" => Some(Self::Xai),
             "fireworks" => Some(Self::Fireworks),
             "together" => Some(Self::Together),
+            "ollama" => Some(Self::Ollama),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "gemini" => Some(Self::Gemini),
             "model_gateway" => Some(Self::ModelGateway),
@@ -221,6 +225,7 @@ impl Router {
             RouteKind::Gemini,
             RouteKind::Fireworks,
             RouteKind::Together,
+            RouteKind::Ollama,
             RouteKind::ModelGateway,
             RouteKind::ModelGatewayOpenai,
             RouteKind::OpenaiCompatible,
@@ -382,7 +387,10 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         // cannot redirect the bearer token around the server's collector.
         RouteKind::Xai => Some(Arc::new(XaiProvider::new(route.api_key.clone()))),
         #[cfg(feature = "openai-compat")]
-        RouteKind::Fireworks | RouteKind::Together | RouteKind::OpenaiCompatible => {
+        RouteKind::Fireworks
+        | RouteKind::Together
+        | RouteKind::Ollama
+        | RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
             // Refuse non-http(s) schemes so a stored base_url can't point the
             // adapter at an arbitrary scheme handler.
@@ -412,7 +420,10 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         #[cfg(not(feature = "xai"))]
         RouteKind::Xai => None,
         #[cfg(not(feature = "openai-compat"))]
-        RouteKind::Fireworks | RouteKind::Together | RouteKind::OpenaiCompatible => None,
+        RouteKind::Fireworks
+        | RouteKind::Together
+        | RouteKind::Ollama
+        | RouteKind::OpenaiCompatible => None,
     }
 }
 
@@ -571,6 +582,26 @@ mod tests {
     fn empty_router_selects_nothing() {
         let router = Router::build(vec![]);
         assert_eq!(router.select("claude-opus-4-8"), None);
+    }
+
+    #[test]
+    fn ollama_serves_only_configured_models() {
+        let router = Router::build(vec![route(
+            RouteKind::Ollama,
+            "ollama",
+            &["qwen3:0.6b"],
+            Some("http://127.0.0.1:11434/v1"),
+        )]);
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("ollama")), "qwen3:0.6b"),
+            Some(RouteKind::Ollama)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("ollama")), "llama3.2:1b"),
+            None
+        );
+        assert_eq!(router.select("qwen3:0.6b"), Some(RouteKind::Ollama));
+        assert_eq!(router.select("llama3.2:1b"), None);
     }
 
     #[test]

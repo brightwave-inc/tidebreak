@@ -1,8 +1,8 @@
 //! OpenAI-compatible Chat Completions provider.
 //!
 //! Speaks the widely-supported `/v1/chat/completions` streaming protocol so the
-//! same adapter covers Fireworks, Together, OpenRouter, vLLM, LM Studio, and other
-//! OpenAI-compatible gateways. Point `base_url` at the gateway's
+//! same adapter covers Fireworks, Together, Ollama, OpenRouter, vLLM, LM Studio,
+//! and other OpenAI-compatible gateways. Point `base_url` at the gateway's
 //! `/v1` root (default: `https://api.openai.com/v1`).
 //!
 //! Native OpenAI uses the separate Responses API adapter; this one deliberately

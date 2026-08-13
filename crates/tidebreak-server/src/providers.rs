@@ -263,6 +263,8 @@ pub enum ProviderKind {
     Fireworks,
     /// Together AI's hosted OpenAI-compatible Chat Completions API.
     Together,
+    /// A local Ollama daemon over the shared OpenAI-compatible transport.
+    Ollama,
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
     OpenaiCompatible,
     /// A signed-in model-gateway deployment: entitled models synced from the
@@ -280,6 +282,7 @@ impl ProviderKind {
         ProviderKind::Gemini,
         ProviderKind::Fireworks,
         ProviderKind::Together,
+        ProviderKind::Ollama,
         ProviderKind::OpenaiCompatible,
         ProviderKind::ModelGateway,
     ];
@@ -293,6 +296,7 @@ impl ProviderKind {
             ProviderKind::Gemini => "gemini",
             ProviderKind::Fireworks => "fireworks",
             ProviderKind::Together => "together",
+            ProviderKind::Ollama => "ollama",
             ProviderKind::OpenaiCompatible => "openai_compatible",
             ProviderKind::ModelGateway => "model_gateway",
         }
@@ -307,27 +311,58 @@ impl ProviderKind {
             "gemini" => Some(Self::Gemini),
             "fireworks" => Some(Self::Fireworks),
             "together" => Some(Self::Together),
+            "ollama" => Some(Self::Ollama),
             "openai_compatible" => Some(Self::OpenaiCompatible),
             "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
     }
 
-    /// Fixed API root for direct hosted compatible presets.
+    /// Default API root. Hosted presets fix this; Ollama uses it when the
+    /// reader has not pointed the card at another daemon.
     pub const fn default_base_url(self) -> Option<&'static str> {
         match self {
             Self::Fireworks => Some("https://api.fireworks.ai/inference/v1"),
             Self::Together => Some("https://api.together.ai/v1"),
+            Self::Ollama => Some("http://127.0.0.1:11434/v1"),
             _ => None,
         }
+    }
+
+    /// Whether [`default_base_url`] is the only legal endpoint.
+    pub const fn has_fixed_endpoint(self) -> bool {
+        matches!(self, Self::Fireworks | Self::Together)
     }
 
     /// Whether this route speaks the shared OpenAI-compatible transport.
     pub const fn uses_openai_compatible_transport(self) -> bool {
         matches!(
             self,
-            Self::Fireworks | Self::Together | Self::OpenaiCompatible
+            Self::Fireworks | Self::Together | Self::Ollama | Self::OpenaiCompatible
         )
+    }
+
+    /// Whether the reader can register model rows beside the endpoint.
+    pub const fn accepts_configured_models(self) -> bool {
+        matches!(self, Self::OpenaiCompatible | Self::Xai | Self::Ollama)
+    }
+
+    /// Whether a stored or env credential is required before the route is
+    /// usable. Local Ollama accepts unauthenticated requests.
+    pub const fn requires_credential(self) -> bool {
+        !matches!(self, Self::Ollama)
+    }
+
+    /// The URL this kind actually calls: a stored override, else the default,
+    /// with hosted presets ignoring any stored value.
+    pub fn effective_base_url(self, configured: Option<&str>) -> Option<String> {
+        if self.has_fixed_endpoint() {
+            return self.default_base_url().map(str::to_owned);
+        }
+        configured
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .or_else(|| self.default_base_url().map(str::to_owned))
     }
 
     /// Store setting key for this kind's non-secret config.
@@ -354,6 +389,7 @@ impl ProviderKind {
                     | ProviderKind::Gemini
                     | ProviderKind::Fireworks
                     | ProviderKind::Together
+                    | ProviderKind::Ollama
                     | ProviderKind::OpenaiCompatible
             ),
             ProviderCredential::Oauth {} => self == ProviderKind::Openai,
@@ -860,8 +896,8 @@ pub struct ProviderUpdate {
     pub base_url: Option<Option<String>>,
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
-    /// Replacement configured-model list. Valid for `openai_compatible` and
-    /// first-party xAI.
+    /// Replacement configured-model list. Valid for `openai_compatible`,
+    /// Ollama, and first-party xAI.
     #[serde(default)]
     pub models: Option<Vec<CustomModelConfig>>,
 }
@@ -1052,10 +1088,7 @@ pub async fn list_providers(
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
-            base_url: kind
-                .default_base_url()
-                .map(str::to_owned)
-                .or_else(|| config.base_url.clone()),
+            base_url: kind.effective_base_url(config.base_url.as_deref()),
             has_credential: has_credential(secrets, kind).await,
             auth_mode: auth_mode_for(secrets, kind).await,
             models: config.models,
@@ -1115,7 +1148,7 @@ pub async fn update_provider(
                 "xai uses its fixed first-party API endpoint",
             ));
         }
-        Some(_) if kind.default_base_url().is_some() => {
+        Some(_) if kind.has_fixed_endpoint() => {
             return Err(ServerError::bad_request(format!(
                 "{kind} uses a fixed provider endpoint"
             )));
@@ -1129,10 +1162,10 @@ pub async fn update_provider(
         }
     }
     if let Some(models) = update.models {
-        if !matches!(kind, ProviderKind::OpenaiCompatible | ProviderKind::Xai) {
-            return Err(ServerError::bad_request(
-                "configured models are only supported by openai_compatible and xai",
-            ));
+        if !kind.accepts_configured_models() {
+            return Err(ServerError::bad_request(format!(
+                "configured models are not supported by {kind}"
+            )));
         }
         validate_configured_models(kind, &models)?;
         config.models = models;
@@ -1159,10 +1192,7 @@ pub async fn update_provider(
     Ok(ProviderInfo {
         kind,
         enabled: config.enabled,
-        base_url: kind
-            .default_base_url()
-            .map(str::to_owned)
-            .or_else(|| config.base_url.clone()),
+        base_url: kind.effective_base_url(config.base_url.as_deref()),
         has_credential: has_credential(secrets, kind).await,
         auth_mode: auth_mode_for(secrets, kind).await,
         models: config.models,
@@ -1336,7 +1366,7 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
         ProviderKind::Together => std::env::var("TOGETHER_API_KEY")
             .ok()
             .filter(|k| !k.is_empty()),
-        ProviderKind::OpenaiCompatible => None,
+        ProviderKind::Ollama | ProviderKind::OpenaiCompatible => None,
         // Gateway tokens rotate; they are supplied per request by the route's
         // token source, never resolved into a static key.
         ProviderKind::ModelGateway => None,
@@ -1358,6 +1388,7 @@ pub fn route_kind(kind: ProviderKind) -> tidebreak_router::RouteKind {
         ProviderKind::Gemini => tidebreak_router::RouteKind::Gemini,
         ProviderKind::Fireworks => tidebreak_router::RouteKind::Fireworks,
         ProviderKind::Together => tidebreak_router::RouteKind::Together,
+        ProviderKind::Ollama => tidebreak_router::RouteKind::Ollama,
         ProviderKind::OpenaiCompatible => tidebreak_router::RouteKind::OpenaiCompatible,
         ProviderKind::ModelGateway => tidebreak_router::RouteKind::ModelGateway,
     }
@@ -1501,13 +1532,15 @@ pub async fn collect_routes(
             Some(_) => None,
             None => env_api_key(kind),
         };
-        let Some(api_key) = api_key else {
-            continue;
+        // Local Ollama accepts unauthenticated requests. The adapter still
+        // sends a bearer token, so an enabled daemon without a stored key
+        // uses a placeholder the endpoint ignores.
+        let api_key = match api_key {
+            Some(key) => key,
+            None if !kind.requires_credential() => "ollama".to_owned(),
+            None => continue,
         };
-        let base_url = kind
-            .default_base_url()
-            .map(str::to_owned)
-            .or_else(|| config.base_url.clone());
+        let base_url = kind.effective_base_url(config.base_url.as_deref());
         if kind == ProviderKind::OpenaiCompatible && base_url.is_none() {
             continue;
         }
@@ -1584,9 +1617,7 @@ pub async fn resolve_model_policy(
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
         let models = match provider {
-            ProviderKind::OpenaiCompatible | ProviderKind::Xai => {
-                read_config(store, provider).await?.models
-            }
+            kind if kind.accepts_configured_models() => read_config(store, provider).await?.models,
             // Resolution is not an offer: usability and routing gate the
             // gateway on policy separately, so the raw snapshot read here
             // only keeps stored selections legible.
@@ -1609,7 +1640,11 @@ pub async fn resolve_model_policy(
         .map(ResolvedModelPolicy::curated)
         .into_iter()
         .collect::<Vec<_>>();
-    for provider in [ProviderKind::Xai, ProviderKind::OpenaiCompatible] {
+    for provider in [
+        ProviderKind::Xai,
+        ProviderKind::Ollama,
+        ProviderKind::OpenaiCompatible,
+    ] {
         let config = read_config(store, provider).await?;
         owners.extend(
             config
@@ -1658,11 +1693,11 @@ pub async fn provider_is_usable(
     if !config.enabled {
         return Ok(false);
     }
-    if !has_credential(secrets, kind).await {
+    if kind.requires_credential() && !has_credential(secrets, kind).await {
         return Ok(false);
     }
     if kind.uses_openai_compatible_transport() {
-        let base_url = kind.default_base_url().or(config.base_url.as_deref());
+        let base_url = kind.effective_base_url(config.base_url.as_deref());
         let Some(base) = base_url else {
             return Ok(false);
         };
@@ -1724,9 +1759,7 @@ pub async fn catalog_models(
         // and the managed gateway's entitled snapshot — which is empty on an
         // unmanaged profile, so no gateway row ever reaches the catalog there.
         let configured = match kind {
-            ProviderKind::OpenaiCompatible | ProviderKind::Xai => {
-                read_config(store, kind).await?.models
-            }
+            kind if kind.accepts_configured_models() => read_config(store, kind).await?.models,
             ProviderKind::ModelGateway => gateway_models(store, policy).await?,
             _ => Vec::new(),
         };
@@ -1921,6 +1954,30 @@ mod tests {
         assert_eq!(
             ProviderKind::Together.default_base_url(),
             Some("https://api.together.ai/v1")
+        );
+        assert_eq!(ProviderKind::parse("ollama"), Some(ProviderKind::Ollama));
+        assert_eq!(
+            ProviderKind::Ollama.default_base_url(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert!(!ProviderKind::Ollama.has_fixed_endpoint());
+        assert!(!ProviderKind::Ollama.requires_credential());
+        assert!(ProviderKind::Ollama.accepts_configured_models());
+        assert_eq!(
+            ProviderKind::Ollama.effective_base_url(None).as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert_eq!(
+            ProviderKind::Ollama
+                .effective_base_url(Some("http://192.168.1.10:11434/v1"))
+                .as_deref(),
+            Some("http://192.168.1.10:11434/v1")
+        );
+        assert_eq!(
+            ProviderKind::Fireworks
+                .effective_base_url(Some("https://attacker.invalid/v1"))
+                .as_deref(),
+            Some("https://api.fireworks.ai/inference/v1")
         );
     }
 

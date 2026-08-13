@@ -303,9 +303,9 @@ independently reauthorizes its live grant. Resolve checks attachment authority
 again, which discards content if a detach won while the read was in flight. A
 crash after possible broker dispatch becomes a safe unavailable result instead
 of another read.
-The model router supports Anthropic, OpenAI, xAI, Gemini, and
-OpenAI-compatible endpoints. It fails closed: if no enabled provider with a
-usable credential can serve the selected model, no model request is sent.
+The model router supports Anthropic, OpenAI, xAI, Gemini, Ollama, and
+OpenAI-compatible endpoints. It fails closed: if no enabled provider that is
+ready to serve the selected model can be used, no model request is sent.
 
 ### Tool calls are small state machines too
 
