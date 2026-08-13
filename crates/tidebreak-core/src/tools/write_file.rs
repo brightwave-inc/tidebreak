@@ -21,6 +21,19 @@ pub struct WriteFile;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Arguments {
+    /// Display-only narration of the write; see [`crate::ToolActionPreview`].
+    /// Required in the schema, tolerant here, so a call that omits it still
+    /// runs and its card falls back to naming the path.
+    #[schemars(
+        required,
+        length(max = crate::preview::MAX_ACTION_SUMMARY_CHARS),
+        description = crate::SUMMARY_ARGUMENT_DESCRIPTION
+    )]
+    #[allow(
+        dead_code,
+        reason = "read from the canonical arguments by the action preview"
+    )]
+    summary: Option<String>,
     #[schemars(description = "Private-scratch-relative file path.")]
     path: String,
     #[schemars(description = "File contents to write.")]

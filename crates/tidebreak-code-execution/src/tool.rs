@@ -4,7 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tidebreak_core::{ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolSpec};
+use tidebreak_core::preview::MAX_ACTION_SUMMARY_CHARS;
+use tidebreak_core::{
+    ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolSpec, SUMMARY_ARGUMENT_DESCRIPTION,
+};
 
 use crate::{
     CodeExecutionProvider, CodeExecutionRequest, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS,
@@ -29,6 +32,16 @@ impl ExecTool {
 #[serde(deny_unknown_fields)]
 struct ExecArguments {
     command: String,
+    /// The model's own account of what this call is doing, shown to the user
+    /// in place of the argument vector. Required in the schema so a model
+    /// reliably writes one; optional here so a call that omits it still runs
+    /// and the card falls back to showing the command.
+    #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "read from the canonical arguments by the action preview"
+    )]
+    summary: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default = "default_cwd")]
@@ -89,6 +102,12 @@ impl Tool for ExecTool {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                    "summary": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ACTION_SUMMARY_CHARS,
+                        "description": SUMMARY_ARGUMENT_DESCRIPTION
+                    },
                     "command": {
                         "type": "string",
                         "minLength": 1,
@@ -114,7 +133,7 @@ impl Tool for ExecTool {
                         "description": "Scratch-relative files or directories staged into a managed sandbox before the command runs; directories stage recursively. Managed sandboxes see only these paths (plus what earlier commands in the session created); a path that does not exist fails the call on every provider."
                     }
                 },
-                "required": ["command"]
+                "required": ["summary", "command"]
             }),
         }
     }

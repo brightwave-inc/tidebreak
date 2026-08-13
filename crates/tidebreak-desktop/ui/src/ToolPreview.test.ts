@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { toolPreviewPresentation } from "./ToolPreview";
+import type { ToolActionPreview } from "./api";
+import { toolPreviewHeadline, toolPreviewPresentation } from "./ToolPreview";
 
 describe("toolPreviewPresentation", () => {
   it("reads a command back as the argument vector it will run", () => {
@@ -56,6 +57,36 @@ describe("toolPreviewPresentation", () => {
         files: [],
       }).headline,
     ).toBe(`python3 -c 'print('\\''two words'\\'')' '' 'a;rm -rf /'`);
+  });
+});
+
+describe("how a call narrates itself", () => {
+  const narrated: ToolActionPreview = {
+    tool: "exec",
+    command: "rm",
+    args: ["-rf", "/tmp/build"],
+    cwd: ".",
+    files: [],
+    summary: "Clearing the stale build directory",
+  };
+
+  it("keeps the narration out of the text an approval is given against", () => {
+    // The approval card renders `detail`, and consent is given to a command
+    // rather than to a sentence about one — see
+    // docs/decisions/0015-tool-call-narration.md.
+    const literal = toolPreviewPresentation(narrated);
+    expect(literal.headline).toBe("rm -rf /tmp/build");
+    expect(literal.detail).not.toContain("Clearing");
+  });
+
+  it("leads a settled card with the sentence, and falls back to the command", () => {
+    expect(toolPreviewHeadline(narrated)).toEqual({
+      text: "Clearing the stale build directory",
+      literal: false,
+    });
+    expect(
+      toolPreviewHeadline({ tool: "exec", command: "rm", args: ["-rf", "/tmp/build"], cwd: ".", files: [] }),
+    ).toEqual({ text: "rm -rf /tmp/build", literal: true });
   });
 });
 

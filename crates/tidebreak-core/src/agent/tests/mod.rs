@@ -3071,6 +3071,62 @@ fn registry_refuses_schema_mismatches_for_server_and_client_tools() {
         .is_some());
 }
 
+/// The narration argument is advertised as required so models reliably write
+/// one, but it is display-only: a call that omits it must still run rather than
+/// spend a round trip being corrected. A tool that genuinely requires its own
+/// `summary` keeps its contract — the relaxation is keyed on our wording.
+#[test]
+fn a_missing_narration_does_not_refuse_a_call_but_a_foreign_summary_still_does() {
+    let mut registry = ToolRegistry::new();
+    registry.register_client(
+        ToolSpec {
+            name: "narrated".into(),
+            description: "a tool carrying Tidebreak's narration argument".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": crate::SUMMARY_ARGUMENT_DESCRIPTION
+                    },
+                    "query": {"type": "string"}
+                },
+                "required": ["summary", "query"]
+            }),
+        },
+        ApprovalClass::ReadOnly,
+    );
+    registry.register_client(
+        ToolSpec {
+            name: "foreign".into(),
+            description: "a mounted tool whose own summary is load-bearing".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "The text to file."}
+                },
+                "required": ["summary"]
+            }),
+        },
+        ApprovalClass::ReadOnly,
+    );
+
+    assert_eq!(
+        registry.schema_mismatch("narrated", &serde_json::json!({"query": "tides"})),
+        None
+    );
+    // Relaxing `required` must not stop the field being checked when present.
+    assert!(registry
+        .schema_mismatch("narrated", &serde_json::json!({"query": "t", "summary": 7}))
+        .is_some());
+    assert!(registry
+        .schema_mismatch("narrated", &serde_json::json!({}))
+        .is_some_and(|mismatch| mismatch.contains("query")));
+    assert!(registry
+        .schema_mismatch("foreign", &serde_json::json!({}))
+        .is_some());
+}
+
 #[tokio::test]
 async fn registry_fails_closed_for_every_consumer_when_a_tool_schema_is_unusable() {
     let mut registry = ToolRegistry::new();

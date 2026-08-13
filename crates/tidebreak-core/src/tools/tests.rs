@@ -102,9 +102,16 @@ async fn built_in_tool_schemas_preserve_their_provider_contracts() {
                 "content": {
                     "type": "string",
                     "description": "File contents to write."
+                },
+                // Display-only narration, required of the model so a card
+                // can lead with it rather than with the path.
+                "summary": {
+                    "type": "string",
+                    "maxLength": crate::preview::MAX_ACTION_SUMMARY_CHARS,
+                    "description": crate::SUMMARY_ARGUMENT_DESCRIPTION
                 }
             },
-            "required": ["path", "content"],
+            "required": ["summary", "path", "content"],
             "additionalProperties": false
         })
     );

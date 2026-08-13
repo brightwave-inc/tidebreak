@@ -44,7 +44,8 @@
       "cwd": ".",
       "files": [
         "documents/report.pdf"
-      ]
+      ],
+      "summary": "Checking the repository status"
     }
   },
   {
@@ -75,7 +76,8 @@
       "cwd": ".",
       "files": [
         "documents/report.pdf"
-      ]
+      ],
+      "summary": "Checking the repository status"
     },
     "result": {
       "tool": "exec",

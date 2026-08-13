@@ -74,9 +74,12 @@ fn default_pending_approvals_limit() -> u64 {
     50
 }
 
-/// Closed renderer-safe pending approval projection. Canonical arguments,
-/// model-authored summaries, and unknown tool names never cross this boundary;
-/// only a tool's own closed preview of the action under review does.
+/// Closed renderer-safe pending approval projection. Canonical arguments and
+/// unknown tool names never cross this boundary; only a tool's own closed
+/// preview of the action under review does. That preview may carry the call's
+/// own `summary`, which the approval card does not render — consent is given to
+/// an action, not to a sentence about one. See
+/// `docs/decisions/0015-tool-call-narration.md`.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub(crate) struct PendingApprovalSnapshot {
     pub call_id: CallId,

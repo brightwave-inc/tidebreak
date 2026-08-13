@@ -1703,9 +1703,12 @@ export type OutputId = string;
 export type OutputWriteMode = "create" | "replace";
 
 /**
- * Closed renderer-safe pending approval projection. Canonical arguments,
- * model-authored summaries, and unknown tool names never cross this boundary;
- * only a tool's own closed preview of the action under review does.
+ * Closed renderer-safe pending approval projection. Canonical arguments and
+ * unknown tool names never cross this boundary; only a tool's own closed
+ * preview of the action under review does. That preview may carry the call's
+ * own `summary`, which the approval card does not render — consent is given to
+ * an action, not to a sentence about one. See
+ * `docs/decisions/0015-tool-call-narration.md`.
  */
 export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
@@ -2557,6 +2560,14 @@ export type TaskPlanStepStatus = "pending" | "in_progress" | "completed";
  * Approval cards need this because consent to an action you cannot see is not
  * consent. Result cards reuse it so the same action is described the same way
  * before and after it runs.
+ *
+ * Most variants also carry a `summary`: one sentence the model wrote about
+ * what its own call is doing. It is **display-only**, and it is the one field
+ * here that is prose rather than a projection of the action. See
+ * `docs/decisions/0015-tool-call-narration.md` — it never reaches an approval
+ * card, never reaches the auto-approval judge, and is never part of a grant's
+ * identity ([`Self::without_summary`]), because a call that could describe
+ * itself to a consent decision could describe itself favourably.
  */
 export type ToolActionPreview = { "tool": "exec", 
 /**
@@ -2588,7 +2599,15 @@ cwd: string,
  * nothing, which is narrower than what they were given for and so
  * sends a call that stages anything back to the person.
  */
-files: Array<string>, } | { "tool": "search", query: string, } | { "tool": "web_search", query: string, 
+files: Array<string>, 
+/**
+ * Display-only narration; see the type's documentation.
+ */
+summary?: string, } | { "tool": "search", query: string, 
+/**
+ * Display-only narration; see the type's documentation.
+ */
+summary?: string, } | { "tool": "web_search", query: string, 
 /**
  * Sites the search is confined to, empty when the model named none.
  */
@@ -2602,11 +2621,23 @@ start_published_at: string | null,
 /**
  * Latest publication date the search will accept.
  */
-end_published_at: string | null, } | { "tool": "web_extract", url: string, } | { "tool": "write_file", 
+end_published_at: string | null, 
+/**
+ * Display-only narration; see the type's documentation.
+ */
+summary?: string, } | { "tool": "web_extract", url: string, 
+/**
+ * Display-only narration; see the type's documentation.
+ */
+summary?: string, } | { "tool": "write_file", 
 /**
  * Workspace-relative destination path, never a host path.
  */
-path: string, } | { "tool": "delegate_agent", 
+path: string, 
+/**
+ * Display-only narration; see the type's documentation.
+ */
+summary?: string, } | { "tool": "delegate_agent", 
 /**
  * The child's self-contained task, as the model wrote it.
  */
