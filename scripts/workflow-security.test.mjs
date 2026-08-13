@@ -732,6 +732,75 @@ test(
   },
 );
 
+function sandboxPublishControls(publish) {
+  const resolve = workflowJob(publish, "resolve");
+  const build = workflowJob(publish, "build");
+  const dockerIgnorePath = repositoryFile(
+    "crates",
+    "tidebreak-sandbox-agent",
+    "Dockerfile.dockerignore",
+  );
+  return {
+    resolve,
+    build,
+    dockerIgnorePath,
+    hasDefaultBranchEnv:
+      /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/.test(
+        resolve,
+      ),
+    hasDefaultBranchRefGate:
+      /SOURCE_REF" == "refs\/heads\/\$DEFAULT_BRANCH" &&\n\s+"\$SOURCE_REF_NAME" == "\$DEFAULT_BRANCH"/.test(
+        resolve,
+      ),
+    hasAncestorGate:
+      /git merge-base --is-ancestor "\$(?:GITHUB_SHA|SOURCE_SHA)" "origin\/\$DEFAULT_BRANCH"/.test(
+        resolve,
+      ),
+    hasPersistCredentialsFalse: /persist-credentials:\s*false/.test(build),
+    hasDockerIgnore: existsSync(dockerIgnorePath),
+  };
+}
+
+function sandboxPublishHasAnyMainOnlyControl(controls) {
+  return (
+    controls.hasDefaultBranchEnv ||
+    controls.hasDefaultBranchRefGate ||
+    controls.hasAncestorGate ||
+    controls.hasPersistCredentialsFalse ||
+    controls.hasDockerIgnore
+  );
+}
+
+function assertSandboxPublishMainOnly(controls) {
+  assert.ok(
+    controls.hasDefaultBranchEnv,
+    "resolve must identify the repository default branch",
+  );
+  assert.ok(
+    controls.hasDefaultBranchRefGate,
+    "dispatch and schedule must require the default-branch workflow",
+  );
+  assert.match(
+    controls.resolve,
+    /workflow_dispatch\|schedule|schedule\|workflow_dispatch/,
+  );
+  assert.ok(
+    controls.hasAncestorGate,
+    "tag and dispatch must refuse SHAs not contained in the default branch",
+  );
+  assert.ok(
+    controls.hasPersistCredentialsFalse,
+    "build checkout must not persist GITHUB_TOKEN into .git/config",
+  );
+  assert.ok(
+    controls.hasDockerIgnore,
+    "sandbox image build must ship a Dockerfile.dockerignore",
+  );
+  const dockerIgnore = readFileSync(controls.dockerIgnorePath, "utf8");
+  assert.match(dockerIgnore, /^\.git$/m);
+  assert.match(dockerIgnore, /^\.git\/\*\*$/m);
+}
+
 test("sandbox image publishing is tag-driven, immutable, and secret-free", () => {
   const publish = workflows["publish-sandbox-image.yml"];
   assert.ok(publish);
@@ -744,6 +813,15 @@ test("sandbox image publishing is tag-driven, immutable, and secret-free", () =>
     /^on:\n  push:\n    tags: \["v\*"\]\n    branches: \[main\]\n  schedule:\n(?:    #.*\n)*    - cron: "43 4 \* \* 4"\n  workflow_dispatch:/m,
   );
   assert.doesNotMatch(publish, /^\s*pull_request(?:_target)?:/m);
+
+  // Current shape: any v* tag and any-ref dispatch may publish. Next shape:
+  // dispatch/schedule must run the default-branch workflow, and every publish
+  // (tag included) refuses a SHA that is not an ancestor of that branch.
+  // Accept either until the workflow change lands; a partial next shape fails.
+  const controls = sandboxPublishControls(publish);
+  if (sandboxPublishHasAnyMainOnlyControl(controls)) {
+    assertSandboxPublishMainOnly(controls);
+  }
 
   // A main push publishes only when the image inputs changed; the scope lives
   // in the resolve job (an `on.push.paths` filter would also gate the tag
