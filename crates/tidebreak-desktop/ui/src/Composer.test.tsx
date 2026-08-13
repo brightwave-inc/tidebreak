@@ -210,13 +210,42 @@ describe("Composer", () => {
       />,
     );
 
-    expect(markup).toContain("Redirect");
+    expect(markup).toContain("Steer");
     expect(markup).toContain('aria-label="Stop response"');
-    expect(markup).toContain('aria-label="Redirect active response"');
+    expect(markup).toContain('aria-label="Steer active response"');
     expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Message"');
     expect(markup).not.toContain('<textarea disabled=""');
     expect(markup).toContain('role="status"');
+  });
+
+  it("shows only the configured Queue action when queueing is available", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId="turn-1"
+        busy
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft="A later draft"
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onQueue={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain(">Queue<");
+    expect(markup).toContain(
+      'aria-label="Queue message for after this response"',
+    );
+    expect(markup).not.toContain('aria-label="Switch send mode"');
+    expect(markup).not.toContain('aria-label="Steer active response"');
   });
 
   it("keeps Stop available for an active turn until the user types", () => {
@@ -267,12 +296,12 @@ describe("Composer", () => {
 
     expect(markup).toContain(">Sending…<");
     expect(markup).toContain('aria-label="Stop response"');
-    expect(markup).toContain('aria-label="Redirect active response"');
+    expect(markup).toContain('aria-label="Steer active response"');
     expect(markup).not.toContain('<textarea disabled=""');
     expect(markup).toContain("Sending guidance…");
   });
 
-  it("keeps Stop available but fences Redirect while cancellation is pending", () => {
+  it("keeps Stop available but fences Steer while cancellation is pending", () => {
     const markup = renderToStaticMarkup(
       <Composer
         activeTurnId="turn-1"
@@ -292,7 +321,7 @@ describe("Composer", () => {
       />,
     );
 
-    expect(markup).toContain(">Redirect<");
+    expect(markup).toContain(">Steer<");
     expect(markup).toContain('aria-label="Stopping response"');
     expect(markup.match(/disabled=""/g)).toHaveLength(2);
   });
@@ -318,7 +347,7 @@ describe("Composer", () => {
     );
 
     expect(markup).toContain("Guidance contains an unsupported character.");
-    expect(markup).toContain('aria-label="Redirect active response"');
+    expect(markup).toContain('aria-label="Steer active response"');
     expect(markup.match(/disabled=""/g)).toHaveLength(1);
   });
 

@@ -363,7 +363,7 @@ describe("ChatView", () => {
     const message = screen.getByLabelText("Message");
     await userEvent.type(message, "go left");
     await userEvent.click(
-      screen.getByRole("button", { name: "Redirect active response" }),
+      screen.getByRole("button", { name: "Steer active response" }),
     );
 
     // Accepting guidance empties the composer. That clearing must not read as
@@ -390,7 +390,7 @@ describe("ChatView", () => {
     const message = screen.getByLabelText("Message");
     await userEvent.type(message, "go left");
     await userEvent.click(
-      screen.getByRole("button", { name: "Redirect active response" }),
+      screen.getByRole("button", { name: "Steer active response" }),
     );
     expect(await screen.findByText(/steer rejected/)).toBeInTheDocument();
 

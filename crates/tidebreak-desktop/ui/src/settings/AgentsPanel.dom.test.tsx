@@ -5,8 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient, RuntimeSettings } from "../api";
 import { AgentsPanel } from "./AgentsPanel";
+import { useUiStore } from "../UiStore";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+  useUiStore.setState({ activeTurnSendMode: "queue" });
+});
 
 describe("AgentsPanel", () => {
   it("loads and saves the agent limits and check-in cadences", async () => {
@@ -44,6 +49,12 @@ describe("AgentsPanel", () => {
 
     render(<AgentsPanel client={client} />);
     await screen.findByText("Active background agents per chat");
+    expect(screen.getByRole("radio", { name: "Queue" })).toBeChecked();
+    fireEvent.click(screen.getByRole("radio", { name: "Steer" }));
+    expect(useUiStore.getState().activeTurnSendMode).toBe("steer");
+    expect(window.localStorage.getItem("tidebreak.composer.sendMode")).toBe(
+      "steer",
+    );
     const [limit, steps, errors] = screen.getAllByRole("spinbutton");
     expect(limit).toHaveValue(5);
     expect(steps).toHaveValue(100);

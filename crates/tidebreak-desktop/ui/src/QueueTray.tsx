@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Pause, Pencil, Play, Trash2 } from "lucide-react";
+import {
+  ArrowUpRight,
+  ChevronDown,
+  ChevronUp,
+  Pause,
+  Pencil,
+  Play,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import type { ApiClient, QueuedTurn } from "./api";
@@ -20,10 +28,12 @@ export function QueueTray({
   client,
   chatId,
   active,
+  onStop,
 }: {
   client: ApiClient;
   chatId: string;
   active: boolean;
+  onStop: () => Promise<void>;
 }) {
   const [queued, setQueued] = useState<QueuedTurn[]>([]);
   const [paused, setPaused] = useState(false);
@@ -65,6 +75,37 @@ export function QueueTray({
     }
   }
 
+  async function sendNow(row: QueuedTurn) {
+    setBusy(true);
+    let temporarilyPaused = false;
+    try {
+      if (!paused) {
+        await client.putQueuePaused(chatId, true);
+        temporarilyPaused = true;
+      }
+      await client.patchQueuedTurn(chatId, row.id, { position: 0 });
+      if (active) await onStop();
+      await client.sendQueuedNow(chatId);
+      temporarilyPaused = false;
+      await refresh();
+    } catch (error) {
+      toast.error(
+        friendlyErrorMessage(error, "Could not send that message now"),
+      );
+      if (temporarilyPaused) {
+        try {
+          await client.putQueuePaused(chatId, false);
+        } catch {
+          // The original failure is the useful one; polling will show the
+          // actual queue state and the header still offers Resume.
+        }
+      }
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (queued.length === 0) return null;
 
   return (
@@ -85,24 +126,6 @@ export function QueueTray({
           </span>
         )}
         <div className="ml-auto flex items-center gap-0.5">
-          {paused && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
-              disabled={busy}
-              onClick={() =>
-                void act(
-                  () => client.sendQueuedNow(chatId),
-                  "Could not start the queue",
-                )
-              }
-            >
-              <Play className="size-3" />
-              Send now
-            </Button>
-          )}
           <Button
             type="button"
             variant="ghost"
@@ -155,7 +178,19 @@ export function QueueTray({
                 {row.content}
               </span>
             )}
-            <span className="hidden shrink-0 items-center gap-0.5 group-hover:inline-flex">
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+              aria-label={`Send queued message ${index + 1} now`}
+              disabled={busy}
+              onClick={() => void sendNow(row)}
+            >
+              <ArrowUpRight className="size-3" />
+              Send now
+            </Button>
+            <span className="hidden shrink-0 items-center gap-0.5 group-hover:inline-flex group-focus-within:inline-flex">
               <Button
                 type="button"
                 variant="ghost"

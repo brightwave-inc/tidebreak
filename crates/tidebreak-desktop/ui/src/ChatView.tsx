@@ -705,7 +705,12 @@ export function ChatView({
           />
         ) : (
           <>
-            <QueueTray client={client} chatId={chat.id} active={activeTurnId !== null} />
+            <QueueTray
+              client={client}
+              chatId={chat.id}
+              active={activeTurnId !== null}
+              onStop={turnControls.cancel}
+            />
             <Composer
             activeTurnId={activeTurnId}
             busy={busy}
