@@ -2156,7 +2156,8 @@ action?: ToolActionPreview,
 result?: ToolResultPreview, } | { "type": "turn_completed", usage: RendererTurnUsage, } | { "type": "turn_refused", refusal: RendererRefusal, usage: RendererTurnUsage, } | { "type": "turn_failed", 
 /**
  * Why the turn failed, at the only resolution a client can act on.
- * The failure's `kind` and `message` stay internal.
+ * The internal `kind` stays behind the server; allowlisted provider
+ * diagnostics may cross separately as `detail`.
  */
 category: TurnFailureCategory, 
 /**
