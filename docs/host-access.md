@@ -4,10 +4,9 @@ Tidebreak is local-first, but "local" should not mean that every agent can see
 every file on the machine. This document describes the intended boundary between
 Tidebreak's product state and user-approved access to the host computer.
 
-The design follows the same basic product split as Brightwave web plus desktop.
-The important difference at first is deployment: Tidebreak's control plane runs
-locally. The boundary is still explicit so that a self-hosted or managed control
-plane can use the same contracts later.
+Tidebreak's control plane runs locally today. The host boundary remains explicit
+so a self-hosted or managed control plane can use the same contracts later
+without widening what an agent can access on the user's computer.
 
 ## The product model
 

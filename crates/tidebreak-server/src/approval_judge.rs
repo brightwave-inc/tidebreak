@@ -174,7 +174,7 @@ Be conservative: when in any doubt, set `safe` or `confident` to false and the p
 /// Every variant is destructured field by field, and each one's `summary` is
 /// discarded explicitly rather than by a wildcard: it is a sentence the call
 /// wrote about itself, so letting it reach the judge would let a call argue
-/// for its own approval. See `docs/decisions/0015-tool-call-narration.md`.
+/// for its own approval. See `docs/decisions/0018-tool-call-narration.md`.
 fn action_description(preview: &ToolActionPreview) -> Option<String> {
     match preview {
         ToolActionPreview::Search { query, summary: _ } => Some(format!(

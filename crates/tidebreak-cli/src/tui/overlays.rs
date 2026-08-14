@@ -41,7 +41,7 @@ pub fn panel(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// The slash-command table, Claude Code style: `/name args` in the composer.
+/// The slash-command table: `/name args` in the composer.
 /// Each entry is the canonical name plus a one-line blurb the help overlay and
 /// the autocomplete list share.
 pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[

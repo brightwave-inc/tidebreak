@@ -1,9 +1,9 @@
-# 9. Data-dir listen endpoint for CLI attach to a running server
+# 12. Data-dir listen endpoint for CLI attach to a running server
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 - Owners: cli, server, desktop
-- Related: [`0005-cli-headless-feature-parity.md`](0005-cli-headless-feature-parity.md)
+- Related: [`0007-cli-headless-feature-parity.md`](0007-cli-headless-feature-parity.md)
   (attach-or-embed; CLI must reach a running desktop),
   [`docs-site/content/docs/headless.mdx`](../../docs-site/content/docs/headless.mdx)
 - Supersedes: none
@@ -12,7 +12,7 @@
 
 A data directory belongs to exactly one server process. The desktop app and
 `openwave serve` both bind `openwave-server` over that directory and mint a
-per-launch bearer token. Decision 5 already says a second process must
+per-launch bearer token. Decision 7 already says a second process must
 **attach** as an HTTP+WS client rather than embed again.
 
 Today attach works for `openwave serve` because it prints the URL and token on
@@ -60,7 +60,7 @@ into its data directory; the CLI may attach by reading that file.**
 
 ## Alternatives Considered
 
-- **Do nothing / document “copy from DevTools”.** Leaves decision 5's desktop
+- **Do nothing / document “copy from DevTools”.** Leaves decision 7's desktop
   attach gap open; unusable for agents.
 - **`--server-token` on argv.** Already forbidden: process list and shell
   history.
@@ -73,7 +73,7 @@ into its data directory; the CLI may attach by reading that file.**
 - **Auto-attach whenever the lock is held (no flag).** Surprising when the
   user meant a fresh embed under another data dir; prefer explicit `--attach`
   and a lock-failure hint that names it.
-- **UDS or a second RPC.** Decision 5 keeps HTTP+WS as the product surface.
+- **UDS or a second RPC.** Decision 7 keeps HTTP+WS as the product surface.
 
 ## Consequences
 

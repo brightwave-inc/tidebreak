@@ -1,0 +1,79 @@
+---
+title: How the agent works
+description: What happens during a turn, how plans and questions pause it, and how to redirect work in progress.
+---
+
+A Tidebreak turn is a durable loop: the selected model proposes the next step,
+Tidebreak applies the chat's permission rules, a tool runs when allowed, and
+the result goes back to the model. The loop continues until the model answers,
+the turn is stopped, or it needs you.
+
+## A turn, step by step
+
+1. Your message and current chat settings are saved.
+2. A worker claims the turn and calls the selected model with the conversation,
+   available tools, attached sources, and relevant instructions.
+3. If the model calls a tool, Tidebreak validates its arguments and checks the
+   chat's [permission mode](/permission-modes) and standing grants.
+4. The tool result is recorded and the model receives it for the next step.
+5. Text, reasoning status, tool activity, and waiting states stream into the
+   transcript as they are recorded.
+6. The final answer and any source references become part of the durable chat
+   history.
+
+The journal is the source of truth. Closing the window does not turn an
+accepted approval, question, or running background job into an unrecorded
+side effect; the app reconstructs the state when you return.
+
+## Plans
+
+In **Plan** mode, mutating tools are refused rather than queued for approval.
+The agent can inspect available information and propose a plan. A plan review
+card lets you comment, request a revision, or execute it. Executing the plan
+switches the chat out of Plan so the work can proceed under the selected
+permission boundary.
+
+During ordinary work, the agent may also maintain a visible task plan. It is a
+progress aid, not a source of authority: listing a step does not approve the
+tools needed to perform it.
+
+## Questions and approvals
+
+When the agent needs a small choice, it can ask up to three structured
+questions and pause. The question remains in the transcript and the **Inbox**
+until you answer it. Approval cards work the same way: the turn waits on a
+durable decision rather than treating a closed window as consent or refusal.
+
+## Redirecting a running turn
+
+If you send another message while a turn is active, Tidebreak can either queue
+it as the next turn or use it to steer the current one, depending on the send
+mode you selected. Steering is applied at a safe model boundary; it does not
+interrupt a tool halfway through and pretend the tool never ran.
+
+Use steering for corrections that matter to the current result. Queue a
+message when it is a separate follow-up you want handled after the current
+turn settles.
+
+## Background work
+
+The foreground agent can delegate independent jobs to background agents. Each
+job has its own isolated workspace and visible status, cannot create more
+agents, and returns its result to the parent turn. Closing and reopening the
+app does not erase an admitted job.
+
+Background work does not bypass consent. The foreground turn must be allowed
+to delegate, and any host resource passed to a child is named and checked
+explicitly.
+
+<Cards>
+  <Card title="Chats" href="/chats">
+    Learn what belongs to a chat and what survives a restart.
+  </Card>
+  <Card title="Permission modes" href="/permission-modes">
+    Understand which calls run, ask, or are refused.
+  </Card>
+  <Card title="Code execution" href="/code-execution">
+    See where commands run and how network policy is enforced.
+  </Card>
+</Cards>

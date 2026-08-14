@@ -395,8 +395,8 @@ async fn app_operations(
     .into_response()
 }
 
-/// The shared-app invoke route (ADR 0036): the SPA-tier data plane, reached
-/// here on a harness's `control`-audience PKCE session.
+/// The shared-app invoke route: the SPA-tier data plane, reached here on a
+/// harness's `control`-audience PKCE session.
 async fn shared_app_invoke(
     State(gateway): State<Arc<FakeGateway>>,
     axum::extract::Path(shared_app_id): axum::extract::Path<String>,

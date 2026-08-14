@@ -47,8 +47,8 @@ export type AppOperationInvoker = (
  * same `operations/call` method, routed by the presence of
  * `connected_app_id` in the call's params.
  *
- * That field is the gateway shell's own invoke vocabulary (its ADR 0036), and
- * naming it the same here is the whole point: a bundle written against this
+ * That field is the gateway shell's own invoke vocabulary, and naming it the
+ * same here is the whole point: a bundle written against this
  * bridge runs unmodified in the gateway's shell, and one written there runs
  * unmodified here. The two hosts differ in where a binding resolves, not in
  * what the bundle speaks.

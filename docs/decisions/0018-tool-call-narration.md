@@ -1,4 +1,4 @@
-# 15. Model-authored tool narration is display-only
+# 18. Model-authored tool narration is display-only
 
 - Status: Accepted
 - Date: 2026-08-13

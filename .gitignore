@@ -38,3 +38,6 @@ Thumbs.db
 # Default `tidebreak serve` data dir when TIDEBREAK_DATA_DIR is unset (SQLite +
 # vector index); created wherever the server is launched from.
 .tidebreak/
+.vercel/
+.env.local
+.env.*.local

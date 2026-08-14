@@ -243,7 +243,7 @@ export function AppDetailView({
   }
 
   // Publishing happens at the gateway, on the app's own page there, next to
-  // the publish state and team grants it changes — decision record 11. This
+  // the publish state and team grants it changes — decision record 14. This
   // host's part is the address, and getting it registers the app there if it
   // never has been, so the page exists by the time the browser arrives.
   async function onPublishAtGateway() {

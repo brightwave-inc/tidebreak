@@ -1,4 +1,4 @@
-# 4. Background agents are supervised by check-ins, not stopped by caps
+# 5. Background agents are supervised by check-ins, not stopped by caps
 
 - Status: Accepted
 - Date: 2026-08-10

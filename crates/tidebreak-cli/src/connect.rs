@@ -9,7 +9,7 @@
 //! `tidebreak serve` — the same client the desktop webview is. `--attach` is
 //! the same attach, but the URL and token come from `{data_dir}/listen.json`
 //! that the running server published (desktop or `serve`), so the token never
-//! rides argv — see [`docs/decisions/0009-data-dir-listen-endpoint.md`].
+//! rides argv — see [`docs/decisions/0012-data-dir-listen-endpoint.md`].
 //!
 //! Attaching is what a second process on one data directory must do. A data
 //! directory belongs to exactly one server process (`tidebreak-server` holds an

@@ -73,7 +73,7 @@ describe("how a call narrates itself", () => {
   it("keeps the narration out of the text an approval is given against", () => {
     // The approval card renders `detail`, and consent is given to a command
     // rather than to a sentence about one — see
-    // docs/decisions/0015-tool-call-narration.md.
+    // docs/decisions/0018-tool-call-narration.md.
     const literal = toolPreviewPresentation(narrated);
     expect(literal.headline).toBe("rm -rf /tmp/build");
     expect(literal.detail).not.toContain("Clearing");

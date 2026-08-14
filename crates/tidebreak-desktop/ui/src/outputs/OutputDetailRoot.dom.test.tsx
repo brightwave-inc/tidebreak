@@ -161,8 +161,8 @@ describe("OutputDetailRoot", () => {
     expect(screen.queryByRole("heading", { name: "not a heading,2" })).toBeNull();
   });
 
-  // Alpha parity: the history affordance is invisible until an output actually
-  // has history, so a first version can never offer a restore.
+  // The history affordance stays hidden until an output actually has history,
+  // so a first version can never offer a restore.
   it("hides version history when the output has a single version", async () => {
     const apis = detailApis();
     await openOutput(apis);

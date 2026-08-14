@@ -1,0 +1,64 @@
+---
+title: Documents and sources
+description: Attach source files, see what the agent can read, and reopen sources from its responses.
+---
+
+Documents are source material for a chat. They are different from
+[outputs](/outputs): a document is something the agent reads, while an output
+is a versioned file the agent produces.
+
+## Attach files to a chat
+
+Use the composer's **Tools** menu and choose **Attach files**, or type `@` in
+the message box to search for a file. Attached documents appear above the
+composer and remain available to later turns in that chat.
+
+Tidebreak copies the selected bytes into its private application data. Moving
+or deleting the original file later does not remove the chat's copy. To work
+against files that continue changing on disk, connect their folder instead;
+see [Connected folders](/connected-folders).
+
+## What the agent reads
+
+At import, Tidebreak keeps the original bytes and extracts canonical text when
+the format supports it. The agent can list the chat's sources and read bounded
+ranges from them. There is no vector database or hidden semantic index: the
+agent reads the source directly and decides which ranges it needs.
+
+PDFs, Word documents, spreadsheets, CSV files, text, and common image formats
+can be opened in the document panel. A file can still be retained when text
+extraction is unavailable; in that case the app reports that it is not ready
+for text reading instead of inventing content.
+
+## Source pills in responses
+
+When a response carries source references, Tidebreak shows a compact
+**Sources** row below it. The numbered pills summarize how many sources the
+response used. Expand the row to see the available locator for each one, such
+as a page, line range, sheet, or cell range.
+
+Select a source to open its document beside the conversation, at the recorded
+location when the format provides one. These are source shortcuts attached to
+the response, not a separate bibliography.
+
+Source pills point into the copy attached to that chat. They are not web links,
+and they do not grant the agent access to neighboring files on your machine.
+
+## Privacy and deletion
+
+Documents and extracted text stay in the local Tidebreak profile. They are
+sent only to the model provider used for a turn when the agent reads them, and
+to another configured service only when an approved tool call requires it.
+
+Removing a document makes it unavailable to future turns in that chat. Before
+deleting a chat or resetting a pre-1.0 profile, export any source or output you
+need to keep.
+
+<Cards>
+  <Card title="Connected folders" href="/connected-folders">
+    Work against a directory without attaching every file up front.
+  </Card>
+  <Card title="Outputs" href="/outputs">
+    Preview, version, restore, and export files the agent creates.
+  </Card>
+</Cards>

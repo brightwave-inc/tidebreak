@@ -3,9 +3,9 @@
 - Status: Accepted
 - Date: 2026-08-10
 - Owners: core, desktop
-- Related: [`crates/openwave-server/src/model_registry.rs`](../../crates/openwave-server/src/model_registry.rs)
+- Related: [`crates/tidebreak-server/src/model_registry.rs`](../../crates/tidebreak-server/src/model_registry.rs)
   (the static catalog and its honesty invariants),
-  [`crates/openwave-server/src/providers.rs`](../../crates/openwave-server/src/providers.rs)
+  [`crates/tidebreak-server/src/providers.rs`](../../crates/tidebreak-server/src/providers.rs)
   (`ProviderKind` and credential-backed provider status)
 - Supersedes: none
 

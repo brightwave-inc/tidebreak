@@ -89,13 +89,13 @@ Sandbox agents never receive the definition. See
 `list_documents` discovers what the conversation can read — its own documents
 followed by the files of the project holding it — without loading content. `read_document` reads one bounded Unicode-character range; the text is
 available the moment a source is stored, because ingestion decodes
-synchronously. The model cites what it reads inline, naming the document id
-and a coarse locator — a page or page range, a line range, or a workbook
-sheet — and no reference resolution happens server-side.
+synchronously. The model can record the document id and a coarse locator — a
+page or page range, a line range, or a workbook sheet — for the **Sources** row
+below its response, and no reference resolution happens server-side.
 
 `web_extract` joins that tier from the other direction: a page it fetches is
-stored as an ordinary source of the conversation, so the model can cite the
-stored document the same way or put the page URL directly in prose, and
+stored as an ordinary source of the conversation, so the model can include the
+stored document in its **Sources** row or put the page URL directly in prose, and
 `read_document` can reach the page afterwards. See
 [Web search](web-search.md#fetched-pages-as-sources).
 
@@ -331,7 +331,8 @@ only then resolves current host policy and credentials. `web_extract` sits
 beside it on the same terms: Sensitive, with the exact page URL on the
 approval card, and routed deterministically to the configured provider when it
 implements the extract contract or to the built-in native extraction engine
-otherwise. Each page it returns is also kept as a conversation source the model can cite. Exa and Tavily both implement it, so a configured host extracts
+otherwise. Each page it returns is also kept as a conversation source the model
+can include below its response. Exa and Tavily both implement it, so a configured host extracts
 through the vendor and falls back to native — except on a rejected key, which
 surfaces for repair rather than degrading silently. Brave and SearXNG are
 search-only, so a host on either extracts natively. See

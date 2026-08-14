@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/brightwave-inc/tidebreak/security/advisories/new
+    about: Please report vulnerabilities privately, not in a public issue.
+  - name: Read the documentation
+    url: https://www.tidebreak.sh/docs/
+    about: Installation, quickstart, permissions, providers, and troubleshooting.

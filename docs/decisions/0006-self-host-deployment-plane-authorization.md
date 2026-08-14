@@ -1,11 +1,11 @@
-# 4. Self-Host Authorization: Admin and Member Roles on the Deployment Plane
+# 6. Self-Host Authorization: Admin and Member Roles on the Deployment Plane
 
 - Status: Accepted
 - Date: 2026-08-10
 - Owners: server, security
-- Related: [`crates/openwave-server/src/auth.rs`](../../crates/openwave-server/src/auth.rs)
+- Related: [`crates/tidebreak-server/src/auth.rs`](../../crates/tidebreak-server/src/auth.rs)
   (token file and credential-to-principal resolution),
-  [`crates/openwave-server/src/principal.rs`](../../crates/openwave-server/src/principal.rs)
+  [`crates/tidebreak-server/src/principal.rs`](../../crates/tidebreak-server/src/principal.rs)
   (`Principal`, `AuthContext`, the fail-closed extractor),
   [record 2](0002-pre-v1-schema-and-persisted-format-mutability.md)
   (pre-1.0 format mutability, which covers the token-file change below),

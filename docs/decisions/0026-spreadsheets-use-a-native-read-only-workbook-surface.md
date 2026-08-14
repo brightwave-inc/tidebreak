@@ -1,4 +1,4 @@
-# 20. Spreadsheets use a native read-only workbook surface
+# 26. Spreadsheets use a native read-only workbook surface
 
 - Status: Proposed
 - Date: 2026-08-14
@@ -38,7 +38,7 @@ remain unchanged and are still the artifact exported by Tidebreak.
 
 The Tidebreak wrapper always enables read-only mode. It owns loading and error
 states, a fixed light document theme, zoom controls, formula and address
-display, citation navigation, and the visual contract with the surrounding
+display, source-reference navigation, and the visual contract with the surrounding
 document panel.
 The display projection may make semantically equivalent OOXML explicit when a
 renderer would otherwise misread it, such as expanding an empty default border
@@ -62,7 +62,7 @@ from a service. The WebAssembly binary is bundled with the application.
 ## Alternatives Considered
 
 - **Convert each workbook to PDF.** This preserves a printable appearance, but
-  a PDF page is not a workbook: cells, formulas, sheets, and range citations are
+  a PDF page is not a workbook: cells, formulas, sheets, and range references are
   no longer inspectable.
 - **Export Calc HTML and add interaction around its tables.** This produces a
   strong static rendering, including rasterized charts, but it flattens the
@@ -104,7 +104,7 @@ the read-only integration cannot satisfy.
 - A workbook with multiple sheets, merged cells, formulas, frozen panes,
   authored dimensions, comments, and charts opens as one interactive workbook
   with no office-to-PDF request.
-- A range citation activates the named or indexed sheet, selects the requested
+- A range source reference activates the named or indexed sheet, selects the requested
   address, and scrolls it into view.
 - The address/formula display follows selection while mutation gestures cannot
   change workbook contents.

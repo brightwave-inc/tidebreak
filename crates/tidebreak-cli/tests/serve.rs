@@ -319,7 +319,7 @@ fn print_mode_fails_with_clean_stdout_when_no_model_provider_is_configured() {
     );
 }
 
-/// The headless run record 5 exists for: one unattended `-p` turn, in `allow`
+/// The headless run record 7 exists for: one unattended `-p` turn, in `allow`
 /// mode, on a data directory that has never been used, that calls a tool for
 /// real and finishes. The model is scripted (`TIDEBREAK_SCRIPTED_PROVIDER`, see
 /// `tidebreak-server`'s `scripted_provider` module) so the turn is deterministic

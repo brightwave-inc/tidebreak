@@ -1,9 +1,9 @@
-# 20. Native authorization for local MCP commands
+# 27. Native authorization for local MCP commands
 
 - Status: Proposed
 - Date: 2026-08-14
 - Owners: desktop / MCP configuration
-- Related: [`0004-self-host-deployment-plane-authorization.md`](0004-self-host-deployment-plane-authorization.md), [`../host-access.md`](../host-access.md)
+- Related: [`0006-self-host-deployment-plane-authorization.md`](0006-self-host-deployment-plane-authorization.md), [`../host-access.md`](../host-access.md)
 
 ## Context
 

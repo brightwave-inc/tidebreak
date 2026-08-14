@@ -1,15 +1,15 @@
-# 5. Check-ins pause a run in `needs_input` and ride the result machinery
+# 8. Check-ins pause a run in `needs_input` and ride the result machinery
 
 - Status: Accepted
 - Date: 2026-08-10
 - Owners: agent runtime (sandbox background runs)
-- Related: [0004](0004-background-agents-checkin-supervision.md) — defines the
+- Related: [0005](0005-background-agents-checkin-supervision.md) — defines the
   two triggers this record gives a destination
 - Supersedes: —
 
 ## Context
 
-Record 0004 replaced hard caps with two escalation triggers (step cadence,
+Record 0005 replaced hard caps with two escalation triggers (step cadence,
 consecutive tool errors) but left the escalation itself unbuilt: reaching the
 cadence still ended in a forced wrap-up. The parent's `wait_for_agents` is a
 strictly fenced receipt machine — the wait settles only on `agent_run_inbox`

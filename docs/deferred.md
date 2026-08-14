@@ -65,7 +65,7 @@ evasion, and password-manager integration are not in this plan.
 
 Desktop computer use — screen capture and consent-gated control of native
 apps — is no longer parked; it is specified by
-[decision record 10](decisions/0010-computer-use-screen-capture-and-app-control.md)
+[decision record 13](decisions/0013-computer-use-screen-capture-and-app-control.md)
 as its own capability with per-app grants. That record deliberately keeps the
 everyday browser out of its starter scope: operating the user's browser
 through the accessibility channel is not a substitute for the managed browser

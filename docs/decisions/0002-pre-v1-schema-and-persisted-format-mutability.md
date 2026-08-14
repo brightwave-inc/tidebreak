@@ -3,11 +3,11 @@
 - Status: Accepted
 - Date: 2026-08-07
 - Owners: core
-- Related: [`crates/openwave-core/src/db/migration.rs`](../../crates/openwave-core/src/db/migration.rs)
+- Related: [`crates/tidebreak-core/src/db/migration.rs`](../../crates/tidebreak-core/src/db/migration.rs)
   (the single-baseline migrator),
-  [`crates/openwave-server/src/desktop_schema.rs`](../../crates/openwave-server/src/desktop_schema.rs)
+  [`crates/tidebreak-server/src/desktop_schema.rs`](../../crates/tidebreak-server/src/desktop_schema.rs)
   (`DESKTOP_SCHEMA_EPOCH` and the reset it drives),
-  [`crates/openwave-core/src/event.rs`](../../crates/openwave-core/src/event.rs)
+  [`crates/tidebreak-core/src/event.rs`](../../crates/tidebreak-core/src/event.rs)
   (the journal payload and its shape fixture)
 
 ## Context

@@ -150,7 +150,7 @@ pub struct Grant {
     /// Session-only one-shot consent. Never written to the durable grant
     /// table; the broker consumes it when the operation it authorized
     /// reaches a terminal result (a confirmation hold is not terminal).
-    /// See decision record 0010.
+    /// See decision record 0013.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     single_use: bool,
 }

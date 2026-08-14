@@ -3,7 +3,7 @@
 //! Publishing a shared app — and re-publishing a later revision — is a
 //! governance action, done on the gateway's own web surface alongside the
 //! publish state, the team grants, and the revocation that belong with it.
-//! Decision record 11 states why: publishing mutates gateway-owned entitlement
+//! Decision record 14 states why: publishing mutates gateway-owned entitlement
 //! state, every other mutation of that state is already done at the gateway,
 //! and a second interface of record in each harness that authors apps can only
 //! drift from the first. So this host offers the way *there* and nothing else.

@@ -1,0 +1,65 @@
+name: Bug report
+description: Report reproducible behavior that is broken or misleading.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Tidebreak. Please search existing issues first.
+        For security vulnerabilities, use private vulnerability reporting instead of this form.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Tell us what you expected and what happened instead.
+      placeholder: Include the exact error text when there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Configure …
+        3. Run …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Tidebreak version
+      description: Find this in the app's About panel or release name.
+      placeholder: v0.43.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel, built from source)
+        - Windows (built from source or legacy package)
+        - Linux (built from source)
+        - Headless / server
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste relevant logs or attach a debug bundle after checking it for sensitive data.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed API keys, tokens, private document contents, and other sensitive data.
+          required: true

@@ -1,6 +1,6 @@
-# 7. Gateway Connected-App Bindings for Local Apps
+# 10. Gateway Connected-App Bindings for Local Apps
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-10
 - Owners: core, desktop
 - Related: [`docs/local-apps.md`](../local-apps.md) (the manifest, grant, and

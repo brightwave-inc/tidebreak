@@ -444,7 +444,7 @@ where
 /// ones the parent must still account for before completing.
 ///
 /// Unsettled covers live work, a terminal delivery not yet consumed or
-/// retired, and a check-in pause in `needs_input` (decision 0005): the pause
+/// retired, and a check-in pause in `needs_input` (decision 0008): the pause
 /// rides the same inbox machinery as a terminal result, so a pending or
 /// already-consumed check-in still fences completion until the child is
 /// resumed, cancelled, or otherwise leaves the origin turn.

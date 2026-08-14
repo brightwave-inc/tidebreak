@@ -108,7 +108,7 @@ impl RegisteredSpec {
 /// `summary` is advertised as required so models reliably write one, but a call
 /// that omits it is still a valid call — the narration is display-only and no
 /// execution path reads it (see
-/// `docs/decisions/0015-tool-call-narration.md`). Refusing such a call would
+/// `docs/decisions/0018-tool-call-narration.md`). Refusing such a call would
 /// spend a model round trip correcting a field that changes nothing but a card
 /// headline. The relaxation is keyed on our own argument description so a
 /// mounted MCP server whose tool genuinely requires a `summary` keeps its

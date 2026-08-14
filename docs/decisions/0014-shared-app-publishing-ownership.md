@@ -1,9 +1,9 @@
-# 11. Shared-App Publishing Is a Gateway Governance Action
+# 14. Shared-App Publishing Is a Gateway Governance Action
 
 - Status: Accepted
 - Date: 2026-08-12
 - Owners: desktop, server
-- Related: record 7 (gateway connected-app bindings for local apps),
+- Related: record 10 (gateway connected-app bindings for local apps),
   [`docs/connected-apps.md`](../connected-apps.md),
   [`docs/local-apps.md`](../local-apps.md), the model gateway's shared-apps
   design (its ADR 0036)

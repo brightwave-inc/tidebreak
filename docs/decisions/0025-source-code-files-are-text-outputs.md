@@ -1,4 +1,4 @@
-# 19. Source-code files are text outputs
+# 25. Source-code files are text outputs
 
 - Status: Proposed
 - Date: 2026-08-14

@@ -24,7 +24,7 @@
  * Command and search fields use the foreground approval-card projection so
  * both surfaces share the same sanitization. The summary is projected the
  * same way but shown only here and on the result card, never on an approval
- * card — see `docs/decisions/0015-tool-call-narration.md`.
+ * card — see `docs/decisions/0018-tool-call-narration.md`.
  */
 export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, 
 /**
@@ -1731,7 +1731,7 @@ export type OutputWriteMode = "create" | "replace";
  * preview of the action under review does. That preview may carry the call's
  * own `summary`, which the approval card does not render — consent is given to
  * an action, not to a sentence about one. See
- * `docs/decisions/0015-tool-call-narration.md`.
+ * `docs/decisions/0018-tool-call-narration.md`.
  */
 export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
@@ -2601,7 +2601,7 @@ export type TaskPlanStepStatus = "pending" | "in_progress" | "completed";
  * Most variants also carry a `summary`: one sentence the model wrote about
  * what its own call is doing. It is **display-only**, and it is the one field
  * here that is prose rather than a projection of the action. See
- * `docs/decisions/0015-tool-call-narration.md` — it never reaches an approval
+ * `docs/decisions/0018-tool-call-narration.md` — it never reaches an approval
  * card, never reaches the auto-approval judge, and is never part of a grant's
  * identity ([`Self::without_summary`]), because a call that could describe
  * itself to a consent decision could describe itself favourably.

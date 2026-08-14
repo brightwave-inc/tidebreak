@@ -26,9 +26,9 @@ libraries.
 
 ## `tidebreak-core` — the open-core seam 🟢
 
-The foundation every client (and, later, the Brightwave Connect control plane)
-sits on. It's independently publishable on crates.io and **never depends on a
-specific client**.
+The foundation every client, including a future managed control plane, sits on.
+It's independently publishable on crates.io and **never depends on a specific
+client**.
 
 It holds the agent loop, the tool registry, the `AgentEvent` stream that every
 client renders from, and the trait **contracts** — `Tool`, `ModelProvider`,

@@ -821,9 +821,6 @@ impl App {
         }
     }
 
-    /// The slash-command table, Claude Code style: `/name args` in the
-    /// composer. Each entry is the canonical name plus a one-line blurb the
-    /// help overlay and the autocomplete list share.
     /// Run a slash command. Returns true when the input was a command (so the
     /// composer resets and nothing is sent to the model). The command table
     /// lives in `overlays::SLASH_COMMANDS`, shared with the help overlay.

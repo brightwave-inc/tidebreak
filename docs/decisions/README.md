@@ -12,5 +12,11 @@ says `Proposed`. When a decision changes, the old record gets
 `Status: Superseded` and a pointer to its replacement rather than being
 rewritten — the value is the reasoning at the time.
 
+Records preserve the names, paths, and operational context that existed when
+the decision was accepted. In particular, records predating the Tidebreak
+rename may use the former OpenWave name. Current documentation and source code
+use Tidebreak terminology; the historical wording is not a second product or
+an active compatibility alias.
+
 [`CLAUDE.md`](../../CLAUDE.md) has the rest of the convention, including when a
 change warrants a record at all.

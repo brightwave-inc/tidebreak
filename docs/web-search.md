@@ -306,14 +306,14 @@ accumulating duplicates.
 The row retains the final URL, sanitized title, fetch time, `text/markdown`
 media type, and extracted text. It has no original blob, parser fingerprint,
 source regions, or background work. `read_document` can open the stored text
-later, and the model may cite its document id with the lightweight locator
-grammar or include the page URL directly in prose.
+later, and the model may include its document id and lightweight locator in the
+response's **Sources** row or put the page URL directly in prose.
 
 Page content is untrusted throughout. Titles and content from every engine are
 stripped of control characters, zero-width marks, and bidirectional overrides
 in `WebExtractResponse::new`. If the page cannot be stored, the content is
-still returned and the result says plainly that it cannot be cited as a stored
-document.
+still returned and the result says plainly that it cannot be attached to the
+response as a stored source.
 
 The server's sandbox checkpoint executor invokes the same resolver and strict
 argument decoder only after it has claimed a persisted `web_search`

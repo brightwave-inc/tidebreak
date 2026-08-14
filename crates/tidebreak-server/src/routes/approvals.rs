@@ -79,7 +79,7 @@ fn default_pending_approvals_limit() -> u64 {
 /// preview of the action under review does. That preview may carry the call's
 /// own `summary`, which the approval card does not render — consent is given to
 /// an action, not to a sentence about one. See
-/// `docs/decisions/0015-tool-call-narration.md`.
+/// `docs/decisions/0018-tool-call-narration.md`.
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub(crate) struct PendingApprovalSnapshot {
     pub call_id: CallId,

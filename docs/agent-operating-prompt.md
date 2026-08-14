@@ -4,7 +4,7 @@ Tidebreak gives every normal foreground turn a small host-owned operating
 prompt. Tool schemas still define how individual calls work; the operating
 prompt defines product-level behavior that otherwise varies between model
 providers, such as when to proceed, when to ask, how to handle untrusted
-content, and how to use citations and delegation.
+content, and how to use sources and delegation.
 
 The prompt is conversation-first. It does not assume that a conversation
 belongs to a project, organization, or shared workspace.
@@ -33,7 +33,7 @@ registered:
 
 - structured user clarification;
 - private scratch;
-- conversation sources and opaque citation references;
+- conversation sources and opaque source references;
 - public web research;
 - public web page reading;
 - connected folders;

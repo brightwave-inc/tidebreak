@@ -14,7 +14,7 @@ coordinate disclosure once a fix is available.
 
 ## Scope
 
-Tidebreak is pre-alpha and under active development. Security fixes land on the
+Tidebreak is pre-1.0 and under active development. Security fixes land on the
 default branch; there are no supported release branches yet. Before `1.0.0`,
 maintainers must replace this statement with explicit supported release lines
 and an end-of-support policy as required by the

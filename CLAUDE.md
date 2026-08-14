@@ -10,9 +10,8 @@ React/TypeScript under `crates/tidebreak-desktop/ui`.
 
 ## Workflow
 
-- **Do not use the `bw` CLI in Tidebreak.** It is tooling for the separate Alpha
-  repository, not this one; use this repository's documented Cargo, pnpm, and
-  GitHub commands instead.
+- **Do not use the `bw` CLI in Tidebreak.** It is not part of this repository;
+  use this repository's documented Cargo, pnpm, and GitHub commands instead.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
 - **Issues are for active or cross-agent work, not for narrating the current
   task or keeping a someday backlog.** Use an issue when work needs a concrete

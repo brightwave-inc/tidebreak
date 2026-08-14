@@ -635,7 +635,7 @@ export class ApiClient {
    *
    * Publishing itself happens on that page, not here: it mutates entitlement
    * state the gateway owns, and every other mutation of that state is already
-   * done at the gateway (decision record 11).
+   * done at the gateway (decision record 14).
    *
    * Every way the gateway can decline is an outcome in the response rather
    * than a thrown error: the author asked a legitimate question and the

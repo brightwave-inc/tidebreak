@@ -31,7 +31,7 @@
 //! them a member. A user's lines must agree about the role, and a file naming
 //! no admin at all fails to load — a deployment nobody can configure must not
 //! start, for the same reason an empty file must not. See
-//! `docs/decisions/0004-self-host-deployment-plane-authorization.md`.
+//! `docs/decisions/0006-self-host-deployment-plane-authorization.md`.
 //!
 //! ```text
 //! # user-id  token                                              role

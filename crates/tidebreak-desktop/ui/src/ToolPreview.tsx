@@ -11,7 +11,7 @@ import { networkPolicyLabel } from "./NetworkPolicyDialog";
  * Deliberately literal, both fields: the action as the tool stated it, never
  * the call's own `summary`. The approval card renders `detail`, and consent is
  * given to a command rather than to a sentence about one — see
- * `docs/decisions/0015-tool-call-narration.md`. Prose belongs to
+ * `docs/decisions/0018-tool-call-narration.md`. Prose belongs to
  * {@link toolPreviewHeadline}, which only result cards call.
  */
 export type ToolPreviewPresentation = {

@@ -1,4 +1,4 @@
-# 22. Release Tags Publish Static Documentation
+# 29. Release Tags Publish Static Documentation
 
 - Status: Proposed
 - Date: 2026-08-14

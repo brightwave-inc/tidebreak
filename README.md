@@ -8,7 +8,13 @@
 <p align="center">
   <strong>A private AI coworker that runs on your machine.</strong><br>
   Point it at your files and tools, and it produces finished, versioned work —
-  and reusable local apps — without your data leaving your computer.
+  and reusable local apps — while keeping its workspace and history local.
+</p>
+
+<p align="center">
+  <a href="https://www.tidebreak.sh">Website</a> ·
+  <a href="https://www.tidebreak.sh/docs/">Documentation</a> ·
+  <a href="https://github.com/brightwave-inc/tidebreak/releases">Releases</a>
 </p>
 
 <p align="center">

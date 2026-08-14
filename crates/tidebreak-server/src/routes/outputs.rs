@@ -5,7 +5,7 @@
 //! restore, user edits, and soft delete with its undo. They were Tauri commands
 //! reading `tidebreak-core`'s `Store` directly, which made every one of them
 //! unreachable without the desktop shell; moving them here is what makes an
-//! output readable and exportable headlessly (decision record 5).
+//! output readable and exportable headlessly (decision record 7).
 //!
 //! Two things deliberately did not move. **Export-to-path stays client-side**:
 //! the route serves bytes and the caller decides where they land, which is the
