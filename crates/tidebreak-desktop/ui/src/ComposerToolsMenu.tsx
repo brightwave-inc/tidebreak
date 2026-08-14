@@ -97,6 +97,7 @@ export function ComposerToolsMenu({
               variant="ghost"
               size="icon-8"
               aria-label="Tools"
+              data-first-task-target="tools"
               disabled={disabled}
             >
               <Plus size={16} />

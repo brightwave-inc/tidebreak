@@ -170,6 +170,7 @@ export function PermissionModeMenu({
           disabled={controlsDisabled}
           aria-label={`Permissions: ${current.label}`}
           aria-busy={saving}
+          data-first-task-target="permissions"
         >
           <CurrentIcon className="size-4 text-foreground" />
           {current.label}

@@ -55,6 +55,25 @@ describe("WelcomeState", () => {
     );
   });
 
+  it("offers the first-task walkthrough when home provides it", () => {
+    const onStartWalkthrough = vi.fn();
+    render(
+      <WelcomeState
+        heading="Welcome to Tidebreak"
+        description="Set up the agent before the first task."
+        onStartWalkthrough={onStartWalkthrough}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Welcome to Tidebreak" }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Set up your first task" }),
+    );
+    expect(onStartWalkthrough).toHaveBeenCalledOnce();
+  });
+
   it("omits the starter prompts when no handler is provided", () => {
     const { container } = render(<WelcomeState />);
 
