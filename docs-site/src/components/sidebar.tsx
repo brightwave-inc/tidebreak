@@ -7,8 +7,8 @@ import type { SidebarSection } from '@/lib/content';
 import { X } from 'lucide-react';
 import { useEffect } from 'react';
 import { Button } from '@/components/ui/button';
+import { PRODUCT_URL } from '@/lib/site';
 
-const PRODUCT_URL = 'https://www.tidebreak.sh';
 const REPO_URL = 'https://github.com/brightwave-inc/tidebreak';
 
 function SidebarNav({ sections, onNavigate }: { sections: SidebarSection[]; onNavigate?: () => void }) {

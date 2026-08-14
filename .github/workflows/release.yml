@@ -319,7 +319,7 @@ jobs:
           request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
           request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
 
-          grep -Fq 'https://www.tidebreak.sh/docs/' "$RUNNER_TEMP/docs-index.html"
+          grep -Fq 'https://www.tidebreak.io/docs/' "$RUNNER_TEMP/docs-index.html"
           grep -Fq '/docs/_next/' "$RUNNER_TEMP/docs-index.html"
           asset_path="$(grep -oE '/docs/_next/[^" ]+' \
             "$RUNNER_TEMP/docs-index.html" | head -n 1)"
@@ -366,7 +366,7 @@ jobs:
               https://tidebreak-docs.vercel.app/docs/ \
               --dump-header "$RUNNER_TEMP/docs-production-headers" \
               --output "$RUNNER_TEMP/docs-production.html" \
-              && grep -Fq 'https://www.tidebreak.sh/docs/' \
+              && grep -Fq 'https://www.tidebreak.io/docs/' \
                 "$RUNNER_TEMP/docs-production.html" \
               && grep -Eqi "content-security-policy:.*default-src 'self'" \
                 "$RUNNER_TEMP/docs-production-headers" \

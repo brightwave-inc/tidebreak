@@ -2,7 +2,7 @@
 
 The user documentation for Tidebreak. It is a Next.js App Router site with MDX
 content, built as a static export and published at
-<https://www.tidebreak.sh/docs/>.
+<https://www.tidebreak.io/docs/>.
 
 ## Documentation boundaries
 
@@ -74,7 +74,7 @@ unset for local development. See `.env.example`.
 
 The release workflow deploys this export to the dedicated documentation
 project, then the marketing project serves it under
-`https://www.tidebreak.sh/docs/`. Canonical metadata and the sitemap point at
+`https://www.tidebreak.io/docs/`. Canonical metadata and the sitemap point at
 that public path so the raw deployment origin is not indexed as a separate
 site.
 
